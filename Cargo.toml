@@ -40,67 +40,67 @@ trustformers-serve = { version = "0.1.0-alpha.1", path = "trustformers-serve" }
 trustformers-c = { version = "0.1.0-alpha.1", path = "trustformers-c" }
 
 # Core dependencies
-anyhow = "1.0.99"
-thiserror = "2.0.15"
-serde = { version = "1.0.227", features = ["derive"] }
-serde_json = "1.0.141"
+anyhow = "1.0.100"
+thiserror = "2.0.17"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
 serde_yaml = "0.9.34"
-semver = { version = "1.0.23", features = ["serde"] }
-tokio = { version = "1.47.1", features = ["full"] }
+semver = { version = "1.0.27", features = ["serde"] }
+tokio = { version = "1.48.0", features = ["full"] }
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-log = "0.4.22"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+log = "0.4.28"
 lazy_static = "1.5.0"
-reqwest = { version = "0.12.23", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.12.24", features = ["json", "stream", "blocking"] }
 futures = "0.3.31"
-bytes = "1.9.0"
-indicatif = "0.17.9"
-sha2 = "0.10.8"
+bytes = "1.10.1"
+indicatif = "0.18.2"
+sha2 = "0.10.9"
 hex = "0.4.3"
-dirs = "5.0.1"
+dirs = "6.0.0"
 
 # ML/Math dependencies
-ndarray = { version = "0.16.1", features = ["serde"] }
-ndarray-rand = "0.15.0"
-ndarray-linalg = "0.17.0"
+ndarray = { version = "0.17.1", features = ["serde"] }
+ndarray-rand = "0.16.0"
+ndarray-linalg = "0.18.0"
 nalgebra = "0.33.2"
 num-traits = "0.2.19"
 num-complex = { version = "0.4.6", features = ["serde"] }
 ordered-float = "5.1.0"
 rand = "0.9.2"
-rand_distr = "0.5.0"
+rand_distr = "0.5.1"
 rayon = "1.10.0"
-half = { version = "2.6.0", features = ["serde"] }
-parking_lot = "0.12.3"
-memmap2 = "0.9.5"
+half = { version = "2.4.1", features = ["serde"] }
+parking_lot = "0.12.5"
+memmap2 = "0.9.9"
 
 # Tokenizer dependencies
-tokenizers = "0.21"
+tokenizers = "0.22"
 unicode-normalization = "0.1"
-regex = "1.11.1"
+regex = "1.12.2"
 
 # Optional dependencies for different backends
 candle-core = "0.9.1"
 candle-nn = "0.9.1"
-tch = { version = "0.20", features = ["download-libtorch"] }
-ort = "2.0"
-safetensors = "0.4"
+tch = { version = "0.22", features = ["download-libtorch"] }
+ort = "1.16"
+safetensors = "0.5"
 
 # Web/Server dependencies  
 axum = { version = "0.8.4", features = ["ws", "macros"] }
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 jsonwebtoken = "9.3"
-num_cpus = "1.16"
+num_cpus = "1.17"
 once_cell = "1.21"
-prometheus = "0.14"
-prost = "0.13"
+prometheus = "0.13"
+prost = "0.14"
 tokio-stream = { version = "0.1", features = ["sync"] }
-tonic = "0.13.1"
+tonic = "0.14.2"
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
-uuid = { version = "1.17.0", features = ["v4", "serde"] }
-tonic-build = "0.13.1"
+uuid = { version = "1.18.1", features = ["v4", "serde"] }
+tonic-build = "0.14.2"
 
 # Serialization dependencies
 rmp-serde = "1.3"
@@ -114,7 +114,7 @@ bincode = "1.3"
 byteorder = "1.5"
 dashmap = "6.1"
 zstd = "0.13"
-flate2 = "1.0"
+flate2 = "1.1"
 lz4 = "1.28"
 tar = "0.4"
 libc = "0.2"
@@ -123,36 +123,36 @@ libc = "0.2"
 tokio-util = "0.7"
 url = "2.5"
 clap = { version = "4.5", features = ["derive"] }
-colored = "2.0"
+colored = "2.2"
 env_logger = "0.11"
-tokio-rustls = "0.24"
-base64 = "0.21"
+tokio-rustls = "0.26"
+base64 = "0.22"
 mime_guess = "2.0"
 fastrand = "2.3.0"
-toml = "0.8.23"
+toml = "0.9.6"
 
 # Dev dependencies
 criterion = { version = "0.5.1", features = ["html_reports", "async_tokio"] }
-proptest = "1.6"
-rstest = "0.23"
+proptest = "1.8"
+rstest = "0.26"
 approx = "0.5"
 pretty_assertions = "1.4"
 axum-test = "17.0"
 tokio-test = "0.4"
-tempfile = "3.14"
+tempfile = "3.23"
 paste = "1.0"
 
 # Debug-specific dependencies
-indexmap = { version = "2.7", features = ["serde"] }
+indexmap = { version = "2.11", features = ["serde"] }
 plotters = "0.3"
 tui = "0.19"
-crossterm = "0.28"
+crossterm = "0.29"
 ratatui = "0.29"
 gif = "0.13"
-image = "0.25.8"
-ffmpeg-next = "7.1"
+image = "0.25.6"
+ffmpeg-next = "8.0"
 statrs = "0.18"
-md5 = "0.7"
+md5 = "0.8"
 
 # MPI dependencies for multi-node training (removed from workspace - now optional per crate)
 # mpi = "0.8"
@@ -161,7 +161,7 @@ md5 = "0.7"
 # Vulkan dependencies for cross-platform GPU computing
 vulkano = "0.35.2"
 vulkano-shaders = "0.35.0"
-bytemuck = { version = "1.23.1", features = ["derive"] }
+bytemuck = { version = "1.24.0", features = ["derive"] }
 
 # SciRS2 dependencies - using rc.2 from crates.io
 # Note: "metal" feature removed from default features as it's Apple-specific
