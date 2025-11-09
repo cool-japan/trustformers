@@ -67,13 +67,27 @@ The TrustformeRS ecosystem follows a strict layered architecture:
 #### Prohibited Direct Imports:
 ```rust
 // ❌ FORBIDDEN in non-core crates
+
+// Random number generation
 use rand::*;
 use rand::Rng;
-use rand_distr::{Normal, Uniform};  // Use scirs2_core::random instead
+use rand_distr::{Normal, Uniform, Beta, Exp};  // Use scirs2_core::random instead
+
+// Array operations
 use ndarray::*;
-use ndarray::{Array, Array1, Array2};
+use ndarray::{Array, Array1, Array2, ArrayD, IxDyn};
 use ndarray::{array, s};  // Use scirs2_core::ndarray instead
-use num_complex::Complex;  // Use scirs2_core::complex instead
+use ndarray_rand::*;  // Use scirs2_core::random instead
+
+// Complex numbers
+use num_complex::{Complex, Complex32, Complex64};  // Use scirs2_core::Complex* instead
+
+// Parallelization and hardware acceleration
+use rayon::*;
+use rayon::prelude::*;  // Use scirs2_core::parallel_ops instead
+use rayon_core::*;  // Use scirs2_core::parallel_ops instead
+
+// Tensor backends
 use tokenizers::*;  // Use trustformers_core::tokenizer instead
 use candle_core::*;  // Use trustformers_core::tensor instead
 use tch::*;  // Use trustformers_core::tensor instead
@@ -89,11 +103,11 @@ use trustformers_core::autodiff::*;      // Automatic differentiation
 use trustformers_core::quantization::*;  // Quantization operations
 
 // For scientific computing operations, use SciRS2-Core
-use scirs2_core::random::*;              // Random number generation
-use scirs2_core::ndarray::*;             // Array operations (when needed)
-use scirs2_core::complex::*;             // Complex numbers
+use scirs2_core::random::*;              // Random number generation (RNG, distributions)
+use scirs2_core::ndarray::*;             // Array operations (Array, ArrayD, array!, s!)
+use scirs2_core::{Complex, Complex32, Complex64};  // Complex numbers (re-exported at root)
 use scirs2_core::simd_ops::*;            // SIMD operations
-use scirs2_core::parallel_ops::*;        // Parallel processing
+use scirs2_core::parallel_ops::*;        // Parallel processing (replaces rayon)
 ```
 
 ### Exception: TrustformeRS-Core Foundation Layer
@@ -266,23 +280,48 @@ let tensor = Tensor::randn(&[1024, 768])?.to_device(&device)?;
 ### Mandatory Rules
 
 1. **ALWAYS use `scirs2_core::parallel_ops`** for all parallel operations
-2. **NEVER add direct `rayon` dependency** to module Cargo.toml files
+2. **NEVER add direct `rayon` or `rayon-core` dependency** to module Cargo.toml files
 3. **ALWAYS import via `use scirs2_core::parallel_ops::*`**
 4. **NEVER use `rayon::prelude::*` directly** in modules
+
+**Rationale**: SciRS2-core provides unified, optimized parallel operations. Direct use of rayon would:
+1. Bypass SciRS2's unified performance optimization layer
+2. Create fragmented parallelization strategies
+3. Complicate cross-platform compatibility
+4. Prevent centralized performance tuning
 
 ### Required Usage Pattern
 
 ```rust
-// CORRECT - Uses scirs2-core parallel abstractions
+// ✅ CORRECT - Uses scirs2-core parallel abstractions
 use scirs2_core::parallel_ops::*;
 
+// Parallel iteration (rayon-style API)
 let results: Vec<i32> = (0..1000)
     .into_par_iter()
     .map(|x| process_batch(x))
     .collect();
 
-// INCORRECT - Direct Rayon usage
+// Parallel chunks
+par_chunks(&data, chunk_size).for_each(|chunk| {
+    process_chunk(chunk);
+});
+
+// ❌ INCORRECT - Direct Rayon usage
 // use rayon::prelude::*;  // FORBIDDEN in modules
+// use rayon_core::*;       // FORBIDDEN in modules
+```
+
+### Cargo.toml Configuration
+
+```toml
+# ✅ CORRECT - Module Cargo.toml
+[dependencies]
+scirs2-core = { workspace = true, features = ["parallel"] }
+
+# ❌ INCORRECT - Direct rayon dependency
+# rayon = "1.8"           # FORBIDDEN
+# rayon-core = "1.12"     # FORBIDDEN
 ```
 
 ### Parallel Processing for ML Tasks
@@ -292,6 +331,8 @@ Common TrustformeRS use cases:
 - Data preprocessing pipelines
 - Ensemble model inference
 - Tokenization of multiple texts
+- Multi-GPU parameter distribution
+- Data loader parallelization
 
 All should use `scirs2_core::parallel_ops`.
 
@@ -596,18 +637,112 @@ pub fn get_best_device() -> Device {
 
 ## Enforcement
 
-### Automated Checks (Future)
-- CI pipeline checks for prohibited imports
-- `cargo deny` configuration for dependency restrictions
-- Custom linting rules for TrustformeRS ecosystem
-- Integration tests that verify policy compliance
+### CI/CD Pipeline Checks
+
+Add the following checks to `.github/workflows/ci.yml`:
+
+```yaml
+- name: Check for SciRS2 policy violations
+  run: |
+    # Core scientific computing violations
+    ! grep -r "^use ndarray::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct ndarray import found. Use scirs2_core::ndarray instead" && exit 1)
+
+    ! grep -r "^use rand::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct rand import found. Use scirs2_core::random instead" && exit 1)
+
+    ! grep -r "^use rand_distr::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct rand_distr import found. Use scirs2_core::random instead" && exit 1)
+
+    ! grep -r "^use num_complex::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct num_complex import found. Use scirs2_core::Complex* instead" && exit 1)
+
+    # Parallelization violations
+    ! grep -r "^use rayon::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct rayon import found. Use scirs2_core::parallel_ops instead" && exit 1)
+
+    ! grep -r 'rayon[[:space:]]*=' trustformers-*/Cargo.toml || \
+      (echo "ERROR: Direct rayon dependency found. Use scirs2_core with parallel feature" && exit 1)
+
+    # Check Cargo.toml files for forbidden dependencies
+    ! grep -E '^(ndarray|rand|rand_distr|num-complex|rayon)[[:space:]]*=' \
+      trustformers-models/Cargo.toml \
+      trustformers-training/Cargo.toml \
+      trustformers-optim/Cargo.toml \
+      trustformers-tokenizers/Cargo.toml \
+      trustformers-py/Cargo.toml || \
+      (echo "ERROR: Forbidden dependency in non-core crate Cargo.toml" && exit 1)
+
+- name: Check for inline ndarray/rand usage
+  run: |
+    # Check for inline qualified paths that bypass imports
+    ! grep -r "ndarray::" trustformers-*/src --include="*.rs" | \
+      grep -v "scirs2_core::ndarray::" | \
+      grep -v "^[[:space:]]*//" || \
+      (echo "ERROR: Inline ndarray:: usage found. Import from scirs2_core::ndarray instead" && exit 1)
+```
+
+### Code Review Checklist
+
+#### Core Scientific Computing
+- [ ] All array operations use `scirs2_core::ndarray`
+- [ ] Random number generation uses `scirs2_core::random`
+- [ ] Complex numbers use `scirs2_core::Complex*` (at root, not in complex module)
+- [ ] No `ndarray_rand` imports (functionality in `scirs2_core::random`)
+
+#### Parallelization and Hardware Acceleration
+- [ ] No direct `rayon` or `rayon-core` dependencies in Cargo.toml
+- [ ] Parallel operations use `scirs2_core::parallel_ops::*`
+- [ ] No manual SIMD intrinsics (`std::arch`, `packed_simd`)
+- [ ] SIMD operations use `scirs2_core::simd_ops` with feature flags
+
+#### TrustformeRS-Specific
+- [ ] Tensor operations use `trustformers_core::tensor`
+- [ ] Tokenization uses `trustformers_core::tokenizer`
+- [ ] Model layers use `trustformers_core::layers`
+- [ ] No direct `tokenizers`, `candle`, or `tch` imports
+
+#### Documentation
+- [ ] New dependencies documented in this policy
+- [ ] Feature flag usage documented
+- [ ] Performance implications noted
+
+### Automated Tools
+
+**cargo-deny configuration** (add to `deny.toml`):
+```toml
+[bans]
+# Ban direct usage of these crates in non-core modules
+deny = [
+    { name = "rand", wrappers = ["scirs2-core"] },
+    { name = "rand_distr", wrappers = ["scirs2-core"] },
+    { name = "ndarray", wrappers = ["scirs2-core"] },
+    { name = "num-complex", wrappers = ["scirs2-core"] },
+    { name = "rayon", wrappers = ["scirs2-core"] },
+    { name = "rayon-core", wrappers = ["scirs2-core"] },
+]
+
+# Only allow these in trustformers-core
+[bans.features]
+allow = ["trustformers-core"]
+```
+
+### Quarterly Dependency Audit
+
+Review and:
+1. Prune unused SciRS2 crates
+2. Evaluate new candidates from SciRS2 ecosystem
+3. Verify compliance across all non-core code
+4. Update this policy with new patterns
 
 ### Manual Review
+
 - All PRs must follow this policy
 - Code reviews must verify TrustformeRS-Core and SciRS2-Core usage
 - Examples and tests must demonstrate proper patterns
 
 ### Current Enforcement
+
 - Code reviews MUST check for policy compliance
 - Regular audits should identify and refactor non-compliant code
 - New modules MUST follow these policies from the start

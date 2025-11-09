@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "trustformers-tokenizers"
-version = "0.1.0"
+version = "0.1.0a2"
 description = "High-performance tokenizers for transformer models"
 authors = [
-    {name = "TrustformeRS Team", email = "team@trustformers.org"},
+    {name = "COOLJAPAN Team (Team KitaSan)", email = "info@kitasan.io"},
 ]
 readme = "README.md"
 license = {text = "MIT OR Apache-2.0"}
@@ -61,7 +61,7 @@ benchmark = [
 [project.urls]
 Homepage = "https://github.com/cool-japan/trustformers"
 Repository = "https://github.com/cool-japan/trustformers"
-Documentation = "https://docs.trustformers.org"
+Documentation = "https://github.com/cool-japan/trustformers"
 "Bug Tracker" = "https://github.com/cool-japan/trustformers/issues"
 
 [tool.maturin]

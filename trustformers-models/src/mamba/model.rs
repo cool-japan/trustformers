@@ -8,7 +8,7 @@ use trustformers_core::{
     traits::{Layer, Model},
 };
 
-use ndarray;
+use scirs2_core::ndarray::s; // SciRS2 Integration Policy
 
 /// RMSNorm layer (Root Mean Square Layer Normalization)
 /// Used in Mamba for normalization
@@ -280,8 +280,8 @@ impl Layer for MambaBlock {
                         "Invalid projected tensor shape for splitting",
                     ));
                 }
-                let x_slice = arr.slice(ndarray::s![.., ..d_inner]).to_owned().into_dyn();
-                let z_slice = arr.slice(ndarray::s![.., d_inner..]).to_owned().into_dyn();
+                let x_slice = arr.slice(s![.., ..d_inner]).to_owned().into_dyn();
+                let z_slice = arr.slice(s![.., d_inner..]).to_owned().into_dyn();
                 (Tensor::F32(x_slice), Tensor::F32(z_slice))
             },
             _ => {
@@ -482,6 +482,7 @@ impl MambaModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scirs2_core::ndarray::Array1; // SciRS2 Integration Policy
 
     #[test]
     fn test_mamba_model_creation() {
@@ -525,7 +526,7 @@ mod tests {
 
         // Create dummy input as i64 tensor (batch_size=1, seq_len=10)
         let input_data = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        let input_ids = Tensor::I64(ndarray::Array1::from(input_data).into_dyn());
+        let input_ids = Tensor::I64(Array1::from(input_data).into_dyn());
         let output = model.forward(input_ids);
         assert!(output.is_ok());
     }

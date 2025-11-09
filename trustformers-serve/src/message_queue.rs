@@ -526,14 +526,17 @@ impl MessageQueueProducer for KafkaProducer {
         let delivery_result = self.producer.send(record, std::time::Duration::from_secs(10)).await;
 
         match delivery_result {
-            Ok((partition, offset)) => Ok(MessageResult {
-                message_id: message.id,
-                topic: message.topic,
-                partition: partition as u32,
-                offset: offset as u64,
-                timestamp: Utc::now(),
-                size: message.payload.len(),
-            }),
+            Ok(delivery) => {
+                // Delivery struct has partition and offset fields
+                Ok(MessageResult {
+                    message_id: message.id,
+                    topic: message.topic,
+                    partition: delivery.partition as u32,
+                    offset: delivery.offset as u64,
+                    timestamp: Utc::now(),
+                    size: message.payload.len(),
+                })
+            },
             Err((kafka_error, _)) => {
                 anyhow::bail!("Kafka send failed: {}", kafka_error)
             },

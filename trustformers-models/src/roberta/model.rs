@@ -1,5 +1,6 @@
 use crate::bert::layers::{BertEncoder, BertPooler};
 use crate::roberta::config::RobertaConfig;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::errors::Result;
 use trustformers_core::tensor::Tensor;
@@ -59,7 +60,7 @@ impl RobertaModel {
             let mask_f32: Vec<f32> = mask.iter().map(|&m| m as f32).collect();
             let shape = vec![1, 1, 1, mask_f32.len()];
             Some(Tensor::F32(
-                ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape), mask_f32).map_err(|e| {
+                ArrayD::from_shape_vec(IxDyn(&shape), mask_f32).map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?,
             ))

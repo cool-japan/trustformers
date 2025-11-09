@@ -4,11 +4,11 @@ build-backend = "maturin"
 
 [project]
 name = "trustformers"
-version = "0.1.0a1"
+version = "0.1.0a2"
 description = "High-performance transformer library for Python, written in Rust"
 readme = "README.md"
 authors = [
-    {name = "TrustformeRS Team", email = "contact@trustformers.dev"}
+    {name = "COOLJAPAN Team (Team KitaSan)", email = "info@kitasan.io"}
 ]
 license = {text = "Apache-2.0"}
 classifiers = [

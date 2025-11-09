@@ -1,4 +1,5 @@
 use crate::cogvlm::config::{CogVideoConfig, CogVlmConfig, CogVlmVisionConfig};
+use scirs2_core::ndarray::{Array3, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use trustformers_core::{
     errors::{Result, TrustformersError},
     layers::{Embedding, FeedForward, LayerNorm, Linear, MultiHeadAttention},
@@ -396,7 +397,7 @@ impl CogVlmModel {
         }
 
         // Create 3D tensor with shape [batch_size, seq_len, hidden_size]
-        use ndarray::Array3;
+        // Array3 already imported via scirs2_core at top
         let array_3d = Array3::from_shape_vec((batch_size, seq_len, hidden_size), combined_data)
             .map_err(|e| {
                 TrustformersError::tensor_op_error(
@@ -1199,12 +1200,9 @@ fn inject_vision_at_positions(
 
             // Create result tensor
             let result_array =
-                ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(hidden_shape), result_data)
-                    .map_err(|_| {
-                        TrustformersError::shape_error(
-                            "Failed to create injected tensor".to_string(),
-                        )
-                    })?;
+                ArrayD::from_shape_vec(IxDyn(hidden_shape), result_data).map_err(|_| {
+                    TrustformersError::shape_error("Failed to create injected tensor".to_string())
+                })?;
 
             Ok(Tensor::F32(result_array))
         },

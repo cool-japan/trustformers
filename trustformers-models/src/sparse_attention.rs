@@ -35,6 +35,7 @@
 //! let output = attention.forward(input)?;
 //! ```
 
+use scirs2_core::Array2; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use trustformers_core::errors::{tensor_op_error, Result};
 use trustformers_core::layers::AttentionInput;
@@ -587,7 +588,7 @@ impl SparseAttention {
                 let seq_len = q_shape[0];
                 let head_dim = q_shape[1];
 
-                let mut scores = ndarray::Array2::from_elem((seq_len, seq_len), f32::NEG_INFINITY);
+                let mut scores = Array2::from_elem((seq_len, seq_len), f32::NEG_INFINITY);
 
                 // Compute scores only for sparse positions
                 for &(i, j) in &mask.indices {
@@ -623,7 +624,7 @@ impl SparseAttention {
                 let seq_len = w_shape[0];
                 let head_dim = v_shape[1];
 
-                let mut output = ndarray::Array2::zeros((seq_len, head_dim));
+                let mut output = Array2::zeros((seq_len, head_dim));
 
                 // Apply sparse attention weights
                 for &(i, j) in &mask.indices {

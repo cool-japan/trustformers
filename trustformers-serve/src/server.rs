@@ -29,7 +29,8 @@ use crate::{
     // graphql::{create_context, create_schema, GraphQLContext},
     health::{HAConfig, HealthStatus, HighAvailabilityService},
     metrics::MetricsService,
-    polling::{LongPollRequest, LongPollResponse, LongPollingService},
+    openapi::ErrorResponse,
+    polling::{LongPollRequest, LongPollResponse, LongPollingService, LongPollingStats},
     shadow::{ShadowComparison, ShadowStats, ShadowTestingService},
     streaming::{SseHandler, StreamingService, WebSocketHandler},
     ServerConfig,
@@ -764,7 +765,7 @@ async fn get_stats(
     path = "/admin/config",
     tag = "admin",
     responses(
-        (status = 200, description = "Configuration retrieved successfully", body = ServerConfig),
+        (status = 200, description = "Configuration retrieved successfully", body = serde_json::Value),
         (status = 503, description = "Service unavailable", body = ErrorResponse)
     ),
     security(

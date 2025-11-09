@@ -1,4 +1,5 @@
 use crate::gpt_neo::config::GptNeoConfig;
+use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::errors::{tensor_op_error, Result, TrustformersError};
 use trustformers_core::layers::{Embedding, LayerNorm, Linear};
@@ -658,8 +659,8 @@ impl GptNeoLMHeadModel {
                     }
                     let seq_len = shape[1];
                     let vocab_size = shape[2];
-                    let slice = arr.slice(ndarray::s![0, seq_len - 1, ..]);
-                    use ndarray::{ArrayD, IxDyn};
+                    let slice = arr.slice(s![0, seq_len - 1, ..]);
+                    // ArrayD and IxDyn already imported via scirs2_core at top
                     ArrayD::from_shape_vec(IxDyn(&[vocab_size]), slice.iter().cloned().collect())
                         .map_err(|e| {
                             TrustformersError::tensor_op_error(
@@ -717,8 +718,6 @@ impl GptNeoLMHeadModel {
 }
 
 // Helper functions for text generation (similar to GPT-2)
-use scirs2_core::ndarray::ArrayD; // SciRS2 Integration Policy
-
 fn apply_top_k_filtering(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f32>> {
     let mut result = logits.clone();
     let mut indices_and_values: Vec<(usize, f32)> =
@@ -765,15 +764,14 @@ fn apply_top_p_filtering(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32>> {
 }
 
 fn sample_from_logits(logits: ArrayD<f32>) -> Result<u32> {
-    use rand_distr::weighted::WeightedAliasIndex;
-    use scirs2_core::random::*; // SciRS2 Integration Policy
+    use scirs2_core::random::*; // SciRS2 Integration Policy (includes WeightedIndex)
 
     // Convert to probabilities
     let probs = softmax(logits)?;
 
     // Create weighted distribution
     let weights: Vec<f32> = probs.iter().copied().collect();
-    let dist = WeightedAliasIndex::new(weights).map_err(|e| {
+    let dist = WeightedIndex::new(weights).map_err(|e| {
         TrustformersError::model_error(format!("Failed to create distribution: {}", e))
     })?;
 

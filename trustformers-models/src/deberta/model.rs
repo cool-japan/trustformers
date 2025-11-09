@@ -1,5 +1,5 @@
 use crate::deberta::config::DebertaConfig;
-use scirs2_core::ndarray::{Array1, Array2, Array3, Array4, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{
     embedding::Embedding, feedforward::FeedForward, layernorm::LayerNorm, linear::Linear,
@@ -33,7 +33,7 @@ impl DebertaEmbeddings {
         let embeddings = self.word_embeddings.forward_ids(input_ids.as_slice().unwrap())?;
         let embeddings_2d = match embeddings {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -48,7 +48,7 @@ impl DebertaEmbeddings {
         let embeddings = self.layer_norm.forward(norm_input)?;
         let embeddings_2d = match embeddings {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -182,7 +182,7 @@ impl DebertaDisentangledSelfAttention {
 
         let query_layer = match query_layer {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -193,7 +193,7 @@ impl DebertaDisentangledSelfAttention {
         };
         let key_layer = match key_layer {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -204,7 +204,7 @@ impl DebertaDisentangledSelfAttention {
         };
         let value_layer = match value_layer {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -225,16 +225,16 @@ impl DebertaDisentangledSelfAttention {
         // Content-to-content attention
         for b in 0..batch_size {
             for h in 0..self.num_attention_heads {
-                let q = query_layer.slice(ndarray::s![b, h, .., ..]);
-                let k = key_layer.slice(ndarray::s![b, h, .., ..]);
+                let q = query_layer.slice(s![b, h, .., ..]);
+                let k = key_layer.slice(s![b, h, .., ..]);
 
                 // Compute dot product attention
                 for i in 0..seq_len {
                     for j in 0..seq_len {
                         let score: f32 = q
-                            .slice(ndarray::s![i, ..])
+                            .slice(s![i, ..])
                             .iter()
-                            .zip(k.slice(ndarray::s![j, ..]).iter())
+                            .zip(k.slice(s![j, ..]).iter())
                             .map(|(a, b)| a * b)
                             .sum();
 
@@ -253,7 +253,7 @@ impl DebertaDisentangledSelfAttention {
                 let pos_query_result = pos_query_proj.forward(pos_query_input)?;
                 let pos_query_layer = match pos_query_result {
                     Tensor::F32(arr) => arr
-                        .into_dimensionality::<ndarray::Ix3>()
+                        .into_dimensionality::<Ix3>()
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
                     _ => {
                         return Err(TrustformersError::tensor_op_error(
@@ -403,7 +403,7 @@ impl DebertaSelfOutput {
         let dense_output = self.dense.forward(dense_input)?;
         let hidden_states = match dense_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -418,7 +418,7 @@ impl DebertaSelfOutput {
         let output = self.layer_norm.forward(norm_input)?;
         let output = match output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -491,7 +491,7 @@ impl DebertaLayer {
         let ff_output = self.feed_forward.forward(ff_input)?;
         let ff_output = match ff_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -506,7 +506,7 @@ impl DebertaLayer {
         let output = self.output_layer_norm.forward(norm_input)?;
         let output = match output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -622,14 +622,14 @@ impl DebertaForSequenceClassification {
         let hidden_states = self.deberta.forward(input_ids, attention_mask)?;
 
         // Use [CLS] token representation (first token)
-        let cls_hidden = hidden_states.slice(ndarray::s![0, 0, ..]).to_owned();
+        let cls_hidden = hidden_states.slice(s![0, 0, ..]).to_owned();
 
         // Pooler
         let pooler_input = Tensor::F32(cls_hidden.insert_axis(Axis(0)).into_dyn());
         let pooled_output = self.pooler.forward(pooler_input)?;
         let pooled_output = match pooled_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -642,7 +642,7 @@ impl DebertaForSequenceClassification {
         let pooled_output = gelu(&pooled_tensor)?;
         let pooled_output = match pooled_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -660,7 +660,7 @@ impl DebertaForSequenceClassification {
         let logits = self.classifier.forward(classifier_input)?;
         let logits = match logits {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -703,7 +703,7 @@ impl DebertaForMaskedLM {
         let prediction_scores = self.cls.forward(cls_input)?;
         let prediction_scores = match prediction_scores {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(

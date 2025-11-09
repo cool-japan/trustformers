@@ -403,7 +403,7 @@ impl DifferentialPrivacy {
 
         match self.config.noise_mechanism {
             NoiseMechanism::Gaussian => {
-                use rand_distr::{Distribution, Normal};
+                use scirs2_core::random::{Distribution, Normal}; // SciRS2 Integration Policy
                 let normal = Normal::new(0.0, scale)
                     .map_err(|e| anyhow!("Normal distribution error: {}", e))?;
 
@@ -414,7 +414,7 @@ impl DifferentialPrivacy {
             NoiseMechanism::Laplace => {
                 // Use exponential distribution to simulate Laplace
                 // Laplace(0, b) can be simulated as: sign * Exponential(1/b)
-                use rand_distr::{Distribution, Exp};
+                use scirs2_core::random::{Distribution, Exp}; // SciRS2 Integration Policy
                 let exp_dist = Exp::new(1.0 / scale)
                     .map_err(|e| anyhow!("Exponential distribution error: {}", e))?;
 

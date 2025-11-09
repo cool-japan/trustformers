@@ -1,5 +1,5 @@
 use crate::electra::config::ElectraConfig;
-use scirs2_core::ndarray::{Array1, Array2, Array3, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array1, Array2, Array3, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
 use trustformers_core::errors::Result;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Layer;
@@ -49,7 +49,7 @@ impl ElectraForTokenClassification {
         let classifier_input = Tensor::F32(hidden_states.into_dyn());
         let logits = self.classifier.forward(classifier_input)?;
         let logits = match logits {
-            Tensor::F32(arr) => arr.into_dimensionality::<ndarray::Ix3>().map_err(|e| {
+            Tensor::F32(arr) => arr.into_dimensionality::<Ix3>().map_err(|e| {
                 trustformers_core::errors::TrustformersError::shape_error(e.to_string())
             })?,
             _ => {
@@ -109,7 +109,7 @@ impl ElectraForQuestionAnswering {
         let qa_input = Tensor::F32(hidden_states.into_dyn());
         let logits = self.qa_outputs.forward(qa_input)?;
         let logits = match logits {
-            Tensor::F32(arr) => arr.into_dimensionality::<ndarray::Ix3>().map_err(|e| {
+            Tensor::F32(arr) => arr.into_dimensionality::<Ix3>().map_err(|e| {
                 trustformers_core::errors::TrustformersError::shape_error(e.to_string())
             })?,
             _ => {
@@ -123,8 +123,8 @@ impl ElectraForQuestionAnswering {
         };
 
         // Split into start and end logits
-        let start_logits = logits.slice(ndarray::s![.., .., 0]).to_owned();
-        let end_logits = logits.slice(ndarray::s![.., .., 1]).to_owned();
+        let start_logits = logits.slice(s![.., .., 0]).to_owned();
+        let end_logits = logits.slice(s![.., .., 1]).to_owned();
 
         Ok((start_logits, end_logits))
     }
@@ -167,7 +167,7 @@ impl ElectraForMultipleChoice {
             self.electra.forward(input_ids, token_type_ids, position_ids, attention_mask)?;
 
         // Use [CLS] token representation (first token)
-        let cls_hidden = hidden_states.slice(ndarray::s![0, 0, ..]).to_owned();
+        let cls_hidden = hidden_states.slice(s![0, 0, ..]).to_owned();
 
         // Apply dropout
         let cls_hidden = cls_hidden * (1.0 - self.dropout);
@@ -176,7 +176,7 @@ impl ElectraForMultipleChoice {
         let cls_input = Tensor::F32(cls_hidden.insert_axis(Axis(0)).into_dyn());
         let logits = self.classifier.forward(cls_input)?;
         let logits = match logits {
-            Tensor::F32(arr) => arr.into_dimensionality::<ndarray::Ix2>().map_err(|e| {
+            Tensor::F32(arr) => arr.into_dimensionality::<Ix2>().map_err(|e| {
                 trustformers_core::errors::TrustformersError::shape_error(e.to_string())
             })?,
             _ => {
@@ -197,7 +197,7 @@ impl ElectraForMultipleChoice {
 mod tests {
     use super::*;
     use crate::electra::model::{ElectraForPreTraining, ElectraForSequenceClassification};
-    use ndarray::Array1;
+    // Array1 already imported via scirs2_core at top
 
     #[test]
     fn test_electra_sequence_classification() {

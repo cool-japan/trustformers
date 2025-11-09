@@ -1,6 +1,7 @@
 use crate::bert::config::BertConfig;
 use crate::bert::layers::{BertEmbeddings, BertEncoder, BertPooler};
 use crate::weight_loading::{WeightDataType, WeightFormat, WeightLoadingConfig};
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::io::Read;
 use trustformers_core::errors::{Result, TrustformersError};
@@ -45,7 +46,7 @@ impl BertModel {
         let embeddings = match embeddings {
             trustformers_core::tensor::Tensor::F32(arr) => {
                 let reshaped = arr
-                    .to_shape(ndarray::IxDyn(&[batch_size, seq_len, hidden_size]))
+                    .to_shape(IxDyn(&[batch_size, seq_len, hidden_size]))
                     .map_err(|e| {
                         trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                     })?
@@ -66,7 +67,7 @@ impl BertModel {
             let mask_f32: Vec<f32> = mask.iter().map(|&m| m as f32).collect();
             let shape = vec![1, 1, 1, mask_f32.len()];
             Some(Tensor::F32(
-                ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape), mask_f32).map_err(|e| {
+                ArrayD::from_shape_vec(IxDyn(&shape), mask_f32).map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?,
             ))

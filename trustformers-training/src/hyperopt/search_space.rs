@@ -1,7 +1,8 @@
 //! Search space definitions for hyperparameter optimization
 
 use anyhow::Result;
-// Explicit import for .choose() method
+use scirs2_core::random::*; // SciRS2 Integration Policy (for Rng, SeedableRng, distributions)
+                            // Explicit import for .choose() method
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -104,7 +105,7 @@ impl HyperParameter {
     }
 
     /// Sample a random value from this parameter's space
-    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
+    pub fn sample<R: Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
         match self {
             HyperParameter::Categorical(p) => p.sample(rng),
             HyperParameter::Continuous(p) => p.sample(rng),
@@ -133,7 +134,7 @@ impl CategoricalParameter {
     }
 
     /// Sample a random choice
-    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
+    pub fn sample<R: Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
         if self.choices.is_empty() {
             return Err(anyhow::anyhow!("Cannot sample from empty choices list"));
         }
@@ -167,8 +168,8 @@ impl ContinuousParameter {
     }
 
     /// Sample a random value
-    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
-        use rand_distr::{Distribution, Uniform};
+    pub fn sample<R: Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
+        // Distribution and Uniform already available via scirs2_core::random::*
         if self.low >= self.high {
             return Err(anyhow::anyhow!(
                 "Invalid range: low ({}) must be less than high ({})",
@@ -209,8 +210,8 @@ impl DiscreteParameter {
     }
 
     /// Sample a random value
-    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
-        use rand_distr::{Distribution, Uniform};
+    pub fn sample<R: Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
+        // Distribution and Uniform already available via scirs2_core::random::*
         if self.low >= self.high {
             return Err(anyhow::anyhow!(
                 "Invalid range: low ({}) must be less than high ({})",
@@ -279,8 +280,8 @@ impl LogParameter {
     }
 
     /// Sample a random value from log space
-    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
-        use rand_distr::{Distribution, Uniform};
+    pub fn sample<R: Rng>(&self, rng: &mut R) -> Result<ParameterValue> {
+        // Distribution and Uniform already available via scirs2_core::random::*
         if self.low <= 0.0 || self.high <= 0.0 {
             return Err(anyhow::anyhow!(
                 "Both bounds must be positive for log scale: low={}, high={}",
@@ -364,7 +365,7 @@ impl SearchSpace {
     }
 
     /// Sample a complete configuration from this search space
-    pub fn sample<R: rand::Rng>(&self, rng: &mut R) -> Result<HashMap<String, ParameterValue>> {
+    pub fn sample<R: Rng>(&self, rng: &mut R) -> Result<HashMap<String, ParameterValue>> {
         let mut config = HashMap::new();
         for param in &self.parameters {
             let value = param.sample(rng).map_err(|e| {
@@ -478,8 +479,8 @@ impl Default for SearchSpaceBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::SeedableRng;
     use scirs2_core::StdRng;
+    use SeedableRng;
 
     #[test]
     fn test_parameter_value() {

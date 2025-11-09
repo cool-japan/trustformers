@@ -1,4 +1,5 @@
 use crate::bert::config::BertConfig;
+use scirs2_core::ndarray::s; // SciRS2 Integration Policy
 use trustformers_core::errors::{tensor_op_error, Result};
 use trustformers_core::layers::{FeedForward, LayerNorm, MultiHeadAttention};
 use trustformers_core::tensor::Tensor;
@@ -211,7 +212,7 @@ impl Layer for BertPooler {
                 }
 
                 // Extract first token and keep it 2D: [1, hidden_size]
-                let first_token = arr.slice(ndarray::s![0..1, ..]).to_owned().into_dyn();
+                let first_token = arr.slice(s![0..1, ..]).to_owned().into_dyn();
                 let pooled = self.dense.forward(Tensor::F32(first_token))?;
                 trustformers_core::ops::activations::tanh(&pooled)
             },

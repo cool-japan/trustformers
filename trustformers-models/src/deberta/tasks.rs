@@ -1,5 +1,5 @@
 use crate::deberta::config::DebertaConfig;
-use scirs2_core::ndarray::{Array1, Array2, Array3, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array1, Array2, Array3, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
 use trustformers_core::errors::Result;
 use trustformers_core::layers::linear::Linear;
 use trustformers_core::ops::activations::gelu;
@@ -44,7 +44,7 @@ impl DebertaForTokenClassification {
         let logits = self.classifier.forward(classifier_input)?;
         let logits = match logits {
             trustformers_core::tensor::Tensor::F32(arr) => {
-                arr.into_dimensionality::<ndarray::Ix3>().map_err(|e| {
+                arr.into_dimensionality::<Ix3>().map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?
             },
@@ -99,7 +99,7 @@ impl DebertaForQuestionAnswering {
         let logits = self.qa_outputs.forward(qa_input)?;
         let logits = match logits {
             trustformers_core::tensor::Tensor::F32(arr) => {
-                arr.into_dimensionality::<ndarray::Ix3>().map_err(|e| {
+                arr.into_dimensionality::<Ix3>().map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?
             },
@@ -114,8 +114,8 @@ impl DebertaForQuestionAnswering {
         };
 
         // Split into start and end logits
-        let start_logits = logits.slice(ndarray::s![.., .., 0]).to_owned();
-        let end_logits = logits.slice(ndarray::s![.., .., 1]).to_owned();
+        let start_logits = logits.slice(s![.., .., 0]).to_owned();
+        let end_logits = logits.slice(s![.., .., 1]).to_owned();
 
         Ok((start_logits, end_logits))
     }
@@ -153,7 +153,7 @@ impl DebertaForMultipleChoice {
         let hidden_states = self.deberta.forward(input_ids, attention_mask)?;
 
         // Use [CLS] token representation (first token)
-        let cls_hidden = hidden_states.slice(ndarray::s![0, 0, ..]).to_owned();
+        let cls_hidden = hidden_states.slice(s![0, 0, ..]).to_owned();
 
         // Pooler
         let pooler_input =
@@ -161,7 +161,7 @@ impl DebertaForMultipleChoice {
         let pooled_output = self.pooler.forward(pooler_input)?;
         let pooled_output = match pooled_output {
             trustformers_core::tensor::Tensor::F32(arr) => {
-                arr.into_dimensionality::<ndarray::Ix2>().map_err(|e| {
+                arr.into_dimensionality::<Ix2>().map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?
             },
@@ -178,7 +178,7 @@ impl DebertaForMultipleChoice {
         let pooled_output = gelu(&pooled_tensor)?;
         let pooled_output = match pooled_output {
             trustformers_core::tensor::Tensor::F32(arr) => {
-                arr.into_dimensionality::<ndarray::Ix2>().map_err(|e| {
+                arr.into_dimensionality::<Ix2>().map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?
             },
@@ -200,7 +200,7 @@ impl DebertaForMultipleChoice {
         let logits = self.classifier.forward(classifier_input)?;
         let logits = match logits {
             trustformers_core::tensor::Tensor::F32(arr) => {
-                arr.into_dimensionality::<ndarray::Ix2>().map_err(|e| {
+                arr.into_dimensionality::<Ix2>().map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?
             },
@@ -222,7 +222,7 @@ impl DebertaForMultipleChoice {
 mod tests {
     use super::*;
     use crate::deberta::model::{DebertaForMaskedLM, DebertaForSequenceClassification};
-    use ndarray::Array1;
+    // Array1 already imported via scirs2_core at top
 
     #[test]
     fn test_deberta_sequence_classification() {

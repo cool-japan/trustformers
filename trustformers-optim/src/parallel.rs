@@ -12,7 +12,7 @@
 //! - **Scalability**: Efficient scaling from 2 to 64+ cores
 
 use crate::common::{BiasCorrection, ParameterUpdate, StateMemoryStats};
-use rayon::prelude::*;
+use scirs2_core::parallel_ops::*; // SciRS2 Integration Policy - replaces rayon
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use trustformers_core::errors::{Result, TrustformersError};
@@ -433,15 +433,12 @@ impl ParallelAdam {
     pub fn configure_thread_pool(&self) -> Result<()> {
         let num_threads = self.state.config.effective_num_threads();
 
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build_global()
-            .map_err(|e| {
-                TrustformersError::tensor_op_error(
-                    &format!("Failed to configure thread pool: {}", e),
-                    "configure_thread_pool",
-                )
-            })?;
+        ThreadPoolBuilder::new().num_threads(num_threads).build_global().map_err(|e| {
+            TrustformersError::tensor_op_error(
+                &format!("Failed to configure thread pool: {}", e),
+                "configure_thread_pool",
+            )
+        })?;
 
         Ok(())
     }

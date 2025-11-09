@@ -1,4 +1,5 @@
 use anyhow::Result;
+use scirs2_core::Complex; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
@@ -257,7 +258,7 @@ impl AMPManager {
                     let im_clamped = x.im.clamp(-65504.0, 65504.0);
                     let re_scaled = (re_clamped * 1024.0).round() / 1024.0;
                     let im_scaled = (im_clamped * 1024.0).round() / 1024.0;
-                    num_complex::Complex::new(re_scaled, im_scaled)
+                    Complex::new(re_scaled, im_scaled)
                 });
                 Ok(Tensor::C32(quantized))
             },
@@ -918,13 +919,13 @@ impl AdvancedMixedPrecisionManager {
             Tensor::CF16(arr) => {
                 let factor_f16 = half::f16::from_f32(factor);
                 let scaled =
-                    arr.mapv(|x| num_complex::Complex::new(x.re * factor_f16, x.im * factor_f16));
+                    arr.mapv(|x| Complex::new(x.re * factor_f16, x.im * factor_f16));
                 Ok(Tensor::CF16(scaled))
             },
             Tensor::CBF16(arr) => {
                 let factor_bf16 = half::bf16::from_f32(factor);
                 let scaled =
-                    arr.mapv(|x| num_complex::Complex::new(x.re * factor_bf16, x.im * factor_bf16));
+                    arr.mapv(|x| Complex::new(x.re * factor_bf16, x.im * factor_bf16));
                 Ok(Tensor::CBF16(scaled))
             },
             Tensor::Sparse(_) => Ok(tensor.clone()), // Don't scale sparse tensors

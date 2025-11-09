@@ -12,8 +12,7 @@
 //! - Task-specific hyperparameter recommendations
 //! - Performance-aware hyperparameter selection
 
-use rand::prelude::*;
-use scirs2_core::random::thread_rng;
+use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::time::Instant;

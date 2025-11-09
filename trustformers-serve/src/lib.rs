@@ -28,7 +28,8 @@ pub mod gpu_profiler;
 pub mod gpu_scheduler;
 pub mod graph_optimization;
 pub mod graphql;
-pub mod grpc;
+// TODO: Re-enable when proto compilation is fixed
+// pub mod grpc;
 pub mod health;
 pub mod kernel_fusion;
 pub mod load_balancer;
@@ -224,7 +225,8 @@ pub use test_cicd_integration::RotationStrategy;
 //     InferenceInput, InferenceResult, BatchInferenceInput, BatchInferenceResult,
 //     StatsInfo, ModelInfo, QueryRoot, MutationRoot
 // }; // Temporarily disabled due to axum compatibility
-pub use grpc::{inference, InferenceServiceImpl};
+// TODO: Re-enable when proto compilation is fixed
+// pub use grpc::{inference, InferenceServiceImpl};
 pub use health::{
     CircuitBreaker, FailoverManager, HAConfig, HealthCheckService, HealthStatus,
     HighAvailabilityService, RetryPolicy,
@@ -434,7 +436,8 @@ pub use validation::{
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Server configuration
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+/// Note: ToSchema removed due to complexity - too many nested config types
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ServerConfig {
     /// Host to bind to
     pub host: String,

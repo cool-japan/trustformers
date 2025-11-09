@@ -929,7 +929,7 @@ mod tests {
         // Mock objective function
         let objective_fn = |_config: &HyperparameterConfig| {
             let mut metrics = HashMap::new();
-            metrics.insert("accuracy".to_string(), rand::random::<f64>());
+            metrics.insert("accuracy".to_string(), random::<f64>());
             Ok(metrics)
         };
 

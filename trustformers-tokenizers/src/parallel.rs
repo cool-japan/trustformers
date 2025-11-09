@@ -1,4 +1,4 @@
-use rayon::prelude::*;
+use scirs2_core::parallel_ops::*; // SciRS2 Integration Policy - replaces rayon
 use std::sync::Arc;
 use trustformers_core::errors::Result;
 use trustformers_core::traits::{TokenizedInput, Tokenizer};

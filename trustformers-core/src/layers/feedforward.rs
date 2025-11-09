@@ -24,6 +24,26 @@ impl FeedForward {
     pub fn parameter_count(&self) -> usize {
         self.dense.parameter_count() + self.output.parameter_count()
     }
+
+    /// Set weights for the dense (first) layer
+    pub fn set_dense_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.dense.set_weight(weight)
+    }
+
+    /// Set bias for the dense (first) layer
+    pub fn set_dense_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.dense.set_bias(bias)
+    }
+
+    /// Set weights for the output (second) layer
+    pub fn set_output_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.output.set_weight(weight)
+    }
+
+    /// Set bias for the output (second) layer
+    pub fn set_output_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.output.set_bias(bias)
+    }
 }
 
 impl Layer for FeedForward {

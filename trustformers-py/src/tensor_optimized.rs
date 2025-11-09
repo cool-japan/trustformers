@@ -3,8 +3,8 @@ use numpy::{PyArray, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use rayon::prelude::*;
 use scirs2_core::ndarray::{self as ndarray, ArrayD, ArrayViewD, Axis, Dimension, IxDyn};
+use scirs2_core::parallel_ops::*; // SciRS2 Integration Policy - replaces rayon
 use trustformers_core::quantization::{
     QuantizationConfig, QuantizationScheme, QuantizedTensor, Quantizer,
 };

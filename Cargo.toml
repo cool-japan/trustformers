@@ -17,27 +17,27 @@ exclude = ["examples/server", "examples/grpc-server"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.2"
 edition = "2021"
 rust-version = "1.75"
 authors = ["TrustformeRS cool-japan Team (Team KitaSan)"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/cool-japan/trustformers"
-homepage = "https://trustformers.org"
+homepage = "https://github.com/cool-japan/trustformers"
 
 [workspace.dependencies]
 # Internal crate dependencies
-trustformers = { version = "0.1.0-alpha.1", path = "trustformers" }
-trustformers-core = { version = "0.1.0-alpha.1", path = "trustformers-core" }
-trustformers-tokenizers = { version = "0.1.0-alpha.1", path = "trustformers-tokenizers" }
-trustformers-models = { version = "0.1.0-alpha.1", path = "trustformers-models" }
-trustformers-optim = { version = "0.1.0-alpha.1", path = "trustformers-optim" }
-trustformers-training = { version = "0.1.0-alpha.1", path = "trustformers-training" }
-trustformers-wasm = { version = "0.1.0-alpha.1", path = "trustformers-wasm" }
-trustformers-mobile = { version = "0.1.0-alpha.1", path = "trustformers-mobile" }
-trustformers-debug = { version = "0.1.0-alpha.1", path = "trustformers-debug" }
-trustformers-serve = { version = "0.1.0-alpha.1", path = "trustformers-serve" }
-trustformers-c = { version = "0.1.0-alpha.1", path = "trustformers-c" }
+trustformers = { version = "0.1.0-alpha.2", path = "trustformers" }
+trustformers-core = { version = "0.1.0-alpha.2", path = "trustformers-core" }
+trustformers-tokenizers = { version = "0.1.0-alpha.2", path = "trustformers-tokenizers" }
+trustformers-models = { version = "0.1.0-alpha.2", path = "trustformers-models" }
+trustformers-optim = { version = "0.1.0-alpha.2", path = "trustformers-optim" }
+trustformers-training = { version = "0.1.0-alpha.2", path = "trustformers-training" }
+trustformers-wasm = { version = "0.1.0-alpha.2", path = "trustformers-wasm" }
+trustformers-mobile = { version = "0.1.0-alpha.2", path = "trustformers-mobile" }
+trustformers-debug = { version = "0.1.0-alpha.2", path = "trustformers-debug" }
+trustformers-serve = { version = "0.1.0-alpha.2", path = "trustformers-serve" }
+trustformers-c = { version = "0.1.0-alpha.2", path = "trustformers-c" }
 
 # Core dependencies
 anyhow = "1.0.100"

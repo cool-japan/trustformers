@@ -90,6 +90,7 @@ pub struct BinaryTokenizer {
     pub merges: Option<Vec<(String, String)>>,
 
     /// Additional tokenizer-specific configuration
+    #[bincode(with_serde)]
     pub config: HashMap<String, serde_json::Value>,
 
     /// Normalization rules
@@ -100,14 +101,15 @@ pub struct BinaryTokenizer {
 }
 
 /// Normalization rule for text preprocessing
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct NormalizationRule {
     pub rule_type: String,
+    #[bincode(with_serde)]
     pub parameters: HashMap<String, serde_json::Value>,
 }
 
 /// Pre-tokenization rule for splitting text
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct PreTokenizationRule {
     pub rule_type: String,
     pub pattern: String,
@@ -188,9 +190,10 @@ impl BinarySerializer {
         })?;
 
         // Write header
-        let header_data = bincode::encode_to_vec(&header, bincode::config::standard()).map_err(|e| {
-            TrustformersError::serialization_error(format!("Failed to serialize header: {}", e))
-        })?;
+        let header_data =
+            bincode::encode_to_vec(&header, bincode::config::standard()).map_err(|e| {
+                TrustformersError::serialization_error(format!("Failed to serialize header: {}", e))
+            })?;
         let header_size = header_data.len() as u32;
 
         writer.write_all(&header_size.to_le_bytes()).map_err(|e| {
@@ -244,9 +247,13 @@ impl BinarySerializer {
             .read_exact(&mut header_data)
             .map_err(|e| TrustformersError::io_error(format!("Failed to read header: {}", e)))?;
 
-        let (header, _): (BinaryHeader, usize) = bincode::decode_from_slice(&header_data, bincode::config::standard()).map_err(|e| {
-            TrustformersError::serialization_error(format!("Failed to deserialize header: {}", e))
-        })?;
+        let (header, _): (BinaryHeader, usize) =
+            bincode::decode_from_slice(&header_data, bincode::config::standard()).map_err(|e| {
+                TrustformersError::serialization_error(format!(
+                    "Failed to deserialize header: {}",
+                    e
+                ))
+            })?;
 
         // Verify version compatibility
         if header.version > BINARY_FORMAT_VERSION {
@@ -281,12 +288,13 @@ impl BinarySerializer {
         }
 
         // Deserialize tokenizer
-        let (tokenizer, _): (BinaryTokenizer, usize) = bincode::decode_from_slice(&final_data, bincode::config::standard()).map_err(|e| {
-            TrustformersError::serialization_error(format!(
-                "Failed to deserialize tokenizer: {}",
-                e
-            ))
-        })?;
+        let (tokenizer, _): (BinaryTokenizer, usize) =
+            bincode::decode_from_slice(&final_data, bincode::config::standard()).map_err(|e| {
+                TrustformersError::serialization_error(format!(
+                    "Failed to deserialize tokenizer: {}",
+                    e
+                ))
+            })?;
 
         Ok((tokenizer, header))
     }
@@ -368,9 +376,13 @@ impl BinarySerializer {
             .read_exact(&mut header_data)
             .map_err(|e| TrustformersError::io_error(format!("Failed to read header: {}", e)))?;
 
-        let (header, _): (BinaryHeader, usize) = bincode::decode_from_slice(&header_data, bincode::config::standard()).map_err(|e| {
-            TrustformersError::serialization_error(format!("Failed to deserialize header: {}", e))
-        })?;
+        let (header, _): (BinaryHeader, usize) =
+            bincode::decode_from_slice(&header_data, bincode::config::standard()).map_err(|e| {
+                TrustformersError::serialization_error(format!(
+                    "Failed to deserialize header: {}",
+                    e
+                ))
+            })?;
 
         Ok(header)
     }

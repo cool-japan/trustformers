@@ -1,5 +1,5 @@
 use crate::stablelm::config::StableLMConfig;
-use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy (Array2 in tests)
 use trustformers_core::{
     errors::{tensor_op_error, Result},
     layers::{Embedding, Linear},
@@ -772,7 +772,7 @@ impl StableLMForCausalLM {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::Array2;
+    // Array2 already imported via scirs2_core at top
 
     #[test]
     fn test_rms_norm() {

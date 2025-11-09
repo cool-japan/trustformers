@@ -20,8 +20,6 @@ bincode.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true
-rand.workspace = true
-rand_distr.workspace = true
 rayon.workspace = true
 num_cpus.workspace = true
 

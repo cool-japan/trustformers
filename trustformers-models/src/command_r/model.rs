@@ -1,4 +1,5 @@
 use crate::command_r::config::CommandRConfig;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use trustformers_core::{
     errors::{invalid_config, tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
@@ -775,10 +776,9 @@ impl CommandRModel {
         let data_vec = data_vec?;
 
         // Create tensor from the loaded data
-        let arr =
-            ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape_vec), data_vec).map_err(|e| {
-                trustformers_core::errors::TrustformersError::shape_error(e.to_string())
-            })?;
+        let arr = ArrayD::from_shape_vec(IxDyn(&shape_vec), data_vec).map_err(|e| {
+            trustformers_core::errors::TrustformersError::shape_error(e.to_string())
+        })?;
         let tensor = trustformers_core::tensor::Tensor::F32(arr);
 
         // Map tensor names to model components
@@ -806,9 +806,9 @@ impl CommandRModel {
         for tensor_name in mock_tensor_names {
             // Create a minimal mock tensor (just for demonstration)
             let mock_data = vec![0.1f32; 128]; // Small mock tensor
-            let arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&[128]), mock_data).map_err(
-                |e| trustformers_core::errors::TrustformersError::shape_error(e.to_string()),
-            )?;
+            let arr = ArrayD::from_shape_vec(IxDyn(&[128]), mock_data).map_err(|e| {
+                trustformers_core::errors::TrustformersError::shape_error(e.to_string())
+            })?;
             let mock_tensor = trustformers_core::tensor::Tensor::F32(arr);
 
             // Use the existing assignment logic

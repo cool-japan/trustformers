@@ -1,5 +1,5 @@
 use crate::electra::config::ElectraConfig;
-use scirs2_core::ndarray::{Array1, Array2, Array3, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array1, Array2, Array3, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{
     attention::MultiHeadAttention, embedding::Embedding, feedforward::FeedForward,
@@ -52,7 +52,7 @@ impl ElectraEmbeddings {
         let word_emb = self.word_embeddings.forward_ids(input_ids.as_slice().unwrap())?;
         let word_emb_2d = match word_emb {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -71,7 +71,7 @@ impl ElectraEmbeddings {
         let pos_emb = self.position_embeddings.forward_ids(pos_ids.as_slice().unwrap())?;
         let pos_emb_2d = match pos_emb {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -90,7 +90,7 @@ impl ElectraEmbeddings {
         let tt_emb = self.token_type_embeddings.forward_ids(tt_ids.as_slice().unwrap())?;
         let tt_emb_2d = match tt_emb {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -108,7 +108,7 @@ impl ElectraEmbeddings {
         let embeddings = self.layer_norm.forward(norm_input)?;
         let embeddings_2d = match embeddings {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -167,7 +167,7 @@ impl ElectraLayer {
         let attention_output = self.attention.forward(hidden_states_tensor)?;
         let attention_output = match attention_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -185,7 +185,7 @@ impl ElectraLayer {
         let attention_output = self.attention_layer_norm.forward(attention_norm_input)?;
         let attention_output = match attention_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -200,7 +200,7 @@ impl ElectraLayer {
         let ff_output = self.feed_forward.forward(ff_input)?;
         let ff_output = match ff_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -217,7 +217,7 @@ impl ElectraLayer {
         let output = self.output_layer_norm.forward(output_norm_input)?;
         let output = match output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -327,7 +327,7 @@ impl ElectraGenerator {
             embeddings = match proj_output {
                 Tensor::F32(arr) => {
                     let arr_3d = arr
-                        .into_dimensionality::<ndarray::Ix3>()
+                        .into_dimensionality::<Ix3>()
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                     // Remove batch dimension to get back to 2D
                     arr_3d.index_axis_move(Axis(0), 0)
@@ -352,7 +352,7 @@ impl ElectraGenerator {
         let normalized_output = self.layer_norm.forward(norm_input)?;
         let normalized_output = match normalized_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -367,7 +367,7 @@ impl ElectraGenerator {
         let logits = self.lm_head.forward(lm_input)?;
         let logits = match logits {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -439,7 +439,7 @@ impl ElectraDiscriminator {
             embeddings = match proj_output {
                 Tensor::F32(arr) => {
                     let arr_3d = arr
-                        .into_dimensionality::<ndarray::Ix3>()
+                        .into_dimensionality::<Ix3>()
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                     // Remove batch dimension to get back to 2D
                     arr_3d.index_axis_move(Axis(0), 0)
@@ -464,7 +464,7 @@ impl ElectraDiscriminator {
         let output = self.layer_norm.forward(norm_input)?;
         let output = match output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -556,7 +556,7 @@ impl ElectraForPreTraining {
         let discriminator_logits = self.discriminator_head.forward(disc_input)?;
         let discriminator_logits = match discriminator_logits {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -606,7 +606,7 @@ impl ElectraForSequenceClassification {
             self.electra.forward(input_ids, token_type_ids, position_ids, attention_mask)?;
 
         // Use [CLS] token representation (first token)
-        let cls_hidden = hidden_states.slice(ndarray::s![0, 0, ..]).to_owned();
+        let cls_hidden = hidden_states.slice(s![0, 0, ..]).to_owned();
 
         // Apply dropout
         let cls_hidden = cls_hidden * (1.0 - self.dropout);
@@ -616,7 +616,7 @@ impl ElectraForSequenceClassification {
         let logits = self.classifier.forward(cls_input)?;
         let logits = match logits {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(

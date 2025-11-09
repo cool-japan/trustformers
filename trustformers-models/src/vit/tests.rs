@@ -2,7 +2,7 @@
 mod tests {
     use crate::vit::config::ViTConfig;
     use crate::vit::model::{PatchEmbedding, ViTForImageClassification, ViTModel};
-    use ndarray::Array4;
+    use scirs2_core::ndarray::Array4; // SciRS2 Integration Policy
     use trustformers_core::traits::Config;
 
     #[test]

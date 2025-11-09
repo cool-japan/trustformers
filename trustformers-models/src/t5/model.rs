@@ -1,4 +1,4 @@
-use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
     errors::{Result, TrustformersError},
@@ -210,9 +210,9 @@ impl T5ForConditionalGeneration {
 
                     // Get last token logits
                     let last_token_slice = if shape.len() == 3 {
-                        arr.slice(ndarray::s![0, seq_len - 1, ..])
+                        arr.slice(s![0, seq_len - 1, ..])
                     } else {
-                        arr.slice(ndarray::s![seq_len - 1, ..])
+                        arr.slice(s![seq_len - 1, ..])
                     };
                     last_token_slice.to_owned()
                 },
@@ -304,9 +304,9 @@ impl T5ForConditionalGeneration {
                         let seq_len = shape[shape.len() - 2];
 
                         let last_token_slice = if shape.len() == 3 {
-                            arr.slice(ndarray::s![0, seq_len - 1, ..])
+                            arr.slice(s![0, seq_len - 1, ..])
                         } else {
-                            arr.slice(ndarray::s![seq_len - 1, ..])
+                            arr.slice(s![seq_len - 1, ..])
                         };
                         last_token_slice.to_owned()
                     },
@@ -685,7 +685,7 @@ impl T5Attention {
         let normed_hidden = match &normed_hidden {
             Tensor::F32(arr) => {
                 if arr.ndim() == 2 {
-                    Tensor::F32(arr.clone().insert_axis(ndarray::Axis(0)).to_owned())
+                    Tensor::F32(arr.clone().insert_axis(Axis(0)).to_owned())
                 } else {
                     normed_hidden
                 }
@@ -723,29 +723,24 @@ impl T5Attention {
 
                 // Ensure tensors are 3D
                 let q_arr = if q_arr.ndim() == 2 {
-                    q_arr.clone().insert_axis(ndarray::Axis(0)).to_owned()
+                    q_arr.clone().insert_axis(Axis(0)).to_owned()
                 } else {
                     q_arr.clone()
                 };
                 let k_arr = if k_arr.ndim() == 2 {
-                    k_arr.clone().insert_axis(ndarray::Axis(0)).to_owned()
+                    k_arr.clone().insert_axis(Axis(0)).to_owned()
                 } else {
                     k_arr.clone()
                 };
                 let v_arr = if v_arr.ndim() == 2 {
-                    v_arr.clone().insert_axis(ndarray::Axis(0)).to_owned()
+                    v_arr.clone().insert_axis(Axis(0)).to_owned()
                 } else {
                     v_arr.clone()
                 };
 
                 // Reshape to [batch, seq_len, n_heads, d_kv]
                 let q = q_arr
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        q_seq_len,
-                        self.n_heads,
-                        self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, q_seq_len, self.n_heads, self.d_kv]))
                     .map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to reshape Q from {:?} to [{}, {}, {}, {}]: {}",
@@ -759,12 +754,7 @@ impl T5Attention {
                     })?
                     .to_owned();
                 let k = k_arr
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        k_seq_len,
-                        self.n_heads,
-                        self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, k_seq_len, self.n_heads, self.d_kv]))
                     .map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to reshape K from {:?} to [{}, {}, {}, {}]: {}",
@@ -778,12 +768,7 @@ impl T5Attention {
                     })?
                     .to_owned();
                 let v = v_arr
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        v_seq_len,
-                        self.n_heads,
-                        self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, v_seq_len, self.n_heads, self.d_kv]))
                     .map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to reshape V from {:?} to [{}, {}, {}, {}]: {}",
@@ -808,7 +793,7 @@ impl T5Attention {
                 let k_t = k.permuted_axes(vec![0, 1, 3, 2]);
 
                 // Compute Q * K^T
-                let mut scores = ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[
+                let mut scores = ArrayD::<f32>::zeros(IxDyn(&[
                     batch_size,
                     self.n_heads,
                     q_seq_len,
@@ -816,10 +801,10 @@ impl T5Attention {
                 ]));
                 for b in 0..batch_size {
                     for h in 0..self.n_heads {
-                        let q_head = q.slice(ndarray::s![b, h, .., ..]);
-                        let k_head_t = k_t.slice(ndarray::s![b, h, .., ..]);
+                        let q_head = q.slice(s![b, h, .., ..]);
+                        let k_head_t = k_t.slice(s![b, h, .., ..]);
                         let score = q_head.dot(&k_head_t);
-                        scores.slice_mut(ndarray::s![b, h, .., ..]).assign(&score);
+                        scores.slice_mut(s![b, h, .., ..]).assign(&score);
                     }
                 }
                 scores *= scale;
@@ -832,7 +817,7 @@ impl T5Attention {
                         Tensor::F32(bias_arr) => {
                             // Add bias to scores
                             for b in 0..batch_size {
-                                let mut slice = scores.slice_mut(ndarray::s![b, .., .., ..]);
+                                let mut slice = scores.slice_mut(s![b, .., .., ..]);
                                 slice += &bias_arr;
                             }
                         },
@@ -865,7 +850,7 @@ impl T5Attention {
                 for b in 0..batch_size {
                     for h in 0..self.n_heads {
                         for i in 0..q_seq_len {
-                            let mut row = attention_probs.slice_mut(ndarray::s![b, h, i, ..]);
+                            let mut row = attention_probs.slice_mut(s![b, h, i, ..]);
                             let max_val = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
                             row.mapv_inplace(|x| (x - max_val).exp());
                             let sum: f32 = row.iter().sum();
@@ -877,29 +862,21 @@ impl T5Attention {
                 }
 
                 // Apply attention to values
-                let mut output = ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[
-                    batch_size,
-                    self.n_heads,
-                    q_seq_len,
-                    self.d_kv,
-                ]));
+                let mut output =
+                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, self.n_heads, q_seq_len, self.d_kv]));
                 for b in 0..batch_size {
                     for h in 0..self.n_heads {
-                        let attn_probs_head = attention_probs.slice(ndarray::s![b, h, .., ..]);
-                        let v_head = v.slice(ndarray::s![b, h, .., ..]);
+                        let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                        let v_head = v.slice(s![b, h, .., ..]);
                         let out = attn_probs_head.dot(&v_head);
-                        output.slice_mut(ndarray::s![b, h, .., ..]).assign(&out);
+                        output.slice_mut(s![b, h, .., ..]).assign(&out);
                     }
                 }
 
                 // Transpose back and reshape
                 let output = output.permuted_axes(vec![0, 2, 1, 3]);
                 let output = output
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        q_seq_len,
-                        self.n_heads * self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, q_seq_len, self.n_heads * self.d_kv]))
                     .map_err(|_| {
                         TrustformersError::shape_error("Failed to reshape output".to_string())
                     })?
@@ -921,7 +898,7 @@ impl T5Attention {
         // Remove batch dimension if input was 2D
         let output = if shape.len() == 2 {
             match output {
-                Tensor::F32(arr) => Tensor::F32(arr.remove_axis(ndarray::Axis(0))),
+                Tensor::F32(arr) => Tensor::F32(arr.remove_axis(Axis(0))),
                 _ => output,
             }
         } else {
@@ -935,7 +912,7 @@ impl T5Attention {
     /// Compute relative position bias for T5
     fn compute_relative_position_bias(&self, query_len: usize, key_len: usize) -> Result<Tensor> {
         // Compute relative positions
-        let mut relative_positions = ndarray::Array2::<i32>::zeros((query_len, key_len));
+        let mut relative_positions = Array2::<i32>::zeros((query_len, key_len));
         for i in 0..query_len {
             for j in 0..key_len {
                 relative_positions[[i, j]] = j as i32 - i as i32;
@@ -954,7 +931,7 @@ impl T5Attention {
             match bias {
                 Tensor::F32(bias_arr) => {
                     let reshaped = bias_arr
-                        .to_shape(ndarray::IxDyn(&[query_len, key_len, self.n_heads]))
+                        .to_shape(IxDyn(&[query_len, key_len, self.n_heads]))
                         .map_err(|_| {
                             TrustformersError::shape_error("Failed to reshape bias".to_string())
                         })?
@@ -970,17 +947,13 @@ impl T5Attention {
             }
         } else {
             // No relative bias, return zeros
-            let zeros =
-                ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[self.n_heads, query_len, key_len]));
+            let zeros = ArrayD::<f32>::zeros(IxDyn(&[self.n_heads, query_len, key_len]));
             Ok(Tensor::F32(zeros))
         }
     }
 
     /// Convert relative positions to bucket indices
-    fn relative_position_bucket(
-        &self,
-        relative_positions: ndarray::Array2<i32>,
-    ) -> ndarray::Array2<i32> {
+    fn relative_position_bucket(&self, relative_positions: Array2<i32>) -> Array2<i32> {
         let num_buckets = self.relative_attention_num_buckets;
         let max_distance = self.relative_attention_max_distance;
         let mut buckets = relative_positions.mapv(|_x| 0);

@@ -114,7 +114,7 @@ pub struct ClientInfo {
 }
 
 /// Shadow response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ShadowResponse {
     /// Response ID
     pub response_id: String,
@@ -148,7 +148,7 @@ pub struct ShadowResponse {
 }
 
 /// Shadow response status
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum ShadowResponseStatus {
     Success,
     Error,
@@ -179,7 +179,7 @@ pub struct ShadowComparison {
 }
 
 /// Comparison metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ComparisonMetrics {
     /// Response similarity score (0-1)
     pub similarity_score: f64,
@@ -201,7 +201,7 @@ pub struct ComparisonMetrics {
 }
 
 /// Token-level differences
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct TokenDifferences {
     /// Token overlap percentage
     pub token_overlap: f64,
@@ -242,7 +242,7 @@ pub struct ShadowStats {
 }
 
 /// Model-specific shadow statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ModelShadowStats {
     /// Model name
     pub model_name: String,

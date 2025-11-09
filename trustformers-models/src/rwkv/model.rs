@@ -8,9 +8,6 @@ use trustformers_core::{
     traits::{Layer, Model},
 };
 
-#[cfg(test)]
-use ndarray;
-
 /// RWKV Time Mixing layer - replaces traditional attention
 /// This implements the core RWKV mechanism for temporal information processing
 pub struct TimeMixing {
@@ -457,6 +454,7 @@ impl RwkvModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scirs2_core::ndarray::Array1; // SciRS2 Integration Policy
 
     #[test]
     fn test_rwkv_model_creation() {
@@ -503,7 +501,7 @@ mod tests {
 
         // Create dummy input as i64 tensor (seq_len=8)
         let input_data = vec![1i64, 2, 3, 4, 5, 6, 7, 8];
-        let input_ids = Tensor::I64(ndarray::Array1::from(input_data).into_dyn());
+        let input_ids = Tensor::I64(Array1::from(input_data).into_dyn());
         let output = model.forward(input_ids);
         assert!(output.is_ok());
     }

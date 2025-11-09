@@ -30,7 +30,6 @@ num_cpus.workspace = true
 once_cell.workspace = true
 memmap2 = "0.9.9"
 jieba-rs = "0.8.1"
-rand.workspace = true
 mecab = { version = "0.1.6", optional = true }
 # Korean tokenization support
 hangul = "0.1.3"

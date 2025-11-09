@@ -229,11 +229,12 @@ impl ProtobufSerializer {
 
     /// Deserialize from protobuf binary format
     pub fn from_protobuf_bytes(bytes: &[u8]) -> Result<ProtobufTokenizerModel> {
-        let (result, _): (ProtobufTokenizerModel, usize) = bincode::decode_from_slice(bytes, bincode::config::standard()).map_err(|e| {
-            TrustformersError::other(
-                anyhow::anyhow!("Failed to deserialize protobuf: {}", e).to_string(),
-            )
-        })?;
+        let (result, _): (ProtobufTokenizerModel, usize) =
+            bincode::decode_from_slice(bytes, bincode::config::standard()).map_err(|e| {
+                TrustformersError::other(
+                    anyhow::anyhow!("Failed to deserialize protobuf: {}", e).to_string(),
+                )
+            })?;
         Ok(result)
     }
 

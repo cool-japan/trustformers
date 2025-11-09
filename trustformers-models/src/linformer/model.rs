@@ -1,5 +1,5 @@
 use crate::linformer::config::LinformerConfig;
-use ndarray;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
     errors::Result,
@@ -827,15 +827,13 @@ impl Model for LinformerForSequenceClassification {
                         }
                     }
 
-                    let cls_array = ndarray::ArrayD::from_shape_vec(
-                        ndarray::IxDyn(&[batch_size, hidden_size]),
-                        cls_data,
-                    )
-                    .map_err(|_| {
-                        trustformers_core::errors::TrustformersError::shape_error(
-                            "Failed to create CLS token tensor".to_string(),
-                        )
-                    })?;
+                    let cls_array =
+                        ArrayD::from_shape_vec(IxDyn(&[batch_size, hidden_size]), cls_data)
+                            .map_err(|_| {
+                                trustformers_core::errors::TrustformersError::shape_error(
+                                    "Failed to create CLS token tensor".to_string(),
+                                )
+                            })?;
 
                     Tensor::F32(cls_array)
                 } else {

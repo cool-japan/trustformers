@@ -1,5 +1,5 @@
 use crate::vit::config::ViTConfig;
-use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{concatenate, s, Array1, Array2, Array3, Array4, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{
     attention::MultiHeadAttention, embedding::Embedding, feedforward::FeedForward,
@@ -87,7 +87,7 @@ impl PatchEmbedding {
         let patches_tensor = Tensor::F32(patches.into_dyn());
         match self.projection.forward(patches_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),
@@ -140,7 +140,7 @@ impl ViTEmbeddings {
                 });
 
             // Concatenate class token with patch embeddings
-            embeddings = ndarray::concatenate![Axis(1), class_tokens, embeddings];
+            embeddings = concatenate![Axis(1), class_tokens, embeddings];
         }
 
         // Add position embeddings
@@ -204,7 +204,7 @@ impl ViTAttention {
         // Extract array and apply dropout
         let attention_output = match attention_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::invalid_input_simple(
@@ -224,7 +224,7 @@ impl ViTAttention {
         let output_tensor = Tensor::F32(output.into_dyn());
         match self.layer_norm.forward(output_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),
@@ -262,7 +262,7 @@ impl ViTMLP {
         // Extract array and apply dropout
         let ff_output = match ff_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::invalid_input_simple(
@@ -279,7 +279,7 @@ impl ViTMLP {
         let output_tensor = Tensor::F32(output.into_dyn());
         match self.layer_norm.forward(output_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),
@@ -377,7 +377,7 @@ impl ViTModel {
         let output_tensor = Tensor::F32(encoder_output.into_dyn());
         let output = match self.layer_norm.forward(output_tensor)? {
             Tensor::F32(result) => result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::invalid_input_simple(
@@ -442,7 +442,7 @@ impl ViTForImageClassification {
         let class_tensor = Tensor::F32(class_output.into_dyn());
         match self.classifier.forward(class_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),

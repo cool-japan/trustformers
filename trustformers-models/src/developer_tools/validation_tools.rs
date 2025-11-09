@@ -3,6 +3,7 @@
 //! Tools for validating model implementations, configurations, and outputs.
 
 use anyhow::Result;
+use scirs2_core::ndarray::ArrayD; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
@@ -123,12 +124,7 @@ impl ModelValidator {
     }
 
     /// Validate F32 tensor values
-    fn validate_f32_values(
-        &self,
-        name: &str,
-        arr: &ndarray::ArrayD<f32>,
-        result: &mut ValidationResult,
-    ) {
+    fn validate_f32_values(&self, name: &str, arr: &ArrayD<f32>, result: &mut ValidationResult) {
         // Check for NaN values
         if self.config.check_nan {
             let nan_count = arr.iter().filter(|&&x| x.is_nan()).count();
@@ -175,12 +171,7 @@ impl ModelValidator {
     }
 
     /// Validate F64 tensor values
-    fn validate_f64_values(
-        &self,
-        name: &str,
-        arr: &ndarray::ArrayD<f64>,
-        result: &mut ValidationResult,
-    ) {
+    fn validate_f64_values(&self, name: &str, arr: &ArrayD<f64>, result: &mut ValidationResult) {
         // Check for NaN values
         if self.config.check_nan {
             let nan_count = arr.iter().filter(|&&x| x.is_nan()).count();

@@ -26,7 +26,6 @@ parking_lot.workspace = true
 lazy_static.workspace = true
 approx.workspace = true
 libc = "0.2"
-num-complex = "0.4"
 
 # SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
 scirs2-core = { workspace = true, features = ["random"] }

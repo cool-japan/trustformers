@@ -1,13 +1,11 @@
 use anyhow::Result;
-use ndarray_rand::RandomExt;
 use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy
 use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::result; // Required for bincode derives
 
 /// Task descriptor containing metadata about a task
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskDescriptor {
     /// Unique task identifier
     pub task_id: String,
@@ -71,7 +69,7 @@ impl TaskDescriptor {
 }
 
 /// Types of tasks
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TaskType {
     Classification,
     Regression,
@@ -82,7 +80,7 @@ pub enum TaskType {
 }
 
 /// Configuration for task adaptation
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptationConfig {
     /// Adaptation strategy
     pub strategy: AdaptationStrategy,
@@ -118,7 +116,7 @@ impl Default for AdaptationConfig {
 }
 
 /// Different adaptation strategies
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AdaptationStrategy {
     /// Full fine-tuning of the model
     FineTuning,
@@ -139,7 +137,7 @@ pub enum AdaptationStrategy {
 }
 
 /// Configuration for adapter layers
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterConfig {
     /// Adapter bottleneck dimension
     pub bottleneck_dim: usize,
@@ -166,7 +164,7 @@ impl Default for AdapterConfig {
 }
 
 /// Where to place adapter layers
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum AdapterPlacement {
     AfterTransformer,
     AfterAttention,
@@ -176,7 +174,7 @@ pub enum AdapterPlacement {
 }
 
 /// Activation functions for adapters
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ActivationFunction {
     ReLU,
     GELU,
@@ -186,7 +184,7 @@ pub enum ActivationFunction {
 }
 
 /// Configuration for fine-tuning
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FineTuneConfig {
     /// Which layers to fine-tune
     pub layers_to_tune: LayerSelection,
@@ -213,7 +211,7 @@ impl Default for FineTuneConfig {
 }
 
 /// Which layers to fine-tune
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LayerSelection {
     All,
     TopN(usize),
@@ -223,7 +221,7 @@ pub enum LayerSelection {
 }
 
 /// Learning rate decay strategies
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum LearningRateDecay {
     None,
     Linear,
@@ -254,14 +252,15 @@ impl AdapterLayer {
         let down_bound = (6.0 / (hidden_dim + bottleneck_dim) as f32).sqrt();
         let up_bound = (6.0 / (bottleneck_dim + hidden_dim) as f32).sqrt();
 
-        let down_projection = Array2::random(
-            (hidden_dim, bottleneck_dim),
-            ndarray_rand::rand_distr::Uniform::new(-down_bound, down_bound),
-        );
-        let up_projection = Array2::random(
-            (bottleneck_dim, hidden_dim),
-            ndarray_rand::rand_distr::Uniform::new(-up_bound, up_bound),
-        );
+        let mut rng = thread_rng();
+        let down_uniform = Uniform::new(-down_bound, down_bound)?;
+        let down_projection = Array2::from_shape_fn((hidden_dim, bottleneck_dim), |_| {
+            down_uniform.sample(&mut rng)
+        });
+        let up_uniform = Uniform::new(-up_bound, up_bound)?;
+        let up_projection = Array2::from_shape_fn((bottleneck_dim, hidden_dim), |_| {
+            up_uniform.sample(&mut rng)
+        });
 
         let down_bias = Array1::zeros(bottleneck_dim);
         let up_bias = Array1::zeros(hidden_dim);
@@ -416,10 +415,10 @@ impl TaskAdapter {
 
         // Xavier initialization
         let bound = (6.0 / (input_dim + output_dim) as f32).sqrt();
-        let classifier = Array2::random(
-            (input_dim, output_dim),
-            ndarray_rand::rand_distr::Uniform::new(-bound, bound),
-        );
+        let mut rng = thread_rng();
+        let uniform = Uniform::new(-bound, bound)?;
+        let classifier =
+            Array2::from_shape_fn((input_dim, output_dim), |_| uniform.sample(&mut rng));
 
         self.classifier_head = Some(classifier);
         Ok(())
@@ -525,9 +524,10 @@ impl TaskAdapter {
 
     /// Sample batch indices
     fn sample_batch_indices(&self, total_size: usize, batch_size: usize) -> Vec<usize> {
-        use rand::seq::SliceRandom;
+        // SliceRandom already available via scirs2_core::random::*
+        let mut rng = thread_rng();
         let mut indices: Vec<_> = (0..total_size).collect();
-        indices.shuffle(&mut thread_rng().rng_mut());
+        indices.shuffle(&mut rng);
         indices.into_iter().take(batch_size).collect()
     }
 
@@ -543,12 +543,13 @@ impl TaskAdapter {
 
     /// Save adapter state
     pub fn save(&self, path: &str) -> Result<()> {
-        let serialized = bincode::encode_to_vec(&(
+        let data_to_serialize = (
             &self.task_descriptor,
             &self.config,
             &self.training_stats,
             self.current_step,
-        ), bincode::config::standard())?;
+        );
+        let serialized = rmp_serde::to_vec(&data_to_serialize)?;
         std::fs::write(path, serialized)?;
         Ok(())
     }
@@ -556,12 +557,12 @@ impl TaskAdapter {
     /// Load adapter state
     pub fn load(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let ((task_descriptor, config, training_stats, current_step), _): ((
+        let (task_descriptor, config, training_stats, current_step): (
             TaskDescriptor,
             AdaptationConfig,
             AdaptationStats,
             usize,
-        ), usize) = bincode::decode_from_slice(&data, bincode::config::standard())?;
+        ) = rmp_serde::from_slice(&data)?;
 
         let mut adapter = Self {
             task_descriptor,
@@ -578,7 +579,7 @@ impl TaskAdapter {
 }
 
 /// Statistics for adaptation training
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptationStats {
     /// Loss per step
     pub losses: Vec<f32>,

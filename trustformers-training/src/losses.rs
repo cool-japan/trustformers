@@ -1,4 +1,4 @@
-use scirs2_core::ndarray::{Array1, Array2, ArrayD}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{Array1, Array2, ArrayD, Axis}; // SciRS2 Integration Policy
 use trustformers_core::errors::{compute_error, Result};
 use trustformers_core::Tensor;
 
@@ -57,22 +57,22 @@ impl CrossEntropyLoss {
     /// Compute softmax with numerical stability
     fn softmax(logits: &ArrayD<f32>) -> Result<ArrayD<f32>> {
         let max_vals = logits.fold_axis(
-            ndarray::Axis(logits.ndim() - 1),
+            Axis(logits.ndim() - 1),
             f32::NEG_INFINITY,
             |&a, &b| a.max(b),
         );
 
         // Subtract max for numerical stability
-        let stable_logits = logits - &max_vals.insert_axis(ndarray::Axis(logits.ndim() - 1));
+        let stable_logits = logits - &max_vals.insert_axis(Axis(logits.ndim() - 1));
 
         // Compute exp
         let exp_logits = stable_logits.mapv(|x| x.exp());
 
         // Sum along last axis
-        let sum_exp = exp_logits.sum_axis(ndarray::Axis(logits.ndim() - 1));
+        let sum_exp = exp_logits.sum_axis(Axis(logits.ndim() - 1));
 
         // Divide by sum
-        let probs = exp_logits / sum_exp.insert_axis(ndarray::Axis(logits.ndim() - 1));
+        let probs = exp_logits / sum_exp.insert_axis(Axis(logits.ndim() - 1));
 
         Ok(probs)
     }

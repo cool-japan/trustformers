@@ -98,6 +98,46 @@ impl MultiHeadAttention {
             + self.projections.out_proj.parameter_count()
     }
 
+    /// Set weights for the query projection
+    pub fn set_query_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.query.set_weight(weight)
+    }
+
+    /// Set bias for the query projection
+    pub fn set_query_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.query.set_bias(bias)
+    }
+
+    /// Set weights for the key projection
+    pub fn set_key_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.key.set_weight(weight)
+    }
+
+    /// Set bias for the key projection
+    pub fn set_key_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.key.set_bias(bias)
+    }
+
+    /// Set weights for the value projection
+    pub fn set_value_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.value.set_weight(weight)
+    }
+
+    /// Set bias for the value projection
+    pub fn set_value_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.value.set_bias(bias)
+    }
+
+    /// Set weights for the output projection
+    pub fn set_out_proj_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.out_proj.set_weight(weight)
+    }
+
+    /// Set bias for the output projection
+    pub fn set_out_proj_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.out_proj.set_bias(bias)
+    }
+
     /// Compute attention for training (with query, key, value from same input)
     pub fn forward_self_attention(
         &self,

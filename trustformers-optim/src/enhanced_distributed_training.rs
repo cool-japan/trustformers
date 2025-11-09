@@ -47,6 +47,7 @@
 use crate::averaged_adam::{AveragedAdam, AveragedAdamConfig};
 use crate::multinode::{MultiNodeConfig, MultiNodeTrainer};
 use crate::traits::StatefulOptimizer;
+use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -1312,11 +1313,10 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
     fn update_gpu_metrics(&mut self) -> Result<()> {
         for ctx in &self.gpu_contexts {
             // Simulate GPU metrics (in real implementation, would query GPU)
-            *ctx.utilization.lock().unwrap() = 0.8 + (rand::random::<f32>() - 0.5) * 0.3;
-            *ctx.memory_usage.lock().unwrap() = 0.7 + (rand::random::<f32>() - 0.5) * 0.2;
-            *ctx.temperature.lock().unwrap() = 75.0 + (rand::random::<f32>() - 0.5) * 10.0;
-            *ctx.communication_bandwidth.lock().unwrap() =
-                800.0 + (rand::random::<f32>() - 0.5) * 200.0;
+            *ctx.utilization.lock().unwrap() = 0.8 + (random::<f32>() - 0.5) * 0.3;
+            *ctx.memory_usage.lock().unwrap() = 0.7 + (random::<f32>() - 0.5) * 0.2;
+            *ctx.temperature.lock().unwrap() = 75.0 + (random::<f32>() - 0.5) * 10.0;
+            *ctx.communication_bandwidth.lock().unwrap() = 800.0 + (random::<f32>() - 0.5) * 200.0;
         }
         Ok(())
     }

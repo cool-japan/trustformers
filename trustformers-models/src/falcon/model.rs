@@ -1,4 +1,5 @@
 use crate::falcon::config::FalconConfig;
+use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
     errors::{tensor_op_error, Result, TrustformersError},
@@ -533,10 +534,9 @@ impl FalconForCausalLM {
                         let head_dim = combined_size / 3;
 
                         // Split the combined weight tensor
-                        let q_slice = arr.slice(ndarray::s![0..head_dim, ..]).to_owned();
-                        let k_slice = arr.slice(ndarray::s![head_dim..2 * head_dim, ..]).to_owned();
-                        let v_slice =
-                            arr.slice(ndarray::s![2 * head_dim..3 * head_dim, ..]).to_owned();
+                        let q_slice = arr.slice(s![0..head_dim, ..]).to_owned();
+                        let k_slice = arr.slice(s![head_dim..2 * head_dim, ..]).to_owned();
+                        let v_slice = arr.slice(s![2 * head_dim..3 * head_dim, ..]).to_owned();
 
                         // Convert to dynamic arrays and set individual weights
                         let q_dyn = q_slice.into_dyn();
@@ -748,9 +748,9 @@ impl FalconForCausalLM {
 
                     // Extract last token logits
                     let last_token_slice = if shape.len() == 3 {
-                        arr.slice(ndarray::s![0, seq_len - 1, ..])
+                        arr.slice(s![0, seq_len - 1, ..])
                     } else {
-                        arr.slice(ndarray::s![seq_len - 1, ..])
+                        arr.slice(s![seq_len - 1, ..])
                     };
                     last_token_slice.to_owned()
                 },
@@ -785,7 +785,7 @@ impl FalconForCausalLM {
                     let last_idx = new_shape.len() - 1;
                     new_shape[last_idx] += 1;
 
-                    let mut new_arr = ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&new_shape));
+                    let mut new_arr = ArrayD::<f32>::zeros(IxDyn(&new_shape));
 
                     // Copy existing data
                     if arr.ndim() == 2 {

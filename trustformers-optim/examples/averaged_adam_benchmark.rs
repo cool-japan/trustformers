@@ -7,7 +7,7 @@
 //! - Optimal control problems
 //! - Standard gradient descent scenarios
 
-use rand::Rng;
+use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::time::Instant;
 use trustformers_core::TrustformersError;
 use trustformers_core::{traits::Optimizer, Tensor};

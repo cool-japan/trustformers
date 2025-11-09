@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2, Array3, Array4};
+use scirs2_core::ndarray::{Array1, Array2, Array3, Array4}; // SciRS2 Integration Policy
 use trustformers::automodel::{AutoModel, AutoModelForSequenceClassification, AutoModelForTokenClassification, AutoModelForQuestionAnswering, AutoModelForCausalLM, AutoModelForMaskedLM};
 use trustformers_models::bert::{BertConfig, BertModel, BertForSequenceClassification};
 use trustformers_models::roberta::{RobertaConfig, RobertaModel, RobertaForSequenceClassification};

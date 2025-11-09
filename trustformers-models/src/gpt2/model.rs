@@ -1,4 +1,4 @@
-use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
     errors::{invalid_config, tensor_op_error, Result, TrustformersError},
@@ -128,8 +128,7 @@ impl Gpt2Model {
             Tensor::F32(arr) => {
                 if arr.ndim() == 2 {
                     // Single sequence case, add batch dimension
-                    hidden_states =
-                        Tensor::F32(arr.clone().insert_axis(ndarray::Axis(0)).to_owned());
+                    hidden_states = Tensor::F32(arr.clone().insert_axis(Axis(0)).to_owned());
                 }
             },
             _ => {
@@ -275,7 +274,7 @@ impl Gpt2LMHeadModel {
                     {
                         let shape = arr.shape();
                         let vocab_size = shape[2];
-                        let slice = arr.slice(ndarray::s![0, seq_len - 1, ..]);
+                        let slice = arr.slice(s![0, seq_len - 1, ..]);
                         ArrayD::from_shape_vec(
                             IxDyn(&[vocab_size]),
                             slice.iter().cloned().collect(),
@@ -356,7 +355,7 @@ impl Gpt2LMHeadModel {
                         ));
                     }
                     let seq_len = shape[1];
-                    let last_logits = arr.slice(ndarray::s![0, seq_len - 1, ..]);
+                    let last_logits = arr.slice(s![0, seq_len - 1, ..]);
 
                     // Find argmax
                     let mut max_idx = 0;
@@ -434,7 +433,7 @@ impl Gpt2LMHeadModel {
                         {
                             let shape = arr.shape();
                             let vocab_size = shape[2];
-                            let slice = arr.slice(ndarray::s![0, seq_len - 1, ..]);
+                            let slice = arr.slice(s![0, seq_len - 1, ..]);
                             ArrayD::from_shape_vec(
                                 IxDyn(&[vocab_size]),
                                 slice.iter().cloned().collect(),
@@ -702,7 +701,7 @@ impl Gpt2Attention {
                 if arr.ndim() == 2 {
                     // Add batch dimension: [seq_len, hidden_size] -> [1, seq_len, hidden_size]
                     let _shape = arr.shape();
-                    let expanded = arr.clone().insert_axis(ndarray::Axis(0)).to_owned();
+                    let expanded = arr.clone().insert_axis(Axis(0)).to_owned();
                     (Tensor::F32(expanded), true)
                 } else {
                     (hidden_states, false)
@@ -728,9 +727,9 @@ impl Gpt2Attention {
                 let chunk_size = hidden_size;
 
                 // Extract Q, K, V
-                let q = arr.slice(ndarray::s![.., .., ..chunk_size]).to_owned();
-                let k = arr.slice(ndarray::s![.., .., chunk_size..2 * chunk_size]).to_owned();
-                let v = arr.slice(ndarray::s![.., .., 2 * chunk_size..]).to_owned();
+                let q = arr.slice(s![.., .., ..chunk_size]).to_owned();
+                let k = arr.slice(s![.., .., chunk_size..2 * chunk_size]).to_owned();
+                let v = arr.slice(s![.., .., 2 * chunk_size..]).to_owned();
 
                 // Reshape for multi-head attention
                 // From [batch, seq_len, hidden_size] to [batch, seq_len, n_heads, head_dim]
@@ -738,15 +737,15 @@ impl Gpt2Attention {
                 let n_heads = self.n_head;
 
                 let q = q
-                    .to_shape(ndarray::IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
+                    .to_shape(IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape Q".into()))?
                     .to_owned();
                 let k = k
-                    .to_shape(ndarray::IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
+                    .to_shape(IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape K".into()))?
                     .to_owned();
                 let v = v
-                    .to_shape(ndarray::IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
+                    .to_shape(IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape V".into()))?
                     .to_owned();
 
@@ -761,15 +760,14 @@ impl Gpt2Attention {
                 let k_t = k.clone().permuted_axes(vec![0, 1, 3, 2]); // Transpose last two dims
 
                 // Compute Q * K^T
-                let mut scores = ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[
-                    batch_size, n_heads, seq_len, seq_len,
-                ]));
+                let mut scores =
+                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, seq_len, seq_len]));
                 for b in 0..batch_size {
                     for h in 0..n_heads {
-                        let q_head = q.slice(ndarray::s![b, h, .., ..]);
-                        let k_head_t = k_t.slice(ndarray::s![b, h, .., ..]);
+                        let q_head = q.slice(s![b, h, .., ..]);
+                        let k_head_t = k_t.slice(s![b, h, .., ..]);
                         let score = q_head.dot(&k_head_t);
-                        scores.slice_mut(ndarray::s![b, h, .., ..]).assign(&score);
+                        scores.slice_mut(s![b, h, .., ..]).assign(&score);
                     }
                 }
                 scores *= scale;
@@ -794,7 +792,7 @@ impl Gpt2Attention {
                 for b in 0..batch_size {
                     for h in 0..n_heads {
                         for i in 0..seq_len {
-                            let mut row = attention_probs.slice_mut(ndarray::s![b, h, i, ..]);
+                            let mut row = attention_probs.slice_mut(s![b, h, i, ..]);
                             let max_val = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
                             row.mapv_inplace(|x| (x - max_val).exp());
                             let sum: f32 = row.iter().sum();
@@ -806,15 +804,14 @@ impl Gpt2Attention {
                 // Apply dropout (skip for now during inference)
 
                 // Compute attention output: attention_probs * V
-                let mut output = ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[
-                    batch_size, n_heads, seq_len, head_dim,
-                ]));
+                let mut output =
+                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, seq_len, head_dim]));
                 for b in 0..batch_size {
                     for h in 0..n_heads {
-                        let attn_probs_head = attention_probs.slice(ndarray::s![b, h, .., ..]);
-                        let v_head = v.slice(ndarray::s![b, h, .., ..]);
+                        let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                        let v_head = v.slice(s![b, h, .., ..]);
                         let out = attn_probs_head.dot(&v_head);
-                        output.slice_mut(ndarray::s![b, h, .., ..]).assign(&out);
+                        output.slice_mut(s![b, h, .., ..]).assign(&out);
                     }
                 }
 
@@ -823,7 +820,7 @@ impl Gpt2Attention {
 
                 // Reshape to [batch, seq_len, hidden_size]
                 let output = output
-                    .to_shape(ndarray::IxDyn(&[batch_size, seq_len, hidden_size]))
+                    .to_shape(IxDyn(&[batch_size, seq_len, hidden_size]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape output".into()))?
                     .to_owned();
 
@@ -839,7 +836,7 @@ impl Gpt2Attention {
                 // Remove batch dimension if input was 2D
                 if was_2d {
                     match output {
-                        Tensor::F32(arr) => Ok(Tensor::F32(arr.remove_axis(ndarray::Axis(0)))),
+                        Tensor::F32(arr) => Ok(Tensor::F32(arr.remove_axis(Axis(0)))),
                         _ => Ok(output),
                     }
                 } else {
@@ -1049,15 +1046,14 @@ fn apply_top_p_filtering(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32>> {
 
 /// Sample from logits using multinomial sampling
 fn sample_from_logits(logits: ArrayD<f32>) -> Result<u32> {
-    use rand_distr::weighted::WeightedAliasIndex;
-    use scirs2_core::random::*; // SciRS2 Integration Policy
+    use scirs2_core::random::*; // SciRS2 Integration Policy (includes WeightedIndex)
 
     // Convert to probabilities
     let probs = softmax(logits)?;
 
     // Create weighted distribution
     let weights: Vec<f32> = probs.iter().copied().collect();
-    let dist = WeightedAliasIndex::new(weights).map_err(|e| {
+    let dist = WeightedIndex::new(weights).map_err(|e| {
         TrustformersError::model_error(format!("Failed to create distribution: {}", e))
     })?;
 

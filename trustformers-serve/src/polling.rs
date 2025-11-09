@@ -47,7 +47,7 @@ impl Default for LongPollingConfig {
 }
 
 /// Event types for long polling
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum PollEvent {
     /// Inference job completed
     InferenceComplete {
@@ -117,7 +117,7 @@ pub struct LongPollResponse {
 }
 
 /// Event with ID for tracking
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct PollEventWithId {
     /// Event ID
     pub id: String,

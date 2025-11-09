@@ -272,7 +272,7 @@ impl DimensionRange {
     }
 
     #[allow(deprecated)]
-    pub fn sample(&self, rng: &mut impl rand::Rng) -> i32 {
+    pub fn sample(&self, rng: &mut impl Rng) -> i32 {
         let steps = (self.max - self.min) / self.step + 1;
         let step_idx = rng.gen_range(0..steps);
         self.min + step_idx * self.step
@@ -519,7 +519,7 @@ impl Architecture {
 
     /// Generate a random architecture within the search space
     #[allow(deprecated)]
-    pub fn random(search_space: &SearchSpace, rng: &mut impl rand::Rng) -> Self {
+    pub fn random(search_space: &SearchSpace, rng: &mut impl Rng) -> Self {
         let mut architecture = Architecture::new();
 
         // Sample dimensions
@@ -540,12 +540,7 @@ impl Architecture {
 
     /// Mutate the architecture for evolutionary search
     #[allow(deprecated)]
-    pub fn mutate(
-        &mut self,
-        search_space: &SearchSpace,
-        mutation_rate: f32,
-        rng: &mut impl rand::Rng,
-    ) {
+    pub fn mutate(&mut self, search_space: &SearchSpace, mutation_rate: f32, rng: &mut impl Rng) {
         // Mutate dimensions
         for (name, value) in &mut self.dimensions {
             if rng.gen::<f32>() < mutation_rate {
@@ -571,7 +566,7 @@ impl Architecture {
 
     /// Create a crossover between two architectures
     #[allow(deprecated)]
-    pub fn crossover(&self, other: &Architecture, rng: &mut impl rand::Rng) -> Architecture {
+    pub fn crossover(&self, other: &Architecture, rng: &mut impl Rng) -> Architecture {
         let mut child = Architecture::new();
 
         // Crossover dimensions
@@ -666,7 +661,7 @@ impl NeuralArchitectureSearcher {
         let rng = if let Some(seed) = config.seed {
             StdRng::seed_from_u64(seed)
         } else {
-            StdRng::seed_from_u64(rand::random::<u64>())
+            StdRng::seed_from_u64(random::<u64>())
         };
 
         Ok(Self {

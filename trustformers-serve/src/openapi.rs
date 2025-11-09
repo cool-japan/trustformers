@@ -43,7 +43,7 @@ use utoipa::{
             crate::polling::LongPollingStats,
             crate::shadow::ShadowStats,
             crate::shadow::ShadowComparison,
-            crate::ServerConfig,
+            // crate::ServerConfig, // Removed - too complex for OpenAPI schema
             ErrorResponse,
         )
     ),

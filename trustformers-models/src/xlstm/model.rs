@@ -4,6 +4,7 @@
 //! following the patterns used in other models in this codebase.
 
 use crate::xlstm::config::XLSTMConfig;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 
@@ -34,7 +35,7 @@ impl XLSTMModel {
         let output_data = vec![0.0f32; batch_size * seq_len * self.config.vocab_size];
 
         let logits = Tensor::F32(
-            ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&output_shape), output_data)
+            ArrayD::from_shape_vec(IxDyn(&output_shape), output_data)
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
         );
 
@@ -111,7 +112,7 @@ impl XLSTMForSequenceClassification {
         let output_data = vec![0.0f32; self.num_labels];
 
         let classification_logits = Tensor::F32(
-            ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&output_shape), output_data)
+            ArrayD::from_shape_vec(IxDyn(&output_shape), output_data)
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
         );
 

@@ -1,6 +1,6 @@
 use crate::s4::config::S4Config;
-use num_complex::Complex64;
 use scirs2_core::ndarray::{Array1, Array2}; // SciRS2 Integration Policy
+use scirs2_core::Complex64; // SciRS2 Integration Policy
 use std::f32::consts::PI;
 use trustformers_core::{
     errors::{

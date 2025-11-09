@@ -3,7 +3,7 @@ use crate::config_utils::{
     parse_t5_config, t5_config_to_dict,
 };
 use crate::tensor::PyTensor;
-use ndarray::{ArrayD, IxDyn};
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use serde_json::Value;
