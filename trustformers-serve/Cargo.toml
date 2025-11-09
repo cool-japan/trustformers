@@ -57,7 +57,7 @@ utoipa-swagger-ui = { version = "9.0", features = ["axum"] }
 clap.workspace = true
 env_logger.workspace = true
 tokio-rustls.workspace = true
-rustls = { version = "0.23", features = ["dangerous_configuration"] }
+rustls = "0.23"
 base64.workspace = true
 mime_guess.workspace = true
 fastrand.workspace = true
