@@ -4,9 +4,10 @@ use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy
 use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::result; // Required for bincode derives
 
 /// Task descriptor containing metadata about a task
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct TaskDescriptor {
     /// Unique task identifier
     pub task_id: String,
@@ -70,7 +71,7 @@ impl TaskDescriptor {
 }
 
 /// Types of tasks
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, bincode::Encode, bincode::Decode)]
 pub enum TaskType {
     Classification,
     Regression,
@@ -81,7 +82,7 @@ pub enum TaskType {
 }
 
 /// Configuration for task adaptation
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct AdaptationConfig {
     /// Adaptation strategy
     pub strategy: AdaptationStrategy,
@@ -117,7 +118,7 @@ impl Default for AdaptationConfig {
 }
 
 /// Different adaptation strategies
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub enum AdaptationStrategy {
     /// Full fine-tuning of the model
     FineTuning,
@@ -138,7 +139,7 @@ pub enum AdaptationStrategy {
 }
 
 /// Configuration for adapter layers
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct AdapterConfig {
     /// Adapter bottleneck dimension
     pub bottleneck_dim: usize,
@@ -165,7 +166,7 @@ impl Default for AdapterConfig {
 }
 
 /// Where to place adapter layers
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub enum AdapterPlacement {
     AfterTransformer,
     AfterAttention,
@@ -175,7 +176,7 @@ pub enum AdapterPlacement {
 }
 
 /// Activation functions for adapters
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub enum ActivationFunction {
     ReLU,
     GELU,
@@ -185,7 +186,7 @@ pub enum ActivationFunction {
 }
 
 /// Configuration for fine-tuning
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct FineTuneConfig {
     /// Which layers to fine-tune
     pub layers_to_tune: LayerSelection,
@@ -212,7 +213,7 @@ impl Default for FineTuneConfig {
 }
 
 /// Which layers to fine-tune
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub enum LayerSelection {
     All,
     TopN(usize),
@@ -222,7 +223,7 @@ pub enum LayerSelection {
 }
 
 /// Learning rate decay strategies
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub enum LearningRateDecay {
     None,
     Linear,
@@ -542,12 +543,12 @@ impl TaskAdapter {
 
     /// Save adapter state
     pub fn save(&self, path: &str) -> Result<()> {
-        let serialized = bincode::serialize(&(
+        let serialized = bincode::encode_to_vec(&(
             &self.task_descriptor,
             &self.config,
             &self.training_stats,
             self.current_step,
-        ))?;
+        ), bincode::config::standard())?;
         std::fs::write(path, serialized)?;
         Ok(())
     }
@@ -555,12 +556,12 @@ impl TaskAdapter {
     /// Load adapter state
     pub fn load(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let (task_descriptor, config, training_stats, current_step): (
+        let ((task_descriptor, config, training_stats, current_step), _): ((
             TaskDescriptor,
             AdaptationConfig,
             AdaptationStats,
             usize,
-        ) = bincode::deserialize(&data)?;
+        ), usize) = bincode::decode_from_slice(&data, bincode::config::standard())?;
 
         let mut adapter = Self {
             task_descriptor,
@@ -577,7 +578,7 @@ impl TaskAdapter {
 }
 
 /// Statistics for adaptation training
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct AdaptationStats {
     /// Loss per step
     pub losses: Vec<f32>,

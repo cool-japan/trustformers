@@ -3,9 +3,10 @@ use ndarray_rand::RandomExt;
 use scirs2_core::ndarray::{s, Array2, Array3}; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::result; // Required for bincode derives
 
 /// Configuration for prompt tuning
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub struct PromptConfig {
     /// Number of virtual tokens in the soft prompt
     pub prompt_length: usize,
@@ -38,7 +39,7 @@ impl Default for PromptConfig {
 }
 
 /// Initialization strategies for soft prompts
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
 pub enum InitStrategy {
     /// Random initialization from normal distribution
     Random,
@@ -166,13 +167,13 @@ impl SoftPrompt {
 
     /// Save prompt to file
     pub fn save(&self, path: &str) -> Result<()> {
-        let serialized = bincode::serialize(&(
+        let serialized = bincode::encode_to_vec(&(
             &self.embeddings.as_slice().unwrap(),
             self.embeddings.shape(),
             &self.config,
             &self.task_id,
             self.step,
-        ))?;
+        ), bincode::config::standard())?;
         std::fs::write(path, serialized)?;
         Ok(())
     }
@@ -180,13 +181,13 @@ impl SoftPrompt {
     /// Load prompt from file
     pub fn load(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let (embeddings_data, shape, config, task_id, step): (
+        let ((embeddings_data, shape, config, task_id, step), _): ((
             Vec<f32>,
             Vec<usize>,
             PromptConfig,
             String,
             usize,
-        ) = bincode::deserialize(&data)?;
+        ), usize) = bincode::decode_from_slice(&data, bincode::config::standard())?;
 
         let embeddings = Array2::from_shape_vec((shape[0], shape[1]), embeddings_data)?;
         let gradients = Array2::zeros((config.prompt_length, config.embedding_dim));

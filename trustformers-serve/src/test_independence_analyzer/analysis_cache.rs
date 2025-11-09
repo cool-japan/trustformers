@@ -844,15 +844,16 @@ struct BincodeCacheSerializer;
 
 impl CacheSerializer for BincodeCacheSerializer {
     fn serialize<T: Serialize>(&self, data: &T) -> AnalysisResult<Vec<u8>> {
-        bincode::serialize(data).map_err(|e| AnalysisError::CacheError {
+        bincode::encode_to_vec(data, bincode::config::standard()).map_err(|e| AnalysisError::CacheError {
             message: format!("Bincode serialization failed: {}", e),
         })
     }
 
     fn deserialize<T: for<'de> Deserialize<'de>>(&self, data: &[u8]) -> AnalysisResult<T> {
-        bincode::deserialize(data).map_err(|e| AnalysisError::CacheError {
+        let (result, _): (T, usize) = bincode::decode_from_slice(data, bincode::config::standard()).map_err(|e| AnalysisError::CacheError {
             message: format!("Bincode deserialization failed: {}", e),
-        })
+        })?;
+        Ok(result)
     }
 }
 
