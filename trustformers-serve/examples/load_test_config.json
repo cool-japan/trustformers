@@ -1,0 +1,150 @@
+{
+  "base_url": "http://localhost:8080",
+  "duration_seconds": 120,
+  "concurrent_users": 25,
+  "requests_per_second": 50.0,
+  "scenarios": [
+    {
+      "name": "health_check",
+      "weight": 40.0,
+      "method": "Get",
+      "path": "/health",
+      "body_template": null,
+      "query_params": {},
+      "headers": {},
+      "expected_status_codes": [200],
+      "validation_rules": [
+        {
+          "rule_type": "ResponseContains",
+          "json_path": null,
+          "expected_value": "healthy",
+          "pattern": null,
+          "header_name": null
+        }
+      ]
+    },
+    {
+      "name": "detailed_health_check",
+      "weight": 20.0,
+      "method": "Get",
+      "path": "/health/detailed",
+      "body_template": null,
+      "query_params": {},
+      "headers": {},
+      "expected_status_codes": [200],
+      "validation_rules": [
+        {
+          "rule_type": "JsonFieldExists",
+          "json_path": "system_health",
+          "expected_value": null,
+          "pattern": null,
+          "header_name": null
+        }
+      ]
+    },
+    {
+      "name": "inference_request",
+      "weight": 25.0,
+      "method": "Post",
+      "path": "/v1/inference",
+      "body_template": "{\n  \"text\": \"What is the capital of France?\",\n  \"max_length\": 100,\n  \"temperature\": 0.7,\n  \"top_p\": 0.9\n}",
+      "query_params": {},
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "expected_status_codes": [200, 400, 429, 503],
+      "validation_rules": [
+        {
+          "rule_type": "JsonFieldExists",
+          "json_path": "request_id",
+          "expected_value": null,
+          "pattern": null,
+          "header_name": null
+        },
+        {
+          "rule_type": "ResponseSizeBounds",
+          "json_path": null,
+          "expected_value": null,
+          "pattern": null,
+          "header_name": null
+        }
+      ]
+    },
+    {
+      "name": "batch_inference",
+      "weight": 10.0,
+      "method": "Post",
+      "path": "/v1/inference/batch",
+      "body_template": "{\n  \"requests\": [\n    {\n      \"text\": \"Hello world\",\n      \"max_length\": 50,\n      \"temperature\": 0.7\n    },\n    {\n      \"text\": \"How are you today?\",\n      \"max_length\": 50,\n      \"temperature\": 0.8\n    }\n  ]\n}",
+      "query_params": {},
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "expected_status_codes": [200, 400, 429, 503],
+      "validation_rules": [
+        {
+          "rule_type": "JsonFieldExists",
+          "json_path": "batch_id",
+          "expected_value": null,
+          "pattern": null,
+          "header_name": null
+        }
+      ]
+    },
+    {
+      "name": "long_polling",
+      "weight": 5.0,
+      "method": "Get",
+      "path": "/v1/poll",
+      "body_template": null,
+      "query_params": {
+        "event_types": "inference,health",
+        "timeout_seconds": "10",
+        "client_id": "load_test_client"
+      },
+      "headers": {},
+      "expected_status_codes": [200, 400],
+      "validation_rules": [
+        {
+          "rule_type": "JsonFieldExists",
+          "json_path": "events",
+          "expected_value": null,
+          "pattern": null,
+          "header_name": null
+        }
+      ]
+    }
+  ],
+  "auth": {
+    "auth_type": "ApiKey",
+    "api_key": "your-api-key-here",
+    "jwt_token": null,
+    "oauth2": null
+  },
+  "timeout_config": {
+    "request_timeout_ms": 30000,
+    "connection_timeout_ms": 10000,
+    "read_timeout_ms": 30000
+  },
+  "output_config": {
+    "enable_realtime_output": true,
+    "format": "Json",
+    "output_file": "load_test_results.json",
+    "enable_detailed_logging": false,
+    "percentiles": [50.0, 75.0, 90.0, 95.0, 99.0, 99.9]
+  },
+  "advanced_config": {
+    "enable_http2": true,
+    "enable_connection_pooling": true,
+    "max_idle_per_host": 32,
+    "keep_alive_timeout_seconds": 90,
+    "enable_compression": true,
+    "custom_headers": {
+      "User-Agent": "TrustformeRS-LoadTest/1.0",
+      "Accept": "application/json"
+    },
+    "think_time_ms": 100,
+    "ramp_up_seconds": 30,
+    "ramp_down_seconds": 15
+  }
+}

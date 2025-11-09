@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/trustformers-logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="TrustformeRS Vue Document Analyzer - Comprehensive document analysis with sentiment, keywords, summaries, and topics using Vue 3 and machine learning" />
+    <meta name="keywords" content="document analysis, sentiment analysis, keyword extraction, text summarization, topic modeling, Vue 3, machine learning, NLP, TrustformeRS" />
+    <meta name="author" content="TrustformeRS Team" />
+    <meta name="theme-color" content="#4f46e5" />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://trustformers.example.com/demos/vue-document/" />
+    <meta property="og:title" content="TrustformeRS Vue Document Analyzer" />
+    <meta property="og:description" content="Comprehensive document analysis with sentiment, keywords, and AI-powered summaries using Vue 3" />
+    <meta property="og:image" content="https://trustformers.example.com/og-image-vue.png" />
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content="https://trustformers.example.com/demos/vue-document/" />
+    <meta property="twitter:title" content="TrustformeRS Vue Document Analyzer" />
+    <meta property="twitter:description" content="Experience comprehensive document analysis with Vue 3 and TrustformeRS" />
+    <meta property="twitter:image" content="https://trustformers.example.com/og-image-vue.png" />
+
+    <!-- PWA Manifest -->
+    <link rel="manifest" href="/manifest.json" />
+    
+    <!-- Preconnect for performance -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    
+    <!-- Load optimized fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    
+    <!-- Tailwind CSS CDN (for demo purposes) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+            },
+            colors: {
+              trustformers: {
+                50: '#f0f9ff',
+                100: '#e0f2fe',
+                500: '#4f46e5',
+                600: '#4338ca',
+                700: '#3730a3',
+              }
+            },
+            animation: {
+              'fade-in': 'fadeIn 0.3s ease-out',
+              'slide-up': 'slideUp 0.3s ease-out',
+              'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+            },
+            keyframes: {
+              fadeIn: {
+                '0%': { opacity: '0', transform: 'translateY(10px)' },
+                '100%': { opacity: '1', transform: 'translateY(0)' },
+              },
+              slideUp: {
+                '0%': { opacity: '0', transform: 'translateY(20px)' },
+                '100%': { opacity: '1', transform: 'translateY(0)' },
+              }
+            }
+          }
+        }
+      }
+    </script>
+    
+    <title>TrustformeRS Vue Document Analyzer</title>
+    
+    <!-- Service Worker for PWA capabilities -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+          navigator.serviceWorker.register('/sw.js')
+            .then(function(registration) {
+              console.log('ServiceWorker registration successful with scope: ', registration.scope);
+            }, function(err) {
+              console.log('ServiceWorker registration failed: ', err);
+            });
+        });
+      }
+    </script>
+    
+    <!-- Performance monitoring -->
+    <script>
+      // Basic performance monitoring
+      window.addEventListener('load', function() {
+        setTimeout(function() {
+          const perfData = performance.getEntriesByType('navigation')[0];
+          console.log('Vue Document Analyzer Performance:');
+          console.log('- DOM Content Loaded:', (perfData.domContentLoadedEventEnd - perfData.fetchStart), 'ms');
+          console.log('- Page Load Complete:', (perfData.loadEventEnd - perfData.fetchStart), 'ms');
+          
+          // Log Vue-specific metrics
+          const vueInitStart = performance.getEntriesByName('vue-app-init-start')[0];
+          const vueInitEnd = performance.getEntriesByName('vue-app-init-end')[0];
+          if (vueInitStart && vueInitEnd) {
+            console.log('- Vue App Initialization:', (vueInitEnd.startTime - vueInitStart.startTime), 'ms');
+          }
+        }, 100);
+      });
+    </script>
+    
+    <!-- Critical CSS for initial render -->
+    <style>
+      /* Prevent FOUC (Flash of Unstyled Content) */
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: linear-gradient(135deg, #f0f9ff 0%, #ffffff 50%, #faf5ff 100%);
+        min-height: 100vh;
+        margin: 0;
+        padding: 0;
+        line-height: 1.6;
+      }
+      
+      /* Loading state styles */
+      .initial-loading {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        flex-direction: column;
+        gap: 1.5rem;
+        color: #374151;
+        text-align: center;
+      }
+      
+      .loading-spinner {
+        display: inline-block;
+        width: 32px;
+        height: 32px;
+        border: 3px solid rgba(79, 70, 229, 0.3);
+        border-radius: 50%;
+        border-top-color: #4f46e5;
+        animation: spin 1s ease-in-out infinite;
+      }
+      
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      
+      .loading-dots {
+        display: inline-flex;
+        gap: 4px;
+      }
+      
+      .loading-dots span {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background-color: #4f46e5;
+        animation: pulse-dot 1.4s ease-in-out infinite both;
+      }
+      
+      .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
+      .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
+      .loading-dots span:nth-child(3) { animation-delay: 0s; }
+      
+      @keyframes pulse-dot {
+        0%, 80%, 100% {
+          transform: scale(0.8);
+          opacity: 0.5;
+        }
+        40% {
+          transform: scale(1.2);
+          opacity: 1;
+        }
+      }
+      
+      /* Hide loading when Vue app is mounted */
+      #app:not(:empty) + .initial-loading {
+        display: none;
+      }
+      
+      /* Smooth transitions for Vue components */
+      .fade-enter-active, .fade-leave-active {
+        transition: opacity 0.3s ease;
+      }
+      
+      .fade-enter-from, .fade-leave-to {
+        opacity: 0;
+      }
+      
+      .slide-up-enter-active, .slide-up-leave-active {
+        transition: all 0.3s ease;
+      }
+      
+      .slide-up-enter-from {
+        opacity: 0;
+        transform: translateY(20px);
+      }
+      
+      .slide-up-leave-to {
+        opacity: 0;
+        transform: translateY(-20px);
+      }
+    </style>
+    
+    <!-- Preload key assets -->
+    <link rel="preload" href="/src/main.js" as="script" />
+    <link rel="preload" href="/src/App.vue" as="fetch" crossorigin />
+  </head>
+  <body>
+    <!-- Vue app mount point -->
+    <div id="app"></div>
+    
+    <!-- Loading fallback shown until Vue loads -->
+    <div class="initial-loading">
+      <div class="loading-spinner"></div>
+      <div>
+        <h1 style="font-size: 1.75rem; font-weight: 600; margin: 0 0 0.5rem 0;">
+          TrustformeRS Document Analyzer
+        </h1>
+        <p style="color: #6b7280; margin: 0 0 1rem 0; font-size: 1rem;">
+          Initializing Vue 3 application and ML models
+        </p>
+        <div class="loading-dots">
+          <span></span>
+          <span></span>
+          <span></span>
+        </div>
+      </div>
+      <div style="font-size: 0.875rem; color: #9ca3af;">
+        <p>Loading document analysis capabilities...</p>
+      </div>
+    </div>
+    
+    <!-- Error boundary fallback (will be replaced by Vue error handling) -->
+    <script>
+      // Global error handler for pre-Vue errors
+      window.onerror = function(msg, url, lineNo, columnNo, error) {
+        console.error('Global error:', { msg, url, lineNo, columnNo, error });
+        
+        // Show user-friendly error if Vue hasn't loaded yet
+        const appEl = document.getElementById('app');
+        const loadingEl = document.querySelector('.initial-loading');
+        
+        if (appEl && appEl.innerHTML === '' && loadingEl) {
+          loadingEl.innerHTML = `
+            <div style="text-align: center; color: #dc2626;">
+              <div style="font-size: 3rem; margin-bottom: 1rem;">⚠️</div>
+              <h1 style="font-size: 1.5rem; font-weight: 600; margin-bottom: 0.5rem;">
+                Loading Error
+              </h1>
+              <p style="color: #6b7280; margin-bottom: 1rem;">
+                Failed to load the document analyzer. Please refresh the page.
+              </p>
+              <button 
+                onclick="window.location.reload()" 
+                style="background: #4f46e5; color: white; border: none; padding: 0.75rem 1.5rem; border-radius: 0.5rem; cursor: pointer; font-weight: 500;"
+              >
+                Refresh Page
+              </button>
+            </div>
+          `;
+        }
+        
+        return false; // Don't prevent default error handling
+      };
+      
+      // Unhandled promise rejection handler
+      window.addEventListener('unhandledrejection', function(event) {
+        console.error('Unhandled promise rejection:', event.reason);
+        
+        // Optionally show user notification for critical errors
+        if (event.reason && event.reason.message && event.reason.message.includes('TrustformeRS')) {
+          const notification = document.createElement('div');
+          notification.innerHTML = `
+            <div style="position: fixed; top: 20px; right: 20px; background: #dc2626; color: white; padding: 1rem; border-radius: 0.5rem; z-index: 9999; max-width: 300px;">
+              <strong>Model Loading Error</strong><br>
+              <small>Failed to initialize TrustformeRS models. Some features may not work.</small>
+              <button onclick="this.parentElement.remove()" style="float: right; background: none; border: none; color: white; cursor: pointer; font-size: 1.2rem; line-height: 1;">×</button>
+            </div>
+          `;
+          document.body.appendChild(notification);
+          
+          // Auto-remove after 10 seconds
+          setTimeout(() => {
+            if (notification.parentElement) {
+              notification.remove();
+            }
+          }, 10000);
+        }
+      });
+    </script>
+    
+    <!-- PWA install prompt -->
+    <script>
+      let deferredPrompt;
+      let installButton;
+      
+      window.addEventListener('beforeinstallprompt', (e) => {
+        // Prevent the mini-infobar from appearing on mobile
+        e.preventDefault();
+        // Stash the event so it can be triggered later
+        deferredPrompt = e;
+        
+        // Show install banner
+        const installBanner = document.createElement('div');
+        installBanner.innerHTML = `
+          <div style="position: fixed; bottom: 20px; right: 20px; background: white; padding: 16px; border-radius: 12px; box-shadow: 0 10px 25px rgba(0,0,0,0.15); z-index: 1000; max-width: 320px; border: 1px solid #e5e7eb;">
+            <div style="display: flex; align-items: center; margin-bottom: 12px;">
+              <div style="background: #4f46e5; width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center; margin-right: 12px;">
+                <span style="color: white; font-size: 20px;">📄</span>
+              </div>
+              <div>
+                <h3 style="margin: 0; font-size: 14px; font-weight: 600; color: #1f2937;">Install Document Analyzer</h3>
+                <p style="margin: 0; font-size: 12px; color: #6b7280;">Quick access to AI-powered document analysis</p>
+              </div>
+            </div>
+            <div style="display: flex; gap: 8px;">
+              <button id="install-btn" style="flex: 1; background: #4f46e5; color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 500; font-size: 13px;">Install</button>
+              <button id="dismiss-btn" style="flex: 1; background: #f3f4f6; color: #374151; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 13px;">Later</button>
+            </div>
+          </div>
+        `;
+        
+        document.body.appendChild(installBanner);
+        
+        installButton = document.getElementById('install-btn');
+        installButton.addEventListener('click', () => {
+          installBanner.remove();
+          deferredPrompt.prompt();
+          deferredPrompt.userChoice.then((choiceResult) => {
+            if (choiceResult.outcome === 'accepted') {
+              console.log('User accepted the PWA install prompt');
+            }
+            deferredPrompt = null;
+          });
+        });
+        
+        document.getElementById('dismiss-btn').addEventListener('click', () => {
+          installBanner.remove();
+        });
+      });
+    </script>
+    
+    <!-- Load Vue app -->
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

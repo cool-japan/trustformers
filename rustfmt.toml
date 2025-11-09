@@ -1,0 +1,34 @@
+# TrustformeRS Rust Formatting Configuration
+# This file defines the formatting rules for the entire workspace
+# Compatible with stable Rust
+
+# Basic formatting
+edition = "2021"
+hard_tabs = false
+tab_spaces = 4
+max_width = 100
+use_small_heuristics = "Default"
+
+# Newlines and spacing
+newline_style = "Unix"
+
+# Imports
+reorder_imports = true
+reorder_modules = true
+
+# Consistency rules
+use_field_init_shorthand = true
+use_try_shorthand = true
+
+# Function and method formatting
+match_block_trailing_comma = true
+
+# Chain formatting
+chain_width = 80
+single_line_if_else_max_width = 80
+
+# Space formatting
+remove_nested_parens = true
+
+# License header (optional - uncomment if needed)
+# license_template_path = ".license_template"

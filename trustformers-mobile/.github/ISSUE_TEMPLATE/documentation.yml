@@ -1,0 +1,174 @@
+name: 📚 Documentation Improvement
+description: Report issues or suggest improvements for documentation
+title: "[DOCS] "
+labels: ["documentation", "good-first-issue"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us improve our documentation! Whether it's fixing typos, clarifying concepts, or adding examples, all contributions are welcome.
+
+  - type: dropdown
+    id: doc-type
+    attributes:
+      label: Documentation Type
+      description: What type of documentation needs improvement?
+      options:
+        - API Reference
+        - Tutorial/Guide
+        - Example Code
+        - README
+        - Architecture Documentation
+        - Migration Guide
+        - Performance Guide
+        - Contributing Guide
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Documentation Location
+      description: Where is the documentation located?
+      placeholder: "docs/guides/getting-started.md or https://docs.trustformers.rs/..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: issue-description
+    attributes:
+      label: Issue Description
+      description: What's wrong or missing in the documentation?
+      placeholder: |
+        The example code in the "Getting Started" guide uses deprecated APIs...
+        
+        The explanation of tensor broadcasting is confusing because...
+        
+        There's no documentation for the new quantization features...
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggested-improvement
+    attributes:
+      label: Suggested Improvement
+      description: How would you improve the documentation?
+      placeholder: |
+        Replace the deprecated API calls with:
+        ```rust
+        // Old (deprecated)
+        let model = Model::load("path")?;
+        
+        // New
+        let model = Model::from_pretrained("path")?;
+        ```
+        
+        Add a section explaining...
+      render: markdown
+
+  - type: dropdown
+    id: clarity-rating
+    attributes:
+      label: Current Clarity Rating
+      description: How clear is the current documentation?
+      options:
+        - "1 - Very unclear/missing"
+        - "2 - Somewhat unclear"
+        - "3 - Adequate but could be improved"
+        - "4 - Mostly clear"
+        - "5 - Very clear (just minor improvements needed)"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: improvements-needed
+    attributes:
+      label: Improvements Needed
+      description: What specific improvements are needed?
+      options:
+        - label: Add code examples
+          required: false
+        - label: Clarify technical concepts
+          required: false
+        - label: Fix broken links
+          required: false
+        - label: Update outdated information
+          required: false
+        - label: Add visual diagrams
+          required: false
+        - label: Improve formatting
+          required: false
+        - label: Add performance considerations
+          required: false
+        - label: Include common pitfalls/troubleshooting
+          required: false
+
+  - type: textarea
+    id: code-examples
+    attributes:
+      label: Code Examples
+      description: If suggesting new examples, provide them here
+      placeholder: |
+        ```rust
+        // Example: Custom model implementation
+        use trustformers_core::{Module, Tensor};
+        
+        struct MyCustomModel {
+            layers: Vec<Linear>,
+        }
+        
+        impl Module for MyCustomModel {
+            fn forward(&self, input: &Tensor) -> Result<Tensor> {
+                // Implementation
+            }
+        }
+        ```
+      render: rust
+
+  - type: dropdown
+    id: target-audience
+    attributes:
+      label: Target Audience
+      description: Who is the primary audience for this documentation?
+      options:
+        - Beginners (new to TrustformeRS)
+        - Intermediate users
+        - Advanced users
+        - Contributors
+        - All levels
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional-resources
+    attributes:
+      label: Additional Resources
+      description: Any additional resources that might help
+      placeholder: |
+        - Similar documentation in PyTorch: https://pytorch.org/docs/...
+        - Relevant blog post: https://...
+        - Paper explaining the concept: https://arxiv.org/...
+
+  - type: checkboxes
+    id: pr-willingness
+    attributes:
+      label: Contribution
+      description: Would you like to contribute to fixing this?
+      options:
+        - label: I can submit a PR to fix this documentation issue
+          required: false
+        - label: I need help/guidance to contribute
+          required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Please check the following before submitting
+      options:
+        - label: I have checked that this documentation issue hasn't been reported
+          required: true
+        - label: I have provided specific suggestions for improvement
+          required: false

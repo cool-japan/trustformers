@@ -1,0 +1,114 @@
+{
+  "name": "@trustformers/core",
+  "version": "0.1.0",
+  "description": "Core TrustformeRS JavaScript/WebAssembly bindings",
+  "main": "dist/index.cjs.js",
+  "module": "dist/index.esm.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.esm.js",
+      "require": "./dist/index.cjs.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./tensor": {
+      "import": "./dist/tensor.esm.js",
+      "require": "./dist/tensor.cjs.js",
+      "types": "./dist/tensor.d.ts"
+    },
+    "./models": {
+      "import": "./dist/models.esm.js",
+      "require": "./dist/models.cjs.js",
+      "types": "./dist/models.d.ts"
+    },
+    "./pipeline": {
+      "import": "./dist/pipeline.esm.js",
+      "require": "./dist/pipeline.cjs.js",
+      "types": "./dist/pipeline.d.ts"
+    },
+    "./utils": {
+      "import": "./dist/utils.esm.js",
+      "require": "./dist/utils.cjs.js",
+      "types": "./dist/utils.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "pkg/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "build:wasm": "cd ../../trustformers-wasm && wasm-pack build --target web --out-dir ../trustformers-js/packages/core/pkg --release",
+    "build:types": "tsc --declaration --emitDeclarationOnly --outDir dist",
+    "clean": "rimraf dist pkg",
+    "dev": "rollup -c --watch",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src/**/*.js",
+    "format": "prettier --write src/**/*.js",
+    "prepublishOnly": "npm run clean && npm run build",
+    "size-check": "size-limit"
+  },
+  "keywords": [
+    "transformers",
+    "webassembly",
+    "wasm",
+    "machine-learning",
+    "nlp",
+    "rust",
+    "ai",
+    "tensor",
+    "neural-networks"
+  ],
+  "author": "TrustformeRS Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trustformers/trustformers.git",
+    "directory": "trustformers-js/packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/trustformers/trustformers/issues"
+  },
+  "homepage": "https://trustformers.ai",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "sideEffects": false,
+  "browserslist": [
+    "> 1%",
+    "last 2 versions",
+    "not ie <= 11",
+    "not op_mini all"
+  ],
+  "peerDependencies": {},
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^16.0.1",
+    "@rollup/plugin-commonjs": "^28.0.6",
+    "@rollup/plugin-terser": "^0.4.4",
+    "@rollup/plugin-wasm": "^6.2.2",
+    "rollup": "^4.26.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "eslint": "^9.36.0",
+    "prettier": "^3.3.3",
+    "rimraf": "^6.0.1",
+    "size-limit": "^11.2.0"
+  },
+  "size-limit": [
+    {
+      "name": "Core Bundle",
+      "path": "dist/index.esm.js",
+      "limit": "300 KB",
+      "gzip": true
+    }
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

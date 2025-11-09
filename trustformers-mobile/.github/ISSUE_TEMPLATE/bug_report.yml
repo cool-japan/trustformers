@@ -1,0 +1,188 @@
+name: 🐛 Bug Report
+description: Report a bug to help us improve TrustformeRS
+title: "[BUG] "
+labels: ["bug", "needs-triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please fill out the form below to help us understand and fix the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is
+      placeholder: |
+        When I try to run model.forward(), I get a tensor dimension mismatch error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Create a model with config X
+        2. Load weights from checkpoint Y
+        3. Run forward pass with input Z
+        4. See error
+      value: |
+        1. 
+        2. 
+        3. 
+        4. 
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What you expected to happen
+      placeholder: The forward pass should complete successfully and return output tensors
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened
+      placeholder: |
+        The program crashes with the following error:
+        thread 'main' panicked at 'assertion failed: dims match'
+    validations:
+      required: true
+
+  - type: textarea
+    id: code-example
+    attributes:
+      label: Minimal Reproducible Example
+      description: Please provide a minimal code example that reproduces the issue
+      placeholder: |
+        ```rust
+        use trustformers_models::bert::BertModel;
+        
+        fn main() -> Result<()> {
+            let model = BertModel::from_pretrained("bert-base")?;
+            // Code that triggers the bug
+            Ok(())
+        }
+        ```
+      render: rust
+
+  - type: textarea
+    id: error-message
+    attributes:
+      label: Error Message
+      description: Complete error message or stack trace
+      placeholder: |
+        thread 'main' panicked at 'assertion failed: dims match', src/tensor.rs:123:5
+        stack backtrace:
+           0: rust_begin_unwind
+           1: core::panicking::panic_fmt
+           ...
+      render: shell
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which component is affected?
+      multiple: true
+      options:
+        - trustformers-core
+        - trustformers-models
+        - trustformers-optim
+        - trustformers-mobile
+        - trustformers-serving
+        - Examples
+        - Documentation
+        - Build System
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: TrustformeRS Version
+      description: What version of TrustformeRS are you using?
+      placeholder: v0.1.0 or commit hash
+    validations:
+      required: true
+
+  - type: dropdown
+    id: rust-version
+    attributes:
+      label: Rust Version
+      description: Output of `rustc --version`
+      options:
+        - "1.70.0 (stable)"
+        - "1.71.0 (stable)"
+        - "1.72.0 (stable)"
+        - "1.73.0 (stable)"
+        - "1.74.0 (stable)"
+        - "1.75.0 (stable)"
+        - "nightly"
+        - "other (please specify in additional context)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      options:
+        - Linux (Ubuntu/Debian)
+        - Linux (RHEL/CentOS/Fedora)
+        - Linux (Arch)
+        - Linux (Other)
+        - macOS
+        - Windows
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: hardware
+    attributes:
+      label: Hardware
+      description: What hardware are you using?
+      multiple: true
+      options:
+        - CPU only
+        - NVIDIA GPU
+        - AMD GPU
+        - Apple Silicon (M1/M2/M3)
+        - Mobile Device (iOS)
+        - Mobile Device (Android)
+        - Other
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Any additional context about the problem
+      placeholder: |
+        - This started happening after upgrading from version X to Y
+        - The issue only occurs with batch sizes > 32
+        - Works fine on CPU but fails on GPU
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Please check the following before submitting
+      options:
+        - label: I have searched the existing issues to ensure this bug hasn't been reported
+          required: true
+        - label: I have provided a minimal reproducible example
+          required: false
+        - label: I have included the complete error message
+          required: false
+        - label: I am willing to help fix this bug
+          required: false

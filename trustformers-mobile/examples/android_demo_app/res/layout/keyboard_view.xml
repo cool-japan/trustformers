@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="@color/keyboard_background">
+
+    <!-- Suggestion Bar -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/suggestion_recycler"
+        android:layout_width="match_parent"
+        android:layout_height="40dp"
+        android:background="@color/suggestion_bar_background"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="4dp"
+        android:visibility="gone" />
+
+    <!-- Keyboard View -->
+    <android.inputmethodservice.KeyboardView
+        android:id="@+id/keyboard_view"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/keyboard_background"
+        android:keyBackground="@drawable/key_background"
+        android:keyTextColor="@color/key_text_color"
+        android:keyTextSize="18sp"
+        android:shadowColor="@color/key_shadow_color"
+        android:shadowRadius="2.75" />
+
+</LinearLayout>

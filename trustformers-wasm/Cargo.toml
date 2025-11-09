@@ -1,0 +1,173 @@
+[package]
+name = "trustformers-wasm"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WebAssembly bindings for TrustformeRS transformer library"
+categories = ["wasm", "web-programming", "science"]
+keywords = ["transformers", "webassembly", "wasm", "machine-learning", "nlp"]
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = { version = "0.2.104", features = ["serde-serialize"] }
+wasm-bindgen-futures = "0.4.54"
+js-sys = "0.3.81"
+serde = { workspace = true, features = ["derive", "alloc"] }
+serde_json = { workspace = true, features = ["alloc"] }
+serde-wasm-bindgen = "0.6.5"
+getrandom = { version = "0.3.3", features = ["wasm_js"] }
+console_error_panic_hook = { version = "0.1.7", optional = true }
+wee_alloc = { version = "0.4.5", optional = true }
+dlmalloc = { version = "0.2.10", features = ["global"], optional = true }
+bytemuck = { workspace = true }
+# SciRS2 dependencies (following SCIRS2 POLICY)
+scirs2-core = { workspace = true, optional = true }
+
+# Core dependencies with no_std support
+# Note: scirs2-core has issues with wasm32 target due to getrandom v0.3 dependency
+# We'll implement our own tensor operations for now
+
+# Core web-sys features for essential functionality
+web-sys = { version = "0.3.81", features = [
+    "console",
+    "Navigator",
+    "Performance",
+    "PerformanceTiming",
+    "Window",
+    "Worker",
+    "WorkerGlobalScope",
+    "WorkerOptions",
+    "WorkerType",
+    "MessageEvent",
+    "MessagePort",
+    "DedicatedWorkerGlobalScope",
+    "BroadcastChannel",
+    "ServiceWorker",
+    "ServiceWorkerContainer",
+    "ServiceWorkerRegistration",
+    "ServiceWorkerGlobalScope",
+    "CacheStorage",
+    "Cache",
+    "Request",
+    "Response",
+    "Headers",
+    "RequestInit",
+    "Event",
+    "IdbFactory",
+    "IdbDatabase",
+    "IdbTransaction",
+    "IdbObjectStore",
+    "IdbRequest",
+    "IdbCursor",
+    "IdbKeyRange",
+    "IdbVersionChangeEvent",
+    "IdbOpenDbRequest",
+    "DomException",
+    "Document",
+    "Element",
+    "HtmlElement",
+    "CustomElementRegistry",
+    "ShadowRoot",
+    "ShadowRootMode",
+    "DomTokenList",
+    "CssStyleDeclaration",
+    "CanvasRenderingContext2d",
+    "WebGlRenderingContext",
+    "WebGl2RenderingContext",
+    "HtmlCanvasElement",
+    "HtmlSelectElement",
+    "HtmlInputElement",
+    "HtmlTextAreaElement",
+    "OffscreenCanvas",
+    "CustomEvent",
+    "CustomEventInit",
+    # Mobile and camera features (only those that exist in web-sys 0.3.81)
+    "Touch",
+    "TouchEvent",
+    "TouchList",
+    "Blob",
+    "File",
+    "FileReader",
+    "HtmlVideoElement",
+    "ImageBitmap",
+    "ImageData",
+    "MediaDevices",
+    "MediaStream",
+    "MediaStreamTrack",
+    "MediaDeviceInfo",
+    "MediaDeviceKind",
+    "MediaStreamConstraints",
+    "MediaTrackConstraints",
+    "MediaTrackSettings",
+    "VideoTrack",
+    "EventTarget",
+    # Basic WebGPU features (only the ones that exist in 0.3.81)
+    "GpuDevice",
+    "GpuBuffer",
+    "GpuTexture",
+    "GpuCommandEncoder",
+    "GpuBindGroup",
+    "GpuPipelineLayout",
+    "GpuRenderPipeline",
+    "GpuComputePipeline",
+    "GpuShaderModule",
+    "GpuAdapter",
+    "GpuQueue",
+    # Basic geolocation features
+    "Geolocation",
+    # Additional request features
+    "RequestMode",
+    "ResponseInit",
+    # Screen and Storage API features
+    "Screen",
+    "ScreenOrientation",
+    "Storage",
+    "StorageManager",
+    "NodeList",
+    "HtmlCollection"
+] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3.54"
+
+[features]
+default = ["console_panic", "wee-alloc"]
+size-optimized = ["wee-alloc", "console_panic"] # Minimal feature set for size optimization
+performance-optimized = ["dlmalloc-alloc", "kernel-fusion", "async-executor", "scirs2"] # Performance-first features with SciRS2
+console_panic = ["console_error_panic_hook"]
+webgpu = []
+web-workers = []
+shared-memory = []
+kernel-fusion = []
+async-executor = []
+indexeddb = []
+memory64 = []
+streaming-loader = []
+model-splitting = []
+react-components = []
+vue-components = []
+angular-components = []
+web-components = []
+playground = []
+streaming-generation = []
+mobile-optimization = []
+wee-alloc = ["wee_alloc"]
+dlmalloc-alloc = ["dlmalloc"]
+scirs2 = ["scirs2-core"] # SciRS2 integration following SCIRS2 POLICY
+minimal = ["wee-alloc"] # Minimal build with only core features and small allocator
+full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "indexeddb", "memory64", "streaming-loader", "model-splitting", "react-components", "vue-components", "angular-components", "web-components", "playground", "streaming-generation", "mobile-optimization", "scirs2", "wee-alloc"]
+
+# Tell `rustc` to optimize for small code size.
+[package.metadata.wasm-pack]
+"wasm-opt" = ["-Oz", "--enable-simd", "--strip-debug", "--strip-producers", "--enable-bulk-memory", "--enable-sign-ext", "--enable-mutable-globals", "--converge"]
+
+# WASM-specific profiles are defined in workspace root Cargo.toml
+
+

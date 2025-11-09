@@ -1,0 +1,32 @@
+# Clippy configuration for TrustformeRS-C
+# Enhances static analysis and code quality checks
+
+# Cognitive complexity threshold
+cognitive-complexity-threshold = 30
+
+# String literal threshold
+too-many-lines-threshold = 200
+
+# Allow certain lints for FFI code
+avoid-breaking-exported-api = false
+
+# Enforce strong typing
+enum-variant-name-threshold = 3
+
+# Excessive nesting threshold
+excessive-nesting-threshold = 5
+
+# Too many arguments threshold (relaxed for FFI)
+too-many-arguments-threshold = 10
+
+# Type complexity threshold
+type-complexity-threshold = 150
+
+# Large error threshold
+large-error-threshold = 200
+
+# Stack size threshold
+stack-size-threshold = 512000
+
+# Trivial copy size limit
+trivial-copy-size-limit = 256

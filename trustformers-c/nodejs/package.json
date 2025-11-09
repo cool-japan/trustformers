@@ -1,0 +1,72 @@
+{
+  "name": "@trustformers/c-bindings",
+  "version": "0.1.0",
+  "description": "Node.js bindings for TrustformeRS C API - High-performance transformer library",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
+    "test": "jest",
+    "example": "node examples/basic_usage.js",
+    "lint": "eslint src/**/*.ts",
+    "format": "prettier --write src/**/*.ts"
+  },
+  "keywords": [
+    "transformers",
+    "nlp",
+    "machine-learning",
+    "ai",
+    "ffi",
+    "native",
+    "performance"
+  ],
+  "author": "TrustformeRS Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cool-japan/trustformers.git",
+    "directory": "trustformers-c/nodejs"
+  },
+  "bugs": {
+    "url": "https://github.com/cool-japan/trustformers/issues"
+  },
+  "homepage": "https://github.com/cool-japan/trustformers#readme",
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "ffi-napi": "^4.0.3",
+    "ref-napi": "^3.0.3",
+    "ref-struct-di": "^1.1.1",
+    "ref-array-di": "^1.2.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "@types/jest": "^29.5.8",
+    "prettier": "^3.1.0",
+    "typescript": "^5.3.0",
+    "ts-jest": "^29.1.1"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "peerDependencies": {},
+  "optionalDependencies": {},
+  "bundleDependencies": []
+}

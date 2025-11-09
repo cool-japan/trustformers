@@ -1,0 +1,1271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Multilingual Translation Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #667eea;
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(102, 126, 234, 0.1);
+            border-radius: 10px;
+            font-size: 0.9rem;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+            min-height: calc(100vh - 160px);
+        }
+
+        .translation-area {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .controls-panel {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            overflow-y: auto;
+        }
+
+        .translation-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid rgba(102, 126, 234, 0.1);
+        }
+
+        .language-selector {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .language-dropdown {
+            padding: 10px 15px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            min-width: 150px;
+        }
+
+        .swap-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 18px;
+            transition: all 0.3s ease;
+            width: 48px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .swap-btn:hover {
+            transform: rotate(180deg);
+            box-shadow: 0 4px 16px rgba(102, 126, 234, 0.3);
+        }
+
+        .translation-panels {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            flex: 1;
+            margin-bottom: 20px;
+        }
+
+        .input-panel, .output-panel {
+            display: flex;
+            flex-direction: column;
+            background: #f8f9fa;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid #e0e0e0;
+        }
+
+        .panel-header {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 12px 16px;
+            font-weight: 600;
+            color: #667eea;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .text-area {
+            flex: 1;
+            padding: 20px;
+            border: none;
+            outline: none;
+            font-size: 16px;
+            line-height: 1.6;
+            resize: none;
+            min-height: 300px;
+            font-family: inherit;
+        }
+
+        .text-area::placeholder {
+            color: #999;
+        }
+
+        .output-text {
+            flex: 1;
+            padding: 20px;
+            min-height: 300px;
+            font-size: 16px;
+            line-height: 1.6;
+            color: #333;
+            background: white;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .translate-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            flex: 1;
+        }
+
+        .translate-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .translate-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .secondary-btn {
+            background: rgba(102, 126, 234, 0.1);
+            color: #667eea;
+            border: 2px solid rgba(102, 126, 234, 0.3);
+            padding: 12px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .secondary-btn:hover {
+            background: rgba(102, 126, 234, 0.2);
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .control-group {
+            margin-bottom: 25px;
+        }
+
+        .control-group h3 {
+            margin-bottom: 15px;
+            color: #667eea;
+            font-size: 1.1rem;
+            border-bottom: 1px solid rgba(102, 126, 234, 0.3);
+            padding-bottom: 8px;
+        }
+
+        .model-selector {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            margin-bottom: 15px;
+        }
+
+        .quick-phrases {
+            display: grid;
+            grid-template-columns: 1fr;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+
+        .phrase-item {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .phrase-item:hover {
+            background: rgba(102, 126, 234, 0.2);
+        }
+
+        .metrics-display {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .metrics-display h3 {
+            margin-bottom: 10px;
+            color: #667eea;
+            border: none;
+            padding: 0;
+        }
+
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+
+        .metric-value {
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .language-detection {
+            background: rgba(255, 193, 7, 0.1);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            border: 1px solid rgba(255, 193, 7, 0.3);
+        }
+
+        .detected-language {
+            font-weight: 600;
+            color: #f57c00;
+        }
+
+        .confidence-score {
+            font-size: 0.9rem;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        .translation-history {
+            max-height: 200px;
+            overflow-y: auto;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 10px;
+        }
+
+        .history-item {
+            padding: 8px;
+            border-bottom: 1px solid #f0f0f0;
+            font-size: 0.85rem;
+            cursor: pointer;
+        }
+
+        .history-item:hover {
+            background: rgba(102, 126, 234, 0.05);
+        }
+
+        .history-item:last-child {
+            border-bottom: none;
+        }
+
+        .history-source {
+            color: #667eea;
+            font-weight: 600;
+        }
+
+        .history-target {
+            color: #666;
+            margin-top: 2px;
+        }
+
+        .advanced-settings {
+            background: rgba(255, 255, 255, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+
+        .checkbox-group {
+            margin-bottom: 10px;
+        }
+
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: #667eea;
+        }
+
+        .character-count {
+            text-align: right;
+            font-size: 0.8rem;
+            color: #666;
+            margin-top: 8px;
+        }
+
+        .loading-indicator {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .quality-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .quality-stars {
+            color: #ffc107;
+        }
+
+        .alternative-translations {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .alternative-translations h4 {
+            margin-bottom: 10px;
+            color: #667eea;
+            font-size: 0.95rem;
+        }
+
+        .alt-translation {
+            background: rgba(102, 126, 234, 0.05);
+            padding: 10px;
+            border-radius: 6px;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .alt-translation:hover {
+            background: rgba(102, 126, 234, 0.1);
+        }
+
+        @media (max-width: 1200px) {
+            .main-content {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr auto;
+            }
+            
+            .translation-panels {
+                grid-template-columns: 1fr;
+            }
+            
+            .controls-panel {
+                max-height: 400px;
+            }
+        }
+
+        .flag-icon {
+            display: inline-block;
+            width: 24px;
+            height: 18px;
+            border-radius: 3px;
+            background-size: cover;
+            margin-right: 8px;
+            vertical-align: middle;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🌐 TrustformeRS Multilingual Translation Demo</h1>
+            <p>Real-time translation powered by transformer models</p>
+            <div class="status-bar">
+                <span id="model-status">Model: Not loaded</span>
+                <span id="device-info">Device: Detecting...</span>
+                <span id="memory-info">Memory: 0 MB</span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="translation-area">
+                <div class="translation-header">
+                    <div class="language-selector">
+                        <select id="source-language" class="language-dropdown">
+                            <option value="auto">🌍 Auto-detect</option>
+                            <option value="en">🇺🇸 English</option>
+                            <option value="es">🇪🇸 Spanish</option>
+                            <option value="fr">🇫🇷 French</option>
+                            <option value="de">🇩🇪 German</option>
+                            <option value="it">🇮🇹 Italian</option>
+                            <option value="pt">🇵🇹 Portuguese</option>
+                            <option value="ru">🇷🇺 Russian</option>
+                            <option value="ja">🇯🇵 Japanese</option>
+                            <option value="ko">🇰🇷 Korean</option>
+                            <option value="zh">🇨🇳 Chinese</option>
+                            <option value="ar">🇸🇦 Arabic</option>
+                            <option value="hi">🇮🇳 Hindi</option>
+                        </select>
+                        
+                        <button id="swap-languages" class="swap-btn" title="Swap languages">⇄</button>
+                        
+                        <select id="target-language" class="language-dropdown">
+                            <option value="en">🇺🇸 English</option>
+                            <option value="es">🇪🇸 Spanish</option>
+                            <option value="fr">🇫🇷 French</option>
+                            <option value="de">🇩🇪 German</option>
+                            <option value="it">🇮🇹 Italian</option>
+                            <option value="pt">🇵🇹 Portuguese</option>
+                            <option value="ru">🇷🇺 Russian</option>
+                            <option value="ja">🇯🇵 Japanese</option>
+                            <option value="ko">🇰🇷 Korean</option>
+                            <option value="zh">🇨🇳 Chinese</option>
+                            <option value="ar">🇸🇦 Arabic</option>
+                            <option value="hi">🇮🇳 Hindi</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="translation-panels">
+                    <div class="input-panel">
+                        <div class="panel-header">
+                            <span>Source Text</span>
+                            <span id="input-language">Auto-detect</span>
+                        </div>
+                        <textarea 
+                            id="source-text" 
+                            class="text-area" 
+                            placeholder="Enter text to translate..."
+                        ></textarea>
+                        <div class="character-count" id="char-count">0 / 5000 characters</div>
+                    </div>
+                    
+                    <div class="output-panel">
+                        <div class="panel-header">
+                            <span>Translation</span>
+                            <div class="quality-indicator" id="quality-indicator" style="display: none;">
+                                <span class="quality-stars">★★★★☆</span>
+                                <span id="quality-score">85%</span>
+                            </div>
+                        </div>
+                        <div id="output-text" class="output-text">
+                            Translation will appear here...
+                        </div>
+                        
+                        <div class="alternative-translations" id="alternative-translations" style="display: none;">
+                            <h4>Alternative translations:</h4>
+                            <div id="alternatives-list"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="language-detection" id="language-detection" style="display: none;">
+                    <div>Detected language: <span class="detected-language" id="detected-lang">English</span></div>
+                    <div class="confidence-score">Confidence: <span id="detection-confidence">95%</span></div>
+                </div>
+
+                <div class="action-buttons">
+                    <button id="translate-btn" class="translate-btn">Translate</button>
+                    <button id="listen-btn" class="secondary-btn">🔊 Listen</button>
+                    <button id="copy-btn" class="secondary-btn">📋 Copy</button>
+                    <button id="share-btn" class="secondary-btn">🔗 Share</button>
+                </div>
+                
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+
+                <div class="loading-indicator" id="loading-indicator">
+                    <div class="spinner"></div>
+                    <p>Translating...</p>
+                </div>
+            </div>
+
+            <div class="controls-panel">
+                <div class="control-group">
+                    <h3>Translation Model</h3>
+                    <select id="model-select" class="model-selector">
+                        <option value="m2m-100-1.2B">M2M-100 1.2B</option>
+                        <option value="nllb-200-1.3B">NLLB-200 1.3B</option>
+                        <option value="opus-mt">OPUS-MT</option>
+                        <option value="mbart-large">mBART Large</option>
+                        <option value="t5-base">T5 Base</option>
+                        <option value="seamless-m4t">SeamlessM4T</option>
+                    </select>
+                </div>
+
+                <div class="control-group">
+                    <h3>Quick Phrases</h3>
+                    <div class="quick-phrases">
+                        <div class="phrase-item" data-text="Hello, how are you?">Hello, how are you?</div>
+                        <div class="phrase-item" data-text="Thank you very much">Thank you very much</div>
+                        <div class="phrase-item" data-text="Where is the nearest restaurant?">Where is the nearest restaurant?</div>
+                        <div class="phrase-item" data-text="I need help">I need help</div>
+                        <div class="phrase-item" data-text="What time is it?">What time is it?</div>
+                        <div class="phrase-item" data-text="How much does this cost?">How much does this cost?</div>
+                        <div class="phrase-item" data-text="I don't understand">I don't understand</div>
+                        <div class="phrase-item" data-text="Please speak slowly">Please speak slowly</div>
+                    </div>
+                </div>
+
+                <div class="metrics-display">
+                    <h3>Translation Metrics</h3>
+                    <div class="metric-item">
+                        <span>Translation Time:</span>
+                        <span class="metric-value" id="translation-time">0ms</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Source Length:</span>
+                        <span class="metric-value" id="source-length">0 chars</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Target Length:</span>
+                        <span class="metric-value" id="target-length">0 chars</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Quality Score:</span>
+                        <span class="metric-value" id="quality-metric">--</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Memory Usage:</span>
+                        <span class="metric-value" id="memory-usage">0 MB</span>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Translation History</h3>
+                    <div class="translation-history" id="translation-history">
+                        <div style="text-align: center; color: #666; padding: 20px;">
+                            No translations yet
+                        </div>
+                    </div>
+                </div>
+
+                <div class="advanced-settings">
+                    <h3>Advanced Settings</h3>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="auto-translate" checked>
+                            Auto-translate
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="preserve-formatting">
+                            Preserve formatting
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="show-alternatives">
+                            Show alternative translations
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="quality-estimation" checked>
+                            Quality estimation
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="formal-tone">
+                            Formal tone
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { 
+            TrustformersWasm, 
+            InferenceSession, 
+            WasmTensor,
+            get_memory_stats
+        } from '../pkg/trustformers_wasm.js';
+
+        class MultilingualTranslationDemo {
+            constructor() {
+                this.session = null;
+                this.isTranslating = false;
+                this.translationHistory = [];
+                this.autoTranslateTimeout = null;
+                this.currentDetectedLanguage = null;
+                
+                this.initializeUI();
+                this.initializeWasm();
+                this.setupLanguageData();
+            }
+
+            async initializeWasm() {
+                try {
+                    // Initialize TrustformeRS
+                    const tf = new TrustformersWasm();
+                    console.log('TrustformeRS Version:', tf.version);
+                    
+                    // Create inference session for translation
+                    this.session = new InferenceSession('translation');
+                    
+                    // Initialize with automatic device selection
+                    await this.session.initialize_with_auto_device();
+                    
+                    // Load default model
+                    await this.loadModel('m2m-100-1.2B');
+                    
+                    this.updateStatus();
+                    
+                } catch (error) {
+                    console.error('Failed to initialize WASM:', error);
+                    this.showError('Failed to initialize TrustformeRS: ' + error.message);
+                }
+            }
+
+            async loadModel(modelId) {
+                try {
+                    const modelInfo = this.getModelInfo(modelId);
+                    document.getElementById('model-status').textContent = `Model: Loading ${modelInfo.name}...`;
+                    
+                    // In a real implementation, you would load the actual translation model
+                    const mockModelData = new Uint8Array(modelInfo.size * 1024 * 1024);
+                    await this.session.load_model(mockModelData);
+                    
+                    document.getElementById('model-status').textContent = `Model: ${modelInfo.name}`;
+                    
+                } catch (error) {
+                    console.error('Failed to load model:', error);
+                    this.showError('Failed to load model: ' + error.message);
+                }
+            }
+
+            getModelInfo(modelId) {
+                const models = {
+                    'm2m-100-1.2B': { name: 'M2M-100 1.2B', size: 2400 },
+                    'nllb-200-1.3B': { name: 'NLLB-200 1.3B', size: 2600 },
+                    'opus-mt': { name: 'OPUS-MT', size: 300 },
+                    'mbart-large': { name: 'mBART Large', size: 2200 },
+                    't5-base': { name: 'T5 Base', size: 850 },
+                    'seamless-m4t': { name: 'SeamlessM4T', size: 9600 }
+                };
+                return models[modelId] || models['m2m-100-1.2B'];
+            }
+
+            setupLanguageData() {
+                this.languages = {
+                    'auto': 'Auto-detect',
+                    'en': 'English',
+                    'es': 'Spanish',
+                    'fr': 'French',
+                    'de': 'German',
+                    'it': 'Italian',
+                    'pt': 'Portuguese',
+                    'ru': 'Russian',
+                    'ja': 'Japanese',
+                    'ko': 'Korean',
+                    'zh': 'Chinese',
+                    'ar': 'Arabic',
+                    'hi': 'Hindi'
+                };
+            }
+
+            initializeUI() {
+                const sourceText = document.getElementById('source-text');
+                const translateBtn = document.getElementById('translate-btn');
+                const swapBtn = document.getElementById('swap-languages');
+                
+                // Text input events
+                sourceText.addEventListener('input', this.handleTextInput.bind(this));
+                sourceText.addEventListener('paste', this.handleTextInput.bind(this));
+                
+                // Translation button
+                translateBtn.addEventListener('click', () => {
+                    this.translateText();
+                });
+                
+                // Swap languages
+                swapBtn.addEventListener('click', () => {
+                    this.swapLanguages();
+                });
+                
+                // Model selector
+                document.getElementById('model-select').addEventListener('change', (e) => {
+                    this.loadModel(e.target.value);
+                });
+                
+                // Action buttons
+                document.getElementById('listen-btn').addEventListener('click', () => {
+                    this.speakTranslation();
+                });
+                
+                document.getElementById('copy-btn').addEventListener('click', () => {
+                    this.copyTranslation();
+                });
+                
+                document.getElementById('share-btn').addEventListener('click', () => {
+                    this.shareTranslation();
+                });
+                
+                // Quick phrases
+                document.querySelectorAll('.phrase-item').forEach(item => {
+                    item.addEventListener('click', () => {
+                        sourceText.value = item.dataset.text;
+                        this.handleTextInput();
+                    });
+                });
+                
+                // Auto-translate setting
+                document.getElementById('auto-translate').addEventListener('change', (e) => {
+                    if (e.target.checked && sourceText.value.trim()) {
+                        this.scheduleAutoTranslate();
+                    }
+                });
+            }
+
+            handleTextInput() {
+                const sourceText = document.getElementById('source-text');
+                const text = sourceText.value;
+                const charCount = document.getElementById('char-count');
+                
+                // Update character count
+                charCount.textContent = `${text.length} / 5000 characters`;
+                
+                // Language detection for non-empty text
+                if (text.trim()) {
+                    this.detectLanguage(text);
+                    
+                    // Auto-translate if enabled
+                    if (document.getElementById('auto-translate').checked) {
+                        this.scheduleAutoTranslate();
+                    }
+                } else {
+                    this.hideLanguageDetection();
+                }
+            }
+
+            scheduleAutoTranslate() {
+                clearTimeout(this.autoTranslateTimeout);
+                this.autoTranslateTimeout = setTimeout(() => {
+                    this.translateText();
+                }, 1000);
+            }
+
+            async detectLanguage(text) {
+                try {
+                    // Simulate language detection
+                    const detection = await this.simulateLanguageDetection(text);
+                    
+                    this.currentDetectedLanguage = detection.language;
+                    this.showLanguageDetection(detection);
+                    
+                    // Update source language if auto-detect is selected
+                    const sourceSelect = document.getElementById('source-language');
+                    if (sourceSelect.value === 'auto') {
+                        document.getElementById('input-language').textContent = this.languages[detection.language];
+                    }
+                    
+                } catch (error) {
+                    console.error('Language detection failed:', error);
+                }
+            }
+
+            async simulateLanguageDetection(text) {
+                // Simulate detection processing time
+                await new Promise(resolve => setTimeout(resolve, 200));
+                
+                // Simple language detection simulation based on common words
+                const detectionPatterns = {
+                    'en': ['the', 'and', 'is', 'are', 'was', 'were', 'have', 'has'],
+                    'es': ['el', 'la', 'es', 'son', 'fue', 'fueron', 'tiene', 'han'],
+                    'fr': ['le', 'la', 'est', 'sont', 'était', 'étaient', 'avoir', 'ont'],
+                    'de': ['der', 'die', 'ist', 'sind', 'war', 'waren', 'haben', 'hat'],
+                    'it': ['il', 'la', 'è', 'sono', 'era', 'erano', 'avere', 'hanno'],
+                    'pt': ['o', 'a', 'é', 'são', 'era', 'eram', 'ter', 'têm'],
+                    'ru': ['и', 'в', 'не', 'на', 'я', 'быть', 'он', 'с'],
+                    'ja': ['の', 'は', 'を', 'が', 'に', 'と', 'で', 'も'],
+                    'zh': ['的', '是', '了', '在', '和', '有', '也', '不'],
+                    'ar': ['في', 'من', 'أن', 'على', 'إلى', 'هذا', 'كان', 'قد'],
+                    'hi': ['है', 'में', 'और', 'का', 'को', 'से', 'पर', 'यह']
+                };
+                
+                let bestMatch = 'en';
+                let maxScore = 0;
+                
+                const lowerText = text.toLowerCase();
+                
+                for (const [lang, patterns] of Object.entries(detectionPatterns)) {
+                    let score = 0;
+                    for (const pattern of patterns) {
+                        if (lowerText.includes(pattern)) {
+                            score++;
+                        }
+                    }
+                    if (score > maxScore) {
+                        maxScore = score;
+                        bestMatch = lang;
+                    }
+                }
+                
+                const confidence = Math.min(0.7 + (maxScore * 0.05), 0.99);
+                
+                return {
+                    language: bestMatch,
+                    confidence: confidence
+                };
+            }
+
+            showLanguageDetection(detection) {
+                const detectionDiv = document.getElementById('language-detection');
+                const langSpan = document.getElementById('detected-lang');
+                const confidenceSpan = document.getElementById('detection-confidence');
+                
+                langSpan.textContent = this.languages[detection.language];
+                confidenceSpan.textContent = `${(detection.confidence * 100).toFixed(0)}%`;
+                detectionDiv.style.display = 'block';
+            }
+
+            hideLanguageDetection() {
+                document.getElementById('language-detection').style.display = 'none';
+            }
+
+            swapLanguages() {
+                const sourceSelect = document.getElementById('source-language');
+                const targetSelect = document.getElementById('target-language');
+                const sourceText = document.getElementById('source-text');
+                const outputText = document.getElementById('output-text');
+                
+                // Skip if source is auto-detect
+                if (sourceSelect.value === 'auto') {
+                    this.showError('Cannot swap when source is set to auto-detect');
+                    return;
+                }
+                
+                // Swap language selections
+                const tempLang = sourceSelect.value;
+                sourceSelect.value = targetSelect.value;
+                targetSelect.value = tempLang;
+                
+                // Swap text content
+                const tempText = sourceText.value;
+                sourceText.value = outputText.textContent === 'Translation will appear here...' ? '' : outputText.textContent;
+                outputText.textContent = tempText || 'Translation will appear here...';
+                
+                this.handleTextInput();
+            }
+
+            async translateText() {
+                const sourceText = document.getElementById('source-text').value.trim();
+                
+                if (!sourceText || this.isTranslating) {
+                    return;
+                }
+                
+                if (sourceText.length > 5000) {
+                    this.showError('Text is too long. Maximum 5000 characters allowed.');
+                    return;
+                }
+                
+                this.isTranslating = true;
+                this.showLoading(true);
+                
+                const translateBtn = document.getElementById('translate-btn');
+                translateBtn.disabled = true;
+                translateBtn.textContent = 'Translating...';
+                
+                try {
+                    const startTime = Date.now();
+                    
+                    const sourceLanguage = document.getElementById('source-language').value;
+                    const targetLanguage = document.getElementById('target-language').value;
+                    
+                    // Use detected language if auto-detect is selected
+                    const actualSourceLang = sourceLanguage === 'auto' ? 
+                        (this.currentDetectedLanguage || 'en') : sourceLanguage;
+                    
+                    // Create translation request
+                    const translation = await this.simulateTranslation(sourceText, actualSourceLang, targetLanguage);
+                    
+                    // Display translation
+                    this.displayTranslation(translation);
+                    
+                    // Update metrics
+                    const duration = Date.now() - startTime;
+                    this.updateMetrics(sourceText, translation.text, duration);
+                    
+                    // Add to history
+                    this.addToHistory(sourceText, translation.text, actualSourceLang, targetLanguage);
+                    
+                    this.updateProgress(100);
+                    
+                } catch (error) {
+                    console.error('Translation failed:', error);
+                    this.showError('Translation failed: ' + error.message);
+                } finally {
+                    this.isTranslating = false;
+                    this.showLoading(false);
+                    translateBtn.disabled = false;
+                    translateBtn.textContent = 'Translate';
+                }
+            }
+
+            async simulateTranslation(text, sourceLang, targetLang) {
+                // Simulate translation processing time
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                
+                // Mock translations for demonstration
+                const mockTranslations = {
+                    'en-es': {
+                        'Hello, how are you?': 'Hola, ¿cómo estás?',
+                        'Thank you very much': 'Muchas gracias',
+                        'I need help': 'Necesito ayuda',
+                        'What time is it?': '¿Qué hora es?'
+                    },
+                    'en-fr': {
+                        'Hello, how are you?': 'Bonjour, comment allez-vous?',
+                        'Thank you very much': 'Merci beaucoup',
+                        'I need help': 'J\'ai besoin d\'aide',
+                        'What time is it?': 'Quelle heure est-il?'
+                    },
+                    'en-de': {
+                        'Hello, how are you?': 'Hallo, wie geht es dir?',
+                        'Thank you very much': 'Vielen Dank',
+                        'I need help': 'Ich brauche Hilfe',
+                        'What time is it?': 'Wie spät ist es?'
+                    }
+                };
+                
+                const translationKey = `${sourceLang}-${targetLang}`;
+                const translations = mockTranslations[translationKey];
+                
+                let translatedText;
+                if (translations && translations[text]) {
+                    translatedText = translations[text];
+                } else {
+                    // Generic mock translation
+                    translatedText = `[${targetLang.toUpperCase()}] ${text}`;
+                }
+                
+                // Generate alternative translations if enabled
+                const alternatives = [];
+                if (document.getElementById('show-alternatives').checked) {
+                    alternatives.push(
+                        translatedText + ' (alternative 1)',
+                        translatedText + ' (alternative 2)',
+                        translatedText + ' (alternative 3)'
+                    );
+                }
+                
+                // Calculate quality score
+                const qualityScore = 0.75 + Math.random() * 0.24; // Between 75% and 99%
+                
+                return {
+                    text: translatedText,
+                    alternatives: alternatives,
+                    quality: qualityScore,
+                    model: document.getElementById('model-select').value
+                };
+            }
+
+            displayTranslation(translation) {
+                const outputText = document.getElementById('output-text');
+                outputText.textContent = translation.text;
+                
+                // Show quality indicator if enabled
+                if (document.getElementById('quality-estimation').checked) {
+                    this.showQualityIndicator(translation.quality);
+                }
+                
+                // Show alternatives if available
+                if (translation.alternatives.length > 0) {
+                    this.showAlternatives(translation.alternatives);
+                }
+            }
+
+            showQualityIndicator(qualityScore) {
+                const indicator = document.getElementById('quality-indicator');
+                const scoreSpan = document.getElementById('quality-score');
+                const stars = indicator.querySelector('.quality-stars');
+                
+                const percentage = Math.round(qualityScore * 100);
+                const starCount = Math.round(qualityScore * 5);
+                
+                scoreSpan.textContent = `${percentage}%`;
+                stars.textContent = '★'.repeat(starCount) + '☆'.repeat(5 - starCount);
+                
+                indicator.style.display = 'flex';
+            }
+
+            showAlternatives(alternatives) {
+                const altDiv = document.getElementById('alternative-translations');
+                const altList = document.getElementById('alternatives-list');
+                
+                altList.innerHTML = '';
+                alternatives.forEach(alt => {
+                    const div = document.createElement('div');
+                    div.className = 'alt-translation';
+                    div.textContent = alt;
+                    div.addEventListener('click', () => {
+                        document.getElementById('output-text').textContent = alt;
+                    });
+                    altList.appendChild(div);
+                });
+                
+                altDiv.style.display = 'block';
+            }
+
+            updateMetrics(sourceText, translatedText, duration) {
+                document.getElementById('translation-time').textContent = `${duration}ms`;
+                document.getElementById('source-length').textContent = `${sourceText.length} chars`;
+                document.getElementById('target-length').textContent = `${translatedText.length} chars`;
+                
+                // Calculate quality metric (mock)
+                const quality = Math.round(75 + Math.random() * 20);
+                document.getElementById('quality-metric').textContent = `${quality}%`;
+                
+                // Update memory usage
+                if (this.session) {
+                    const memStats = get_memory_stats();
+                    const memoryMB = Math.round(memStats.wasm_memory / 1024 / 1024);
+                    document.getElementById('memory-usage').textContent = `${memoryMB} MB`;
+                    document.getElementById('memory-info').textContent = `Memory: ${memoryMB} MB`;
+                }
+            }
+
+            addToHistory(sourceText, translatedText, sourceLang, targetLang) {
+                this.translationHistory.unshift({
+                    source: sourceText,
+                    target: translatedText,
+                    sourceLang: sourceLang,
+                    targetLang: targetLang,
+                    timestamp: new Date()
+                });
+                
+                // Limit history to 10 items
+                if (this.translationHistory.length > 10) {
+                    this.translationHistory.pop();
+                }
+                
+                this.updateHistoryDisplay();
+            }
+
+            updateHistoryDisplay() {
+                const historyDiv = document.getElementById('translation-history');
+                
+                if (this.translationHistory.length === 0) {
+                    historyDiv.innerHTML = '<div style="text-align: center; color: #666; padding: 20px;">No translations yet</div>';
+                    return;
+                }
+                
+                historyDiv.innerHTML = '';
+                this.translationHistory.forEach(item => {
+                    const div = document.createElement('div');
+                    div.className = 'history-item';
+                    div.innerHTML = `
+                        <div class="history-source">${item.source.substring(0, 50)}${item.source.length > 50 ? '...' : ''}</div>
+                        <div class="history-target">${item.target.substring(0, 50)}${item.target.length > 50 ? '...' : ''}</div>
+                    `;
+                    
+                    div.addEventListener('click', () => {
+                        document.getElementById('source-text').value = item.source;
+                        document.getElementById('output-text').textContent = item.target;
+                        document.getElementById('source-language').value = item.sourceLang;
+                        document.getElementById('target-language').value = item.targetLang;
+                    });
+                    
+                    historyDiv.appendChild(div);
+                });
+            }
+
+            async speakTranslation() {
+                const outputText = document.getElementById('output-text').textContent;
+                
+                if (outputText === 'Translation will appear here...') {
+                    this.showError('No translation to speak');
+                    return;
+                }
+                
+                if ('speechSynthesis' in window) {
+                    const utterance = new SpeechSynthesisUtterance(outputText);
+                    const targetLang = document.getElementById('target-language').value;
+                    utterance.lang = targetLang;
+                    speechSynthesis.speak(utterance);
+                } else {
+                    this.showError('Speech synthesis not supported in this browser');
+                }
+            }
+
+            async copyTranslation() {
+                const outputText = document.getElementById('output-text').textContent;
+                
+                if (outputText === 'Translation will appear here...') {
+                    this.showError('No translation to copy');
+                    return;
+                }
+                
+                try {
+                    await navigator.clipboard.writeText(outputText);
+                    // Show temporary feedback
+                    const btn = document.getElementById('copy-btn');
+                    const originalText = btn.textContent;
+                    btn.textContent = '✓ Copied';
+                    setTimeout(() => {
+                        btn.textContent = originalText;
+                    }, 1000);
+                } catch (error) {
+                    this.showError('Failed to copy to clipboard');
+                }
+            }
+
+            async shareTranslation() {
+                const sourceText = document.getElementById('source-text').value;
+                const outputText = document.getElementById('output-text').textContent;
+                
+                if (!sourceText || outputText === 'Translation will appear here...') {
+                    this.showError('No translation to share');
+                    return;
+                }
+                
+                const shareText = `Translation:\n\nSource: ${sourceText}\nTranslation: ${outputText}`;
+                
+                if (navigator.share) {
+                    try {
+                        await navigator.share({
+                            title: 'Translation',
+                            text: shareText
+                        });
+                    } catch (error) {
+                        console.log('Share canceled');
+                    }
+                } else {
+                    // Fallback: copy to clipboard
+                    await navigator.clipboard.writeText(shareText);
+                    alert('Translation copied to clipboard!');
+                }
+            }
+
+            updateStatus() {
+                if (this.session) {
+                    const deviceType = this.session.current_device_type || 'CPU';
+                    document.getElementById('device-info').textContent = `Device: ${deviceType}`;
+                }
+            }
+
+            updateProgress(percentage) {
+                document.getElementById('progress-fill').style.width = `${percentage}%`;
+            }
+
+            showLoading(show) {
+                document.getElementById('loading-indicator').style.display = show ? 'block' : 'none';
+                this.updateProgress(show ? 50 : 0);
+            }
+
+            showError(message) {
+                alert(message); // In production, use a proper notification system
+            }
+        }
+
+        // Initialize the demo
+        const demo = new MultilingualTranslationDemo();
+        
+        // Make demo available globally for debugging
+        window.demo = demo;
+    </script>
+</body>
+</html>

@@ -1,0 +1,357 @@
+name: Code Style Automation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # Format and lint checks
+  style-check:
+    name: Code Style Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-style-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-style-
+    
+    - name: Check Rust formatting
+      run: cargo fmt --all -- --check
+    
+    - name: Run clippy lints
+      run: |
+        cargo clippy --all-targets --all-features -- \
+          -D warnings \
+          -D clippy::all \
+          -D clippy::pedantic \
+          -A clippy::module_name_repetitions \
+          -A clippy::must_use_candidate \
+          -A clippy::missing_errors_doc \
+          -A clippy::missing_panics_doc
+    
+    - name: Check for TODO/FIXME comments in new code
+      if: github.event_name == 'pull_request'
+      run: |
+        # Get changed files
+        git fetch origin ${{ github.base_ref }}
+        CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- '*.rs')
+        
+        if [ ! -z "$CHANGED_FILES" ]; then
+          echo "Checking for TODO/FIXME in changed files:"
+          echo "$CHANGED_FILES"
+          
+          # Check for TODO/FIXME in changed lines only
+          TODO_COUNT=$(git diff origin/${{ github.base_ref }}...HEAD -- '*.rs' | grep '^+' | grep -i 'todo\|fixme' | wc -l)
+          
+          if [ $TODO_COUNT -gt 0 ]; then
+            echo "⚠️ Found $TODO_COUNT new TODO/FIXME comments in this PR:"
+            git diff origin/${{ github.base_ref }}...HEAD -- '*.rs' | grep '^+' | grep -i 'todo\|fixme' || true
+            echo "Consider addressing these before merging."
+          else
+            echo "✅ No new TODO/FIXME comments found"
+          fi
+        fi
+    
+    - name: Check code complexity
+      run: |
+        # Install cargo-complexity if not already installed
+        if ! command -v cargo-complexity &> /dev/null; then
+          cargo install cargo-complexity
+        fi
+        
+        # Check complexity (non-blocking, informational)
+        cargo complexity --threshold 10 || echo "Some functions have high complexity"
+    
+    - name: Check dependencies for issues
+      run: |
+        # Install cargo-machete to find unused dependencies
+        cargo install cargo-machete
+        
+        # Check for unused dependencies
+        cargo machete || echo "Some unused dependencies found"
+        
+        # Install cargo-outdated to check for outdated dependencies
+        cargo install cargo-outdated
+        
+        # Check for outdated dependencies (informational)
+        cargo outdated || echo "Some dependencies may be outdated"
+
+  # Auto-format code (only on main branch push)
+  auto-format:
+    name: Auto Format Code
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt
+    
+    - name: Format code
+      run: cargo fmt --all
+    
+    - name: Check for changes
+      id: verify-changed-files
+      run: |
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Commit formatted code
+      if: steps.verify-changed-files.outputs.changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        git commit -m "Auto-format code [skip ci]"
+        git push
+
+  # Automatically fix clippy issues (only for trivial cases)
+  auto-fix-clippy:
+    name: Auto Fix Clippy Issues
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        ref: ${{ github.head_ref }}
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+    
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-clippy-fix-${{ hashFiles('**/Cargo.lock') }}
+    
+    - name: Apply clippy suggestions
+      run: |
+        # Only apply safe, automatic fixes
+        cargo clippy --fix --allow-dirty --allow-staged -- \
+          -A clippy::needless_return \
+          -A clippy::redundant_field_names \
+          -A clippy::single_match \
+          -A clippy::match_bool
+    
+    - name: Format after clippy fixes
+      run: cargo fmt --all
+    
+    - name: Check for changes
+      id: verify-changed-files
+      run: |
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+          echo "The following files were modified:"
+          git status --porcelain
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Commit clippy fixes
+      if: steps.verify-changed-files.outputs.changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        git commit -m "Auto-fix clippy suggestions"
+        git push
+
+  # Import sorting and organization
+  import-organization:
+    name: Organize Imports
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        ref: ${{ github.head_ref }}
+    
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@nightly
+    
+    - name: Install cargo-sort
+      run: cargo install cargo-sort
+    
+    - name: Sort imports and dependencies
+      run: |
+        # Sort Cargo.toml dependencies
+        find . -name "Cargo.toml" -exec cargo-sort {} \;
+        
+        # Format imports (using rustfmt with unstable features)
+        cargo +nightly fmt --all -- --config imports_granularity=Crate,group_imports=StdExternalCrate
+    
+    - name: Check for changes
+      id: verify-changed-files
+      run: |
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Commit import organization
+      if: steps.verify-changed-files.outputs.changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        git commit -m "Organize imports and dependencies"
+        git push
+
+  # Documentation formatting
+  doc-formatting:
+    name: Format Documentation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.GITHUB_TOKEN }}
+        ref: ${{ github.head_ref }}
+    
+    - name: Install documentation tools
+      run: |
+        # Install markdownlint
+        npm install -g markdownlint-cli2
+        
+        # Install prettier for JSON/YAML formatting
+        npm install -g prettier
+    
+    - name: Format Markdown files
+      run: |
+        # Fix common markdown issues
+        find . -name "*.md" -not -path "./target/*" -not -path "./.git/*" | \
+        xargs markdownlint-cli2-fix || true
+    
+    - name: Format JSON and YAML files
+      run: |
+        # Format JSON files
+        find . -name "*.json" -not -path "./target/*" -not -path "./.git/*" | \
+        xargs prettier --write --tab-width 2
+        
+        # Format YAML files
+        find . -name "*.yml" -o -name "*.yaml" -not -path "./target/*" -not -path "./.git/*" | \
+        xargs prettier --write --tab-width 2
+    
+    - name: Check for changes
+      id: verify-changed-files
+      run: |
+        if [ -n "$(git status --porcelain)" ]; then
+          echo "changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "changed=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Commit documentation formatting
+      if: steps.verify-changed-files.outputs.changed == 'true'
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add .
+        git commit -m "Format documentation files"
+        git push
+
+  # Generate style report
+  style-report:
+    name: Generate Style Report
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [style-check, auto-format, auto-fix-clippy, import-organization, doc-formatting]
+    
+    steps:
+    - name: Generate style summary
+      run: |
+        echo "## 🎨 Code Style Report" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [[ "${{ needs.style-check.result }}" == "success" ]]; then
+          echo "✅ **Style Check**: Passed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Style Check**: Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [[ "${{ needs.auto-format.result }}" == "success" ]]; then
+          echo "✅ **Auto Format**: Applied" >> $GITHUB_STEP_SUMMARY
+        elif [[ "${{ needs.auto-format.result }}" == "skipped" ]]; then
+          echo "⏭️ **Auto Format**: Skipped (not main branch)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Auto Format**: Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [[ "${{ needs.auto-fix-clippy.result }}" == "success" ]]; then
+          echo "✅ **Clippy Auto-fix**: Applied" >> $GITHUB_STEP_SUMMARY
+        elif [[ "${{ needs.auto-fix-clippy.result }}" == "skipped" ]]; then
+          echo "⏭️ **Clippy Auto-fix**: Skipped (not PR)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Clippy Auto-fix**: Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [[ "${{ needs.import-organization.result }}" == "success" ]]; then
+          echo "✅ **Import Organization**: Applied" >> $GITHUB_STEP_SUMMARY
+        elif [[ "${{ needs.import-organization.result }}" == "skipped" ]]; then
+          echo "⏭️ **Import Organization**: Skipped (not PR)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Import Organization**: Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [[ "${{ needs.doc-formatting.result }}" == "success" ]]; then
+          echo "✅ **Documentation Formatting**: Applied" >> $GITHUB_STEP_SUMMARY
+        elif [[ "${{ needs.doc-formatting.result }}" == "skipped" ]]; then
+          echo "⏭️ **Documentation Formatting**: Skipped (not PR)" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ **Documentation Formatting**: Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📋 Style Guidelines" >> $GITHUB_STEP_SUMMARY
+        echo "- Follow Rust standard formatting (`cargo fmt`)" >> $GITHUB_STEP_SUMMARY
+        echo "- Address clippy warnings and suggestions" >> $GITHUB_STEP_SUMMARY
+        echo "- Organize imports by std, external crates, then local modules" >> $GITHUB_STEP_SUMMARY
+        echo "- Keep functions under 50 lines when possible" >> $GITHUB_STEP_SUMMARY
+        echo "- Document public APIs with doc comments" >> $GITHUB_STEP_SUMMARY
+        echo "- Use descriptive variable and function names" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,554 @@
+# Comprehensive Monitoring and Observability for TrustformeRS Serve
+# Includes Prometheus, Grafana, Jaeger, and custom monitoring resources
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trustformers-monitoring
+  labels:
+    name: trustformers-monitoring
+    monitoring: enabled
+
+---
+# ServiceMonitor for Prometheus
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: trustformers-serve-metrics
+  namespace: trustformers-monitoring
+  labels:
+    app: trustformers-serve
+    release: prometheus
+spec:
+  namespaceSelector:
+    matchNames:
+    - trustformers
+  selector:
+    matchLabels:
+      app: trustformers-serve
+      service: metrics
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics
+    honorLabels: true
+    scrapeTimeout: 10s
+    metricRelabelings:
+    - sourceLabels: [__name__]
+      regex: 'go_.*'
+      action: drop
+    - sourceLabels: [__name__]
+      regex: 'process_.*'
+      action: drop
+
+---
+# Prometheus Rule for alerting
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: trustformers-serve-alerts
+  namespace: trustformers-monitoring
+  labels:
+    app: trustformers-serve
+    prometheus: kube-prometheus
+    role: alert-rules
+spec:
+  groups:
+  - name: trustformers-serve.rules
+    interval: 30s
+    rules:
+    
+    # High-level availability alerts
+    - alert: TrustformersServeDown
+      expr: up{job=~".*trustformers-serve.*"} == 0
+      for: 1m
+      labels:
+        severity: critical
+        service: trustformers-serve
+      annotations:
+        summary: "TrustformeRS Serve instance is down"
+        description: "TrustformeRS Serve instance {{ $labels.instance }} has been down for more than 1 minute."
+        runbook_url: "https://runbooks.example.com/trustformers-serve-down"
+    
+    - alert: TrustformersServeHighErrorRate
+      expr: rate(http_requests_total{job=~".*trustformers-serve.*",status=~"5.."}[5m]) / rate(http_requests_total{job=~".*trustformers-serve.*"}[5m]) > 0.1
+      for: 5m
+      labels:
+        severity: warning
+        service: trustformers-serve
+      annotations:
+        summary: "High error rate in TrustformeRS Serve"
+        description: "TrustformeRS Serve instance {{ $labels.instance }} has error rate above 10% for more than 5 minutes."
+    
+    # Performance alerts
+    - alert: TrustformersServeHighLatency
+      expr: histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=~".*trustformers-serve.*"}[5m])) > 2
+      for: 10m
+      labels:
+        severity: warning
+        service: trustformers-serve
+      annotations:
+        summary: "High latency in TrustformeRS Serve"
+        description: "TrustformeRS Serve 95th percentile latency is above 2 seconds for more than 10 minutes."
+    
+    - alert: TrustformersServeHighCPU
+      expr: rate(process_cpu_seconds_total{job=~".*trustformers-serve.*"}[5m]) * 100 > 80
+      for: 15m
+      labels:
+        severity: warning
+        service: trustformers-serve
+      annotations:
+        summary: "High CPU usage in TrustformeRS Serve"
+        description: "TrustformeRS Serve instance {{ $labels.instance }} CPU usage is above 80% for more than 15 minutes."
+    
+    - alert: TrustformersServeHighMemory
+      expr: process_resident_memory_bytes{job=~".*trustformers-serve.*"} / 1024 / 1024 / 1024 > 6
+      for: 10m
+      labels:
+        severity: warning
+        service: trustformers-serve
+      annotations:
+        summary: "High memory usage in TrustformeRS Serve"
+        description: "TrustformeRS Serve instance {{ $labels.instance }} memory usage is above 6GB for more than 10 minutes."
+    
+    # Business logic alerts
+    - alert: TrustformersServeLowThroughput
+      expr: rate(inference_requests_total{job=~".*trustformers-serve.*"}[5m]) < 10
+      for: 10m
+      labels:
+        severity: warning
+        service: trustformers-serve
+      annotations:
+        summary: "Low inference throughput in TrustformeRS Serve"
+        description: "TrustformeRS Serve inference rate is below 10 requests/second for more than 10 minutes."
+    
+    - alert: TrustformersServeQueueBacklog
+      expr: inference_queue_size{job=~".*trustformers-serve.*"} > 100
+      for: 5m
+      labels:
+        severity: warning
+        service: trustformers-serve
+      annotations:
+        summary: "High queue backlog in TrustformeRS Serve"
+        description: "TrustformeRS Serve inference queue has more than 100 pending requests for more than 5 minutes."
+    
+    # Cache performance alerts
+    - alert: TrustformersServeLowCacheHitRate
+      expr: rate(cache_hits_total{job=~".*trustformers-serve.*"}[5m]) / (rate(cache_hits_total{job=~".*trustformers-serve.*"}[5m]) + rate(cache_misses_total{job=~".*trustformers-serve.*"}[5m])) < 0.7
+      for: 15m
+      labels:
+        severity: warning
+        service: trustformers-serve
+      annotations:
+        summary: "Low cache hit rate in TrustformeRS Serve"
+        description: "TrustformeRS Serve cache hit rate is below 70% for more than 15 minutes."
+
+---
+# Grafana Dashboard ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trustformers-serve-dashboard
+  namespace: trustformers-monitoring
+  labels:
+    grafana_dashboard: "1"
+    app: trustformers-serve
+data:
+  trustformers-serve-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "TrustformeRS Serve Dashboard",
+        "tags": ["trustformers", "inference", "ml"],
+        "style": "dark",
+        "timezone": "browser",
+        "panels": [
+          {
+            "id": 1,
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{job=~\".*trustformers-serve.*\"}[5m])",
+                "legendFormat": "{{instance}} - {{method}} {{status}}"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Requests/sec"
+              }
+            ]
+          },
+          {
+            "id": 2,
+            "title": "Response Time",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=~\".*trustformers-serve.*\"}[5m]))",
+                "legendFormat": "95th percentile"
+              },
+              {
+                "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=~\".*trustformers-serve.*\"}[5m]))",
+                "legendFormat": "50th percentile"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Seconds"
+              }
+            ]
+          },
+          {
+            "id": 3,
+            "title": "Error Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{job=~\".*trustformers-serve.*\",status=~\"5..\"}[5m])",
+                "legendFormat": "5xx errors"
+              },
+              {
+                "expr": "rate(http_requests_total{job=~\".*trustformers-serve.*\",status=~\"4..\"}[5m])",
+                "legendFormat": "4xx errors"
+              }
+            ],
+            "yAxes": [
+              {
+                "label": "Errors/sec"
+              }
+            ]
+          },
+          {
+            "id": 4,
+            "title": "Resource Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(process_cpu_seconds_total{job=~\".*trustformers-serve.*\"}[5m]) * 100",
+                "legendFormat": "CPU %"
+              },
+              {
+                "expr": "process_resident_memory_bytes{job=~\".*trustformers-serve.*\"} / 1024 / 1024 / 1024",
+                "legendFormat": "Memory GB"
+              }
+            ]
+          },
+          {
+            "id": 5,
+            "title": "Inference Metrics",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(inference_requests_total{job=~\".*trustformers-serve.*\"}[5m])",
+                "legendFormat": "Inference rate"
+              },
+              {
+                "expr": "inference_queue_size{job=~\".*trustformers-serve.*\"}",
+                "legendFormat": "Queue size"
+              }
+            ]
+          },
+          {
+            "id": 6,
+            "title": "Cache Performance",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(cache_hits_total{job=~\".*trustformers-serve.*\"}[5m]) / (rate(cache_hits_total{job=~\".*trustformers-serve.*\"}[5m]) + rate(cache_misses_total{job=~\".*trustformers-serve.*\"}[5m]))",
+                "legendFormat": "Hit rate"
+              },
+              {
+                "expr": "cache_size_bytes{job=~\".*trustformers-serve.*\"} / 1024 / 1024",
+                "legendFormat": "Cache size MB"
+              }
+            ]
+          }
+        ],
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "30s"
+      }
+    }
+
+---
+# Jaeger configuration for distributed tracing
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jaeger-config
+  namespace: trustformers-monitoring
+  labels:
+    app: jaeger
+data:
+  jaeger.yaml: |
+    receivers:
+      jaeger:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:14250
+          thrift_http:
+            endpoint: 0.0.0.0:14268
+          thrift_compact:
+            endpoint: 0.0.0.0:6831
+          thrift_binary:
+            endpoint: 0.0.0.0:6832
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+      memory_limiter:
+        limit_mib: 512
+    
+    exporters:
+      jaeger:
+        endpoint: jaeger-collector:14250
+        tls:
+          insecure: true
+    
+    service:
+      pipelines:
+        traces:
+          receivers: [jaeger, otlp]
+          processors: [memory_limiter, batch]
+          exporters: [jaeger]
+
+---
+# Custom Resource for ML-specific monitoring
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: inferencemonitors.monitoring.trustformers.ai
+spec:
+  group: monitoring.trustformers.ai
+  versions:
+  - name: v1
+    served: true
+    storage: true
+    schema:
+      openAPIV3Schema:
+        type: object
+        properties:
+          spec:
+            type: object
+            properties:
+              modelName:
+                type: string
+              thresholds:
+                type: object
+                properties:
+                  latencyMs:
+                    type: integer
+                  errorRate:
+                    type: number
+                  throughput:
+                    type: integer
+              alerting:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  webhookUrl:
+                    type: string
+          status:
+            type: object
+            properties:
+              lastCheck:
+                type: string
+              healthy:
+                type: boolean
+              metrics:
+                type: object
+  scope: Namespaced
+  names:
+    plural: inferencemonitors
+    singular: inferencemonitor
+    kind: InferenceMonitor
+
+---
+# InferenceMonitor instance
+apiVersion: monitoring.trustformers.ai/v1
+kind: InferenceMonitor
+metadata:
+  name: trustformers-serve-monitor
+  namespace: trustformers
+spec:
+  modelName: "trustformers-serve"
+  thresholds:
+    latencyMs: 2000
+    errorRate: 0.05
+    throughput: 100
+  alerting:
+    enabled: true
+    webhookUrl: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+
+---
+# Network Policy for monitoring
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: monitoring-network-policy
+  namespace: trustformers-monitoring
+spec:
+  podSelector:
+    matchLabels:
+      app: prometheus
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: trustformers
+    ports:
+    - protocol: TCP
+      port: 9090
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: trustformers
+    ports:
+    - protocol: TCP
+      port: 9091
+
+---
+# PodMonitor for additional pod metrics
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: trustformers-serve-pods
+  namespace: trustformers-monitoring
+  labels:
+    app: trustformers-serve
+spec:
+  namespaceSelector:
+    matchNames:
+    - trustformers
+  selector:
+    matchLabels:
+      app: trustformers-serve
+  podMetricsEndpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics
+    honorLabels: true
+
+---
+# VirticalPodAutoscaler for intelligent scaling
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: trustformers-serve-vpa
+  namespace: trustformers
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: trustformers-serve-production
+  updatePolicy:
+    updateMode: "Auto"
+  resourcePolicy:
+    containerPolicies:
+    - containerName: trustformers-serve
+      maxAllowed:
+        cpu: 8
+        memory: 16Gi
+      minAllowed:
+        cpu: 1
+        memory: 2Gi
+      controlledResources: ["cpu", "memory"]
+
+---
+# KEDA ScaledObject for advanced autoscaling
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: trustformers-serve-scaler
+  namespace: trustformers
+spec:
+  scaleTargetRef:
+    name: trustformers-serve-production
+  minReplicaCount: 2
+  maxReplicaCount: 50
+  pollingInterval: 30
+  cooldownPeriod: 300
+  triggers:
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.trustformers-monitoring.svc.cluster.local:9090
+      metricName: inference_queue_size
+      threshold: '10'
+      query: avg(inference_queue_size{job=~".*trustformers-serve.*"})
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus.trustformers-monitoring.svc.cluster.local:9090
+      metricName: http_requests_rate
+      threshold: '100'
+      query: sum(rate(http_requests_total{job=~".*trustformers-serve.*"}[2m]))
+
+---
+# Alertmanager configuration for advanced alerting
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+  namespace: trustformers-monitoring
+data:
+  alertmanager.yml: |
+    global:
+      smtp_smarthost: 'localhost:587'
+      smtp_from: 'alertmanager@trustformers.ai'
+    
+    route:
+      group_by: ['alertname', 'cluster', 'service']
+      group_wait: 10s
+      group_interval: 10s
+      repeat_interval: 1h
+      receiver: 'default'
+      routes:
+      - match:
+          severity: critical
+        receiver: 'critical-alerts'
+      - match:
+          service: trustformers-serve
+        receiver: 'ml-team'
+    
+    receivers:
+    - name: 'default'
+      slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        channel: '#alerts'
+        title: 'TrustformeRS Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+    
+    - name: 'critical-alerts'
+      slack_configs:
+      - api_url: 'https://hooks.slack.com/services/YOUR/CRITICAL/WEBHOOK'
+        channel: '#critical'
+        title: 'CRITICAL: TrustformeRS Alert'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}\n{{ .Annotations.description }}{{ end }}'
+      pagerduty_configs:
+      - routing_key: 'YOUR_PAGERDUTY_KEY'
+        description: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+    
+    - name: 'ml-team'
+      email_configs:
+      - to: 'ml-team@trustformers.ai'
+        subject: 'TrustformeRS Serve Alert'
+        body: |
+          {{ range .Alerts }}
+          Alert: {{ .Annotations.summary }}
+          Description: {{ .Annotations.description }}
+          Instance: {{ .Labels.instance }}
+          {{ end }}

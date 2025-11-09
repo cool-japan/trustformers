@@ -1,0 +1,46 @@
+[package]
+name = "trustformers-py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Python bindings for TrustformeRS transformer library"
+categories = ["api-bindings", "science"]
+keywords = ["transformers", "python", "machine-learning", "nlp", "pyo3"]
+
+[lib]
+name = "trustformers"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true, features = ["extension-module", "abi3-py38"] }
+numpy.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rayon.workspace = true
+parking_lot.workspace = true
+lazy_static.workspace = true
+approx.workspace = true
+libc = "0.2"
+num-complex = "0.4"
+
+# SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
+scirs2-core = { workspace = true, features = ["random"] }
+
+# TrustformeRS dependencies
+trustformers-core.workspace = true
+trustformers-models = { workspace = true, features = ["bert", "gpt2", "t5", "llama"] }
+trustformers-tokenizers.workspace = true
+trustformers-optim.workspace = true
+trustformers-training.workspace = true
+trustformers = { workspace = true, features = ["all-models"] }
+
+[build-dependencies]
+pyo3-build-config = "0.27.1"
+
+[features]
+default = ["pyo3/auto-initialize"]

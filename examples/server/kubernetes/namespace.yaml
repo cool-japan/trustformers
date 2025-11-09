@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: trustformers
+  labels:
+    name: trustformers
+    app.kubernetes.io/name: trustformers
+    app.kubernetes.io/part-of: trustformers

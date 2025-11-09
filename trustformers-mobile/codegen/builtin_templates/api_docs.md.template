@@ -1,0 +1,358 @@
+# {{name|title}} API Documentation
+
+{{#if description}}
+{{description}}
+{{/if}}
+
+## Overview
+
+This document provides comprehensive API documentation for the {{name}} {{model_type}} implementation in TrustformeRS.
+
+## Installation
+
+```bash
+# For Rust projects
+cargo add {{name|snake_case}}
+
+# For Python bindings
+pip install {{name|snake_case}}
+```
+
+## Quick Start
+
+### Rust Example
+
+```rust
+use {{name|snake_case}}::{{{name|pascal_case}}, {{name|pascal_case}}Config};
+use trustformers_core::Device;
+
+// Load configuration
+let config = {{name|pascal_case}}Config::default();
+
+// Create model
+let model = {{name|pascal_case}}::new(&config)?;
+model.to(Device::cuda()?)?;
+
+// Forward pass
+let output = model.forward(&input)?;
+```
+
+### Python Example
+
+```python
+import {{name|snake_case}}
+
+# Create model
+model = {{name|snake_case}}.{{name|pascal_case}}(
+    config={{name|snake_case}}.{{name|pascal_case}}Config(),
+    device="cuda"
+)
+
+# Forward pass
+output = model.forward(inputs)
+```
+
+## Configuration
+
+### {{name|pascal_case}}Config
+
+The model configuration class with the following parameters:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+{{#each config_fields}}
+| `{{name}}` | `{{type}}` | `{{default}}` | {{description}} |
+{{/each}}
+
+### Example Configuration
+
+```rust
+let config = {{name|pascal_case}}Config {
+    {{#each config_example_fields}}
+    {{name}}: {{value}},
+    {{/each}}
+    ..Default::default()
+};
+```
+
+## Model Architecture
+
+{{#if architecture_description}}
+{{architecture_description}}
+{{else}}
+The {{name|pascal_case}} model implements a {{model_type}} architecture with the following components:
+
+{{#if model_type == "transformer"}}
+- **Embeddings**: Token, position, and segment embeddings
+- **Encoder/Decoder**: Stack of transformer layers with self-attention
+- **Output Head**: Task-specific output layer
+{{else if model_type == "cnn"}}
+- **Feature Extractor**: Convolutional layers for feature extraction
+- **Pooling**: Global average/max pooling
+- **Classifier**: Fully connected layers for classification
+{{else}}
+- **Input Processing**: Custom input processing layer
+- **Core Network**: Main model architecture
+- **Output Layer**: Task-specific output processing
+{{/if}}
+{{/if}}
+
+## API Reference
+
+### Core Model
+
+#### `{{name|pascal_case}}::new`
+
+Creates a new model instance.
+
+```rust
+pub fn new(config: &{{name|pascal_case}}Config) -> Result<Self>
+```
+
+**Parameters:**
+- `config`: Model configuration
+
+**Returns:**
+- `Result<Self>`: Model instance or error
+
+#### `{{name|pascal_case}}::forward`
+
+Performs forward pass through the model.
+
+```rust
+pub fn forward(&self, {{#each forward_params}}{{name}}: {{type}}{{#unless @last}}, {{/unless}}{{/each}}) -> Result<{{name|pascal_case}}Output>
+```
+
+**Parameters:**
+{{#each forward_params}}
+- `{{name}}`: {{description}}
+{{/each}}
+
+**Returns:**
+- `Result<{{name|pascal_case}}Output>`: Model output
+
+### Model Output
+
+#### `{{name|pascal_case}}Output`
+
+Output structure returned by the model.
+
+```rust
+pub struct {{name|pascal_case}}Output {
+    {{#each output_fields}}
+    pub {{name}}: {{type}},
+    {{/each}}
+}
+```
+
+**Fields:**
+{{#each output_fields}}
+- `{{name}}`: {{description}}
+{{/each}}
+
+### Utility Functions
+
+{{#each utility_functions}}
+#### `{{name}}`
+
+{{description}}
+
+```rust
+pub fn {{name}}({{params}}) -> {{return_type}}
+```
+
+{{#if param_descriptions}}
+**Parameters:**
+{{#each param_descriptions}}
+- `{{name}}`: {{description}}
+{{/each}}
+{{/if}}
+
+**Returns:**
+- `{{return_type}}`: {{return_description}}
+
+{{/each}}
+
+## Advanced Usage
+
+### Custom Forward Pass
+
+```rust
+// Example of custom forward pass with additional processing
+let mut hidden_states = model.embeddings(&input_ids)?;
+
+for layer in &model.layers {
+    hidden_states = layer.forward(&hidden_states, attention_mask)?;
+}
+
+let output = model.output_head(&hidden_states)?;
+```
+
+### Fine-tuning
+
+```rust
+use trustformers_optim::Adam;
+
+// Set model to training mode
+model.train();
+
+// Create optimizer
+let optimizer = Adam::new(model.parameters(), 1e-5)?;
+
+// Training loop
+for batch in dataloader {
+    let output = model.forward(&batch.inputs)?;
+    let loss = loss_fn(&output.logits, &batch.labels)?;
+    
+    loss.backward()?;
+    optimizer.step()?;
+    optimizer.zero_grad()?;
+}
+```
+
+{{#if model_type == "generation"}}
+### Text Generation
+
+```rust
+// Generate text with custom parameters
+let generated = model.generate(
+    &prompt,
+    max_length: 100,
+    temperature: 0.8,
+    top_k: 50,
+    top_p: 0.9,
+)?;
+```
+
+**Generation Parameters:**
+- `max_length`: Maximum sequence length
+- `temperature`: Sampling temperature (higher = more random)
+- `top_k`: Top-k sampling parameter
+- `top_p`: Top-p (nucleus) sampling parameter
+{{/if}}
+
+## Performance Optimization
+
+### Batch Processing
+
+```rust
+// Process multiple samples in parallel
+let batch_size = 32;
+let batched_input = Tensor::stack(&inputs, 0)?;
+let batched_output = model.forward(&batched_input)?;
+```
+
+### Mixed Precision Training
+
+```rust
+// Enable mixed precision for faster training
+model.enable_mixed_precision()?;
+
+// Training with automatic mixed precision
+let output = model.forward_amp(&input)?;
+```
+
+### Model Quantization
+
+```rust
+// Quantize model for deployment
+let quantized_model = model.quantize(
+    QuantizationConfig {
+        bits: 8,
+        symmetric: true,
+    }
+)?;
+```
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Out of Memory**
+   ```rust
+   // Reduce batch size or enable gradient checkpointing
+   model.enable_gradient_checkpointing()?;
+   ```
+
+2. **Slow Inference**
+   ```rust
+   // Enable inference optimizations
+   model.optimize_for_inference()?;
+   model.eval();
+   ```
+
+3. **Numerical Instability**
+   ```rust
+   // Use mixed precision with loss scaling
+   let scaler = GradScaler::new();
+   ```
+
+## Examples
+
+### Complete Training Example
+
+```rust
+use {{name|snake_case}}::{{{name|pascal_case}}, {{name|pascal_case}}Config, DataLoader};
+use trustformers_optim::{Adam, LinearScheduler};
+
+fn train_model() -> Result<()> {
+    // Setup
+    let config = {{name|pascal_case}}Config::from_pretrained("{{name}}-base")?;
+    let model = {{name|pascal_case}}::new(&config)?;
+    model.to(Device::cuda()?)?;
+    
+    // Data
+    let train_loader = DataLoader::new("train.json", batch_size: 32)?;
+    let val_loader = DataLoader::new("val.json", batch_size: 32)?;
+    
+    // Optimizer and scheduler
+    let mut optimizer = Adam::new(model.parameters(), 1e-5)?;
+    let scheduler = LinearScheduler::new(&optimizer, num_steps: 1000)?;
+    
+    // Training loop
+    for epoch in 0..num_epochs {
+        model.train();
+        for batch in &train_loader {
+            let output = model.forward(&batch.inputs)?;
+            let loss = compute_loss(&output, &batch.labels)?;
+            
+            loss.backward()?;
+            optimizer.step()?;
+            scheduler.step()?;
+            optimizer.zero_grad()?;
+        }
+        
+        // Validation
+        model.eval();
+        let val_loss = evaluate(&model, &val_loader)?;
+        println!("Epoch {}: val_loss = {:.4}", epoch, val_loss);
+    }
+    
+    Ok(())
+}
+```
+
+## API Stability
+
+This API follows semantic versioning. Breaking changes will only be introduced in major version updates.
+
+### Deprecated Features
+
+{{#if deprecated_features}}
+The following features are deprecated and will be removed in the next major version:
+
+{{#each deprecated_features}}
+- `{{name}}`: {{reason}} (use `{{alternative}}` instead)
+{{/each}}
+{{/if}}
+
+## See Also
+
+- [Model Architecture Guide](./ARCHITECTURE.md)
+- [Training Guide](./TRAINING.md)
+- [Deployment Guide](./DEPLOYMENT.md)
+- [Migration Guide](./MIGRATION.md)
+
+## License
+
+{{license|default:MIT OR Apache-2.0}}

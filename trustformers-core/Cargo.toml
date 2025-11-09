@@ -1,0 +1,112 @@
+[package]
+name = "trustformers-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core traits and utilities for TrustformeRS"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+semver.workspace = true
+tracing.workspace = true
+log.workspace = true
+# Transitioning from ndarray to SciRS2
+ndarray.workspace = true  # Keep for gradual migration
+num-traits.workspace = true
+num-complex.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+# rayon removed - using scirs2_core::parallel_ops per SciRS2 Core Usage Policy
+rayon.workspace = true  # Re-added for checkpoint conversion parallelization
+half.workspace = true
+bincode.workspace = true
+safetensors.workspace = true
+byteorder.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+regex.workspace = true
+lazy_static.workspace = true
+dashmap.workspace = true
+zstd.workspace = true
+parking_lot.workspace = true
+once_cell.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
+num_cpus.workspace = true
+approx.workspace = true
+tempfile.workspace = true
+
+# SciRS2 dependencies - required for SciRS2 Integration Policy
+scirs2-core = { workspace = true, features = ["random"] }
+
+# Optional backends
+tch = { workspace = true, optional = true }
+candle-core = { workspace = true, optional = true }
+
+# MPI for multi-node communication (optional - only needed for multi-node training)
+# Disable default features to avoid libffi-sys build issues on macOS ARM64
+mpi = { version = "0.8", optional = true, default-features = false }
+
+# Hardware acceleration backends
+vulkano = { workspace = true, optional = true }
+vulkano-shaders = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+metal = { version = "0.32", optional = true }
+mpsgraph = { version = "0.2", optional = true }
+objc2 = { version = "0.5", optional = true }
+
+[dev-dependencies]
+rstest.workspace = true
+approx.workspace = true
+pretty_assertions.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+
+[features]
+default = []
+torch = ["dep:tch"]
+candle = ["dep:candle-core"]
+parallel = []
+mpi = ["dep:mpi"]
+cuda = ["dep:cudarc"]
+rocm = []
+intel = []
+llvm = []
+cranelift = []
+vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]
+metal = ["dep:metal", "dep:mpsgraph", "dep:objc2"]
+opencl = []
+xla = []
+tpu = []
+oneapi = []
+riscv = []
+nccl = []
+backtrace = []
+
+[[bench]]
+name = "tensor_operations"
+harness = false
+
+[[bench]]
+name = "hardware_acceleration"
+harness = false
+
+[[bin]]
+name = "naming_checker"
+path = "src/bin/naming_checker.rs"
+
+# Platform-specific dependencies
+# CUDA is only supported on Linux and Windows (not macOS)
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+cudarc = { version = "0.12", optional = true, features = ["nvrtc", "cuda-12060"] }

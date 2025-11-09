@@ -1,0 +1,871 @@
+//! Performance regression testing framework for TrustformeRS-C
+//!
+//! This module provides a comprehensive framework for detecting performance
+//! regressions in the TrustformeRS C API through automated benchmarking
+//! and historical performance tracking.
+
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, VecDeque};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+extern crate trustformers_c;
+use trustformers_c::*;
+
+/// Performance benchmark configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkConfig {
+    /// Name of the benchmark
+    pub name: String,
+    /// Number of iterations to run
+    pub iterations: usize,
+    /// Warmup iterations before measurement
+    pub warmup_iterations: usize,
+    /// Timeout for each benchmark in seconds
+    pub timeout_seconds: u64,
+    /// Minimum number of samples required
+    pub min_samples: usize,
+    /// Maximum allowed coefficient of variation (0.0-1.0)
+    pub max_cv: f64,
+    /// Regression threshold (percentage increase that triggers alert)
+    pub regression_threshold: f64,
+}
+
+impl Default for BenchmarkConfig {
+    fn default() -> Self {
+        Self {
+            name: "default".to_string(),
+            iterations: 100,
+            warmup_iterations: 10,
+            timeout_seconds: 30,
+            min_samples: 10,
+            max_cv: 0.1,                // 10% coefficient of variation
+            regression_threshold: 0.15, // 15% increase triggers regression alert
+        }
+    }
+}
+
+/// Single benchmark measurement
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkMeasurement {
+    /// Duration of the operation
+    pub duration_ns: u64,
+    /// Memory usage during the operation
+    pub memory_bytes: u64,
+    /// CPU usage percentage (if available)
+    pub cpu_usage: f64,
+    /// Timestamp when measurement was taken
+    pub timestamp: u64,
+}
+
+/// Statistical analysis of benchmark results
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchmarkStatistics {
+    /// Number of samples
+    pub count: usize,
+    /// Mean duration in nanoseconds
+    pub mean_ns: f64,
+    /// Median duration in nanoseconds
+    pub median_ns: f64,
+    /// Standard deviation in nanoseconds
+    pub std_dev_ns: f64,
+    /// Coefficient of variation (std_dev / mean)
+    pub coefficient_of_variation: f64,
+    /// Minimum duration in nanoseconds
+    pub min_ns: u64,
+    /// Maximum duration in nanoseconds
+    pub max_ns: u64,
+    /// 95th percentile
+    pub p95_ns: u64,
+    /// 99th percentile
+    pub p99_ns: u64,
+}
+
+impl BenchmarkStatistics {
+    pub fn from_measurements(measurements: &[BenchmarkMeasurement]) -> Self {
+        if measurements.is_empty() {
+            return Self::default();
+        }
+
+        let durations: Vec<u64> = measurements.iter().map(|m| m.duration_ns).collect();
+        let mut sorted_durations = durations.clone();
+        sorted_durations.sort_unstable();
+
+        let count = durations.len();
+        let mean = durations.iter().sum::<u64>() as f64 / count as f64;
+        let median = if count % 2 == 0 {
+            (sorted_durations[count / 2 - 1] + sorted_durations[count / 2]) as f64 / 2.0
+        } else {
+            sorted_durations[count / 2] as f64
+        };
+
+        let variance =
+            durations.iter().map(|&d| (d as f64 - mean).powi(2)).sum::<f64>() / count as f64;
+        let std_dev = variance.sqrt();
+        let cv = if mean > 0.0 { std_dev / mean } else { 0.0 };
+
+        let p95_index = ((count as f64 * 0.95) as usize).min(count - 1);
+        let p99_index = ((count as f64 * 0.99) as usize).min(count - 1);
+
+        Self {
+            count,
+            mean_ns: mean,
+            median_ns: median,
+            std_dev_ns: std_dev,
+            coefficient_of_variation: cv,
+            min_ns: sorted_durations[0],
+            max_ns: sorted_durations[count - 1],
+            p95_ns: sorted_durations[p95_index],
+            p99_ns: sorted_durations[p99_index],
+        }
+    }
+}
+
+impl Default for BenchmarkStatistics {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            mean_ns: 0.0,
+            median_ns: 0.0,
+            std_dev_ns: 0.0,
+            coefficient_of_variation: 0.0,
+            min_ns: 0,
+            max_ns: 0,
+            p95_ns: 0,
+            p99_ns: 0,
+        }
+    }
+}
+
+/// Performance regression detection result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegressionDetectionResult {
+    /// Whether a regression was detected
+    pub has_regression: bool,
+    /// Current performance statistics
+    pub current_stats: BenchmarkStatistics,
+    /// Baseline performance statistics for comparison
+    pub baseline_stats: Option<BenchmarkStatistics>,
+    /// Percentage change from baseline
+    pub percentage_change: f64,
+    /// Detailed analysis
+    pub analysis: String,
+    /// Severity level (0=none, 1=minor, 2=moderate, 3=severe)
+    pub severity: u8,
+}
+
+/// Historical performance data
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceHistory {
+    /// Benchmark name
+    pub benchmark_name: String,
+    /// Historical measurements (limited to last N)
+    pub measurements: VecDeque<BenchmarkMeasurement>,
+    /// Historical statistics
+    pub statistics_history: VecDeque<BenchmarkStatistics>,
+    /// Maximum number of measurements to keep
+    pub max_history_size: usize,
+}
+
+impl PerformanceHistory {
+    pub fn new(benchmark_name: String, max_history_size: usize) -> Self {
+        Self {
+            benchmark_name,
+            measurements: VecDeque::new(),
+            statistics_history: VecDeque::new(),
+            max_history_size,
+        }
+    }
+
+    pub fn add_measurement(&mut self, measurement: BenchmarkMeasurement) {
+        self.measurements.push_back(measurement);
+        if self.measurements.len() > self.max_history_size {
+            self.measurements.pop_front();
+        }
+    }
+
+    pub fn add_statistics(&mut self, stats: BenchmarkStatistics) {
+        self.statistics_history.push_back(stats);
+        if self.statistics_history.len() > self.max_history_size {
+            self.statistics_history.pop_front();
+        }
+    }
+
+    pub fn get_baseline_stats(&self) -> Option<BenchmarkStatistics> {
+        // Use median of last 10 measurements as baseline
+        let recent_count = 10.min(self.statistics_history.len());
+        if recent_count < 3 {
+            return None;
+        }
+
+        let recent_means: Vec<f64> = self
+            .statistics_history
+            .iter()
+            .rev()
+            .take(recent_count)
+            .map(|s| s.mean_ns)
+            .collect();
+
+        let mut sorted_means = recent_means.clone();
+        sorted_means.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let baseline_mean = if sorted_means.len() % 2 == 0 {
+            (sorted_means[sorted_means.len() / 2 - 1] + sorted_means[sorted_means.len() / 2]) / 2.0
+        } else {
+            sorted_means[sorted_means.len() / 2]
+        };
+
+        // Create a synthetic baseline with the median mean
+        Some(BenchmarkStatistics {
+            count: recent_count,
+            mean_ns: baseline_mean,
+            median_ns: baseline_mean,
+            std_dev_ns: 0.0,
+            coefficient_of_variation: 0.0,
+            min_ns: baseline_mean as u64,
+            max_ns: baseline_mean as u64,
+            p95_ns: baseline_mean as u64,
+            p99_ns: baseline_mean as u64,
+        })
+    }
+}
+
+/// Performance regression testing framework
+pub struct PerformanceRegressionTester {
+    /// Historical performance data
+    history: Arc<Mutex<HashMap<String, PerformanceHistory>>>,
+    /// Base directory for storing performance data
+    data_dir: PathBuf,
+    /// Default benchmark configuration
+    default_config: BenchmarkConfig,
+}
+
+impl PerformanceRegressionTester {
+    pub fn new<P: AsRef<Path>>(data_dir: P) -> Self {
+        let data_dir = data_dir.as_ref().to_path_buf();
+        fs::create_dir_all(&data_dir).unwrap_or_default();
+
+        Self {
+            history: Arc::new(Mutex::new(HashMap::new())),
+            data_dir,
+            default_config: BenchmarkConfig::default(),
+        }
+    }
+
+    /// Load historical performance data from disk
+    pub fn load_history(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let history_file = self.data_dir.join("performance_history.json");
+        if history_file.exists() {
+            let data = fs::read_to_string(history_file)?;
+            let loaded_history: HashMap<String, PerformanceHistory> = serde_json::from_str(&data)?;
+
+            let mut history = self.history.lock().unwrap();
+            *history = loaded_history;
+        }
+        Ok(())
+    }
+
+    /// Save historical performance data to disk
+    pub fn save_history(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let history_file = self.data_dir.join("performance_history.json");
+        let history = self.history.lock().unwrap();
+        let data = serde_json::to_string_pretty(&*history)?;
+        fs::write(history_file, data)?;
+        Ok(())
+    }
+
+    /// Run a performance benchmark
+    pub fn run_benchmark<F>(
+        &self,
+        name: &str,
+        config: Option<BenchmarkConfig>,
+        mut benchmark_fn: F,
+    ) -> Result<BenchmarkStatistics, Box<dyn std::error::Error>>
+    where
+        F: FnMut() -> Result<(), Box<dyn std::error::Error>>,
+    {
+        let config = config.unwrap_or_else(|| self.default_config.clone());
+        let mut measurements = Vec::new();
+
+        // Warmup phase
+        for _ in 0..config.warmup_iterations {
+            benchmark_fn()?;
+        }
+
+        // Measurement phase
+        for i in 0..config.iterations {
+            let start_time = Instant::now();
+
+            // Get initial memory usage
+            let mut memory_usage = TrustformersMemoryUsage {
+                total_memory_bytes: 0,
+                peak_memory_bytes: 0,
+                allocated_models: 0,
+                allocated_tokenizers: 0,
+                allocated_pipelines: 0,
+                allocated_tensors: 0,
+            };
+            trustformers_get_memory_usage(&mut memory_usage);
+            let initial_memory = memory_usage.total_memory_bytes;
+
+            // Run the benchmark
+            benchmark_fn()?;
+
+            let duration = start_time.elapsed();
+
+            // Get final memory usage
+            trustformers_get_memory_usage(&mut memory_usage);
+            let final_memory = memory_usage.total_memory_bytes;
+
+            let measurement = BenchmarkMeasurement {
+                duration_ns: duration.as_nanos() as u64,
+                memory_bytes: final_memory.saturating_sub(initial_memory),
+                cpu_usage: measure_cpu_usage().unwrap_or(0.0),
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs(),
+            };
+
+            measurements.push(measurement);
+
+            // Check timeout
+            if start_time.elapsed().as_secs() > config.timeout_seconds {
+                break;
+            }
+
+            // Early exit if we have enough stable measurements
+            if measurements.len() >= config.min_samples {
+                let stats = BenchmarkStatistics::from_measurements(&measurements);
+                if stats.coefficient_of_variation <= config.max_cv {
+                    break;
+                }
+            }
+        }
+
+        if measurements.len() < config.min_samples {
+            return Err(format!(
+                "Insufficient measurements: {} < {}",
+                measurements.len(),
+                config.min_samples
+            )
+            .into());
+        }
+
+        let stats = BenchmarkStatistics::from_measurements(&measurements);
+
+        // Store measurements in history
+        {
+            let mut history = self.history.lock().unwrap();
+            let entry = history
+                .entry(name.to_string())
+                .or_insert_with(|| PerformanceHistory::new(name.to_string(), 1000));
+
+            for measurement in measurements {
+                entry.add_measurement(measurement);
+            }
+            entry.add_statistics(stats.clone());
+        }
+
+        Ok(stats)
+    }
+
+    /// Detect performance regressions
+    pub fn detect_regression(
+        &self,
+        benchmark_name: &str,
+        current_stats: &BenchmarkStatistics,
+        threshold: Option<f64>,
+    ) -> RegressionDetectionResult {
+        let threshold = threshold.unwrap_or(self.default_config.regression_threshold);
+
+        let history = self.history.lock().unwrap();
+        let baseline_stats = history.get(benchmark_name).and_then(|h| h.get_baseline_stats());
+
+        if let Some(baseline) = &baseline_stats {
+            let percentage_change = (current_stats.mean_ns - baseline.mean_ns) / baseline.mean_ns;
+            let has_regression = percentage_change > threshold;
+
+            let severity = if percentage_change > threshold * 3.0 {
+                3 // Severe
+            } else if percentage_change > threshold * 2.0 {
+                2 // Moderate
+            } else if percentage_change > threshold {
+                1 // Minor
+            } else {
+                0 // None
+            };
+
+            let analysis = if has_regression {
+                format!(
+                    "Performance regression detected: {:.2}% increase in execution time. \
+                     Current mean: {:.2}ms, Baseline mean: {:.2}ms",
+                    percentage_change * 100.0,
+                    current_stats.mean_ns / 1_000_000.0,
+                    baseline.mean_ns / 1_000_000.0
+                )
+            } else {
+                format!(
+                    "No significant regression detected. \
+                     Current mean: {:.2}ms, Baseline mean: {:.2}ms ({:+.2}%)",
+                    current_stats.mean_ns / 1_000_000.0,
+                    baseline.mean_ns / 1_000_000.0,
+                    percentage_change * 100.0
+                )
+            };
+
+            RegressionDetectionResult {
+                has_regression,
+                current_stats: current_stats.clone(),
+                baseline_stats: Some(baseline.clone()),
+                percentage_change: percentage_change * 100.0,
+                analysis,
+                severity,
+            }
+        } else {
+            RegressionDetectionResult {
+                has_regression: false,
+                current_stats: current_stats.clone(),
+                baseline_stats: None,
+                percentage_change: 0.0,
+                analysis: "No baseline data available for comparison".to_string(),
+                severity: 0,
+            }
+        }
+    }
+
+    /// Run a comprehensive benchmark suite
+    pub fn run_benchmark_suite(
+        &self,
+    ) -> Result<Vec<RegressionDetectionResult>, Box<dyn std::error::Error>> {
+        let mut results = Vec::new();
+
+        // Initialize TrustformeRS for testing
+        let init_result = trustformers_init();
+        if init_result != TrustformersError::Success {
+            return Err("Failed to initialize TrustformeRS".into());
+        }
+
+        // Benchmark 1: API Initialization
+        let init_stats = self.run_benchmark("api_initialization", None, || {
+            let cleanup_result = trustformers_cleanup();
+            if cleanup_result != TrustformersError::Success {
+                return Err("Cleanup failed".into());
+            }
+            let init_result = trustformers_init();
+            if init_result != TrustformersError::Success {
+                return Err("Init failed".into());
+            }
+            Ok(())
+        })?;
+
+        let init_regression = self.detect_regression("api_initialization", &init_stats, None);
+        results.push(init_regression);
+
+        // Benchmark 2: Memory Usage Tracking
+        let memory_stats = self.run_benchmark("memory_usage_tracking", None, || {
+            let mut usage = TrustformersMemoryUsage {
+                total_memory_bytes: 0,
+                peak_memory_bytes: 0,
+                allocated_models: 0,
+                allocated_tokenizers: 0,
+                allocated_pipelines: 0,
+                allocated_tensors: 0,
+            };
+
+            for _ in 0..100 {
+                let result = trustformers_get_memory_usage(&mut usage);
+                if result != TrustformersError::Success {
+                    return Err("Memory usage call failed".into());
+                }
+            }
+            Ok(())
+        })?;
+
+        let memory_regression =
+            self.detect_regression("memory_usage_tracking", &memory_stats, None);
+        results.push(memory_regression);
+
+        // Benchmark 3: Performance Metrics
+        let perf_stats = self.run_benchmark("performance_metrics", None, || {
+            let mut metrics = TrustformersPerformanceMetrics::default();
+
+            for _ in 0..50 {
+                let result = trustformers_get_performance_metrics(&mut metrics);
+                if result != TrustformersError::Success {
+                    return Err("Performance metrics call failed".into());
+                }
+                trustformers_performance_metrics_free(&mut metrics);
+            }
+            Ok(())
+        })?;
+
+        let perf_regression = self.detect_regression("performance_metrics", &perf_stats, None);
+        results.push(perf_regression);
+
+        // Benchmark 4: Feature Detection
+        let feature_stats = self.run_benchmark("feature_detection", None, || {
+            let features = ["tokenizers", "models", "pipelines", "gpu", "debug", "wasm"];
+            for feature in &features {
+                let feature_cstr = std::ffi::CString::new(*feature).unwrap();
+                trustformers_has_feature(feature_cstr.as_ptr());
+            }
+            Ok(())
+        })?;
+
+        let feature_regression = self.detect_regression("feature_detection", &feature_stats, None);
+        results.push(feature_regression);
+
+        // Benchmark 5: Platform Information
+        let platform_stats = self.run_benchmark("platform_information", None, || {
+            for _ in 0..20 {
+                let platform_info = trustformers_get_platform_info();
+                if !platform_info.is_null() {
+                    trustformers_free_platform_info(platform_info as *mut _);
+                }
+            }
+            Ok(())
+        })?;
+
+        let platform_regression =
+            self.detect_regression("platform_information", &platform_stats, None);
+        results.push(platform_regression);
+
+        // Cleanup
+        let cleanup_result = trustformers_cleanup();
+        if cleanup_result != TrustformersError::Success {
+            return Err("Final cleanup failed".into());
+        }
+
+        Ok(results)
+    }
+
+    /// Generate a performance report
+    pub fn generate_report(&self, results: &[RegressionDetectionResult]) -> String {
+        let mut report = String::new();
+
+        report.push_str("# TrustformeRS Performance Regression Report\n\n");
+        report.push_str(&format!(
+            "Generated: {}\n\n",
+            chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+        ));
+
+        let total_regressions = results.iter().filter(|r| r.has_regression).count();
+        let severe_regressions = results.iter().filter(|r| r.severity >= 3).count();
+        let moderate_regressions = results.iter().filter(|r| r.severity == 2).count();
+        let minor_regressions = results.iter().filter(|r| r.severity == 1).count();
+
+        report.push_str("## Summary\n\n");
+        report.push_str(&format!("- Total benchmarks: {}\n", results.len()));
+        report.push_str(&format!("- Regressions detected: {}\n", total_regressions));
+        report.push_str(&format!("  - Severe: {}\n", severe_regressions));
+        report.push_str(&format!("  - Moderate: {}\n", moderate_regressions));
+        report.push_str(&format!("  - Minor: {}\n", minor_regressions));
+        report.push_str("\n");
+
+        report.push_str("## Detailed Results\n\n");
+
+        for (i, result) in results.iter().enumerate() {
+            let status = if result.has_regression {
+                match result.severity {
+                    3 => "🔴 SEVERE REGRESSION",
+                    2 => "🟠 MODERATE REGRESSION",
+                    1 => "🟡 MINOR REGRESSION",
+                    _ => "❓ UNKNOWN",
+                }
+            } else {
+                "✅ PASS"
+            };
+
+            report.push_str(&format!("### Benchmark {}: {}\n\n", i + 1, status));
+            report.push_str(&format!("**Analysis:** {}\n\n", result.analysis));
+
+            report.push_str("**Current Performance:**\n");
+            report.push_str(&format!(
+                "- Mean: {:.2}ms\n",
+                result.current_stats.mean_ns / 1_000_000.0
+            ));
+            report.push_str(&format!(
+                "- Median: {:.2}ms\n",
+                result.current_stats.median_ns / 1_000_000.0
+            ));
+            report.push_str(&format!(
+                "- P95: {:.2}ms\n",
+                result.current_stats.p95_ns as f64 / 1_000_000.0
+            ));
+            report.push_str(&format!(
+                "- P99: {:.2}ms\n",
+                result.current_stats.p99_ns as f64 / 1_000_000.0
+            ));
+            report.push_str(&format!(
+                "- CV: {:.3}\n",
+                result.current_stats.coefficient_of_variation
+            ));
+
+            if let Some(baseline) = &result.baseline_stats {
+                report.push_str("\n**Baseline Performance:**\n");
+                report.push_str(&format!(
+                    "- Mean: {:.2}ms\n",
+                    baseline.mean_ns / 1_000_000.0
+                ));
+                report.push_str(&format!("- Change: {:+.2}%\n", result.percentage_change));
+            }
+
+            report.push_str("\n---\n\n");
+        }
+
+        report
+    }
+}
+
+/// Measure current CPU usage as a percentage
+fn measure_cpu_usage() -> Result<f64, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::fs;
+        use std::thread;
+        use std::time::Duration;
+
+        // Read /proc/stat to get CPU usage on Linux/Unix
+        let stat1 = fs::read_to_string("/proc/stat")?;
+        let cpu_line1 = stat1.lines().next().ok_or("No CPU line found")?;
+        let fields1: Vec<u64> = cpu_line1
+            .split_whitespace()
+            .skip(1) // Skip "cpu" label
+            .take(7) // user, nice, system, idle, iowait, irq, softirq
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
+
+        // Wait a short time for measurement
+        thread::sleep(Duration::from_millis(100));
+
+        let stat2 = fs::read_to_string("/proc/stat")?;
+        let cpu_line2 = stat2.lines().next().ok_or("No CPU line found")?;
+        let fields2: Vec<u64> = cpu_line2
+            .split_whitespace()
+            .skip(1)
+            .take(7)
+            .map(|s| s.parse().unwrap_or(0))
+            .collect();
+
+        if fields1.len() >= 4 && fields2.len() >= 4 {
+            let idle1 = fields1[3];
+            let idle2 = fields2[3];
+            let total1: u64 = fields1.iter().sum();
+            let total2: u64 = fields2.iter().sum();
+
+            let total_diff = total2.saturating_sub(total1) as f64;
+            let idle_diff = idle2.saturating_sub(idle1) as f64;
+
+            if total_diff > 0.0 {
+                let cpu_usage = ((total_diff - idle_diff) / total_diff) * 100.0;
+                return Ok(cpu_usage.max(0.0).min(100.0));
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, we could use WMI or performance counters
+        // For simplicity, we'll use a placeholder that could be expanded
+        // to use proper Windows APIs like GetSystemTimes or PDH (Performance Data Helper)
+        return Ok(0.0);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // On macOS, we could use host_processor_info or sysctl
+        // For now, return 0.0 as a placeholder
+        return Ok(0.0);
+    }
+
+    // Fallback for other platforms
+    Ok(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_benchmark_statistics_calculation() {
+        let measurements = vec![
+            BenchmarkMeasurement {
+                duration_ns: 1000,
+                memory_bytes: 100,
+                cpu_usage: 0.0,
+                timestamp: 0,
+            },
+            BenchmarkMeasurement {
+                duration_ns: 2000,
+                memory_bytes: 200,
+                cpu_usage: 0.0,
+                timestamp: 1,
+            },
+            BenchmarkMeasurement {
+                duration_ns: 1500,
+                memory_bytes: 150,
+                cpu_usage: 0.0,
+                timestamp: 2,
+            },
+        ];
+
+        let stats = BenchmarkStatistics::from_measurements(&measurements);
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.mean_ns, 1500.0);
+        assert_eq!(stats.median_ns, 1500.0);
+        assert_eq!(stats.min_ns, 1000);
+        assert_eq!(stats.max_ns, 2000);
+    }
+
+    #[test]
+    fn test_performance_history() {
+        let mut history = PerformanceHistory::new("test_benchmark".to_string(), 5);
+
+        // Add measurements
+        for i in 0..10 {
+            let measurement = BenchmarkMeasurement {
+                duration_ns: (i + 1) * 1000,
+                memory_bytes: (i + 1) * 100,
+                cpu_usage: 0.0,
+                timestamp: i,
+            };
+            history.add_measurement(measurement);
+        }
+
+        // Should only keep the last 5 measurements
+        assert_eq!(history.measurements.len(), 5);
+        assert_eq!(history.measurements.front().unwrap().duration_ns, 6000);
+        assert_eq!(history.measurements.back().unwrap().duration_ns, 10000);
+    }
+
+    #[test]
+    fn test_regression_detection() {
+        let temp_dir = TempDir::new().unwrap();
+        let tester = PerformanceRegressionTester::new(temp_dir.path());
+
+        // Add baseline data
+        {
+            let mut history = tester.history.lock().unwrap();
+            let mut perf_history = PerformanceHistory::new("test".to_string(), 100);
+
+            // Add baseline statistics (1ms mean)
+            for _ in 0..10 {
+                let stats = BenchmarkStatistics {
+                    count: 100,
+                    mean_ns: 1_000_000.0, // 1ms
+                    median_ns: 1_000_000.0,
+                    std_dev_ns: 100_000.0,
+                    coefficient_of_variation: 0.1,
+                    min_ns: 900_000,
+                    max_ns: 1_100_000,
+                    p95_ns: 1_050_000,
+                    p99_ns: 1_080_000,
+                };
+                perf_history.add_statistics(stats);
+            }
+
+            history.insert("test".to_string(), perf_history);
+        }
+
+        // Test no regression (1.1ms, 10% increase)
+        let current_stats = BenchmarkStatistics {
+            count: 100,
+            mean_ns: 1_100_000.0, // 1.1ms
+            median_ns: 1_100_000.0,
+            std_dev_ns: 110_000.0,
+            coefficient_of_variation: 0.1,
+            min_ns: 990_000,
+            max_ns: 1_210_000,
+            p95_ns: 1_155_000,
+            p99_ns: 1_188_000,
+        };
+
+        let result = tester.detect_regression("test", &current_stats, Some(0.15)); // 15% threshold
+        assert!(!result.has_regression);
+        assert!((result.percentage_change - 10.0).abs() < 0.1);
+
+        // Test regression (1.5ms, 50% increase)
+        let current_stats_regressed = BenchmarkStatistics {
+            count: 100,
+            mean_ns: 1_500_000.0, // 1.5ms
+            median_ns: 1_500_000.0,
+            std_dev_ns: 150_000.0,
+            coefficient_of_variation: 0.1,
+            min_ns: 1_350_000,
+            max_ns: 1_650_000,
+            p95_ns: 1_575_000,
+            p99_ns: 1_620_000,
+        };
+
+        let result_regressed =
+            tester.detect_regression("test", &current_stats_regressed, Some(0.15));
+        assert!(result_regressed.has_regression);
+        assert!((result_regressed.percentage_change - 50.0).abs() < 0.1);
+        assert_eq!(result_regressed.severity, 3); // Severe (50% > 15% * 3)
+    }
+
+    #[test]
+    fn test_benchmark_runner() {
+        let temp_dir = TempDir::new().unwrap();
+        let tester = PerformanceRegressionTester::new(temp_dir.path());
+
+        let config = BenchmarkConfig {
+            name: "test_benchmark".to_string(),
+            iterations: 10,
+            warmup_iterations: 2,
+            timeout_seconds: 5,
+            min_samples: 5,
+            max_cv: 1.0, // Allow high variation for test
+            regression_threshold: 0.5,
+        };
+
+        let mut counter = 0;
+        let stats = tester
+            .run_benchmark("test", Some(config), || {
+                counter += 1;
+                std::thread::sleep(Duration::from_millis(1));
+                Ok(())
+            })
+            .unwrap();
+
+        assert!(stats.count >= 5);
+        assert!(stats.mean_ns > 1_000_000.0); // At least 1ms
+        assert!(stats.coefficient_of_variation >= 0.0);
+    }
+
+    #[test]
+    fn test_history_persistence() {
+        let temp_dir = TempDir::new().unwrap();
+        let history_file = temp_dir.path().join("performance_history.json");
+
+        // Create tester and add some data
+        {
+            let tester = PerformanceRegressionTester::new(temp_dir.path());
+            let stats = BenchmarkStatistics::default();
+
+            {
+                let mut history = tester.history.lock().unwrap();
+                let mut perf_history = PerformanceHistory::new("test".to_string(), 100);
+                perf_history.add_statistics(stats);
+                history.insert("test".to_string(), perf_history);
+            }
+
+            tester.save_history().unwrap();
+        }
+
+        assert!(history_file.exists());
+
+        // Create new tester and load data
+        {
+            let tester = PerformanceRegressionTester::new(temp_dir.path());
+            tester.load_history().unwrap();
+
+            let history = tester.history.lock().unwrap();
+            assert!(history.contains_key("test"));
+        }
+    }
+}

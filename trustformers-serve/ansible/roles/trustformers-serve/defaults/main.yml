@@ -1,0 +1,174 @@
+---
+# Default variables for TrustformeRS Serve role
+
+# Application settings
+app_name: "trustformers-serve"
+app_version: "latest"
+app_user: "trustformers"
+app_group: "trustformers"
+app_home: "/opt/trustformers"
+
+# Deployment configuration
+deployment_method: "docker"  # docker, binary, kubernetes
+container_registry: "public.ecr.aws/trustformers"
+container_image: "trustformers-serve"
+container_tag: "{{ app_version }}"
+
+# Directory structure
+app_config_dir: "{{ app_home }}/config"
+app_data_dir: "{{ app_home }}/data"
+app_log_dir: "/var/log/trustformers"
+app_models_dir: "{{ app_home }}/models"
+app_scripts_dir: "{{ app_home }}/scripts"
+
+# Service configuration
+app_port: 8080
+grpc_port: 9090
+metrics_port: 9091
+app_host: "0.0.0.0"
+
+# Performance settings
+worker_threads: "{{ ansible_processor_vcpus }}"
+max_memory: "2G"
+max_batch_size: 32
+max_sequence_length: 2048
+
+# Database configuration
+database_enabled: true
+database_url: "postgresql://{{ db_user }}:{{ db_password }}@{{ db_host }}:{{ db_port }}/{{ db_name }}"
+db_host: "localhost"
+db_port: 5432
+db_name: "trustformers"
+db_user: "trustformers"
+db_password: "{{ vault_db_password | default('changeme') }}"
+
+# Redis configuration
+redis_enabled: true
+redis_url: "redis://{{ redis_host }}:{{ redis_port }}"
+redis_host: "localhost"
+redis_port: 6379
+
+# Security settings
+enable_ssl: false
+jwt_secret: "{{ vault_jwt_secret | default('changeme') }}"
+api_keys: "{{ vault_api_keys | default({}) }}"
+
+# SSL/TLS configuration
+ssl_cert_path: "{{ app_config_dir }}/ssl/cert.pem"
+ssl_key_path: "{{ app_config_dir }}/ssl/key.pem"
+ssl_ca_path: "{{ app_config_dir }}/ssl/ca.pem"
+
+# Logging configuration
+log_level: "info"
+log_format: "json"
+log_rotation:
+  max_size: "100M"
+  max_files: 10
+  compress: true
+
+# Monitoring configuration
+monitoring_enabled: true
+metrics_enabled: true
+health_check_interval: 30
+health_check_timeout: 10
+
+# Backup configuration
+backup_enabled: true
+backup_schedule: "0 2 * * *"  # Daily at 2 AM
+backup_retention_days: 30
+backup_s3_bucket: ""
+backup_s3_prefix: "{{ inventory_hostname }}/{{ app_name }}"
+
+# Model management
+model_auto_download: true
+model_cache_dir: "{{ app_models_dir }}/cache"
+model_registry_url: ""
+default_models:
+  - name: "gpt2-small"
+    url: "https://huggingface.co/gpt2"
+    version: "main"
+
+# Environment variables for the application
+app_environment:
+  RUST_LOG: "{{ log_level }}"
+  SERVER_HOST: "{{ app_host }}"
+  SERVER_PORT: "{{ app_port }}"
+  GRPC_PORT: "{{ grpc_port }}"
+  METRICS_PORT: "{{ metrics_port }}"
+  WORKER_THREADS: "{{ worker_threads }}"
+  MAX_MEMORY: "{{ max_memory }}"
+  DATABASE_URL: "{{ database_url if database_enabled else '' }}"
+  REDIS_URL: "{{ redis_url if redis_enabled else '' }}"
+  JWT_SECRET: "{{ jwt_secret }}"
+  LOG_LEVEL: "{{ log_level }}"
+  LOG_FORMAT: "{{ log_format }}"
+  MODELS_DIR: "{{ app_models_dir }}"
+  CONFIG_DIR: "{{ app_config_dir }}"
+
+# Systemd service configuration
+systemd_service:
+  description: "TrustformeRS Serve - High-performance inference server"
+  documentation: "https://github.com/cool-japan/trustformers"
+  after: "network.target"
+  wanted_by: "multi-user.target"
+  restart: "always"
+  restart_sec: 10
+  user: "{{ app_user }}"
+  group: "{{ app_group }}"
+  working_directory: "{{ app_home }}"
+  environment_file: "{{ app_config_dir }}/environment"
+  exec_start_pre: "{{ app_scripts_dir }}/pre-start.sh"
+  exec_start: "{{ app_home }}/bin/trustformers-serve"
+  exec_reload: "/bin/kill -USR1 $MAINPID"
+  kill_mode: "mixed"
+  timeout_stop_sec: 30
+
+# Docker configuration (when using Docker deployment)
+docker_config:
+  image: "{{ container_registry }}/{{ container_image }}:{{ container_tag }}"
+  container_name: "{{ app_name }}"
+  restart_policy: "unless-stopped"
+  network_mode: "host"
+  volumes:
+    - "{{ app_config_dir }}:/app/config:ro"
+    - "{{ app_data_dir }}:/app/data"
+    - "{{ app_log_dir }}:/app/logs"
+    - "{{ app_models_dir }}:/app/models"
+  ports:
+    - "{{ app_port }}:8080"
+    - "{{ grpc_port }}:9090"
+    - "{{ metrics_port }}:9091"
+  environment: "{{ app_environment }}"
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 40s
+
+# Load balancer configuration
+load_balancer:
+  enabled: true
+  algorithm: "round_robin"  # round_robin, least_conn, ip_hash
+  health_check:
+    uri: "/health"
+    interval: 5
+    timeout: 3
+    unhealthy_threshold: 3
+    healthy_threshold: 2
+
+# Auto-scaling configuration
+auto_scaling:
+  enabled: false
+  min_instances: 1
+  max_instances: 5
+  target_cpu_utilization: 70
+  scale_up_cooldown: 300
+  scale_down_cooldown: 300
+
+# Maintenance configuration
+maintenance:
+  update_strategy: "rolling"  # rolling, blue_green, canary
+  max_unavailable: 1
+  rolling_update_delay: 30
+  health_check_grace_period: 60

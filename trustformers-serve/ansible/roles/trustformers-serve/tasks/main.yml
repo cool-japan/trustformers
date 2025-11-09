@@ -1,0 +1,84 @@
+---
+# TrustformeRS Serve application deployment tasks
+
+- name: Include OS-specific variables
+  include_vars: "{{ ansible_os_family }}.yml"
+  tags: [always]
+
+- name: Create application configuration directory
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  loop:
+    - "{{ app_config_dir }}"
+    - "{{ app_data_dir }}"
+    - "{{ app_log_dir }}"
+    - "{{ app_models_dir }}"
+  tags: [directories]
+
+- name: Download and install TrustformeRS Serve binary
+  include_tasks: install_binary.yml
+  when: deployment_method == "binary"
+  tags: [installation, binary]
+
+- name: Deploy TrustformeRS Serve with Docker
+  include_tasks: docker_deploy.yml
+  when: deployment_method == "docker"
+  tags: [installation, docker]
+
+- name: Configure TrustformeRS Serve
+  include_tasks: configure.yml
+  tags: [configuration]
+
+- name: Set up systemd service
+  include_tasks: systemd.yml
+  tags: [systemd, service]
+
+- name: Configure log rotation
+  include_tasks: logrotate.yml
+  tags: [logging, logrotate]
+
+- name: Set up health checks
+  include_tasks: health_checks.yml
+  tags: [health-checks, monitoring]
+
+- name: Configure TLS/SSL certificates
+  include_tasks: ssl.yml
+  when: enable_ssl | default(false)
+  tags: [ssl, security]
+
+- name: Start and enable TrustformeRS Serve service
+  systemd:
+    name: trustformers-serve
+    state: started
+    enabled: true
+    daemon_reload: true
+  tags: [service]
+
+- name: Wait for service to be ready
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ app_port }}/health"
+    method: GET
+    timeout: 30
+  register: health_check
+  retries: 10
+  delay: 5
+  until: health_check.status == 200
+  tags: [validation, health-check]
+
+- name: Configure application monitoring
+  include_tasks: monitoring.yml
+  when: monitoring_enabled | default(true)
+  tags: [monitoring]
+
+- name: Set up backup scripts
+  include_tasks: backup.yml
+  when: backup_enabled | default(true)
+  tags: [backup]
+
+- name: Configure model management
+  include_tasks: model_management.yml
+  tags: [models, management]

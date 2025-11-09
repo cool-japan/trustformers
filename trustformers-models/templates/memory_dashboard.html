@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Memory Profiling Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 2rem;
+            font-weight: 300;
+        }
+
+        .header .subtitle {
+            opacity: 0.9;
+            margin-top: 0.5rem;
+        }
+
+        .dashboard-container {
+            max-width: 1400px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+        }
+
+        .status-bar {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .status-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .status-card h3 {
+            color: #666;
+            font-size: 0.9rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .status-value {
+            font-size: 2rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .status-unit {
+            font-size: 1rem;
+            color: #666;
+            margin-left: 0.25rem;
+        }
+
+        .status-change {
+            font-size: 0.8rem;
+            margin-top: 0.5rem;
+        }
+
+        .positive { color: #e74c3c; }
+        .negative { color: #27ae60; }
+        .neutral { color: #666; }
+
+        .charts-container {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .chart-panel {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .chart-header {
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid #eee;
+            background: #fafafa;
+        }
+
+        .chart-header h3 {
+            margin: 0;
+            font-size: 1.1rem;
+            color: #333;
+        }
+
+        .chart-content {
+            padding: 1rem;
+        }
+
+        .alerts-container {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+        }
+
+        .alert-item {
+            padding: 1rem 1.5rem;
+            border-left: 4px solid #ddd;
+            margin-bottom: 0.5rem;
+            background: #fafafa;
+        }
+
+        .alert-item.warning { border-left-color: #f39c12; background: #fef9e7; }
+        .alert-item.error { border-left-color: #e74c3c; background: #fdf2f2; }
+        .alert-item.critical { border-left-color: #c0392b; background: #f8d7da; }
+        .alert-item.info { border-left-color: #3498db; background: #e8f4f8; }
+
+        .alert-title {
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+
+        .alert-message {
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        .alert-time {
+            font-size: 0.8rem;
+            color: #999;
+            margin-top: 0.5rem;
+        }
+
+        .recommendations {
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            padding: 1.5rem;
+        }
+
+        .recommendations h3 {
+            margin-bottom: 1rem;
+            color: #333;
+        }
+
+        .recommendation-item {
+            padding: 0.75rem;
+            background: #f8f9fa;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+            border-left: 3px solid #28a745;
+        }
+
+        .controls {
+            background: white;
+            padding: 1rem 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            margin-bottom: 2rem;
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+
+        button:hover {
+            background: #5a67d8;
+        }
+
+        button.secondary {
+            background: #6c757d;
+        }
+
+        button.secondary:hover {
+            background: #5a6268;
+        }
+
+        select {
+            padding: 0.5rem;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: #666;
+        }
+
+        .error {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 1rem;
+            border-radius: 4px;
+            margin: 1rem 0;
+        }
+
+        .memory-breakdown {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-top: 1rem;
+        }
+
+        .breakdown-item {
+            text-align: center;
+            padding: 1rem;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+
+        .breakdown-value {
+            font-size: 1.5rem;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .breakdown-label {
+            font-size: 0.8rem;
+            color: #666;
+            margin-top: 0.25rem;
+        }
+
+        @media (max-width: 768px) {
+            .charts-container {
+                grid-template-columns: 1fr;
+            }
+            
+            .status-bar {
+                flex-direction: column;
+            }
+            
+            .controls {
+                flex-direction: column;
+                align-items: stretch;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>TrustformeRS Memory Profiling Dashboard</h1>
+        <div class="subtitle">Real-time memory monitoring and analysis</div>
+    </div>
+
+    <div class="dashboard-container">
+        <!-- Controls -->
+        <div class="controls">
+            <div class="control-group">
+                <button id="start-monitoring">Start Monitoring</button>
+                <button id="stop-monitoring" class="secondary">Stop Monitoring</button>
+                <button id="refresh-data" class="secondary">Refresh</button>
+            </div>
+            <div class="control-group">
+                <label for="time-range">Time Range:</label>
+                <select id="time-range">
+                    <option value="1h">Last 1 Hour</option>
+                    <option value="6h">Last 6 Hours</option>
+                    <option value="24h">Last 24 Hours</option>
+                    <option value="all">All Data</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <span id="connection-status">●</span>
+                <span>Status: <span id="status-text">Connecting...</span></span>
+            </div>
+        </div>
+
+        <!-- Status Cards -->
+        <div class="status-bar">
+            <div class="status-card">
+                <h3>Current Memory</h3>
+                <div class="status-value">
+                    <span id="current-memory">0</span>
+                    <span class="status-unit">MB</span>
+                </div>
+                <div class="status-change neutral" id="memory-change">No change</div>
+            </div>
+            <div class="status-card">
+                <h3>Peak Memory</h3>
+                <div class="status-value">
+                    <span id="peak-memory">0</span>
+                    <span class="status-unit">MB</span>
+                </div>
+            </div>
+            <div class="status-card">
+                <h3>Growth Rate</h3>
+                <div class="status-value">
+                    <span id="growth-rate">0</span>
+                    <span class="status-unit">MB/s</span>
+                </div>
+                <div class="status-change neutral" id="growth-trend">Stable</div>
+            </div>
+            <div class="status-card">
+                <h3>Active Alerts</h3>
+                <div class="status-value">
+                    <span id="active-alerts">0</span>
+                </div>
+            </div>
+            <div class="status-card">
+                <h3>Fragmentation</h3>
+                <div class="status-value">
+                    <span id="fragmentation">0</span>
+                    <span class="status-unit">%</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-container">
+            <div class="chart-panel">
+                <div class="chart-header">
+                    <h3>Memory Usage Over Time</h3>
+                </div>
+                <div class="chart-content">
+                    <div id="memory-chart" style="height: 400px;"></div>
+                </div>
+            </div>
+
+            <div class="chart-panel">
+                <div class="chart-header">
+                    <h3>Memory Breakdown</h3>
+                </div>
+                <div class="chart-content">
+                    <div id="breakdown-chart" style="height: 300px;"></div>
+                    <div class="memory-breakdown">
+                        <div class="breakdown-item">
+                            <div class="breakdown-value" id="heap-memory">0</div>
+                            <div class="breakdown-label">Heap (MB)</div>
+                        </div>
+                        <div class="breakdown-item">
+                            <div class="breakdown-value" id="stack-memory">0</div>
+                            <div class="breakdown-label">Stack (MB)</div>
+                        </div>
+                        <div class="breakdown-item">
+                            <div class="breakdown-value" id="gpu-memory">N/A</div>
+                            <div class="breakdown-label">GPU (MB)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Alerts -->
+        <div class="alerts-container">
+            <div class="chart-header">
+                <h3>Recent Alerts</h3>
+            </div>
+            <div id="alerts-list">
+                <div class="loading">No alerts</div>
+            </div>
+        </div>
+
+        <!-- Recommendations -->
+        <div class="recommendations">
+            <h3>Optimization Recommendations</h3>
+            <div id="recommendations-list">
+                <div class="loading">Loading recommendations...</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class MemoryDashboard {
+            constructor() {
+                this.isMonitoring = false;
+                this.websocket = null;
+                this.metricsData = [];
+                this.refreshInterval = null;
+                
+                this.initializeEventListeners();
+                this.initializeCharts();
+                this.startAutoRefresh();
+            }
+
+            initializeEventListeners() {
+                document.getElementById('start-monitoring').addEventListener('click', () => {
+                    this.startMonitoring();
+                });
+
+                document.getElementById('stop-monitoring').addEventListener('click', () => {
+                    this.stopMonitoring();
+                });
+
+                document.getElementById('refresh-data').addEventListener('click', () => {
+                    this.refreshData();
+                });
+
+                document.getElementById('time-range').addEventListener('change', (e) => {
+                    this.updateTimeRange(e.target.value);
+                });
+            }
+
+            initializeCharts() {
+                // Initialize empty charts
+                this.initMemoryChart();
+                this.initBreakdownChart();
+            }
+
+            initMemoryChart() {
+                const layout = {
+                    title: 'Memory Usage Trends',
+                    xaxis: { title: 'Time' },
+                    yaxis: { title: 'Memory (MB)' },
+                    showlegend: true,
+                    margin: { t: 40, r: 40, b: 40, l: 60 }
+                };
+
+                Plotly.newPlot('memory-chart', [], layout, {responsive: true});
+            }
+
+            initBreakdownChart() {
+                const data = [{
+                    values: [1],
+                    labels: ['No Data'],
+                    type: 'pie',
+                    hole: 0.4
+                }];
+
+                const layout = {
+                    title: 'Memory Allocation',
+                    showlegend: true,
+                    margin: { t: 40, r: 40, b: 40, l: 40 }
+                };
+
+                Plotly.newPlot('breakdown-chart', data, layout, {responsive: true});
+            }
+
+            async startMonitoring() {
+                try {
+                    const response = await fetch('/api/monitoring/start', { method: 'POST' });
+                    if (response.ok) {
+                        this.isMonitoring = true;
+                        this.updateStatus('Monitoring', true);
+                        this.connectWebSocket();
+                    }
+                } catch (error) {
+                    console.error('Failed to start monitoring:', error);
+                    this.updateStatus('Error', false);
+                }
+            }
+
+            async stopMonitoring() {
+                try {
+                    const response = await fetch('/api/monitoring/stop', { method: 'POST' });
+                    if (response.ok) {
+                        this.isMonitoring = false;
+                        this.updateStatus('Stopped', false);
+                        this.disconnectWebSocket();
+                    }
+                } catch (error) {
+                    console.error('Failed to stop monitoring:', error);
+                }
+            }
+
+            connectWebSocket() {
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${window.location.host}/ws`;
+                
+                this.websocket = new WebSocket(wsUrl);
+                
+                this.websocket.onopen = () => {
+                    console.log('WebSocket connected');
+                };
+                
+                this.websocket.onmessage = (event) => {
+                    const data = JSON.parse(event.data);
+                    this.handleRealtimeData(data);
+                };
+                
+                this.websocket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    this.updateStatus('Connection Error', false);
+                };
+                
+                this.websocket.onclose = () => {
+                    console.log('WebSocket disconnected');
+                    if (this.isMonitoring) {
+                        // Try to reconnect
+                        setTimeout(() => this.connectWebSocket(), 5000);
+                    }
+                };
+            }
+
+            disconnectWebSocket() {
+                if (this.websocket) {
+                    this.websocket.close();
+                    this.websocket = null;
+                }
+            }
+
+            async refreshData() {
+                try {
+                    // Fetch metrics
+                    const metricsResponse = await fetch('/api/metrics');
+                    const metrics = await metricsResponse.json();
+                    
+                    // Fetch alerts
+                    const alertsResponse = await fetch('/api/alerts');
+                    const alerts = await alertsResponse.json();
+                    
+                    // Fetch patterns
+                    const patternsResponse = await fetch('/api/patterns');
+                    const patterns = await patternsResponse.json();
+
+                    this.updateDashboard(metrics, alerts, patterns);
+                } catch (error) {
+                    console.error('Failed to refresh data:', error);
+                    this.showError('Failed to load data. Please check your connection.');
+                }
+            }
+
+            updateDashboard(metrics, alerts, patterns) {
+                if (metrics && metrics.length > 0) {
+                    this.metricsData = metrics;
+                    this.updateStatusCards(metrics[metrics.length - 1]);
+                    this.updateMemoryChart(metrics);
+                    this.updateBreakdownChart(metrics[metrics.length - 1]);
+                }
+
+                if (alerts) {
+                    this.updateAlerts(alerts);
+                }
+
+                this.updateRecommendations(patterns);
+            }
+
+            updateStatusCards(latestMetrics) {
+                document.getElementById('current-memory').textContent = 
+                    Math.round(latestMetrics.total_memory_mb);
+                document.getElementById('peak-memory').textContent = 
+                    Math.round(latestMetrics.peak_memory_mb);
+                document.getElementById('growth-rate').textContent = 
+                    latestMetrics.memory_growth_rate_mb_per_sec.toFixed(2);
+                document.getElementById('fragmentation').textContent = 
+                    (latestMetrics.memory_fragmentation_ratio * 100).toFixed(1);
+
+                // Update growth trend
+                const growthElement = document.getElementById('growth-trend');
+                const growthRate = latestMetrics.memory_growth_rate_mb_per_sec;
+                
+                if (growthRate > 1) {
+                    growthElement.textContent = 'Increasing';
+                    growthElement.className = 'status-change positive';
+                } else if (growthRate < -1) {
+                    growthElement.textContent = 'Decreasing';
+                    growthElement.className = 'status-change negative';
+                } else {
+                    growthElement.textContent = 'Stable';
+                    growthElement.className = 'status-change neutral';
+                }
+            }
+
+            updateMemoryChart(metrics) {
+                const times = metrics.map(m => new Date(m.timestamp * 1000));
+                const totalMemory = metrics.map(m => m.total_memory_mb);
+                const heapMemory = metrics.map(m => m.heap_memory_mb);
+                const peakMemory = metrics.map(m => m.peak_memory_mb);
+
+                const traces = [
+                    {
+                        x: times,
+                        y: totalMemory,
+                        name: 'Total Memory',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { color: '#667eea', width: 2 }
+                    },
+                    {
+                        x: times,
+                        y: heapMemory,
+                        name: 'Heap Memory',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { color: '#f093fb', width: 2 }
+                    },
+                    {
+                        x: times,
+                        y: peakMemory,
+                        name: 'Peak Memory',
+                        type: 'scatter',
+                        mode: 'lines',
+                        line: { color: '#e74c3c', width: 1, dash: 'dash' }
+                    }
+                ];
+
+                const layout = {
+                    title: 'Memory Usage Trends',
+                    xaxis: { title: 'Time' },
+                    yaxis: { title: 'Memory (MB)' },
+                    showlegend: true,
+                    margin: { t: 40, r: 40, b: 60, l: 60 }
+                };
+
+                Plotly.react('memory-chart', traces, layout);
+            }
+
+            updateBreakdownChart(latestMetrics) {
+                const values = [
+                    latestMetrics.heap_memory_mb,
+                    latestMetrics.stack_memory_mb,
+                    latestMetrics.gpu_memory_mb || 0
+                ];
+                
+                const labels = ['Heap', 'Stack', 'GPU'];
+                const colors = ['#667eea', '#f093fb', '#fdbb2d'];
+
+                const data = [{
+                    values: values,
+                    labels: labels,
+                    type: 'pie',
+                    hole: 0.4,
+                    marker: { colors: colors }
+                }];
+
+                const layout = {
+                    title: 'Memory Allocation',
+                    showlegend: true,
+                    margin: { t: 40, r: 40, b: 40, l: 40 }
+                };
+
+                Plotly.react('breakdown-chart', data, layout);
+
+                // Update breakdown numbers
+                document.getElementById('heap-memory').textContent = Math.round(latestMetrics.heap_memory_mb);
+                document.getElementById('stack-memory').textContent = Math.round(latestMetrics.stack_memory_mb);
+                document.getElementById('gpu-memory').textContent = 
+                    latestMetrics.gpu_memory_mb ? Math.round(latestMetrics.gpu_memory_mb) : 'N/A';
+            }
+
+            updateAlerts(alerts) {
+                const alertsList = document.getElementById('alerts-list');
+                
+                if (!alerts || alerts.length === 0) {
+                    alertsList.innerHTML = '<div class="loading">No alerts</div>';
+                    document.getElementById('active-alerts').textContent = '0';
+                    return;
+                }
+
+                document.getElementById('active-alerts').textContent = alerts.length;
+
+                const alertsHtml = alerts.slice(-10).map(alert => {
+                    const severity = alert.severity.toLowerCase();
+                    const time = new Date(alert.timestamp * 1000).toLocaleTimeString();
+                    
+                    return `
+                        <div class="alert-item ${severity}">
+                            <div class="alert-title">${alert.alert_type.replace(/([A-Z])/g, ' $1').trim()}</div>
+                            <div class="alert-message">${alert.message}</div>
+                            <div class="alert-time">${time}</div>
+                        </div>
+                    `;
+                }).join('');
+
+                alertsList.innerHTML = alertsHtml;
+            }
+
+            updateRecommendations(patterns) {
+                const recommendationsList = document.getElementById('recommendations-list');
+                
+                // Generate recommendations based on current state
+                const recommendations = this.generateRecommendations();
+                
+                if (recommendations.length === 0) {
+                    recommendationsList.innerHTML = '<div class="loading">No specific recommendations</div>';
+                    return;
+                }
+
+                const recommendationsHtml = recommendations.map(rec => 
+                    `<div class="recommendation-item">${rec}</div>`
+                ).join('');
+
+                recommendationsList.innerHTML = recommendationsHtml;
+            }
+
+            generateRecommendations() {
+                const recommendations = [];
+                
+                if (this.metricsData.length === 0) {
+                    return ['Start monitoring to get personalized recommendations'];
+                }
+
+                const latest = this.metricsData[this.metricsData.length - 1];
+                
+                if (latest.total_memory_mb > 1000) {
+                    recommendations.push('High memory usage detected. Consider reducing batch size or enabling gradient checkpointing.');
+                }
+                
+                if (latest.memory_fragmentation_ratio > 0.3) {
+                    recommendations.push('High memory fragmentation. Consider restarting the process or using memory pools.');
+                }
+                
+                if (latest.memory_growth_rate_mb_per_sec > 5) {
+                    recommendations.push('Rapid memory growth detected. Check for memory leaks or excessive tensor accumulation.');
+                }
+
+                if (recommendations.length === 0) {
+                    recommendations.push('Memory usage appears optimal. Monitor for any changes.');
+                }
+
+                return recommendations;
+            }
+
+            updateStatus(text, isActive) {
+                document.getElementById('status-text').textContent = text;
+                const statusDot = document.getElementById('connection-status');
+                statusDot.style.color = isActive ? '#27ae60' : '#e74c3c';
+            }
+
+            showError(message) {
+                const dashboard = document.querySelector('.dashboard-container');
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error';
+                errorDiv.textContent = message;
+                dashboard.insertBefore(errorDiv, dashboard.firstChild);
+                
+                setTimeout(() => errorDiv.remove(), 5000);
+            }
+
+            handleRealtimeData(data) {
+                if (data.type === 'metrics') {
+                    this.metricsData.push(data.payload);
+                    
+                    // Keep only recent data
+                    if (this.metricsData.length > 1000) {
+                        this.metricsData = this.metricsData.slice(-1000);
+                    }
+                    
+                    this.updateStatusCards(data.payload);
+                    this.updateMemoryChart(this.metricsData);
+                    this.updateBreakdownChart(data.payload);
+                }
+            }
+
+            startAutoRefresh() {
+                this.refreshInterval = setInterval(() => {
+                    if (!this.isMonitoring) {
+                        this.refreshData();
+                    }
+                }, 30000); // Refresh every 30 seconds when not monitoring
+            }
+
+            updateTimeRange(range) {
+                // Filter data based on selected time range
+                const now = Date.now() / 1000;
+                let cutoff = now;
+                
+                switch (range) {
+                    case '1h':
+                        cutoff = now - 3600;
+                        break;
+                    case '6h':
+                        cutoff = now - 21600;
+                        break;
+                    case '24h':
+                        cutoff = now - 86400;
+                        break;
+                    case 'all':
+                    default:
+                        cutoff = 0;
+                        break;
+                }
+                
+                const filteredData = this.metricsData.filter(m => m.timestamp >= cutoff);
+                if (filteredData.length > 0) {
+                    this.updateMemoryChart(filteredData);
+                }
+            }
+        }
+
+        // Initialize dashboard when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            window.dashboard = new MemoryDashboard();
+        });
+    </script>
+</body>
+</html>

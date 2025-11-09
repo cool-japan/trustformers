@@ -1,0 +1,74 @@
+{
+  "description": "ResNet-50 (Residual Network with 50 layers)",
+  "architecture_details": "ResNet-50 is a convolutional neural network that uses residual connections to enable training of very deep networks. It consists of 50 layers with skip connections.",
+  "model_id": "trustformers/resnet50",
+  
+  "num_classes": 1000,
+  "image_height": 224,
+  "image_width": 224,
+  "activation": "ReLU",
+  "dropout": 0.0,
+  "use_batch_norm": true,
+  
+  "has_stem": true,
+  "has_residual": true,
+  "has_depthwise": false,
+  "has_se_module": false,
+  "has_neck": false,
+  "supports_detection": false,
+  "supports_segmentation": false,
+  
+  "layers": [
+    {
+      "out_channels": 64,
+      "kernel_size": 7,
+      "stride": 2,
+      "padding": 3,
+      "num_blocks": 3
+    },
+    {
+      "out_channels": 128,
+      "kernel_size": 3,
+      "stride": 2,
+      "padding": 1,
+      "num_blocks": 4
+    },
+    {
+      "out_channels": 256,
+      "kernel_size": 3,
+      "stride": 2,
+      "padding": 1,
+      "num_blocks": 6
+    },
+    {
+      "out_channels": 512,
+      "kernel_size": 3,
+      "stride": 2,
+      "padding": 1,
+      "num_blocks": 3
+    }
+  ],
+  
+  "custom_params": [
+    {
+      "name": "zero_init_residual",
+      "type": "bool",
+      "description": "Zero-initialize the last BN in each residual branch",
+      "default": "false"
+    },
+    {
+      "name": "groups",
+      "type": "usize",
+      "description": "Number of groups for grouped convolution",
+      "default": "1"
+    },
+    {
+      "name": "width_per_group",
+      "type": "usize",
+      "description": "Width of each group",
+      "default": "64"
+    }
+  ],
+  
+  "references": "- Original paper: [Deep Residual Learning for Image Recognition](https://arxiv.org/abs/1512.03385)"
+}

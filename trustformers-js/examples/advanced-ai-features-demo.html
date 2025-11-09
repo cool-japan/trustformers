@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS-JS Advanced AI Features Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+
+        h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 30px;
+            padding: 40px;
+        }
+
+        .feature-card {
+            background: #f8f9fa;
+            border-radius: 15px;
+            padding: 25px;
+            transition: transform 0.3s, box-shadow 0.3s;
+            border: 2px solid #e9ecef;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+        }
+
+        .feature-card h3 {
+            color: #667eea;
+            margin-bottom: 15px;
+            font-size: 1.4em;
+        }
+
+        .feature-card p {
+            color: #6c757d;
+            line-height: 1.6;
+            margin-bottom: 15px;
+        }
+
+        .demo-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 25px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+            width: 100%;
+            margin-top: 10px;
+        }
+
+        .demo-button:hover {
+            transform: scale(1.05);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .demo-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .result-box {
+            margin-top: 15px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+            display: none;
+        }
+
+        .result-box.show {
+            display: block;
+            animation: slideIn 0.3s ease-out;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .result-box h4 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .result-box pre {
+            background: #f1f3f5;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+            font-size: 0.9em;
+        }
+
+        .status {
+            padding: 10px 20px;
+            background: #e7f3ff;
+            border-left: 4px solid #2196F3;
+            margin: 20px 40px;
+            border-radius: 5px;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-left: 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            background: #667eea;
+            color: white;
+            border-radius: 12px;
+            font-size: 0.8em;
+            margin-right: 8px;
+            margin-bottom: 8px;
+        }
+
+        .icon {
+            font-size: 2em;
+            margin-bottom: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 TrustformeRS-JS Advanced AI Features</h1>
+            <p class="subtitle">Cutting-edge machine learning capabilities in your browser</p>
+        </header>
+
+        <div class="status">
+            <strong>Status:</strong> <span id="status">Loading...</span>
+        </div>
+
+        <div class="features-grid">
+            <!-- Advanced Optimization -->
+            <div class="feature-card">
+                <div class="icon">⚡</div>
+                <h3>Advanced Optimization</h3>
+                <div>
+                    <span class="badge">Gradient Checkpointing</span>
+                    <span class="badge">Mixed Precision</span>
+                    <span class="badge">LARS</span>
+                    <span class="badge">SAM</span>
+                </div>
+                <p>Cutting-edge optimization techniques for memory efficiency and faster training with adaptive learning rates and sharpness-aware minimization.</p>
+                <button class="demo-button" onclick="runOptimizationDemo()">Run Demo</button>
+                <div class="result-box" id="optimization-result">
+                    <h4>Results:</h4>
+                    <pre id="optimization-output"></pre>
+                </div>
+            </div>
+
+            <!-- Federated Learning -->
+            <div class="feature-card">
+                <div class="icon">🔐</div>
+                <h3>Federated Learning</h3>
+                <div>
+                    <span class="badge">Secure Aggregation</span>
+                    <span class="badge">Differential Privacy</span>
+                    <span class="badge">Byzantine Robust</span>
+                </div>
+                <p>Privacy-preserving distributed machine learning with secure aggregation protocols and differential privacy guarantees.</p>
+                <button class="demo-button" onclick="runFederatedDemo()">Run Demo</button>
+                <div class="result-box" id="federated-result">
+                    <h4>Results:</h4>
+                    <pre id="federated-output"></pre>
+                </div>
+            </div>
+
+            <!-- Neural Architecture Search -->
+            <div class="feature-card">
+                <div class="icon">🧬</div>
+                <h3>Neural Architecture Search</h3>
+                <div>
+                    <span class="badge">Evolutionary</span>
+                    <span class="badge">Multi-Objective</span>
+                    <span class="badge">Auto-ML</span>
+                </div>
+                <p>Automated model design with evolutionary algorithms and multi-objective optimization for accuracy, latency, and model size.</p>
+                <button class="demo-button" onclick="runNASDemo()">Run Demo</button>
+                <div class="result-box" id="nas-result">
+                    <h4>Results:</h4>
+                    <pre id="nas-output"></pre>
+                </div>
+            </div>
+
+            <!-- Knowledge Distillation -->
+            <div class="feature-card">
+                <div class="icon">🎓</div>
+                <h3>Knowledge Distillation</h3>
+                <div>
+                    <span class="badge">Teacher-Student</span>
+                    <span class="badge">Progressive</span>
+                    <span class="badge">Self-Distillation</span>
+                </div>
+                <p>Model compression through knowledge transfer from large teacher models to efficient student models with progressive distillation.</p>
+                <button class="demo-button" onclick="runDistillationDemo()">Run Demo</button>
+                <div class="result-box" id="distillation-result">
+                    <h4>Results:</h4>
+                    <pre id="distillation-output"></pre>
+                </div>
+            </div>
+
+            <!-- Multi-Modal Streaming -->
+            <div class="feature-card">
+                <div class="icon">🎬</div>
+                <h3>Multi-Modal Streaming</h3>
+                <div>
+                    <span class="badge">Text</span>
+                    <span class="badge">Image</span>
+                    <span class="badge">Audio</span>
+                    <span class="badge">Synchronized</span>
+                </div>
+                <p>Real-time processing and synchronization of multiple data modalities with timestamp-based coordination.</p>
+                <button class="demo-button" onclick="runMultiModalDemo()">Run Demo</button>
+                <div class="result-box" id="multimodal-result">
+                    <h4>Results:</h4>
+                    <pre id="multimodal-output"></pre>
+                </div>
+            </div>
+
+            <!-- ONNX Integration -->
+            <div class="feature-card">
+                <div class="icon">🔄</div>
+                <h3>ONNX Integration</h3>
+                <div>
+                    <span class="badge">Model Conversion</span>
+                    <span class="badge">Optimization</span>
+                    <span class="badge">Cross-Platform</span>
+                </div>
+                <p>Seamless integration with ONNX runtime for model conversion, optimization, and cross-platform deployment.</p>
+                <button class="demo-button" onclick="runONNXDemo()">Run Demo</button>
+                <div class="result-box" id="onnx-result">
+                    <h4>Results:</h4>
+                    <pre id="onnx-output"></pre>
+                </div>
+            </div>
+
+            <!-- Model Interpretability -->
+            <div class="feature-card">
+                <div class="icon">🔍</div>
+                <h3>Model Interpretability</h3>
+                <div>
+                    <span class="badge">Attention Viz</span>
+                    <span class="badge">Gradients</span>
+                    <span class="badge">Feature Importance</span>
+                </div>
+                <p>Explain model decisions with attention visualization, gradient-based explanations, and feature importance analysis.</p>
+                <button class="demo-button" onclick="runInterpretabilityDemo()">Run Demo</button>
+                <div class="result-box" id="interpretability-result">
+                    <h4>Results:</h4>
+                    <pre id="interpretability-output"></pre>
+                </div>
+            </div>
+
+            <!-- Auto Performance Optimization -->
+            <div class="feature-card">
+                <div class="icon">🎯</div>
+                <h3>Auto Performance Optimizer</h3>
+                <div>
+                    <span class="badge">Bottleneck Detection</span>
+                    <span class="badge">ML-Based</span>
+                    <span class="badge">Adaptive</span>
+                </div>
+                <p>Automatic performance optimization with ML-based bottleneck detection and adaptive configuration tuning.</p>
+                <button class="demo-button" onclick="runAutoOptimizerDemo()">Run Demo</button>
+                <div class="result-box" id="autoopt-result">
+                    <h4>Results:</h4>
+                    <pre id="autoopt-output"></pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import {
+            GradientCheckpointingManager,
+            MixedPrecisionManager,
+            LARSOptimizer,
+            SAMOptimizer,
+            LookaheadOptimizer,
+            OptimizationStrategySelector,
+            createAdvancedOptimizer,
+            FederatedClient,
+            FederatedServer,
+            SecureAggregationProtocol,
+            DifferentialPrivacyMechanism,
+            createFederatedLearning,
+            SearchSpace,
+            RandomSearch,
+            EvolutionarySearch,
+            PerformanceEstimator,
+            createNAS,
+            TeacherModel,
+            StudentModel,
+            DistillationLoss,
+            createDistillation,
+            TextStreamHandler,
+            ImageStreamHandler,
+            AudioStreamHandler,
+            MultiModalStreamCoordinator,
+            createMultiModalStreaming,
+            ONNXRuntimeWrapper,
+            ONNXModelConverter,
+            ONNXModelAnalyzer,
+            createONNXIntegration,
+            AttentionVisualizer,
+            GradientExplainer,
+            FeatureImportanceAnalyzer,
+            createInterpretability,
+            AutoPerformanceProfiler,
+            BottleneckDetector,
+            MLBasedOptimizer,
+            createAutoOptimizer
+        } from '../src/index.js';
+
+        // Update status
+        document.getElementById('status').textContent = 'Ready! Click any demo button to try the features.';
+
+        // Helper functions
+        const createMockModel = () => ({
+            type: 'transformer',
+            layers: Array.from({ length: 12 }, (_, i) => ({
+                id: i,
+                type: 'attention',
+                parameters: new Float32Array(1000)
+            })),
+            parameters: new Float32Array(10000),
+            forward: async (input) => ({ data: new Float32Array(input.length) })
+        });
+
+        const showResult = (id, content) => {
+            const resultBox = document.getElementById(`${id}-result`);
+            const output = document.getElementById(`${id}-output`);
+            output.textContent = JSON.stringify(content, null, 2);
+            resultBox.classList.add('show');
+        };
+
+        // Demo functions (exposed globally)
+        window.runOptimizationDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                // Create optimization strategy
+                const selector = new OptimizationStrategySelector();
+                const strategy = selector.selectStrategy({
+                    modelSize: 1e8,
+                    batchSize: 16,
+                    sequenceLength: 512
+                });
+
+                // Test mixed precision
+                const mp = new MixedPrecisionManager({ dtype: 'float16', lossScale: 1024 });
+                const tensor = new Float32Array([1.0, 2.0, 3.0, 4.0]);
+                const fp16 = mp.toFloat16(tensor);
+
+                // Test LARS optimizer
+                const lars = new LARSOptimizer({ baseLearningRate: 0.01, momentum: 0.9 });
+                const update = lars.computeUpdate(
+                    new Float32Array([1, 2, 3]),
+                    new Float32Array([0.1, 0.2, 0.3]),
+                    0
+                );
+
+                showResult('optimization', {
+                    strategy: strategy.name,
+                    techniques: strategy.techniques,
+                    mixedPrecision: {
+                        enabled: true,
+                        dtype: 'float16',
+                        tensorSize: tensor.length,
+                        fp16Size: fp16.length
+                    },
+                    larsUpdate: {
+                        updateSize: update.length,
+                        sampleValues: Array.from(update.slice(0, 3))
+                    }
+                });
+            } catch (error) {
+                showResult('optimization', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+
+        window.runFederatedDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                // Create federated learning system
+                const flSystem = createFederatedLearning({
+                    numClients: 5,
+                    clientsPerRound: 3,
+                    differentialPrivacy: true
+                });
+
+                // Test differential privacy
+                const dp = new DifferentialPrivacyMechanism({
+                    epsilon: 1.0,
+                    delta: 1e-5,
+                    clipNorm: 1.0
+                });
+
+                const gradients = new Float32Array([0.5, 1.5, 2.5]);
+                const clipped = dp.clipGradients(gradients);
+                const noisy = dp.addNoise(clipped);
+
+                showResult('federated', {
+                    system: {
+                        numClients: 5,
+                        clientsPerRound: 3,
+                        privacyEnabled: true
+                    },
+                    differentialPrivacy: {
+                        epsilon: 1.0,
+                        clipNorm: 1.0,
+                        originalGradients: Array.from(gradients),
+                        clippedGradients: Array.from(clipped),
+                        noisyGradients: Array.from(noisy.slice(0, 3))
+                    }
+                });
+            } catch (error) {
+                showResult('federated', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+
+        window.runNASDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                const searchSpace = new SearchSpace({
+                    maxLayers: 10,
+                    minLayers: 3
+                });
+
+                const architecture = searchSpace.sampleArchitecture();
+
+                showResult('nas', {
+                    searchSpace: {
+                        maxLayers: 10,
+                        minLayers: 3,
+                        operationTypes: ['conv3x3', 'conv5x5', 'maxpool', 'avgpool']
+                    },
+                    sampledArchitecture: {
+                        numLayers: architecture.layers.length,
+                        numConnections: architecture.connections.length,
+                        firstThreeLayers: architecture.layers.slice(0, 3).map(l => ({
+                            operation: l.operation,
+                            channels: l.channels
+                        }))
+                    }
+                });
+            } catch (error) {
+                showResult('nas', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+
+        window.runDistillationDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                const loss = new DistillationLoss({
+                    temperature: 3.0,
+                    alpha: 0.7
+                });
+
+                const studentLogits = new Float32Array([2.0, 1.0, 0.5]);
+                const teacherLogits = new Float32Array([2.5, 1.2, 0.3]);
+                const hardLabels = new Float32Array([1.0, 0.0, 0.0]);
+
+                const klDiv = loss.computeKLDivergence(studentLogits, teacherLogits, 3.0);
+                const combinedLoss = loss.compute(studentLogits, teacherLogits, hardLabels);
+
+                showResult('distillation', {
+                    configuration: {
+                        temperature: 3.0,
+                        alpha: 0.7
+                    },
+                    losses: {
+                        klDivergence: klDiv,
+                        combined: combinedLoss
+                    },
+                    softTargetEffect: 'Temperature scaling applied to teacher outputs'
+                });
+            } catch (error) {
+                showResult('distillation', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+
+        window.runMultiModalDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                const coordinator = new MultiModalStreamCoordinator({
+                    synchronization: 'timestamp',
+                    bufferSize: 10,
+                    maxLatency: 100
+                });
+
+                coordinator.registerModality('text', new TextStreamHandler());
+                coordinator.registerModality('image', new ImageStreamHandler());
+
+                await coordinator.addChunk({
+                    modality: 'text',
+                    data: { text: 'A beautiful sunset' },
+                    timestamp: 1000
+                });
+
+                await coordinator.addChunk({
+                    modality: 'image',
+                    data: { data: new Uint8Array(100) },
+                    timestamp: 1002
+                });
+
+                const batch = coordinator.getSynchronizedBatch();
+
+                showResult('multimodal', {
+                    modalities: ['text', 'image'],
+                    synchronization: 'timestamp',
+                    bufferSize: 10,
+                    synchronized: batch ? true : false,
+                    description: 'Real-time multi-modal stream processing enabled'
+                });
+            } catch (error) {
+                showResult('multimodal', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+
+        window.runONNXDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                const runtime = new ONNXRuntimeWrapper({
+                    executionProviders: ['cpu', 'webgl'],
+                    graphOptimizationLevel: 'all'
+                });
+
+                const analyzer = new ONNXModelAnalyzer();
+
+                const mockModel = {
+                    graph: {
+                        node: [
+                            { op_type: 'MatMul', name: 'layer1' },
+                            { op_type: 'Add', name: 'layer2' },
+                            { op_type: 'Relu', name: 'layer3' }
+                        ]
+                    }
+                };
+
+                const analysis = analyzer.analyze(mockModel);
+
+                showResult('onnx', {
+                    runtime: {
+                        executionProviders: ['cpu', 'webgl'],
+                        optimizationLevel: 'all'
+                    },
+                    modelAnalysis: {
+                        totalOps: analysis.summary.totalOps,
+                        operators: ['MatMul', 'Add', 'Relu']
+                    },
+                    features: ['Model conversion', 'Optimization', 'Cross-platform deployment']
+                });
+            } catch (error) {
+                showResult('onnx', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+
+        window.runInterpretabilityDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                const visualizer = new AttentionVisualizer({
+                    numHeads: 8,
+                    sequenceLength: 128
+                });
+
+                const attentionWeights = new Float32Array(8 * 128 * 128).map(() => Math.random());
+
+                const visualization = visualizer.visualize(attentionWeights, {
+                    heads: [0, 1, 2],
+                    tokens: ['hello', 'world', 'transformer']
+                });
+
+                const stats = visualizer.computeHeadStatistics(attentionWeights);
+
+                showResult('interpretability', {
+                    attention: {
+                        numHeads: 8,
+                        sequenceLength: 128,
+                        visualizedHeads: [0, 1, 2]
+                    },
+                    statistics: {
+                        entropyRange: [
+                            Math.min(...stats.entropy),
+                            Math.max(...stats.entropy)
+                        ].map(v => v.toFixed(3)),
+                        avgAttentionDistance: stats.avgAttentionDistance.toFixed(3)
+                    },
+                    features: ['Attention maps', 'Gradient explanations', 'Feature importance']
+                });
+            } catch (error) {
+                showResult('interpretability', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+
+        window.runAutoOptimizerDemo = async () => {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.innerHTML = 'Running... <span class="loading"></span>';
+
+            try {
+                const detector = new BottleneckDetector({
+                    thresholds: {
+                        memory: 0.8,
+                        cpu: 0.9,
+                        duration: 1000
+                    }
+                });
+
+                const metrics = {
+                    operations: [
+                        { name: 'fast_op', duration: 10, memory: 100 },
+                        { name: 'slow_op', duration: 2000, memory: 500 },
+                        { name: 'memory_heavy', duration: 50, memory: 900 }
+                    ],
+                    totalMemory: 1000
+                };
+
+                const bottlenecks = detector.detect(metrics);
+                const recommendations = detector.generateRecommendations(bottlenecks);
+
+                showResult('autoopt', {
+                    detected: {
+                        numBottlenecks: bottlenecks.length,
+                        types: bottlenecks.map(b => b.type),
+                        operations: bottlenecks.map(b => b.operation)
+                    },
+                    recommendations: recommendations.slice(0, 3),
+                    features: ['ML-based optimization', 'Adaptive tuning', 'Real-time monitoring']
+                });
+            } catch (error) {
+                showResult('autoopt', { error: error.message });
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Demo';
+            }
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+[package]
+name = "trustformers-tokenizers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Tokenizers for TrustformeRS"
+
+[lints]
+workspace = true
+
+[dependencies]
+trustformers-core.workspace = true
+scirs2-core.workspace = true
+tokenizers.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+unicode-normalization.workspace = true
+regex.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+rayon.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+tokio-stream.workspace = true
+num_cpus.workspace = true
+once_cell.workspace = true
+memmap2 = "0.9.8"
+jieba-rs = "0.8.1"
+rand.workspace = true
+mecab = { version = "0.1.6", optional = true }
+# Korean tokenization support
+hangul = "0.1.3"
+# Binary format dependencies
+flate2.workspace = true
+crc32fast = "1.5.0"
+bincode = "1.3"
+# Performance profiler dependencies
+chrono.workspace = true
+# MessagePack serialization
+rmp-serde.workspace = true
+# Additional dependencies for coverage and serialization
+unicode_categories = "0.1.1"
+serde_yaml.workspace = true
+# Python bindings
+pyo3 = { workspace = true, features = ["extension-module"], optional = true }
+
+[lib]
+name = "trustformers_tokenizers"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+python = ["pyo3"]
+pyo3 = ["dep:pyo3"]
+mecab = ["dep:mecab"]
+gpu = []
+jax = []
+onnx = []
+pytorch = []
+tensorflow = []
+
+[dev-dependencies]
+rstest.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+
+[[bench]]
+name = "tokenizer_performance"
+harness = false

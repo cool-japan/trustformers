@@ -1,0 +1,133 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trustformers-serve-ingress
+  labels:
+    app: trustformers-serve
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTP"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "10"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - trustformers-serve.example.com
+    secretName: trustformers-serve-tls
+  rules:
+  - host: trustformers-serve.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: trustformers-serve
+            port:
+              number: 8080
+      - path: /metrics
+        pathType: Prefix
+        backend:
+          service:
+            name: trustformers-serve-metrics
+            port:
+              number: 9091
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: trustformers-serve-grpc-ingress
+  labels:
+    app: trustformers-serve
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/grpc-backend: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - grpc.trustformers-serve.example.com
+    secretName: trustformers-serve-grpc-tls
+  rules:
+  - host: grpc.trustformers-serve.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: trustformers-serve
+            port:
+              number: 9090
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: trustformers-serve-pdb
+  labels:
+    app: trustformers-serve
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: trustformers-serve
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: trustformers-serve-secrets
+  labels:
+    app: trustformers-serve
+type: Opaque
+data:
+  jwt-secret: eW91ci1zZWNyZXQta2V5LWhlcmU=  # base64 encoded "your-secret-key-here"
+  redis-password: ""  # Add your redis password here (base64 encoded)
+  api-key: ""  # Add your API key here (base64 encoded)
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: trustformers-serve
+  labels:
+    app: trustformers-serve
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: trustformers-serve-role
+  labels:
+    app: trustformers-serve
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: [""]
+  resources: ["secrets"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: trustformers-serve-rolebinding
+  labels:
+    app: trustformers-serve
+subjects:
+- kind: ServiceAccount
+  name: trustformers-serve
+  namespace: default
+roleRef:
+  kind: Role
+  name: trustformers-serve-role
+  apiGroup: rbac.authorization.k8s.io

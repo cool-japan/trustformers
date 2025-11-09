@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:padding="16dp"
+    android:background="@drawable/accessibility_feature_item_background"
+    android:layout_marginBottom="8dp"
+    android:gravity="center_vertical">
+
+    <!-- Feature Icon -->
+    <ImageView
+        android:id="@+id/feature_icon"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginEnd="16dp"
+        android:src="@drawable/ic_accessibility"
+        android:contentDescription="Feature icon" />
+
+    <!-- Feature Content -->
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <!-- Feature Title -->
+        <TextView
+            android:id="@+id/feature_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Feature Title"
+            android:textSize="18sp"
+            android:textStyle="bold"
+            android:textColor="@color/feature_title_color" />
+
+        <!-- Feature Description -->
+        <TextView
+            android:id="@+id/feature_description"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Feature description explaining what this accessibility feature does"
+            android:textSize="14sp"
+            android:textColor="@color/feature_description_color"
+            android:layout_marginTop="4dp"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Feature Category -->
+        <TextView
+            android:id="@+id/feature_category"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Category"
+            android:textSize="12sp"
+            android:textColor="@color/feature_category_color"
+            android:background="@drawable/category_tag_background"
+            android:padding="4dp" />
+
+    </LinearLayout>
+
+    <!-- Feature Status Switch -->
+    <Switch
+        android:id="@+id/feature_status_switch"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginStart="16dp"
+        android:contentDescription="Toggle feature on or off" />
+
+</LinearLayout>

@@ -1,0 +1,22 @@
+{
+  "id": "tensor_transpose_1d_regression",
+  "description": "Regression test for transposing 1D tensors - should return error",
+  "issue": "Issue #42: Transpose on 1D tensor causes panic",
+  "category": "tensor",
+  "test_data": {
+    "type": "TensorOperation",
+    "operation": "transpose",
+    "inputs": [
+      {
+        "data": [1.0, 2.0, 3.0, 4.0],
+        "shape": [4]
+      }
+    ],
+    "params": {}
+  },
+  "expected": {
+    "type": "Error",
+    "error_type": "TensorError",
+    "message_contains": "dimensions"
+  }
+}

@@ -1,0 +1,108 @@
+# TrustformeRS Clippy Linting Configuration
+# This file defines the linting rules for the entire workspace
+
+# Set the MSRV (Minimum Supported Rust Version)
+msrv = "1.70"
+
+# Maximum cognitive complexity allowed per function
+cognitive-complexity-threshold = 30
+
+# Maximum number of lines allowed per function
+too-many-lines-threshold = 100
+
+# Maximum arguments allowed per function
+too-many-arguments-threshold = 7
+
+# Maximum nesting level for blocks
+excessive-nesting-threshold = 5
+
+# Note: cognitive-complexity-threshold is used instead of cyclomatic-complexity-threshold
+
+# Documentation requirements
+missing-docs-in-crate-items = true
+
+# Type complexity threshold
+type-complexity-threshold = 250
+
+# Note: allowed-dependencies field is not supported in current clippy version
+
+# Disallowed types that should not be used in the codebase
+disallowed-types = [
+    # Add any types that should be avoided
+    # Example: "std::collections::HashMap" (if you want to enforce using a specific map type)
+]
+
+# Disallowed methods
+disallowed-methods = [
+    # Add any methods that should be avoided
+    # Example: "std::vec::Vec::with_capacity" (if you want to enforce a different pattern)
+]
+
+# Enforced-method-names for common patterns
+# Note: Leaving this empty to avoid false-positive warnings about redundant renames
+enforced-import-renames = []
+
+# Maximum size for types passed by value (in bytes)
+trivial-copy-size-limit = 16
+
+# Maximum number of single char bindings a scope can have
+single-char-binding-names-threshold = 4
+
+# Maximum number of lines for expressions in function arguments
+large-error-threshold = 128
+
+# Maximum include file size
+max-include-file-size = 1000000
+
+# Array size threshold for stack allocation warning
+too-large-for-stack = 512000
+
+# Vec initialization size threshold
+vec-box-size-threshold = 4096
+
+# Maximum trait bounds on a single type
+max-trait-bounds = 3
+
+# Enum variant name threshold for similar names
+enum-variant-name-threshold = 3
+
+# Allow certain macros in expression position
+allow-expect-in-tests = true
+allow-unwrap-in-tests = true
+allow-dbg-in-tests = false
+
+# Future incompatibility
+future-size-threshold = 200
+
+# Documentation style
+doc-valid-idents = [
+    "KiB", "MiB", "GiB", "TiB",
+    "KB", "MB", "GB", "TB",
+    "TrustformeRS",
+    "GPT", "GPT2", "GPT3", "GPT4",
+    "BERT", "RoBERTa", "ALBERT",
+    "T5", "BART", "LLaMA",
+    "PyTorch", "TensorFlow", "JAX",
+    "CUDA", "ROCm", "Metal", "WebGPU",
+    "MPI", "gRPC", "REST", "WebSocket",
+    "fp16", "fp32", "fp64", "bf16",
+    "RMSNorm", "LayerNorm", "BatchNorm",
+    "RoPE", "ALiBi", "FlashAttention",
+    "AdamW", "SGD", "LAMB", "LARS",
+    "ZeRO", "FSDP", "DDP",
+    "ONNX", "CoreML", "NNAPI",
+    "iOS", "macOS", "tvOS", "watchOS",
+    "x86_64", "aarch64", "wasm32",
+]
+
+# Standard prefixes that don't need to be documented
+standard-macro-braces = [
+    { name = "println", brace = "(" },
+    { name = "format", brace = "(" },
+    { name = "vec", brace = "[" },
+]
+
+# Note: max-dependencies field is not supported
+
+# Lint level configurations (these would typically be in lib.rs or main.rs)
+# warn-by-default = true

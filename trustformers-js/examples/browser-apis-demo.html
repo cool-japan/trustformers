@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Browser APIs Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        
+        .header {
+            text-align: center;
+            border-bottom: 2px solid #007acc;
+            padding-bottom: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .section {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .section h3 {
+            margin-top: 0;
+            color: #007acc;
+        }
+        
+        .feature {
+            display: flex;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        
+        .feature-status {
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        
+        .supported { background-color: #28a745; }
+        .not-supported { background-color: #dc3545; }
+        
+        button {
+            background: #007acc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        
+        button:hover {
+            background: #005a9e;
+        }
+        
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background-color: #007acc;
+            transition: width 0.3s ease;
+        }
+        
+        .log {
+            background: #f1f3f4;
+            border: 1px solid #dadce0;
+            border-radius: 4px;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+            margin-top: 10px;
+        }
+        
+        .file-drop {
+            border: 2px dashed #007acc;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            margin: 10px 0;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        
+        .file-drop:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .file-drop.dragover {
+            background-color: #e3f2fd;
+            border-color: #1976d2;
+        }
+        
+        input[type="file"] {
+            display: none;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+        
+        .demo-result {
+            background: #fff;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 10px;
+        }
+        
+        .error {
+            background-color: #f8d7da;
+            border-color: #f5c6cb;
+            color: #721c24;
+        }
+        
+        .success {
+            background-color: #d4edda;
+            border-color: #c3e6cb;
+            color: #155724;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🌐 TrustformeRS Browser APIs Demo</h1>
+        <p>Interactive demonstration of browser API integration capabilities</p>
+    </div>
+
+    <!-- Browser Support Check -->
+    <div class="section">
+        <h3>🔍 Browser Support Detection</h3>
+        <div id="support-status">
+            <p>Checking browser capabilities...</p>
+        </div>
+        <button onclick="checkSupport()">Refresh Support Check</button>
+    </div>
+
+    <div class="grid">
+        <!-- File API Demo -->
+        <div class="section">
+            <h3>📁 File API Integration</h3>
+            <div class="file-drop" onclick="document.getElementById('file-input').click()">
+                <p>Click or drag files here</p>
+                <p><small>Supports: .txt, .json, .bin files</small></p>
+            </div>
+            <input type="file" id="file-input" multiple accept=".txt,.json,.bin">
+            
+            <div class="demo-result" id="file-results">
+                <p>No files processed yet</p>
+            </div>
+            
+            <button onclick="downloadSampleData()">Download Sample Tensor</button>
+        </div>
+
+        <!-- IndexedDB Demo -->
+        <div class="section">
+            <h3>💾 IndexedDB Caching</h3>
+            <button onclick="saveSampleModel()">Save Sample Model</button>
+            <button onclick="loadSampleModel()">Load Sample Model</button>
+            <button onclick="listCachedModels()">List Cached Models</button>
+            <button onclick="clearCache()">Clear Cache</button>
+            
+            <div class="demo-result" id="cache-results">
+                <p>No cache operations yet</p>
+            </div>
+        </div>
+
+        <!-- Streaming Demo -->
+        <div class="section">
+            <h3>🌊 Web Streams Processing</h3>
+            <button onclick="processStreamDemo()">Process Data Stream</button>
+            <button onclick="streamTextDemo()">Stream Text Processing</button>
+            
+            <div class="progress-bar">
+                <div class="progress-fill" id="stream-progress" style="width: 0%"></div>
+            </div>
+            
+            <div class="demo-result" id="stream-results">
+                <p>No streaming operations yet</p>
+            </div>
+        </div>
+
+        <!-- Broadcast Channel Demo -->
+        <div class="section">
+            <h3>📡 Broadcast Channel</h3>
+            <button onclick="sendBroadcast()">Send Message</button>
+            <button onclick="startListening()">Start Listening</button>
+            <button onclick="stopListening()">Stop Listening</button>
+            
+            <div class="demo-result" id="broadcast-results">
+                <p>No broadcast activity yet</p>
+            </div>
+        </div>
+
+        <!-- Model Sharing Demo -->
+        <div class="section">
+            <h3>🤝 Model Sharing</h3>
+            <button onclick="simulateInference()">Simulate Inference</button>
+            <button onclick="sharePerformanceMetrics()">Share Metrics</button>
+            
+            <div class="demo-result" id="sharing-results">
+                <p>No sharing activity yet</p>
+            </div>
+        </div>
+
+        <!-- Progressive Loading Demo -->
+        <div class="section">
+            <h3>⬇️ Progressive Loading</h3>
+            <button onclick="simulateModelLoad()">Simulate Model Load</button>
+            
+            <div class="progress-bar">
+                <div class="progress-fill" id="load-progress" style="width: 0%"></div>
+            </div>
+            
+            <div class="demo-result" id="loading-results">
+                <p>No loading operations yet</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Activity Log -->
+    <div class="section">
+        <h3>📋 Activity Log</h3>
+        <button onclick="clearLog()">Clear Log</button>
+        <div class="log" id="activity-log"></div>
+    </div>
+
+    <script type="module">
+        // Import TrustformeRS browser integration
+        // Note: In a real implementation, you would import from the actual module
+        
+        // Mock implementation for demo purposes
+        const browserIntegration = {
+            apis: {
+                checkSupport: () => ({
+                    fileAPI: typeof File !== 'undefined',
+                    indexedDB: typeof indexedDB !== 'undefined',
+                    webStreams: typeof ReadableStream !== 'undefined',
+                    broadcastChannel: typeof BroadcastChannel !== 'undefined',
+                    sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
+                    isBrowser: typeof window !== 'undefined'
+                })
+            },
+            files: {
+                validateFileType: (file, types) => true,
+                readAsText: async (file) => await file.text(),
+                readAsArrayBuffer: async (file) => await file.arrayBuffer(),
+                createDownloadBlob: (data, type) => new Blob([data], { type }),
+                downloadFile: (blob, filename) => {
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                }
+            },
+            storage: {
+                saveModel: async (id, data) => {
+                    localStorage.setItem(`model_${id}`, JSON.stringify(data));
+                    return true;
+                },
+                loadModel: async (id) => {
+                    const data = localStorage.getItem(`model_${id}`);
+                    return data ? JSON.parse(data) : null;
+                },
+                listModels: async () => {
+                    const models = [];
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        if (key.startsWith('model_')) {
+                            models.push({
+                                id: key.replace('model_', ''),
+                                timestamp: Date.now()
+                            });
+                        }
+                    }
+                    return models;
+                }
+            }
+        };
+
+        let broadcastChannel = null;
+        let broadcastListener = null;
+
+        // Global functions for the demo
+        window.checkSupport = function() {
+            const support = browserIntegration.apis.checkSupport();
+            const statusDiv = document.getElementById('support-status');
+            
+            let html = '<div class="grid">';
+            Object.entries(support).forEach(([feature, supported]) => {
+                const statusClass = supported ? 'supported' : 'not-supported';
+                const statusText = supported ? 'Supported' : 'Not Supported';
+                html += `
+                    <div class="feature">
+                        <div class="feature-status ${statusClass}"></div>
+                        <span><strong>${feature}:</strong> ${statusText}</span>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            
+            statusDiv.innerHTML = html;
+            log('Browser support check completed');
+        };
+
+        window.downloadSampleData = function() {
+            const sampleData = new Float32Array([1, 2, 3, 4, 5, 6, 7, 8]);
+            const blob = browserIntegration.files.createDownloadBlob(sampleData, 'application/octet-stream');
+            browserIntegration.files.downloadFile(blob, 'sample_tensor.bin');
+            log('Downloaded sample tensor data');
+        };
+
+        window.saveSampleModel = async function() {
+            const sampleModel = {
+                name: 'demo-bert-base',
+                config: { hidden_size: 768, num_layers: 12 },
+                weights: new Array(1000).fill(0.1),
+                timestamp: Date.now()
+            };
+            
+            try {
+                await browserIntegration.storage.saveModel('demo-bert-base', sampleModel);
+                document.getElementById('cache-results').innerHTML = 
+                    '<div class="success">✅ Sample model saved to cache</div>';
+                log('Sample model saved to IndexedDB cache');
+            } catch (error) {
+                document.getElementById('cache-results').innerHTML = 
+                    `<div class="error">❌ Failed to save model: ${error.message}</div>`;
+                log(`Error saving model: ${error.message}`);
+            }
+        };
+
+        window.loadSampleModel = async function() {
+            try {
+                const model = await browserIntegration.storage.loadModel('demo-bert-base');
+                if (model) {
+                    document.getElementById('cache-results').innerHTML = 
+                        `<div class="success">✅ Model loaded: ${model.name} (${model.config.hidden_size}d)</div>`;
+                    log('Sample model loaded from cache');
+                } else {
+                    document.getElementById('cache-results').innerHTML = 
+                        '<div class="error">❌ Model not found in cache</div>';
+                    log('Model not found in cache');
+                }
+            } catch (error) {
+                document.getElementById('cache-results').innerHTML = 
+                    `<div class="error">❌ Failed to load model: ${error.message}</div>`;
+                log(`Error loading model: ${error.message}`);
+            }
+        };
+
+        window.listCachedModels = async function() {
+            try {
+                const models = await browserIntegration.storage.listModels();
+                let html = '<div class="success">📋 Cached Models:</div><ul>';
+                models.forEach(model => {
+                    html += `<li>${model.id} (${new Date(model.timestamp).toLocaleString()})</li>`;
+                });
+                html += '</ul>';
+                document.getElementById('cache-results').innerHTML = html;
+                log(`Listed ${models.length} cached models`);
+            } catch (error) {
+                document.getElementById('cache-results').innerHTML = 
+                    `<div class="error">❌ Failed to list models: ${error.message}</div>`;
+                log(`Error listing models: ${error.message}`);
+            }
+        };
+
+        window.clearCache = function() {
+            try {
+                Object.keys(localStorage).forEach(key => {
+                    if (key.startsWith('model_')) {
+                        localStorage.removeItem(key);
+                    }
+                });
+                document.getElementById('cache-results').innerHTML = 
+                    '<div class="success">✅ Cache cleared</div>';
+                log('Cache cleared');
+            } catch (error) {
+                document.getElementById('cache-results').innerHTML = 
+                    `<div class="error">❌ Failed to clear cache: ${error.message}</div>`;
+                log(`Error clearing cache: ${error.message}`);
+            }
+        };
+
+        window.processStreamDemo = async function() {
+            const progressBar = document.getElementById('stream-progress');
+            const resultsDiv = document.getElementById('stream-results');
+            
+            // Simulate streaming data processing
+            const data = new Array(1000).fill(0).map((_, i) => Math.random());
+            let processed = 0;
+            
+            resultsDiv.innerHTML = '<p>🔄 Processing stream...</p>';
+            
+            for (let i = 0; i < data.length; i += 50) {
+                const chunk = data.slice(i, i + 50);
+                // Simulate processing time
+                await new Promise(resolve => setTimeout(resolve, 10));
+                
+                processed += chunk.length;
+                const progress = (processed / data.length) * 100;
+                progressBar.style.width = `${progress}%`;
+            }
+            
+            resultsDiv.innerHTML = 
+                `<div class="success">✅ Processed ${data.length} data points in stream</div>`;
+            log(`Stream processing completed: ${data.length} data points`);
+        };
+
+        window.streamTextDemo = async function() {
+            const text = "This is a sample text for streaming processing. ".repeat(20);
+            const words = text.split(' ');
+            const resultsDiv = document.getElementById('stream-results');
+            
+            resultsDiv.innerHTML = '<p>🔄 Processing text stream...</p>';
+            
+            let processedWords = 0;
+            for (const word of words) {
+                if (word.trim()) {
+                    processedWords++;
+                    // Simulate processing delay
+                    await new Promise(resolve => setTimeout(resolve, 5));
+                }
+            }
+            
+            resultsDiv.innerHTML = 
+                `<div class="success">✅ Processed ${processedWords} words from text stream</div>`;
+            log(`Text stream processing completed: ${processedWords} words`);
+        };
+
+        window.sendBroadcast = function() {
+            if (typeof BroadcastChannel !== 'undefined') {
+                if (!broadcastChannel) {
+                    broadcastChannel = new BroadcastChannel('trustformers-demo');
+                }
+                
+                const message = {
+                    type: 'demo-message',
+                    content: 'Hello from TrustformeRS!',
+                    timestamp: Date.now()
+                };
+                
+                broadcastChannel.postMessage(message);
+                document.getElementById('broadcast-results').innerHTML = 
+                    '<div class="success">✅ Message sent via broadcast channel</div>';
+                log('Broadcast message sent');
+            } else {
+                document.getElementById('broadcast-results').innerHTML = 
+                    '<div class="error">❌ BroadcastChannel not supported</div>';
+                log('BroadcastChannel not supported');
+            }
+        };
+
+        window.startListening = function() {
+            if (typeof BroadcastChannel !== 'undefined') {
+                if (!broadcastChannel) {
+                    broadcastChannel = new BroadcastChannel('trustformers-demo');
+                }
+                
+                broadcastListener = (event) => {
+                    document.getElementById('broadcast-results').innerHTML = 
+                        `<div class="success">📨 Received: ${event.data.content}</div>`;
+                    log(`Broadcast message received: ${event.data.content}`);
+                };
+                
+                broadcastChannel.addEventListener('message', broadcastListener);
+                document.getElementById('broadcast-results').innerHTML = 
+                    '<div class="success">👂 Listening for broadcasts...</div>';
+                log('Started listening for broadcast messages');
+            } else {
+                document.getElementById('broadcast-results').innerHTML = 
+                    '<div class="error">❌ BroadcastChannel not supported</div>';
+                log('BroadcastChannel not supported');
+            }
+        };
+
+        window.stopListening = function() {
+            if (broadcastChannel && broadcastListener) {
+                broadcastChannel.removeEventListener('message', broadcastListener);
+                broadcastListener = null;
+                document.getElementById('broadcast-results').innerHTML = 
+                    '<div class="success">🔇 Stopped listening</div>';
+                log('Stopped listening for broadcast messages');
+            }
+        };
+
+        window.simulateInference = function() {
+            const input = [1, 2, 3, 4, 5];
+            const output = input.map(x => x * 2 + Math.random());
+            
+            if (broadcastChannel) {
+                broadcastChannel.postMessage({
+                    type: 'inference',
+                    modelId: 'demo-bert',
+                    input,
+                    output,
+                    timestamp: Date.now()
+                });
+            }
+            
+            document.getElementById('sharing-results').innerHTML = 
+                `<div class="success">🧠 Shared inference result: [${output.map(x => x.toFixed(2)).join(', ')}]</div>`;
+            log('Simulated model inference shared');
+        };
+
+        window.sharePerformanceMetrics = function() {
+            const metrics = {
+                inferenceTime: Math.random() * 100 + 50,
+                memoryUsage: Math.random() * 500 + 200,
+                throughput: Math.random() * 100 + 50
+            };
+            
+            if (broadcastChannel) {
+                broadcastChannel.postMessage({
+                    type: 'performance',
+                    metrics,
+                    timestamp: Date.now()
+                });
+            }
+            
+            document.getElementById('sharing-results').innerHTML = 
+                `<div class="success">📊 Shared metrics: ${metrics.inferenceTime.toFixed(1)}ms inference, ${metrics.memoryUsage.toFixed(1)}MB memory</div>`;
+            log('Performance metrics shared');
+        };
+
+        window.simulateModelLoad = async function() {
+            const progressBar = document.getElementById('load-progress');
+            const resultsDiv = document.getElementById('loading-results');
+            
+            const stages = [
+                { name: 'Fetching', duration: 500 },
+                { name: 'Downloading', duration: 1500 },
+                { name: 'Parsing', duration: 800 },
+                { name: 'Loading', duration: 1200 },
+                { name: 'Complete', duration: 0 }
+            ];
+            
+            let totalProgress = 0;
+            const stageWeight = 100 / stages.length;
+            
+            for (const stage of stages) {
+                resultsDiv.innerHTML = `<p>🔄 ${stage.name}...</p>`;
+                
+                if (stage.duration > 0) {
+                    const steps = 20;
+                    const stepDuration = stage.duration / steps;
+                    
+                    for (let i = 0; i <= steps; i++) {
+                        const stageProgress = (i / steps) * stageWeight;
+                        progressBar.style.width = `${totalProgress + stageProgress}%`;
+                        await new Promise(resolve => setTimeout(resolve, stepDuration));
+                    }
+                }
+                
+                totalProgress += stageWeight;
+                progressBar.style.width = `${totalProgress}%`;
+            }
+            
+            resultsDiv.innerHTML = 
+                '<div class="success">✅ Model loaded successfully with progressive loading</div>';
+            log('Progressive model loading completed');
+        };
+
+        window.clearLog = function() {
+            document.getElementById('activity-log').innerHTML = '';
+        };
+
+        function log(message) {
+            const logDiv = document.getElementById('activity-log');
+            const timestamp = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        // File drag and drop handling
+        const fileInput = document.getElementById('file-input');
+        const fileDrop = document.querySelector('.file-drop');
+
+        fileDrop.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            fileDrop.classList.add('dragover');
+        });
+
+        fileDrop.addEventListener('dragleave', () => {
+            fileDrop.classList.remove('dragover');
+        });
+
+        fileDrop.addEventListener('drop', (e) => {
+            e.preventDefault();
+            fileDrop.classList.remove('dragover');
+            
+            const files = Array.from(e.dataTransfer.files);
+            handleFiles(files);
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            const files = Array.from(e.target.files);
+            handleFiles(files);
+        });
+
+        async function handleFiles(files) {
+            const resultsDiv = document.getElementById('file-results');
+            let html = '<div class="success">📁 Processed Files:</div><ul>';
+            
+            for (const file of files) {
+                try {
+                    let content = '';
+                    
+                    if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+                        const text = await browserIntegration.files.readAsText(file);
+                        content = `Text file, ${text.length} characters`;
+                    } else if (file.type === 'application/json' || file.name.endsWith('.json')) {
+                        const text = await browserIntegration.files.readAsText(file);
+                        const json = JSON.parse(text);
+                        content = `JSON file, ${Object.keys(json).length} keys`;
+                    } else {
+                        const buffer = await browserIntegration.files.readAsArrayBuffer(file);
+                        content = `Binary file, ${buffer.byteLength} bytes`;
+                    }
+                    
+                    html += `<li><strong>${file.name}</strong> (${(file.size / 1024).toFixed(1)} KB): ${content}</li>`;
+                    log(`Processed file: ${file.name}`);
+                    
+                } catch (error) {
+                    html += `<li><strong>${file.name}</strong>: ❌ Error - ${error.message}</li>`;
+                    log(`Error processing file ${file.name}: ${error.message}`);
+                }
+            }
+            
+            html += '</ul>';
+            resultsDiv.innerHTML = html;
+        }
+
+        // Initialize the demo
+        document.addEventListener('DOMContentLoaded', () => {
+            checkSupport();
+            log('TrustformeRS Browser APIs Demo initialized');
+        });
+    </script>
+</body>
+</html>

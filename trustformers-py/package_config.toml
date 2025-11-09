@@ -1,0 +1,338 @@
+# Package optimization configuration for trustformers-py
+
+[build]
+# Build optimization settings
+profile = "release"
+strip = true
+lto = true
+codegen_units = 1
+
+# Platform-specific builds
+[build.targets]
+linux = "x86_64-unknown-linux-gnu"
+macos = "x86_64-apple-darwin"
+windows = "x86_64-pc-windows-msvc"
+
+# Feature configurations
+[features]
+default = ["cpu"]
+
+# Core features
+cpu = []
+simd = ["cpu"]
+
+# GPU acceleration
+cuda = ["cuda11", "cuda12"]
+cuda11 = []
+cuda12 = []
+metal = []  # macOS Metal support
+opencl = []
+
+# Framework integrations
+torch = []
+jax = []
+tensorflow = []
+
+# Serving features  
+serving = ["fastapi", "async"]
+fastapi = []
+async = []
+
+# Development features
+dev = ["test-utils", "debugging"]
+test-utils = []
+debugging = []
+
+# Packaging configurations
+[packaging]
+# Wheel optimization
+strip_binaries = true
+compress_binaries = true
+remove_debug_info = true
+optimize_size = true
+
+# Include/exclude patterns
+include = [
+    "python/trustformers/**/*.py",
+    "python/trustformers/**/*.pyi", 
+    "python/trustformers/py.typed",
+    "README.md",
+    "LICENSE",
+]
+
+exclude = [
+    "**/__pycache__/**",
+    "**/*.pyc",
+    "**/*.pyo",
+    "**/.pytest_cache/**",
+    "**/tests/**",
+    "**/.git/**",
+    "**/target/debug/**",
+    "**/*.debug",
+]
+
+# Size limits (in MB)
+max_wheel_size = 100
+max_sdist_size = 20
+
+# Dependencies optimization
+[dependencies]
+# Core dependencies (always included)
+core = [
+    "numpy>=1.21.0",
+    "typing-extensions>=4.0.0",
+]
+
+# Optional dependencies by feature
+[dependencies.torch]
+packages = [
+    "torch>=1.9.0",
+    "torchvision>=0.10.0",
+]
+platform_specific = true
+
+[dependencies.jax]
+packages = [
+    "jax[cpu]>=0.3.0", 
+    "jaxlib>=0.3.0",
+]
+
+[dependencies.serving]
+packages = [
+    "fastapi>=0.68.0",
+    "uvicorn[standard]>=0.15.0", 
+    "prometheus-client>=0.11.0",
+]
+
+[dependencies.mlops] 
+packages = [
+    "mlflow>=1.20.0",
+    "wandb>=0.12.0",
+    "tensorboard>=2.7.0",
+]
+
+[dependencies.data]
+packages = [
+    "pandas>=1.3.0",
+    "scikit-learn>=1.0.0",
+    "matplotlib>=3.4.0",
+    "seaborn>=0.11.0",
+    "plotly>=5.0.0",
+]
+
+[dependencies.jupyter]
+packages = [
+    "jupyter>=1.0.0",
+    "ipywidgets>=7.6.0", 
+    "tqdm>=4.60.0",
+]
+
+[dependencies.dev]
+packages = [
+    "pytest>=6.2.0",
+    "pytest-cov>=2.12.0",
+    "pytest-asyncio>=0.15.0",
+    "black>=21.6.0",
+    "isort>=5.9.0",
+    "mypy>=0.910",
+    "ruff>=0.0.90",
+]
+
+# Platform-specific optimizations
+[platform.linux]
+torch_index = "https://download.pytorch.org/whl/cpu"
+cuda_support = true
+optimization_flags = ["-O3", "-flto", "-march=native"]
+
+[platform.macos]
+torch_index = "https://download.pytorch.org/whl/cpu"
+metal_support = true
+optimization_flags = ["-O3", "-flto"]
+universal_binary = false  # Set to true for universal binaries
+
+[platform.windows]
+torch_index = "https://download.pytorch.org/whl/cpu"
+optimization_flags = ["/O2", "/GL"]
+
+# Build profiles
+[profiles.minimal]
+features = ["cpu"]
+dependencies = ["core"]
+max_size_mb = 20
+
+[profiles.standard]
+features = ["cpu", "simd"]
+dependencies = ["core", "torch"]
+max_size_mb = 50
+
+[profiles.full]
+features = ["cpu", "simd", "serving"]
+dependencies = ["core", "torch", "jax", "serving", "data"]
+max_size_mb = 100
+
+[profiles.gpu]
+features = ["cuda", "simd"]
+dependencies = ["core", "torch"]
+max_size_mb = 150
+
+[profiles.serving]
+features = ["cpu", "serving", "async"]
+dependencies = ["core", "serving", "mlops"]
+max_size_mb = 75
+
+[profiles.dev]
+features = ["cpu", "dev", "debugging"]
+dependencies = ["core", "dev", "torch", "data"]
+max_size_mb = 200
+
+# Testing configurations
+[testing]
+# Test matrix
+python_versions = ["3.8", "3.9", "3.10", "3.11", "3.12"]
+platforms = ["linux", "macos", "windows"]
+
+# Test categories
+test_categories = [
+    "unit",
+    "integration", 
+    "performance",
+    "compatibility",
+]
+
+# Test requirements
+[testing.requirements]
+unit = ["pytest", "pytest-cov"]
+integration = ["pytest", "pytest-asyncio"]
+performance = ["pytest-benchmark"]
+compatibility = ["tox"]
+
+# Distribution settings
+[distribution]
+# PyPI configuration
+pypi_repository = "pypi"
+test_pypi_repository = "testpypi"
+
+# Release types
+release_types = ["stable", "beta", "alpha", "dev"]
+
+# Supported Python versions
+python_requires = ">=3.8"
+
+# Classifiers
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9", 
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Keywords
+keywords = [
+    "machine-learning",
+    "deep-learning", 
+    "transformers",
+    "pytorch",
+    "jax",
+    "rust",
+    "performance",
+    "inference",
+]
+
+# Quality gates
+[quality]
+# Code coverage requirements
+min_coverage = 80
+coverage_threshold = 85
+
+# Performance requirements
+max_import_time_ms = 1000
+max_memory_usage_mb = 100
+
+# Security requirements
+security_scan = true
+vulnerability_check = true
+
+# Documentation requirements
+docstring_coverage = 90
+api_docs = true
+
+# Optimization strategies
+[optimization]
+# Binary optimization
+strip_symbols = true
+compress_sections = true
+remove_unused_code = true
+
+# Python optimization  
+compile_pyc = false  # Let pip handle this
+optimize_imports = true
+remove_docstrings = false  # Keep for API docs
+
+# Size optimization strategies
+size_strategies = [
+    "strip_binaries",
+    "remove_debug_info", 
+    "compress_data",
+    "optimize_dependencies",
+]
+
+# Performance optimization strategies
+performance_strategies = [
+    "link_time_optimization",
+    "profile_guided_optimization",
+    "target_cpu_optimization",
+    "vectorization",
+]
+
+# Memory optimization
+memory_strategies = [
+    "arena_allocation",
+    "lazy_loading",
+    "memory_mapping",
+    "gc_optimization",
+]
+
+# Monitoring and metrics
+[monitoring]
+# Build metrics
+track_build_time = true
+track_binary_size = true
+track_dependencies = true
+
+# Runtime metrics
+track_import_time = true
+track_memory_usage = true
+track_performance = true
+
+# Quality metrics
+track_test_coverage = true
+track_documentation = true
+track_security_issues = true
+
+# Notification settings
+[notifications]
+# Build notifications
+build_success = false
+build_failure = true
+size_threshold_exceeded = true
+
+# Quality notifications  
+coverage_below_threshold = true
+security_issues_found = true
+performance_regression = true
+
+# Channels
+slack_webhook = ""
+email_recipients = []
+github_issues = true

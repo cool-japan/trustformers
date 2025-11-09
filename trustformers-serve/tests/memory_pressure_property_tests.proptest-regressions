@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 6419016162736235cdc0c93b192bec9994d071636a94450eca842f3ae230b75f # shrinks to config = MemoryPressureConfig { enabled: false, pressure_thresholds: MemoryPressureThresholds { low: 0.1, medium: 0.54337656, high: 0.39000002, critical: 0.4, adaptive: true, base_low: 0.6, base_medium: 0.75, base_high: 0.85, base_critical: 0.95, adjustment_factor: 1.0, learning_rate: 0.01 }, monitoring_interval_seconds: 1, cleanup_strategies: [CacheEviction, GarbageCollection, BufferCompaction, RequestRejection], emergency_threshold: 0.8, memory_buffer_mb: 1, enable_aggressive_cleanup: true, gc_trigger_threshold: 0.8, cache_eviction_threshold: 0.75, request_rejection_threshold: 0.9, enable_memory_compaction: true, swap_usage_threshold: 0.5, enable_gpu_monitoring: true, gpu_pressure_thresholds: MemoryPressureThresholds { low: 0.7, medium: 0.8, high: 0.9, critical: 0.95, adaptive: true, base_low: 0.6, base_medium: 0.75, base_high: 0.85, base_critical: 0.95, adjustment_factor: 1.0, learning_rate: 0.01 }, gpu_cleanup_strategies: [GpuCacheEviction, GpuBufferCompaction, GpuModelUnloading, GpuVramCompaction], gpu_memory_buffer_mb: 512, gpu_fragmentation_threshold: 0.8, gpu_device_strategy: All }

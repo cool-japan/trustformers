@@ -1,0 +1,188 @@
+# syntax=docker/dockerfile:1.4
+# Optimized multi-stage Dockerfile for TrustformeRS Serve
+
+# Build arguments for customization
+ARG RUST_VERSION=1.75
+ARG TARGET_ARCH=x86_64-unknown-linux-gnu
+ARG TARGETPLATFORM=linux/amd64
+
+# Base builder stage with common dependencies
+FROM rust:${RUST_VERSION}-slim as base-builder
+
+# Install build dependencies and tools
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    protobuf-compiler \
+    clang \
+    lld \
+    git \
+    curl \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Configure Rust for optimized builds
+ENV CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+ENV CARGO_TARGET_DIR=/tmp/target
+ENV RUSTFLAGS="-C target-cpu=native -C link-arg=-fuse-ld=lld"
+
+# Add target architecture support
+RUN rustup target add ${TARGET_ARCH}
+
+# Create app directory
+WORKDIR /app
+
+# Dependency caching stage - builds dependencies separately for better layer caching
+FROM base-builder as deps-builder
+
+# Copy manifests first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+
+# Create dummy main for dependency compilation
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+
+# Build dependencies only (will be cached unless Cargo.toml changes)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/tmp/target \
+    cargo build --release --target=${TARGET_ARCH} && \
+    rm src/main.rs
+
+# Main builder stage
+FROM base-builder as builder
+
+# Copy cached dependencies from previous stage
+COPY --from=deps-builder /tmp/target /tmp/target
+
+# Copy build configuration
+COPY build.rs ./
+
+# Copy proto files for gRPC
+COPY proto/ ./proto/
+
+# Copy source code
+COPY src/ ./src/
+
+# Build the application with caching
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/tmp/target \
+    cargo build --release --target=${TARGET_ARCH} && \
+    cp /tmp/target/${TARGET_ARCH}/release/trustformers-serve /tmp/trustformers-serve
+
+# Strip debug symbols to reduce binary size
+RUN strip /tmp/trustformers-serve
+
+# Development stage for development builds
+FROM base-builder as development
+
+# Copy cached dependencies
+COPY --from=deps-builder /tmp/target /tmp/target
+
+# Copy all source files
+COPY . .
+
+# Install additional development tools
+RUN cargo install cargo-watch cargo-audit cargo-tarpaulin
+
+# Expose ports
+EXPOSE 8080 9090 9091
+
+# Default development command
+CMD ["cargo", "run", "--release"]
+
+# Testing stage for running tests
+FROM base-builder as testing
+
+# Copy cached dependencies
+COPY --from=deps-builder /tmp/target /tmp/target
+
+# Copy source code
+COPY . .
+
+# Run tests
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/tmp/target \
+    cargo test --release --target=${TARGET_ARCH}
+
+# Production runtime stage using distroless for minimal attack surface
+FROM gcr.io/distroless/cc-debian12:latest as production
+
+# Copy CA certificates for HTTPS requests
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# Create non-root user (distroless already provides this)
+USER 65532:65532
+
+# Copy the binary from builder stage
+COPY --from=builder /tmp/trustformers-serve /usr/local/bin/trustformers-serve
+
+# Create app directories with proper permissions
+COPY --from=builder --chown=65532:65532 /app /app
+
+# Set working directory
+WORKDIR /app
+
+# Expose ports
+EXPOSE 8080 9090 9091
+
+# Health check using a minimal approach
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD ["/usr/local/bin/trustformers-serve", "--health-check"] || exit 1
+
+# Environment variables for production
+ENV RUST_LOG=info \
+    SERVER_HOST=0.0.0.0 \
+    SERVER_PORT=8080 \
+    GRPC_PORT=9090 \
+    METRICS_PORT=9091 \
+    RUST_BACKTRACE=1
+
+# Default entrypoint
+ENTRYPOINT ["/usr/local/bin/trustformers-serve"]
+
+# Debug stage for troubleshooting
+FROM debian:bookworm-slim as debug
+
+# Install debugging tools
+RUN apt-get update && apt-get install -y \
+    curl \
+    netcat-traditional \
+    procps \
+    strace \
+    gdb \
+    valgrind \
+    htop \
+    iotop \
+    tcpdump \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary
+COPY --from=builder /tmp/trustformers-serve /usr/local/bin/trustformers-serve
+
+# Copy debug symbols if available
+COPY --from=builder /tmp/target/${TARGET_ARCH}/release/trustformers-serve.debug /usr/local/bin/ 2>/dev/null || true
+
+# Create app directory
+WORKDIR /app
+
+# Expose ports
+EXPOSE 8080 9090 9091
+
+# Debug entrypoint
+CMD ["/usr/local/bin/trustformers-serve"]
+
+# Security-hardened stage
+FROM production as security-hardened
+
+# Switch to even more restricted user
+USER 65534:65534
+
+# Add security labels
+LABEL security.scan="enabled" \
+      security.vulnerabilities="none" \
+      security.policy="restricted"
+
+# Remove any potential security risks
+RUN rm -rf /tmp/* /var/tmp/* 2>/dev/null || true
+
+# Default to production stage
+FROM production as default

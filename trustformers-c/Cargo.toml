@@ -1,0 +1,141 @@
+[package]
+name = "trustformers-c"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "C API for TrustformeRS - High-performance transformer library"
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-c"
+readme = "README.md"
+keywords = ["transformers", "nlp", "ffi", "c-api", "language-bindings"]
+categories = ["api-bindings", "science", "wasm"]
+
+[lints]
+workspace = true
+
+[lib]
+name = "trustformers_c"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+default = ["tokenizers", "models", "pipelines"]
+# Core features
+tokenizers = ["trustformers-tokenizers"]
+models = ["trustformers-models"] 
+pipelines = []
+serving = ["trustformers-serve"]
+training = ["trustformers-training"]
+# Platform features
+gpu = ["cuda"]
+cuda = ["trustformers-core/cuda", "cudarc", "half"]
+rocm = ["trustformers-core/rocm"]
+torch = ["trustformers-core/torch"]
+candle = ["trustformers-core/candle"]
+# Cross-platform optimizations
+arm64 = []
+apple-silicon = ["arm64"]
+windows-dll = []
+universal-binary = []
+simd = []
+# WebAssembly features
+wasm = ["wasm-bindgen"]
+wasm-simd = ["wasm", "simd"]
+wasm-threads = ["wasm"]
+# Debug features
+debug = ["trustformers-debug"]
+profiling = []
+# Code generation features
+codegen = ["syn", "quote", "clap", "toml"]
+
+[dependencies]
+trustformers = { workspace = true, default-features = false, features = ["bert", "gpt2"] }
+
+# Add the minimal async dependencies that trustformers core requires
+futures.workspace = true
+tokio.workspace = true
+trustformers-core = { workspace = true, default-features = false }
+trustformers-tokenizers = { workspace = true, optional = true, default-features = false }
+trustformers-models = { workspace = true, optional = true, default-features = false }
+trustformers-serve = { workspace = true, optional = true, default-features = false }
+trustformers-training = { workspace = true, optional = true, default-features = false }
+trustformers-debug = { workspace = true, optional = true, default-features = false }
+
+# Core dependencies
+libc = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+thiserror = "1.0"
+base64 = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log.workspace = true
+
+# FFI utilities (using standard approach)
+
+# Memory management
+once_cell = "1.19"
+parking_lot = "0.12"
+num_cpus = "1.16"
+crossbeam-deque = "0.8"
+crossbeam-utils = "0.8"
+dashmap = "5.5"
+crossbeam-skiplist = "0.1"
+
+# CUDA support (optional) - moved to platform-specific section below
+# cudarc is only available on Linux and Windows
+half = { version = "2.3", optional = true, features = ["serde"] }
+
+# Code generation dependencies (optional)
+syn = { version = "2.0", optional = true, features = ["full"] }
+quote = { version = "1.0", optional = true }
+clap = { version = "4.4", optional = true, features = ["derive"] }
+toml = { version = "0.8", optional = true }
+
+# HTTP server support (optional)
+chrono = { version = "0.4", features = ["serde"] }
+
+# SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
+scirs2-core.workspace = true
+
+# Standards framework dependencies
+regex = "1.10"
+lazy_static = "1.4"
+serde_yaml = "0.9"
+
+# WebAssembly support
+wasm-bindgen = { version = "0.2", optional = true }
+
+# String handling (using standard libc)
+
+[build-dependencies]
+cbindgen = "0.26"
+cc = "1.0"
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3.8"
+quickcheck = "1.0"
+quickcheck_macros = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+
+[package.metadata.docs.rs]
+features = ["tokenizers", "models", "pipelines", "serving", "training", "debug"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+# Platform-specific dependencies
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winnt", "processenv", "handleapi"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+core-foundation-sys = "0.8"
+
+# CUDA is only supported on Linux and Windows (not macOS)
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+cudarc = { version = "0.9", optional = true, features = ["cublas", "curand"] }
+

@@ -1,0 +1,78 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trustformers-server-config
+  namespace: trustformers
+  labels:
+    app: trustformers-server
+    app.kubernetes.io/name: trustformers-server-config
+    app.kubernetes.io/instance: trustformers
+    app.kubernetes.io/component: config
+data:
+  # Server configuration
+  server.yaml: |
+    server:
+      host: 0.0.0.0
+      port: 8080
+      workers: 4
+      max_connections: 1000
+      keep_alive: 75
+      
+    models:
+      cache_dir: /var/cache/trustformers
+      max_loaded: 10
+      default_models:
+        - name: bert-base-uncased
+          type: bert
+          auto_load: true
+        - name: gpt2
+          type: gpt2
+          auto_load: false
+          
+    inference:
+      max_batch_size: 32
+      timeout_seconds: 300
+      max_sequence_length: 512
+      
+    monitoring:
+      metrics_enabled: true
+      metrics_path: /metrics
+      trace_enabled: true
+      trace_sample_rate: 0.1
+      
+    security:
+      cors_enabled: true
+      cors_origins:
+        - "*"
+      rate_limit:
+        enabled: false
+        requests_per_minute: 60
+        
+  # Logging configuration
+  log4rs.yaml: |
+    refresh_rate: 30 seconds
+    appenders:
+      stdout:
+        kind: console
+        encoder:
+          pattern: "{d} {l} {t} - {m}{n}"
+      file:
+        kind: file
+        path: /tmp/trustformers.log
+        encoder:
+          pattern: "{d(%Y-%m-%d %H:%M:%S)} [{l}] {t} - {m}{n}"
+    root:
+      level: info
+      appenders:
+        - stdout
+    loggers:
+      trustformers:
+        level: debug
+        appenders:
+          - stdout
+          - file
+        additive: false
+      axum:
+        level: info
+      tower_http:
+        level: debug

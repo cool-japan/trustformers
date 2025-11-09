@@ -1,0 +1,198 @@
+# Build artifacts and cache
+target/
+Cargo.lock
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+
+# Documentation
+README.md
+CHANGELOG.md
+LICENSE*
+docs/
+*.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+Jenkinsfile
+
+# Testing artifacts
+coverage/
+test-results/
+*.profraw
+*.gcda
+*.gcno
+
+# Temporary files
+tmp/
+temp/
+.tmp/
+*.tmp
+*.log
+*.pid
+*.seed
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+*.env
+
+# Package manager files
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+yarn.lock
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Rust artifacts
+**/*.rs.bk
+*.pdb
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# Deployment specific
+docker-compose.override.yml
+docker-compose.local.yml
+Dockerfile.local
+.dockerignore
+
+# Kubernetes
+k8s/
+helm/
+deployment/
+manifests/
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+terraform.tfvars
+*.tfplan
+
+# Ansible
+*.retry
+inventory/
+group_vars/
+host_vars/
+
+# Configuration that shouldn't be in container
+config.local.toml
+config.development.toml
+config.test.toml
+secrets/
+certificates/
+keys/
+
+# Monitoring and logs
+logs/
+*.log
+monitoring/
+grafana/
+prometheus/
+
+# Examples and demos
+examples/
+demo/
+sample/
+benchmarks/
+
+# Large model files that should be mounted
+models/
+weights/
+checkpoints/
+*.bin
+*.safetensors
+*.onnx
+*.h5
+
+# Development tools
+.cargo/
+rustfmt.toml
+clippy.toml
+
+# Security scanning
+.snyk
+.trivyignore
+security-scan-results/
+
+# Performance profiling
+flamegraph.svg
+perf.data*
+callgrind.out.*
+
+# Backup files
+*.bak
+*.backup
+*.old
+*~
+
+# IDE specific
+.idea/
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# MacOS
+.AppleDouble
+.LSOverride
+Icon
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*

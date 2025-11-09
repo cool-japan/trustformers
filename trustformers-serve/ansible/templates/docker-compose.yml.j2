@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  trustformers-serve:
+    image: {{ docker_image }}
+    container_name: trustformers-serve
+    restart: unless-stopped
+    ports:
+      - "{{ app_port }}:8080"
+    volumes:
+      - {{ config_dir }}:/app/config:ro
+      - {{ logs_dir }}:/app/logs
+      - {{ data_dir }}:/app/data
+      - {{ models_dir }}:/app/models
+    environment:
+      - RUST_LOG={{ log_level | default('info') }}
+      - TRUSTFORMERS_CONFIG_PATH=/app/config/server.toml
+      - TRUSTFORMERS_MAX_BATCH_SIZE={{ max_batch_size | default(32) }}
+      - TRUSTFORMERS_MODEL_CACHE_SIZE={{ model_cache_size | default(1024) }}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+          cpus: '4.0'
+        reservations:
+          memory: 4G
+          cpus: '2.0'
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+    networks:
+      - trustformers-network
+
+networks:
+  trustformers-network:
+    driver: bridge

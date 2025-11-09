@@ -1,0 +1,540 @@
+use std::path::PathBuf;
+use clap::Parser;
+use anyhow::Result;
+use trustformers_core::{Tensor, Device};
+use trustformers_models::{{model_type|pascal_case}}Model;
+{{#if generate_metrics}}
+use crate::metrics::{{{#each metrics}}{{name|pascal_case}}, {{/each}}};
+{{/if}}
+
+/// {{name|title}} Evaluation Script
+/// 
+/// Evaluate a trained {{model_type}} model on {{dataset_type}} data.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to model checkpoint
+    #[arg(short, long)]
+    model: PathBuf,
+    
+    /// Path to test data
+    #[arg(short, long)]
+    test_data: PathBuf,
+    
+    /// Batch size for evaluation
+    #[arg(short, long, default_value = "{{batch_size|default:32}}")]
+    batch_size: usize,
+    
+    /// Device to use (cpu, cuda, mps)
+    #[arg(short, long, default_value = "{{device|default:cuda}}")]
+    device: String,
+    
+    /// Output file for results
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    
+    /// Generate predictions file
+    #[arg(long)]
+    save_predictions: bool,
+    
+    {{#if is_sequence_model}}
+    /// Maximum sequence length
+    #[arg(long, default_value = "{{max_length|default:512}}")]
+    max_length: usize,
+    {{/if}}
+    
+    /// Verbose output
+    #[arg(short, long)]
+    verbose: bool,
+    
+    {{#each eval_args}}
+    /// {{description}}
+    #[arg({{arg_attributes}})]
+    {{name}}: {{type}},
+    {{/each}}
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    
+    // Initialize device
+    let device = Device::from_string(&args.device)?;
+    println!("Using device: {:?}", device);
+    
+    // Load model
+    println!("Loading model from: {:?}", args.model);
+    let model = {{model_type|pascal_case}}Model::load(&args.model)?;
+    model.to(device.clone())?;
+    model.eval();
+    
+    // Load test dataset
+    let test_dataset = {{dataset_type|pascal_case}}Dataset::from_file(
+        &args.test_data,
+        {{#if is_sequence_model}}
+        args.max_length,
+        {{/if}}
+    )?;
+    
+    println!("Test dataset size: {}", test_dataset.len());
+    
+    // Create data loader
+    let test_loader = DataLoader::new(
+        test_dataset,
+        args.batch_size,
+        false, // shuffle
+        device.clone(),
+    )?;
+    
+    // Initialize metrics
+    {{#if generate_metrics}}
+    {{#each metrics}}
+    let mut {{name|snake_case}} = {{name|pascal_case}}::new({{#if params}}{{params}}{{/if}});
+    {{/each}}
+    {{/if}}
+    
+    // Evaluation loop
+    let mut all_predictions = Vec::new();
+    let mut all_labels = Vec::new();
+    {{#if compute_loss}}
+    let mut total_loss = 0.0;
+    let mut num_batches = 0;
+    {{/if}}
+    
+    let progress = if args.verbose {
+        Some(ProgressBar::new(test_loader.len()))
+    } else {
+        None
+    };
+    
+    for batch in test_loader {
+        // Forward pass
+        let outputs = model.forward(&batch.inputs)?;
+        
+        {{#if model_type == "classification"}}
+        // Get predictions
+        let predictions = outputs.logits.argmax(-1)?;
+        all_predictions.extend(predictions.to_vec::<i64>()?);
+        all_labels.extend(batch.labels.to_vec::<i64>()?);
+        
+        {{else if model_type == "regression"}}
+        // Get predictions
+        let predictions = outputs.predictions;
+        all_predictions.extend(predictions.to_vec::<f32>()?);
+        all_labels.extend(batch.labels.to_vec::<f32>()?);
+        
+        {{else if model_type == "generation"}}
+        // Generate sequences
+        let generated = model.generate(
+            &batch.inputs,
+            max_length: args.max_length,
+            temperature: 1.0,
+            top_k: 50,
+            top_p: 0.9,
+        )?;
+        all_predictions.push(generated);
+        
+        {{else}}
+        // Custom prediction extraction
+        let predictions = extract_predictions(&outputs)?;
+        all_predictions.extend(predictions);
+        all_labels.extend(batch.labels.to_vec::<{{label_type|default:i64}}>()?);
+        {{/if}}
+        
+        {{#if compute_loss}}
+        // Compute loss
+        let loss = compute_loss(&outputs, &batch.labels)?;
+        total_loss += loss.item();
+        num_batches += 1;
+        {{/if}}
+        
+        {{#if generate_metrics}}
+        // Update metrics
+        {{#each metrics}}
+        {{name|snake_case}}.update(&predictions, &batch.labels)?;
+        {{/each}}
+        {{/if}}
+        
+        if let Some(ref progress) = progress {
+            progress.update(1);
+        }
+    }
+    
+    if let Some(progress) = progress {
+        progress.finish();
+    }
+    
+    // Compute final metrics
+    let mut results = std::collections::HashMap::new();
+    
+    {{#if compute_loss}}
+    let avg_loss = total_loss / num_batches as f32;
+    results.insert("loss".to_string(), avg_loss);
+    println!("\nAverage Loss: {:.4}", avg_loss);
+    {{/if}}
+    
+    {{#if generate_metrics}}
+    {{#each metrics}}
+    let {{name|snake_case}}_score = {{name|snake_case}}.compute()?;
+    results.insert("{{name}}".to_string(), {{name|snake_case}}_score);
+    println!("{{name|title}}: {:.4}", {{name|snake_case}}_score);
+    {{/each}}
+    {{/if}}
+    
+    {{#if model_type == "classification"}}
+    // Compute accuracy
+    let correct = all_predictions.iter()
+        .zip(all_labels.iter())
+        .filter(|(pred, label)| pred == label)
+        .count();
+    let accuracy = correct as f32 / all_labels.len() as f32;
+    results.insert("accuracy".to_string(), accuracy);
+    println!("Accuracy: {:.2}%", accuracy * 100.0);
+    
+    // Confusion matrix
+    if args.verbose {
+        let confusion_matrix = compute_confusion_matrix(&all_predictions, &all_labels)?;
+        println!("\nConfusion Matrix:");
+        print_confusion_matrix(&confusion_matrix);
+    }
+    {{/if}}
+    
+    // Save predictions if requested
+    if args.save_predictions {
+        let pred_file = args.output
+            .as_ref()
+            .map(|p| p.with_extension("predictions.json"))
+            .unwrap_or_else(|| PathBuf::from("predictions.json"));
+        
+        save_predictions(&pred_file, &all_predictions, &all_labels)?;
+        println!("\nPredictions saved to: {:?}", pred_file);
+    }
+    
+    // Save results
+    if let Some(output_path) = args.output {
+        save_results(&output_path, &results)?;
+        println!("\nResults saved to: {:?}", output_path);
+    }
+    
+    Ok(())
+}
+
+{{#if model_type == "classification"}}
+fn compute_confusion_matrix(
+    predictions: &[i64],
+    labels: &[i64],
+) -> Result<Vec<Vec<usize>>> {
+    let num_classes = (*labels.iter().max().unwrap() + 1) as usize;
+    let mut matrix = vec![vec![0usize; num_classes]; num_classes];
+    
+    for (&pred, &label) in predictions.iter().zip(labels.iter()) {
+        matrix[label as usize][pred as usize] += 1;
+    }
+    
+    Ok(matrix)
+}
+
+fn print_confusion_matrix(matrix: &[Vec<usize>]) {
+    let num_classes = matrix.len();
+    
+    // Print header
+    print!("      ");
+    for i in 0..num_classes {
+        print!("{:>6}", i);
+    }
+    println!();
+    
+    // Print rows
+    for (i, row) in matrix.iter().enumerate() {
+        print!("{:>6}", i);
+        for &val in row {
+            print!("{:>6}", val);
+        }
+        println!();
+    }
+}
+{{/if}}
+
+fn save_predictions<P: AsRef<std::path::Path>>(
+    path: P,
+    predictions: &[{{prediction_type|default:i64}}],
+    labels: &[{{label_type|default:i64}}],
+) -> Result<()> {
+    use std::io::Write;
+    
+    let data = serde_json::json!({
+        "predictions": predictions,
+        "labels": labels,
+        "num_samples": predictions.len(),
+    });
+    
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(serde_json::to_string_pretty(&data)?.as_bytes())?;
+    
+    Ok(())
+}
+
+fn save_results<P: AsRef<std::path::Path>>(
+    path: P,
+    results: &std::collections::HashMap<String, f32>,
+) -> Result<()> {
+    use std::io::Write;
+    
+    let data = serde_json::json!({
+        "metrics": results,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(serde_json::to_string_pretty(&data)?.as_bytes())?;
+    
+    Ok(())
+}
+
+{{#if model_type == "custom"}}
+fn extract_predictions(outputs: &ModelOutput) -> Result<Vec<{{prediction_type|default:f32}}>> {
+    // Custom prediction extraction based on model output structure
+    match outputs {
+        ModelOutput::Tensor(tensor) => {
+            // For single tensor output, extract predictions based on tensor dimensions
+            let shape = tensor.shape();
+            match shape.len() {
+                1 => {
+                    // 1D tensor: direct prediction values
+                    Ok(tensor.to_vec::<{{prediction_type|default:f32}}>()?)
+                },
+                2 => {
+                    // 2D tensor: batch x features or batch x classes
+                    if shape[1] == 1 {
+                        // Regression: single output per sample
+                        let flattened = tensor.flatten()?;
+                        Ok(flattened.to_vec::<{{prediction_type|default:f32}}>()?)
+                    } else {
+                        // Classification: take argmax across classes
+                        let predictions = tensor.argmax(1)?;
+                        let preds = predictions.to_vec::<i64>()?;
+                        Ok(preds.into_iter().map(|x| x as {{prediction_type|default:f32}}).collect())
+                    }
+                },
+                3 => {
+                    // 3D tensor: sequence prediction (batch x seq_len x vocab_size)
+                    let predictions = tensor.argmax(-1)?; // Take argmax over last dimension
+                    let flattened = predictions.flatten()?;
+                    let preds = flattened.to_vec::<i64>()?;
+                    Ok(preds.into_iter().map(|x| x as {{prediction_type|default:f32}}).collect())
+                },
+                _ => {
+                    // Higher dimensional: flatten and take first element per batch
+                    let batch_size = shape[0];
+                    let mut predictions = Vec::with_capacity(batch_size);
+                    
+                    for i in 0..batch_size {
+                        let sample = tensor.select(0, i)?;
+                        let flattened = sample.flatten()?;
+                        let data = flattened.to_vec::<{{prediction_type|default:f32}}>()?;
+                        if !data.is_empty() {
+                            predictions.push(data[0]);
+                        } else {
+                            predictions.push(Default::default());
+                        }
+                    }
+                    
+                    Ok(predictions)
+                }
+            }
+        },
+        ModelOutput::Multiple(tensors) => {
+            // For multiple tensor outputs, use the first tensor as predictions
+            if let Some(first_tensor) = tensors.get("predictions")
+                .or_else(|| tensors.get("logits"))
+                .or_else(|| tensors.get("output"))
+                .or_else(|| tensors.values().next()) {
+                extract_predictions(&ModelOutput::Tensor(first_tensor.clone()))
+            } else {
+                Ok(vec![])
+            }
+        },
+        ModelOutput::Structured { predictions, logits, hidden_states, .. } => {
+            // For structured output, prefer predictions field, then logits
+            if let Some(pred_tensor) = predictions {
+                extract_predictions(&ModelOutput::Tensor(pred_tensor.clone()))
+            } else if let Some(logits_tensor) = logits {
+                // Apply softmax or argmax to logits
+                let shape = logits_tensor.shape();
+                if shape.len() >= 2 && shape[shape.len() - 1] > 1 {
+                    // Multi-class: take argmax
+                    let predictions = logits_tensor.argmax(-1)?;
+                    let preds = predictions.to_vec::<i64>()?;
+                    Ok(preds.into_iter().map(|x| x as {{prediction_type|default:f32}}).collect())
+                } else {
+                    // Single value: flatten
+                    let flattened = logits_tensor.flatten()?;
+                    Ok(flattened.to_vec::<{{prediction_type|default:f32}}>()?)
+                }
+            } else {
+                // Fallback: return zeros
+                Ok(vec![Default::default(); 1])
+            }
+        },
+        _ => {
+            // Unknown output type: return empty predictions
+            println!("Warning: Unknown model output type, returning empty predictions");
+            Ok(vec![])
+        }
+    }
+}
+{{/if}}
+
+{{#if compute_loss}}
+fn compute_loss(outputs: &ModelOutput, labels: &Tensor) -> Result<Tensor> {
+    // Compute loss based on model output type and labels
+    match outputs {
+        ModelOutput::Tensor(predictions) => {
+            compute_tensor_loss(predictions, labels)
+        },
+        ModelOutput::Multiple(tensors) => {
+            // Use first available tensor for loss computation
+            if let Some(pred_tensor) = tensors.get("predictions")
+                .or_else(|| tensors.get("logits"))
+                .or_else(|| tensors.get("output"))
+                .or_else(|| tensors.values().next()) {
+                compute_tensor_loss(pred_tensor, labels)
+            } else {
+                Ok(Tensor::zeros(&[1])?)
+            }
+        },
+        ModelOutput::Structured { predictions, logits, .. } => {
+            // Prefer predictions, then logits
+            if let Some(pred_tensor) = predictions {
+                compute_tensor_loss(pred_tensor, labels)
+            } else if let Some(logits_tensor) = logits {
+                compute_tensor_loss(logits_tensor, labels)
+            } else {
+                Ok(Tensor::zeros(&[1])?)
+            }
+        },
+        _ => Ok(Tensor::zeros(&[1])?)
+    }
+}
+
+fn compute_tensor_loss(predictions: &Tensor, labels: &Tensor) -> Result<Tensor> {
+    let pred_shape = predictions.shape();
+    let label_shape = labels.shape();
+    
+    // Determine loss type based on prediction and label shapes
+    match (pred_shape.len(), label_shape.len()) {
+        // Classification case: predictions are logits [batch_size, num_classes]
+        (2, 1) if pred_shape[1] > 1 => {
+            // Cross-entropy loss
+            let log_softmax = predictions.log_softmax(-1)?;
+            let batch_size = pred_shape[0];
+            let mut loss = 0.0f32;
+            
+            for i in 0..batch_size {
+                let label = labels.get_item::<i64>(&[i])? as usize;
+                if label < pred_shape[1] {
+                    let log_prob = log_softmax.get_item::<f32>(&[i, label])?;
+                    loss -= log_prob;
+                }
+            }
+            
+            loss /= batch_size as f32;
+            Ok(Tensor::from_scalar(loss)?)
+        },
+        
+        // Binary classification: predictions are probabilities [batch_size, 1] or [batch_size]
+        (1, 1) | (2, 1) if pred_shape.len() == 2 && pred_shape[1] == 1 => {
+            // Binary cross-entropy loss
+            let predictions = if pred_shape.len() == 2 {
+                predictions.squeeze(1)?
+            } else {
+                predictions.clone()
+            };
+            
+            let labels = labels.to_dtype(predictions.dtype())?;
+            
+            // BCE: -[y*log(p) + (1-y)*log(1-p)]
+            let eps = 1e-7f32;
+            let predictions_clamped = predictions.clamp(eps, 1.0 - eps)?;
+            
+            let pos_loss = labels.mul(&predictions_clamped.log())?;
+            let neg_loss = labels.neg()?.add_scalar(1.0)?.mul(&predictions_clamped.neg()?.add_scalar(1.0)?.log())?;
+            let loss = pos_loss.add(&neg_loss)?.neg()?.mean()?;
+            
+            Ok(loss)
+        },
+        
+        // Regression case: predictions and labels have same shape
+        _ if pred_shape == label_shape => {
+            // Mean Squared Error loss
+            let labels = labels.to_dtype(predictions.dtype())?;
+            let diff = predictions.sub(&labels)?;
+            let squared_diff = diff.mul(&diff)?;
+            let mse = squared_diff.mean()?;
+            
+            Ok(mse)
+        },
+        
+        // Sequence-to-sequence: predictions [batch, seq_len, vocab_size], labels [batch, seq_len]
+        (3, 2) => {
+            // Cross-entropy over sequence
+            let batch_size = pred_shape[0];
+            let seq_len = pred_shape[1];
+            let vocab_size = pred_shape[2];
+            
+            let log_softmax = predictions.log_softmax(-1)?;
+            let mut total_loss = 0.0f32;
+            let mut valid_tokens = 0;
+            
+            for b in 0..batch_size {
+                for s in 0..seq_len {
+                    let label = labels.get_item::<i64>(&[b, s])? as usize;
+                    if label < vocab_size && label > 0 { // Assume 0 is padding token
+                        let log_prob = log_softmax.get_item::<f32>(&[b, s, label])?;
+                        total_loss -= log_prob;
+                        valid_tokens += 1;
+                    }
+                }
+            }
+            
+            if valid_tokens > 0 {
+                total_loss /= valid_tokens as f32;
+            }
+            
+            Ok(Tensor::from_scalar(total_loss)?)
+        },
+        
+        // Default: try to compute MSE after reshaping
+        _ => {
+            // Attempt to flatten both tensors and compute MSE
+            let pred_flat = predictions.flatten()?;
+            let label_flat = labels.flatten()?;
+            
+            let min_len = pred_flat.shape()[0].min(label_flat.shape()[0]);
+            if min_len > 0 {
+                let pred_slice = pred_flat.slice(&[0..min_len])?;
+                let label_slice = label_flat.slice(&[0..min_len])?;
+                let label_slice = label_slice.to_dtype(pred_slice.dtype())?;
+                
+                let diff = pred_slice.sub(&label_slice)?;
+                let squared_diff = diff.mul(&diff)?;
+                let mse = squared_diff.mean()?;
+                
+                Ok(mse)
+            } else {
+                Ok(Tensor::zeros(&[1])?)
+            }
+        }
+    }
+}
+{{/if}}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_evaluation() {
+        // Test basic evaluation setup
+        // This is just a compilation test
+    }
+}

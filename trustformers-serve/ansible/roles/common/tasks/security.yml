@@ -1,0 +1,151 @@
+---
+# Security hardening tasks
+
+- name: Configure SSH daemon
+  template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    backup: true
+    validate: '/usr/sbin/sshd -t -f %s'
+  notify: restart sshd
+  tags: [ssh, security]
+
+- name: Configure firewall (UFW)
+  ufw:
+    state: "{{ 'enabled' if firewall_enabled else 'disabled' }}"
+    policy: "{{ firewall_default_policy }}"
+  tags: [firewall, security]
+
+- name: Configure firewall rules
+  ufw:
+    rule: allow
+    port: "{{ item.split('/')[0] }}"
+    proto: "{{ item.split('/')[1] }}"
+  loop: "{{ firewall_allowed_ports }}"
+  when: firewall_enabled
+  tags: [firewall, security]
+
+- name: Install and configure fail2ban
+  package:
+    name: fail2ban
+    state: present
+  when: security_settings.enable_fail2ban
+  tags: [fail2ban, security]
+
+- name: Configure fail2ban
+  template:
+    src: jail.local.j2
+    dest: /etc/fail2ban/jail.local
+  notify: restart fail2ban
+  when: security_settings.enable_fail2ban
+  tags: [fail2ban, security]
+
+- name: Disable unused services
+  service:
+    name: "{{ item }}"
+    enabled: false
+    state: stopped
+  loop: "{{ security_settings.disable_services }}"
+  failed_when: false  # Some services might not exist
+  tags: [services, security]
+
+- name: Remove unnecessary packages
+  package:
+    name: "{{ security_settings.remove_packages }}"
+    state: absent
+  tags: [packages, security]
+
+- name: Configure kernel parameters for security
+  sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    state: present
+    reload: true
+  loop:
+    - name: net.ipv4.conf.all.send_redirects
+      value: 0
+    - name: net.ipv4.conf.default.send_redirects
+      value: 0
+    - name: net.ipv4.conf.all.accept_redirects
+      value: 0
+    - name: net.ipv4.conf.default.accept_redirects
+      value: 0
+    - name: net.ipv4.conf.all.secure_redirects
+      value: 0
+    - name: net.ipv4.conf.default.secure_redirects
+      value: 0
+    - name: net.ipv4.ip_forward
+      value: 0
+    - name: net.ipv4.conf.all.log_martians
+      value: 1
+    - name: net.ipv4.conf.default.log_martians
+      value: 1
+    - name: net.ipv4.icmp_echo_ignore_broadcasts
+      value: 1
+    - name: net.ipv4.icmp_ignore_bogus_error_responses
+      value: 1
+    - name: net.ipv4.tcp_syncookies
+      value: 1
+  tags: [sysctl, security]
+
+- name: Set proper file permissions on sensitive files
+  file:
+    path: "{{ item.path }}"
+    mode: "{{ item.mode }}"
+    owner: "{{ item.owner | default('root') }}"
+    group: "{{ item.group | default('root') }}"
+  loop:
+    - path: /etc/passwd
+      mode: '0644'
+    - path: /etc/shadow
+      mode: '0600'
+    - path: /etc/group
+      mode: '0644'
+    - path: /etc/gshadow
+      mode: '0600'
+    - path: /etc/ssh/sshd_config
+      mode: '0600'
+  tags: [permissions, security]
+
+- name: Configure audit rules
+  template:
+    src: audit.rules.j2
+    dest: /etc/audit/rules.d/trustformers.rules
+  notify: restart auditd
+  when: ansible_os_family == "RedHat" or ansible_os_family == "Debian"
+  tags: [audit, security]
+
+- name: Configure password policy
+  template:
+    src: pwquality.conf.j2
+    dest: /etc/security/pwquality.conf
+  when: ansible_os_family == "RedHat" or ansible_os_family == "Debian"
+  tags: [password-policy, security]
+
+- name: Configure login definitions
+  template:
+    src: login.defs.j2
+    dest: /etc/login.defs
+    backup: true
+  tags: [login, security]
+
+- name: Set up automatic security updates
+  template:
+    src: 50unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+  when: ansible_os_family == "Debian"
+  notify: restart unattended-upgrades
+  tags: [updates, security]
+
+- name: Configure AppArmor profiles (Ubuntu/Debian)
+  command: aa-enforce /etc/apparmor.d/*
+  when: ansible_os_family == "Debian"
+  failed_when: false
+  tags: [apparmor, security]
+
+- name: Configure SELinux (RHEL/CentOS)
+  selinux:
+    policy: targeted
+    state: enforcing
+  when: ansible_os_family == "RedHat"
+  tags: [selinux, security]

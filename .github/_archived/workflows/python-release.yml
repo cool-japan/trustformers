@@ -1,0 +1,411 @@
+name: Python Package Release
+
+on:
+  push:
+    tags:
+      - 'py-v*'  # Separate tag pattern for Python releases
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.1.0)'
+        required: true
+        type: string
+      test_pypi:
+        description: 'Release to Test PyPI instead of PyPI'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  PACKAGE_PATH: trustformers-py
+  PYTHON_PACKAGE_NAME: trustformers
+
+defaults:
+  run:
+    working-directory: trustformers-py
+
+jobs:
+  # Validate release
+  validate-release:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      is_prerelease: ${{ steps.check_prerelease.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from tag or input
+        id: get_version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/py-v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check if prerelease
+        id: check_prerelease
+        run: |
+          version="${{ steps.get_version.outputs.version }}"
+          if [[ "$version" =~ (alpha|beta|rc|dev) ]]; then
+            echo "is_prerelease=true" >> $GITHUB_OUTPUT
+          else
+            echo "is_prerelease=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Validate version format
+        run: |
+          version="${{ steps.get_version.outputs.version }}"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc|dev)[0-9]*)?$ ]]; then
+            echo "Invalid version format: $version"
+            echo "Expected format: X.Y.Z or X.Y.Z-(alpha|beta|rc|dev)N"
+            exit 1
+          fi
+
+  # Run full test suite before release
+  pre-release-tests:
+    name: Pre-release Tests
+    needs: validate-release
+    uses: ./.github/workflows/python-ci.yml
+
+  # Build all distribution artifacts
+  build-distributions:
+    name: Build Distributions
+    needs: [validate-release, pre-release-tests]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install maturin cibuildwheel==2.16.*
+
+      - name: Build wheels
+        run: python -m cibuildwheel --output-dir dist
+        env:
+          # Build for multiple Python versions
+          CIBW_BUILD: "cp38-* cp39-* cp310-* cp311-* cp312-*"
+          # Skip 32-bit and PyPy
+          CIBW_SKIP: "*-win32 *-manylinux_i686 pp*"
+          # Install Rust in build environment
+          CIBW_BEFORE_ALL_LINUX: "curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain stable -y && source ~/.cargo/env"
+          CIBW_BEFORE_ALL_MACOS: "curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain stable -y && source ~/.cargo/env"
+          CIBW_BEFORE_ALL_WINDOWS: "curl -sSf -o rustup-init.exe https://win.rustup.rs && rustup-init.exe -y --default-toolchain stable"
+          CIBW_ENVIRONMENT_LINUX: "PATH=$HOME/.cargo/bin:$PATH"
+          CIBW_ENVIRONMENT_MACOS: "PATH=$HOME/.cargo/bin:$PATH"
+          CIBW_ENVIRONMENT_WINDOWS: "PATH=$USERPROFILE\\.cargo\\bin;$PATH"
+
+      - name: Build source distribution (Ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          maturin sdist --out dist
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v3
+        with:
+          name: distributions-${{ matrix.os }}
+          path: trustformers-py/dist/*
+
+  # Create GitHub release
+  create-github-release:
+    name: Create GitHub Release
+    needs: [validate-release, build-distributions]
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+      release_id: ${{ steps.create_release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all distributions
+        uses: actions/download-artifact@v3
+        with:
+          path: distributions
+
+      - name: Organize distributions
+        run: |
+          mkdir -p all-distributions
+          find distributions -name "*.whl" -o -name "*.tar.gz" | xargs -I {} cp {} all-distributions/
+          ls -la all-distributions/
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          echo "# Changelog for Python Package v${{ needs.validate-release.outputs.version }}" > CHANGELOG_RELEASE.md
+          echo "" >> CHANGELOG_RELEASE.md
+          
+          # Get commits since last Python release tag
+          if git describe --tags --match "py-v*" --abbrev=0 HEAD^ >/dev/null 2>&1; then
+            last_tag=$(git describe --tags --match "py-v*" --abbrev=0 HEAD^)
+            echo "## Changes since $last_tag" >> CHANGELOG_RELEASE.md
+            git log --pretty=format:"- %s (%h)" $last_tag..HEAD -- trustformers-py/ >> CHANGELOG_RELEASE.md
+          else
+            echo "## Changes" >> CHANGELOG_RELEASE.md
+            git log --pretty=format:"- %s (%h)" HEAD~10..HEAD -- trustformers-py/ >> CHANGELOG_RELEASE.md
+          fi
+          
+          echo "" >> CHANGELOG_RELEASE.md
+          echo "## Package Contents" >> CHANGELOG_RELEASE.md
+          echo "This release includes:" >> CHANGELOG_RELEASE.md
+          echo "- Python wheels for Python 3.8-3.12 on Linux, macOS, and Windows" >> CHANGELOG_RELEASE.md
+          echo "- Source distribution for building from source" >> CHANGELOG_RELEASE.md
+
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: py-v${{ needs.validate-release.outputs.version }}
+          release_name: Python Package v${{ needs.validate-release.outputs.version }}
+          body_path: CHANGELOG_RELEASE.md
+          draft: false
+          prerelease: ${{ needs.validate-release.outputs.is_prerelease == 'true' }}
+
+      - name: Upload distributions to release
+        run: |
+          for file in all-distributions/*; do
+            filename=$(basename "$file")
+            curl -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                 -H "Content-Type: application/octet-stream" \
+                 --data-binary @"$file" \
+                 "${{ steps.create_release.outputs.upload_url }}?name=$filename"
+          done
+
+  # Publish to PyPI
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [validate-release, build-distributions, create-github-release]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/trustformers/
+    permissions:
+      id-token: write  # For trusted publishing
+    steps:
+      - name: Download all distributions
+        uses: actions/download-artifact@v3
+        with:
+          path: distributions
+
+      - name: Organize distributions for upload
+        run: |
+          mkdir -p dist
+          find distributions -name "*.whl" -o -name "*.tar.gz" | xargs -I {} cp {} dist/
+          ls -la dist/
+
+      - name: Publish to Test PyPI
+        if: github.event.inputs.test_pypi == 'true' || needs.validate-release.outputs.is_prerelease == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          repository-url: https://test.pypi.org/legacy/
+          verbose: true
+
+      - name: Publish to PyPI
+        if: github.event.inputs.test_pypi != 'true' && needs.validate-release.outputs.is_prerelease == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          verbose: true
+
+  # Test installation from PyPI
+  test-pypi-installation:
+    name: Test PyPI Installation
+    needs: [validate-release, publish-pypi]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.8', '3.11', '3.12']
+    steps:
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Wait for PyPI propagation
+        run: sleep 300  # Wait 5 minutes for PyPI to propagate
+
+      - name: Install from PyPI
+        run: |
+          python -m pip install --upgrade pip
+          if [ "${{ github.event.inputs.test_pypi }}" = "true" ] || [ "${{ needs.validate-release.outputs.is_prerelease }}" = "true" ]; then
+            pip install --index-url https://test.pypi.org/simple/ --extra-index-url https://pypi.org/simple/ trustformers==${{ needs.validate-release.outputs.version }}
+          else
+            pip install trustformers==${{ needs.validate-release.outputs.version }}
+          fi
+
+      - name: Test installation
+        run: |
+          python -c "
+          import trustformers as tf
+          print(f'TrustformeRS version: {tf.__version__}')
+          assert tf.__version__ == '${{ needs.validate-release.outputs.version }}'
+          print('✓ Installation test passed!')
+          "
+
+  # Publish Docker image with Python package
+  publish-docker:
+    name: Publish Docker Image
+    needs: [validate-release, publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v2
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create Python Dockerfile
+        working-directory: trustformers-py
+        run: |
+          cat > Dockerfile.python << 'EOF'
+          FROM python:3.11-slim
+
+          # Install system dependencies
+          RUN apt-get update && apt-get install -y \
+              curl \
+              build-essential \
+              && rm -rf /var/lib/apt/lists/*
+
+          # Install Rust
+          RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          ENV PATH="/root/.cargo/bin:${PATH}"
+
+          # Set working directory
+          WORKDIR /app
+
+          # Install TrustformeRS from PyPI
+          RUN pip install --no-cache-dir trustformers==${{ needs.validate-release.outputs.version }}
+
+          # Create example script
+          RUN echo 'import trustformers as tf; print(f"TrustformeRS {tf.__version__} ready!")' > test.py
+
+          # Default command
+          CMD ["python", "test.py"]
+          EOF
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: trustformers-py
+          file: trustformers-py/Dockerfile.python
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            trustformers/python:latest
+            trustformers/python:${{ needs.validate-release.outputs.version }}
+            ghcr.io/${{ github.repository }}/python:latest
+            ghcr.io/${{ github.repository }}/python:${{ needs.validate-release.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Update package metadata and documentation
+  update-metadata:
+    name: Update Package Metadata
+    needs: [validate-release, test-pypi-installation]
+    runs-on: ubuntu-latest
+    if: needs.validate-release.outputs.is_prerelease == 'false'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update package version in README
+        working-directory: trustformers-py
+        run: |
+          if [ -f README.md ]; then
+            sed -i "s/trustformers==.*/trustformers==${{ needs.validate-release.outputs.version }}/g" README.md
+          fi
+
+      - name: Create/update CHANGELOG
+        working-directory: trustformers-py
+        run: |
+          if [ ! -f CHANGELOG.md ]; then
+            echo "# Changelog" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+          fi
+          
+          # Add new version to top of changelog
+          temp_file=$(mktemp)
+          echo "# Changelog" > "$temp_file"
+          echo "" >> "$temp_file"
+          echo "## [${{ needs.validate-release.outputs.version }}] - $(date +%Y-%m-%d)" >> "$temp_file"
+          echo "" >> "$temp_file"
+          
+          # Get changes since last release
+          if git describe --tags --match "py-v*" --abbrev=0 HEAD^ >/dev/null 2>&1; then
+            last_tag=$(git describe --tags --match "py-v*" --abbrev=0 HEAD^)
+            git log --pretty=format:"- %s" $last_tag..HEAD -- . >> "$temp_file"
+          fi
+          
+          echo "" >> "$temp_file"
+          echo "" >> "$temp_file"
+          
+          # Append existing changelog (skip first line)
+          if [ -f CHANGELOG.md ]; then
+            tail -n +2 CHANGELOG.md >> "$temp_file"
+          fi
+          
+          mv "$temp_file" CHANGELOG.md
+
+      - name: Commit changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add trustformers-py/README.md trustformers-py/CHANGELOG.md
+          git diff --staged --quiet || git commit -m "Update package metadata for v${{ needs.validate-release.outputs.version }}"
+          git push
+
+  # Final release status
+  release-status:
+    name: Release Status
+    runs-on: ubuntu-latest
+    needs: [validate-release, publish-pypi, test-pypi-installation, publish-docker]
+    if: always()
+    steps:
+      - name: Check release status
+        run: |
+          echo "## Release Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ needs.validate-release.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Prerelease**: ${{ needs.validate-release.outputs.is_prerelease }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **PyPI Publication**: ${{ needs.publish-pypi.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Installation Test**: ${{ needs.test-pypi-installation.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Docker Image**: ${{ needs.publish-docker.result }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.publish-pypi.result }}" != "success" || \
+                "${{ needs.test-pypi-installation.result }}" != "success" ]]; then
+            echo "❌ Release failed!" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo "✅ Release completed successfully!" >> $GITHUB_STEP_SUMMARY
+          fi

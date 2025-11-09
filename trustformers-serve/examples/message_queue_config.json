@@ -1,0 +1,248 @@
+{
+  "kafka_config": {
+    "backend": "Kafka",
+    "connection_string": "localhost:9092",
+    "topics": [
+      "inference-requests",
+      "inference-responses",
+      "batch-requests",
+      "batch-responses",
+      "system-events",
+      "audit-events"
+    ],
+    "consumer_group": "trustformers-serve-group",
+    "batch_size": 100,
+    "retry_policy": {
+      "max_retries": 3,
+      "initial_delay_ms": 1000,
+      "max_delay_ms": 30000,
+      "exponential_backoff": true,
+      "jitter": true
+    },
+    "serialization": "Json",
+    "compression": "Snappy",
+    "security": {
+      "tls_enabled": true,
+      "ca_cert_path": "/etc/ssl/certs/ca-cert.pem",
+      "client_cert_path": "/etc/ssl/certs/client-cert.pem",
+      "client_key_path": "/etc/ssl/private/client-key.pem",
+      "sasl_mechanism": "PLAIN",
+      "username": "trustformers-user",
+      "password": "secure-password"
+    },
+    "performance": {
+      "connection_pool_size": 10,
+      "buffer_size": 2097152,
+      "flush_interval_ms": 500,
+      "compression_threshold": 1024,
+      "prefetch_count": 200
+    }
+  },
+  "rabbitmq_config": {
+    "backend": "RabbitMQ",
+    "connection_string": "amqp://username:password@localhost:5672/vhost",
+    "topics": [
+      "inference-queue",
+      "response-queue",
+      "events-queue"
+    ],
+    "consumer_group": "trustformers-consumers",
+    "batch_size": 50,
+    "retry_policy": {
+      "max_retries": 5,
+      "initial_delay_ms": 2000,
+      "max_delay_ms": 60000,
+      "exponential_backoff": true,
+      "jitter": true
+    },
+    "serialization": "Json",
+    "compression": "Gzip",
+    "security": {
+      "tls_enabled": true,
+      "ca_cert_path": "/etc/ssl/certs/ca-cert.pem",
+      "client_cert_path": "/etc/ssl/certs/client-cert.pem",
+      "client_key_path": "/etc/ssl/private/client-key.pem",
+      "sasl_mechanism": null,
+      "username": "rabbitmq-user",
+      "password": "rabbitmq-password"
+    },
+    "performance": {
+      "connection_pool_size": 5,
+      "buffer_size": 1048576,
+      "flush_interval_ms": 1000,
+      "compression_threshold": 512,
+      "prefetch_count": 100
+    }
+  },
+  "redis_config": {
+    "backend": "RedisStreams",
+    "connection_string": "redis://localhost:6379",
+    "topics": [
+      "inference-stream",
+      "response-stream",
+      "events-stream"
+    ],
+    "consumer_group": "trustformers-redis-group",
+    "batch_size": 25,
+    "retry_policy": {
+      "max_retries": 3,
+      "initial_delay_ms": 500,
+      "max_delay_ms": 15000,
+      "exponential_backoff": true,
+      "jitter": false
+    },
+    "serialization": "Json",
+    "compression": "Lz4",
+    "security": {
+      "tls_enabled": false,
+      "ca_cert_path": null,
+      "client_cert_path": null,
+      "client_key_path": null,
+      "sasl_mechanism": null,
+      "username": null,
+      "password": "redis-password"
+    },
+    "performance": {
+      "connection_pool_size": 8,
+      "buffer_size": 524288,
+      "flush_interval_ms": 100,
+      "compression_threshold": 256,
+      "prefetch_count": 50
+    }
+  },
+  "nats_config": {
+    "backend": "Nats",
+    "connection_string": "nats://localhost:4222",
+    "topics": [
+      "inference.requests",
+      "inference.responses",
+      "system.events"
+    ],
+    "consumer_group": "trustformers-nats-group",
+    "batch_size": 20,
+    "retry_policy": {
+      "max_retries": 2,
+      "initial_delay_ms": 100,
+      "max_delay_ms": 5000,
+      "exponential_backoff": false,
+      "jitter": true
+    },
+    "serialization": "Json",
+    "compression": "Snappy",
+    "security": {
+      "tls_enabled": false,
+      "ca_cert_path": null,
+      "client_cert_path": null,
+      "client_key_path": null,
+      "sasl_mechanism": null,
+      "username": "nats-user",
+      "password": "nats-password"
+    },
+    "performance": {
+      "connection_pool_size": 3,
+      "buffer_size": 262144,
+      "flush_interval_ms": 50,
+      "compression_threshold": 128,
+      "prefetch_count": 25
+    }
+  },
+  "sqs_config": {
+    "backend": "AmazonSqs",
+    "connection_string": "https://sqs.us-east-1.amazonaws.com/123456789012/",
+    "topics": [
+      "inference-requests-queue",
+      "inference-responses-queue",
+      "dlq-queue"
+    ],
+    "consumer_group": "trustformers-sqs-group",
+    "batch_size": 10,
+    "retry_policy": {
+      "max_retries": 3,
+      "initial_delay_ms": 1000,
+      "max_delay_ms": 30000,
+      "exponential_backoff": true,
+      "jitter": true
+    },
+    "serialization": "Json",
+    "compression": "Gzip",
+    "security": {
+      "tls_enabled": true,
+      "ca_cert_path": null,
+      "client_cert_path": null,
+      "client_key_path": null,
+      "sasl_mechanism": null,
+      "username": "AWS_ACCESS_KEY_ID",
+      "password": "AWS_SECRET_ACCESS_KEY"
+    },
+    "performance": {
+      "connection_pool_size": 5,
+      "buffer_size": 1048576,
+      "flush_interval_ms": 1000,
+      "compression_threshold": 1024,
+      "prefetch_count": 10
+    }
+  },
+  "middleware_config": {
+    "enabled": true,
+    "async_inference": true,
+    "event_publishing": true,
+    "request_logging": true,
+    "metrics_collection": true,
+    "dead_letter_queue": true,
+    "async_topics": {
+      "inference_requests": "inference-requests",
+      "inference_responses": "inference-responses",
+      "batch_requests": "batch-requests",
+      "batch_responses": "batch-responses",
+      "health_checks": "health-checks"
+    },
+    "event_topics": {
+      "model_events": "model-events",
+      "system_events": "system-events",
+      "user_events": "user-events",
+      "error_events": "error-events",
+      "audit_events": "audit-events"
+    }
+  },
+  "production_examples": {
+    "high_throughput": {
+      "backend": "Kafka",
+      "connection_string": "kafka-cluster:9092",
+      "topics": ["high-throughput-requests"],
+      "batch_size": 1000,
+      "performance": {
+        "connection_pool_size": 20,
+        "buffer_size": 16777216,
+        "flush_interval_ms": 100,
+        "compression_threshold": 512,
+        "prefetch_count": 1000
+      }
+    },
+    "low_latency": {
+      "backend": "Nats",
+      "connection_string": "nats-cluster:4222",
+      "topics": ["low-latency-requests"],
+      "batch_size": 1,
+      "performance": {
+        "connection_pool_size": 10,
+        "buffer_size": 65536,
+        "flush_interval_ms": 1,
+        "compression_threshold": 0,
+        "prefetch_count": 1
+      }
+    },
+    "reliable_processing": {
+      "backend": "RabbitMQ",
+      "connection_string": "amqp://rabbitmq-cluster:5672",
+      "topics": ["reliable-requests"],
+      "batch_size": 10,
+      "retry_policy": {
+        "max_retries": 10,
+        "initial_delay_ms": 5000,
+        "max_delay_ms": 300000,
+        "exponential_backoff": true,
+        "jitter": true
+      }
+    }
+  }
+}

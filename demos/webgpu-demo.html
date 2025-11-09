@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS WebGPU Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        
+        .status-card {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #eee;
+        }
+        
+        .status-item:last-child {
+            border-bottom: none;
+        }
+        
+        .status-label {
+            font-weight: 600;
+            color: #555;
+        }
+        
+        .status-value {
+            color: #333;
+        }
+        
+        .status-value.available {
+            color: #28a745;
+            font-weight: 600;
+        }
+        
+        .status-value.unavailable {
+            color: #dc3545;
+            font-weight: 600;
+        }
+        
+        .demo-section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        button {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        
+        button:hover {
+            background: #0052a3;
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .output {
+            background: #f8f8f8;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            white-space: pre-wrap;
+        }
+        
+        .warning {
+            background: #fff3cd;
+            color: #856404;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+        
+        .info {
+            background: #cce5ff;
+            color: #004085;
+            padding: 15px;
+            border-radius: 4px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 TrustformeRS WebGPU Support</h1>
+    
+    <div class="status-card">
+        <h2>WebGPU Status</h2>
+        <div class="status-item">
+            <span class="status-label">Browser Support:</span>
+            <span id="browserSupport" class="status-value">Checking...</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">WASM Module:</span>
+            <span id="wasmStatus" class="status-value">Loading...</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">WebGPU Status:</span>
+            <span id="webgpuStatus" class="status-value">Checking...</span>
+        </div>
+        <div class="status-item">
+            <span class="status-label">Features:</span>
+            <span id="features" class="status-value">Loading...</span>
+        </div>
+    </div>
+    
+    <div class="warning" id="warningMessage" style="display: none;">
+        <strong>⚠️ Note:</strong> WebGPU is an experimental API and may not be available in all browsers. 
+        Enable it in Chrome/Edge at chrome://flags/#enable-unsafe-webgpu or edge://flags/#enable-unsafe-webgpu
+    </div>
+    
+    <div class="info" id="infoMessage" style="display: none;">
+        <strong>ℹ️ Info:</strong> WebGPU support is currently in preview. The implementation provides a fallback 
+        to CPU operations while full GPU compute shader support is being developed.
+    </div>
+    
+    <div class="demo-section">
+        <h2>WebGPU Operations Demo</h2>
+        <p>Test GPU-accelerated tensor operations (currently using CPU fallback):</p>
+        
+        <button onclick="testMatMul()" id="matmulBtn">Test Matrix Multiplication</button>
+        <button onclick="testAdd()" id="addBtn">Test Addition</button>
+        <button onclick="testReLU()" id="reluBtn">Test ReLU</button>
+        
+        <div id="demoOutput" class="output">Click a button to test WebGPU operations...</div>
+    </div>
+    
+    <div class="demo-section">
+        <h2>Performance Comparison</h2>
+        <p>Compare CPU vs GPU operations (when available):</p>
+        
+        <button onclick="runBenchmark()" id="benchmarkBtn">Run Benchmark</button>
+        
+        <div id="benchmarkOutput" class="output">Benchmark results will appear here...</div>
+    </div>
+
+    <script type="module">
+        let trustformers = null;
+        let webgpuOps = null;
+        
+        async function init() {
+            try {
+                // Check browser WebGPU support
+                const browserHasWebGPU = 'gpu' in navigator;
+                document.getElementById('browserSupport').textContent = browserHasWebGPU ? 'Available' : 'Not Available';
+                document.getElementById('browserSupport').className = 'status-value ' + (browserHasWebGPU ? 'available' : 'unavailable');
+                
+                if (!browserHasWebGPU) {
+                    document.getElementById('warningMessage').style.display = 'block';
+                }
+                
+                // Load TrustformeRS module
+                document.getElementById('wasmStatus').textContent = 'Loading...';
+                
+                const module = await import('../trustformers-js/src/index.js');
+                trustformers = module;
+                
+                await trustformers.initialize({
+                    wasmPath: '../trustformers-wasm/pkg/trustformers_wasm_bg.wasm'
+                });
+                
+                document.getElementById('wasmStatus').textContent = 'Loaded';
+                document.getElementById('wasmStatus').className = 'status-value available';
+                
+                // Check WebGPU availability through WASM
+                const webgpuAvailable = trustformers.webgpu.isAvailable();
+                const webgpuStatus = trustformers.webgpu.getStatus();
+                
+                document.getElementById('webgpuStatus').textContent = webgpuStatus;
+                document.getElementById('webgpuStatus').className = 'status-value ' + (webgpuAvailable ? 'available' : 'unavailable');
+                
+                // Get features
+                const features = trustformers.utils.features();
+                document.getElementById('features').textContent = features.join(', ');
+                
+                // Initialize WebGPU ops if available
+                if (webgpuAvailable || trustformers.webgpu.createOps) {
+                    try {
+                        webgpuOps = trustformers.webgpu.createOps();
+                        document.getElementById('infoMessage').style.display = 'block';
+                    } catch (e) {
+                        console.log('WebGPU ops not available:', e.message);
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Initialization error:', error);
+                document.getElementById('wasmStatus').textContent = 'Error: ' + error.message;
+                document.getElementById('wasmStatus').className = 'status-value unavailable';
+            }
+        }
+        
+        window.testMatMul = async function() {
+            if (!webgpuOps) {
+                document.getElementById('demoOutput').textContent = 'WebGPU operations not available';
+                return;
+            }
+            
+            const output = document.getElementById('demoOutput');
+            output.textContent = 'Running matrix multiplication test...\n\n';
+            
+            try {
+                // Create test tensors
+                const a = trustformers.tensor([1, 2, 3, 4, 5, 6], [2, 3]);
+                const b = trustformers.tensor([7, 8, 9, 10, 11, 12], [3, 2]);
+                
+                output.textContent += `Matrix A (2x3):\n${a.toString()}\n\n`;
+                output.textContent += `Matrix B (3x2):\n${b.toString()}\n\n`;
+                
+                // Perform multiplication
+                const start = performance.now();
+                const result = await webgpuOps.matmul(a, b);
+                const elapsed = performance.now() - start;
+                
+                output.textContent += `Result (2x2):\n${result.toString()}\n\n`;
+                output.textContent += `Time: ${elapsed.toFixed(2)}ms\n`;
+                output.textContent += `Backend: ${await webgpuOps.info()}`;
+                
+                // Clean up
+                a.free();
+                b.free();
+                result.free();
+                
+            } catch (error) {
+                output.textContent += `Error: ${error.message}`;
+            }
+        };
+        
+        window.testAdd = async function() {
+            if (!webgpuOps) {
+                document.getElementById('demoOutput').textContent = 'WebGPU operations not available';
+                return;
+            }
+            
+            const output = document.getElementById('demoOutput');
+            output.textContent = 'Running addition test...\n\n';
+            
+            try {
+                // Create test tensors
+                const a = trustformers.tensor([1, 2, 3, 4], [2, 2]);
+                const b = trustformers.tensor([5, 6, 7, 8], [2, 2]);
+                
+                output.textContent += `Tensor A:\n${a.toString()}\n\n`;
+                output.textContent += `Tensor B:\n${b.toString()}\n\n`;
+                
+                // Perform addition
+                const start = performance.now();
+                const result = await webgpuOps.add(a, b);
+                const elapsed = performance.now() - start;
+                
+                output.textContent += `Result (A + B):\n${result.toString()}\n\n`;
+                output.textContent += `Time: ${elapsed.toFixed(2)}ms\n`;
+                output.textContent += `Backend: ${await webgpuOps.info()}`;
+                
+                // Clean up
+                a.free();
+                b.free();
+                result.free();
+                
+            } catch (error) {
+                output.textContent += `Error: ${error.message}`;
+            }
+        };
+        
+        window.testReLU = async function() {
+            if (!webgpuOps) {
+                document.getElementById('demoOutput').textContent = 'WebGPU operations not available';
+                return;
+            }
+            
+            const output = document.getElementById('demoOutput');
+            output.textContent = 'Running ReLU test...\n\n';
+            
+            try {
+                // Create test tensor with mixed positive/negative values
+                const input = trustformers.tensor([-2, -1, 0, 1, 2, 3], [2, 3]);
+                
+                output.textContent += `Input tensor:\n${input.toString()}\n\n`;
+                
+                // Apply ReLU
+                const start = performance.now();
+                const result = await webgpuOps.relu(input);
+                const elapsed = performance.now() - start;
+                
+                output.textContent += `ReLU result:\n${result.toString()}\n\n`;
+                output.textContent += `Time: ${elapsed.toFixed(2)}ms\n`;
+                output.textContent += `Backend: ${await webgpuOps.info()}`;
+                
+                // Clean up
+                input.free();
+                result.free();
+                
+            } catch (error) {
+                output.textContent += `Error: ${error.message}`;
+            }
+        };
+        
+        window.runBenchmark = async function() {
+            const output = document.getElementById('benchmarkOutput');
+            output.textContent = 'Running benchmark...\n\n';
+            
+            const sizes = [10, 100, 500];
+            const iterations = 100;
+            
+            for (const size of sizes) {
+                output.textContent += `\nMatrix size: ${size}x${size}\n`;
+                output.textContent += '-'.repeat(40) + '\n';
+                
+                // Create random matrices
+                const dataA = Array(size * size).fill(0).map(() => Math.random());
+                const dataB = Array(size * size).fill(0).map(() => Math.random());
+                
+                // CPU benchmark
+                const cpuStart = performance.now();
+                for (let i = 0; i < iterations; i++) {
+                    const a = trustformers.tensor(dataA, [size, size]);
+                    const b = trustformers.tensor(dataB, [size, size]);
+                    const result = a.matmul(b);
+                    a.free();
+                    b.free();
+                    result.free();
+                }
+                const cpuTime = performance.now() - cpuStart;
+                
+                output.textContent += `CPU time: ${cpuTime.toFixed(2)}ms (${iterations} iterations)\n`;
+                output.textContent += `Average: ${(cpuTime / iterations).toFixed(3)}ms per operation\n`;
+                
+                // GPU benchmark (if available)
+                if (webgpuOps) {
+                    const gpuStart = performance.now();
+                    for (let i = 0; i < iterations; i++) {
+                        const a = trustformers.tensor(dataA, [size, size]);
+                        const b = trustformers.tensor(dataB, [size, size]);
+                        const result = await webgpuOps.matmul(a, b);
+                        a.free();
+                        b.free();
+                        result.free();
+                    }
+                    const gpuTime = performance.now() - gpuStart;
+                    
+                    output.textContent += `GPU time: ${gpuTime.toFixed(2)}ms (${iterations} iterations)\n`;
+                    output.textContent += `Average: ${(gpuTime / iterations).toFixed(3)}ms per operation\n`;
+                    output.textContent += `Note: Currently using CPU fallback\n`;
+                }
+            }
+            
+            output.textContent += '\n\nBenchmark complete!';
+        };
+        
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>

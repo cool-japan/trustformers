@@ -1,0 +1,23 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4ffcf6d53ed1cefba38b6dce58dcb5e981f3c2fb883eb698ddbf44121e028f4f # shrinks to shape = [8, 7]
+cc e05902e5a94033fd69d1fda1ee2fbcb2f75a3b42cfbed52807167bf590f411d5 # shrinks to shape = [1, 4], scalar = -46.625225
+cc b755a2dfe7acfb69fa24249c651e1fdd7625a6aeba574abd2837ab8e2dbb0fc8 # shrinks to shape = [4, 6]
+cc 1297fcc36229e65dc45d5a31d905e4888b311f497e82e07bd2ad1e10b43db8a2 # shrinks to shape = [9, 9]
+cc 6241f0b2cb6967765ecd7c257264b9484e6241b7392f3d74eab7684cd600a1c5 # shrinks to shape = [5, 7]
+cc 061be823ff65fdbff2a4be6e36852f9816c084f9384fa6146ad145500a4f4223 # shrinks to shape = [8, 6]
+cc 3e329d417c72ec4600e08513d409a5e1ebe674e2da7a1646e91f69c49977f9b1 # shrinks to shape = [2, 3, 3]
+cc cd01c9119cced5095e2f27dd5920d3677b41b73ad42c3e0ff2bc58aa7fe6e8bd # shrinks to shape = [7, 5]
+cc 949332669e9952b62c0e29e238485cf855bbcb741392a1292f4b4be6c102e33b # shrinks to shape = [4, 4, 4]
+cc 382548e3ade052156df48636073e8e018393a6faca3b6241836399234c0d1c9e # shrinks to shape = [9, 8]
+cc ce7abb5e290a76fc54667c7c4fd0d2c24a310d8286ab8e3bec4b758a29839975 # shrinks to shape = [8, 4]
+cc 64b9e8c1636b57a73f323d444cba1141bbfa5abb6f6ee1c9b13dd767eb2bcb19 # shrinks to shape = [6]
+cc 787e2e01e01b08b3da3d2e109a5a041b5088ebca31465911f2832e2f0fad03c4 # shrinks to shape = [6, 6], scalar = -84.00042
+cc 16db11e5b448920a36f08c32886481ae87a6a0289c2f4f0d3a4170d794b2f5f5 # shrinks to m = 5, k1 = 4, k2 = 7, n = 3
+cc d402dadca5ee0dacf61ec877d7c440c1eade7351c4dbce3db8d3365f0354e5f9 # shrinks to m = 7, k1 = 4, k2 = 2, n = 2
+cc 3e38c02139b70545490a9dc9c1d5d2c79d0541ed7feb85837746bb8f52e4cf4b # shrinks to m = 3, k1 = 3, k2 = 4, n = 2
+cc 590d0def31dc1b55239e09880a639d873ef31d283ad66f793ca6a36c27eb2fd8 # shrinks to m = 5, k1 = 6, k2 = 2, n = 2

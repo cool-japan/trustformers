@@ -1,0 +1,216 @@
+{
+  "description": "Graph Attention Network (GAT) for graph-structured data",
+  "architecture_details": "GAT uses masked self-attention layers to process graph-structured data. It computes attention coefficients between neighboring nodes to aggregate features.",
+  "model_id": "trustformers/gat-base",
+  
+  "hidden_size_expr": "self.hidden_dim",
+  "has_labels": true,
+  "is_decoder": false,
+  "is_encoder_decoder": false,
+  "default_activation": "ELU",
+  
+  "config_params": [
+    {
+      "name": "num_node_features",
+      "type": "usize",
+      "description": "Number of input node features"
+    },
+    {
+      "name": "num_edge_features",
+      "type": "usize", 
+      "description": "Number of edge features"
+    },
+    {
+      "name": "hidden_dim",
+      "type": "usize",
+      "description": "Hidden dimension size"
+    },
+    {
+      "name": "num_layers",
+      "type": "usize",
+      "description": "Number of GAT layers"
+    },
+    {
+      "name": "num_heads",
+      "type": "usize",
+      "description": "Number of attention heads per layer"
+    },
+    {
+      "name": "num_classes",
+      "type": "usize",
+      "description": "Number of output classes"
+    },
+    {
+      "name": "dropout",
+      "type": "f32",
+      "description": "Dropout probability"
+    },
+    {
+      "name": "attention_dropout",
+      "type": "f32",
+      "description": "Attention dropout probability"
+    },
+    {
+      "name": "negative_slope",
+      "type": "f32",
+      "description": "LeakyReLU negative slope"
+    }
+  ],
+  
+  "config_defaults": [
+    {"name": "num_node_features", "value": "128"},
+    {"name": "num_edge_features", "value": "64"},
+    {"name": "hidden_dim", "value": "256"},
+    {"name": "num_layers", "value": "3"},
+    {"name": "num_heads", "value": "8"},
+    {"name": "num_classes", "value": "10"},
+    {"name": "dropout", "value": "0.1"},
+    {"name": "attention_dropout", "value": "0.1"},
+    {"name": "negative_slope", "value": "0.2"}
+  ],
+  
+  "components": [
+    {
+      "component_name": "GATLayer",
+      "component_description": "Graph Attention Layer",
+      "fields": [
+        {"name": "query_proj", "type": "Linear"},
+        {"name": "key_proj", "type": "Linear"},
+        {"name": "value_proj", "type": "Linear"},
+        {"name": "edge_proj", "type": "Option<Linear>"},
+        {"name": "output_proj", "type": "Linear"},
+        {"name": "attention_dropout", "type": "Dropout"},
+        {"name": "feat_dropout", "type": "Dropout"},
+        {"name": "activation", "type": "Activation"},
+        {"name": "num_heads", "type": "usize"}
+      ],
+      "field_initializers": [
+        {"name": "query_proj", "initializer": "Linear::new(config.hidden_dim, config.hidden_dim, false)?"},
+        {"name": "key_proj", "initializer": "Linear::new(config.hidden_dim, config.hidden_dim, false)?"},
+        {"name": "value_proj", "initializer": "Linear::new(config.hidden_dim, config.hidden_dim, false)?"},
+        {"name": "edge_proj", "initializer": "if config.num_edge_features > 0 { Some(Linear::new(config.num_edge_features, config.num_heads, false)?) } else { None }"},
+        {"name": "output_proj", "initializer": "Linear::new(config.hidden_dim, config.hidden_dim, true)?"},
+        {"name": "attention_dropout", "initializer": "Dropout::new(config.attention_dropout)"},
+        {"name": "feat_dropout", "initializer": "Dropout::new(config.dropout)"},
+        {"name": "activation", "initializer": "config.activation.clone()"},
+        {"name": "num_heads", "initializer": "config.num_heads"}
+      ],
+      "forward_params": [
+        {"name": "node_features", "type": "&Tensor"},
+        {"name": "edge_index", "type": "&Tensor"},
+        {"name": "edge_features", "type": "Option<&Tensor>"}
+      ],
+      "return_type": "Tensor",
+      "forward_implementation": "// Graph attention computation\n        let num_nodes = node_features.shape()[0];\n        let head_dim = self.query_proj.out_features() / self.num_heads;\n        \n        // Project to multi-head queries, keys, values\n        let queries = self.query_proj.forward(node_features)?;\n        let keys = self.key_proj.forward(node_features)?;\n        let values = self.value_proj.forward(node_features)?;\n        \n        // Reshape for multi-head attention\n        let queries = queries.view(&[num_nodes, self.num_heads, head_dim])?;\n        let keys = keys.view(&[num_nodes, self.num_heads, head_dim])?;\n        let values = values.view(&[num_nodes, self.num_heads, head_dim])?;\n        \n        // Compute attention scores\n        // TODO: Implement graph attention mechanism\n        \n        // Apply dropout and output projection\n        let output = self.feat_dropout.forward(&values.flatten(1)?)?;\n        self.output_proj.forward(&output)"
+    },
+    {
+      "component_name": "GraphReadout",
+      "component_description": "Graph-level readout/pooling",
+      "fields": [
+        {"name": "method", "type": "ReadoutMethod"}
+      ],
+      "field_initializers": [
+        {"name": "method", "initializer": "ReadoutMethod::Mean"}
+      ],
+      "forward_params": [
+        {"name": "node_features", "type": "&Tensor"},
+        {"name": "batch", "type": "Option<&Tensor>"}
+      ],
+      "return_type": "Tensor",
+      "forward_implementation": "// Global graph pooling\n        match self.method {\n            ReadoutMethod::Mean => {\n                // Global mean pooling\n                node_features.mean_dim(&[0], true)\n            }\n            ReadoutMethod::Max => {\n                // Global max pooling\n                node_features.max_dim(0)?.0\n            }\n            ReadoutMethod::Sum => {\n                // Global sum pooling\n                node_features.sum_dim(&[0], true)\n            }\n        }"
+    }
+  ],
+  
+  "model_components": [
+    {"name": "input_proj", "type": "Linear"},
+    {"name": "gat_layers", "type": "ModuleList<GATLayer>"},
+    {"name": "readout", "type": "GraphReadout"},
+    {"name": "classifier", "type": "Linear"},
+    {"name": "dropout", "type": "Dropout"}
+  ],
+  
+  "model_initializers": [
+    {"name": "input_proj", "initializer": "Linear::new(config.num_node_features, config.hidden_dim, true)?"},
+    {"name": "gat_layers", "initializer": "{\n            let mut layers = ModuleList::new();\n            for _ in 0..config.num_layers {\n                layers.push(GATLayer::new(&config)?);\n            }\n            layers\n        }"},
+    {"name": "readout", "initializer": "GraphReadout::new(&config)?"},
+    {"name": "classifier", "initializer": "Linear::new(config.hidden_dim, config.num_classes, true)?"},
+    {"name": "dropout", "initializer": "Dropout::new(config.dropout)"}
+  ],
+  
+  "forward_args": [
+    {"name": "node_features", "type": "&Tensor"},
+    {"name": "edge_index", "type": "&Tensor"},
+    {"name": "edge_features", "type": "Option<&Tensor>"},
+    {"name": "batch", "type": "Option<&Tensor>"}
+  ],
+  
+  "main_forward_implementation": "// Initial projection\n        let mut x = self.input_proj.forward(node_features)?;\n        x = self.dropout.forward(&x)?;\n        \n        // Apply GAT layers\n        for layer in &self.gat_layers {\n            let residual = x.clone();\n            x = layer.forward(&x, edge_index, edge_features)?;\n            x = x.add(&residual)?; // Residual connection\n        }\n        \n        // Graph-level readout\n        let graph_repr = self.readout.forward(&x, batch)?;\n        \n        // Classification\n        let logits = self.classifier.forward(&graph_repr)?;\n        \n        Ok(GraphAttentionNetworkOutput {\n            logits,\n            node_embeddings: x,\n            graph_embedding: graph_repr,\n        })",
+  
+  "output_fields": [
+    {"name": "logits", "type": "Tensor", "description": "Classification logits"},
+    {"name": "node_embeddings", "type": "Tensor", "description": "Final node embeddings"},
+    {"name": "graph_embedding", "type": "Tensor", "description": "Graph-level representation"}
+  ],
+  
+  "has_logits": true,
+  "has_loss": false,
+  "returns_hidden_states": false,
+  "returns_attentions": false,
+  
+  "utility_functions": [
+    {
+      "function_name": "edge_index_to_adjacency",
+      "function_description": "Convert edge index to adjacency matrix",
+      "params": [
+        {"name": "edge_index", "type": "&Tensor"},
+        {"name": "num_nodes", "type": "usize"}
+      ],
+      "return_type": "Tensor",
+      "function_implementation": "// Create sparse adjacency matrix from edge index\n    let mut adjacency = Tensor::zeros(&[num_nodes, num_nodes])?;\n    // TODO: Implement sparse matrix construction\n    Ok(adjacency)"
+    }
+  ],
+  
+  "additional_methods": [
+    {
+      "method_name": "compute_attention_weights",
+      "method_description": "Compute attention weights for visualization",
+      "params": [
+        {"name": "node_features", "type": "&Tensor"},
+        {"name": "edge_index", "type": "&Tensor"}
+      ],
+      "return_type": "Vec<Tensor>",
+      "method_implementation": "// Return attention weights from each layer\n        let mut attention_weights = Vec::new();\n        // TODO: Implement attention weight extraction\n        Ok(attention_weights)"
+    }
+  ],
+  
+  "config_tests": [
+    "assert_eq!(config.num_layers, 3);",
+    "assert_eq!(config.num_heads, 8);",
+    "assert_eq!(config.hidden_dim, 256);"
+  ],
+  
+  "test_config_overrides": [
+    {"name": "num_node_features", "value": "32"},
+    {"name": "hidden_dim", "value": "64"},
+    {"name": "num_layers", "value": "2"},
+    {"name": "num_classes", "value": "5"}
+  ],
+  
+  "test_forward_setup": "// Create graph data\n        let num_nodes = 10;\n        let num_edges = 20;\n        let node_features = Tensor::randn(&[num_nodes, 32])?;\n        let edge_index = Tensor::randint(0, num_nodes as i64, &[2, num_edges])?;",
+  
+  "test_forward_args": "&node_features, &edge_index, None, None",
+  
+  "output_tests": [
+    "assert_eq!(output.logits.shape(), &[1, 5]);",
+    "assert_eq!(output.node_embeddings.shape(), &[10, 64]);",
+    "assert_eq!(output.graph_embedding.shape(), &[1, 64]);"
+  ],
+  
+  "parameter_collection": [
+    "// Input projection\n        params.extend(self.input_proj.parameters());",
+    "\n        // GAT layers\n        for layer in &self.gat_layers {\n            params.extend(layer.query_proj.parameters());\n            params.extend(layer.key_proj.parameters());\n            params.extend(layer.value_proj.parameters());\n            if let Some(ref edge_proj) = layer.edge_proj {\n                params.extend(edge_proj.parameters());\n            }\n            params.extend(layer.output_proj.parameters());\n        }",
+    "\n        // Classifier\n        params.extend(self.classifier.parameters());"
+  ],
+  
+  "references": "- Original paper: [Graph Attention Networks](https://arxiv.org/abs/1710.10903)\n- Related: [Attention is All You Need](https://arxiv.org/abs/1706.03762)"
+}

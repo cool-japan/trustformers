@@ -1,0 +1,77 @@
+[package]
+name = "trustformers-debug"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Advanced debugging tools for TrustformeRS models"
+keywords = ["debugging", "tensor", "gradient", "ml", "diagnostics"]
+categories = ["development-tools", "science"]
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, features = ["v4", "serde"] }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true, features = ["sync"] }
+futures.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+indexmap = { workspace = true, features = ["serde"] }
+plotters = { workspace = true, optional = true }
+tui = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true }
+
+# Video generation dependencies
+gif = { workspace = true, optional = true }
+image = { workspace = true, optional = true }
+ffmpeg-next = { workspace = true, optional = true }
+
+# Math and ML dependencies
+nalgebra.workspace = true
+num-traits.workspace = true
+half.workspace = true
+
+# Statistical analysis
+statrs.workspace = true
+
+# Time and date handling
+chrono = { workspace = true, features = ["serde"] }
+
+# Regular expressions
+regex.workspace = true
+
+# Hashing for CI/CD artifacts
+md5.workspace = true
+
+# WebAssembly dependencies
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+js-sys = { version = "0.3", optional = true }
+web-sys = { version = "0.3", features = ["console"], optional = true }
+
+# Internal dependencies
+trustformers-core.workspace = true
+scirs2-core.workspace = true
+
+[dev-dependencies]
+tokio-test.workspace = true
+criterion.workspace = true
+tempfile.workspace = true
+
+[features]
+default = ["visual"]
+visual = ["plotters", "tui", "crossterm", "ratatui"]
+video = ["gif", "image", "ffmpeg-next"]
+gif = ["dep:gif", "image"]
+wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]
+atomics = []  # WebAssembly atomic operations and threading support
+headless = []

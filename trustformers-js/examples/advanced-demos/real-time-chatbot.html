@@ -1,0 +1,736 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Real-time Chatbot Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .chat-container {
+            width: 800px;
+            height: 600px;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .chat-header {
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            color: white;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .chat-title {
+            font-size: 1.5em;
+            font-weight: 600;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4CAF50;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: #f8f9fa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .message.user {
+            flex-direction: row-reverse;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            position: relative;
+        }
+
+        .message.user .message-content {
+            background: #667eea;
+            color: white;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            border: 1px solid #e0e0e0;
+            color: #333;
+        }
+
+        .message-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            color: white;
+        }
+
+        .message.user .message-avatar {
+            background: #667eea;
+        }
+
+        .message.bot .message-avatar {
+            background: #764ba2;
+        }
+
+        .message-time {
+            font-size: 0.75em;
+            color: #666;
+            margin-top: 4px;
+        }
+
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 20px;
+            color: #666;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #666;
+            animation: typing 1.4s infinite ease-in-out;
+        }
+
+        .typing-dot:nth-child(1) { animation-delay: -0.32s; }
+        .typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+        @keyframes typing {
+            0%, 80%, 100% { opacity: 0.3; }
+            40% { opacity: 1; }
+        }
+
+        .chat-input {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .input-group {
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+        }
+
+        .input-field {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #e0e0e0;
+            border-radius: 25px;
+            resize: none;
+            font-family: inherit;
+            font-size: 14px;
+            max-height: 100px;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .input-field:focus {
+            border-color: #667eea;
+        }
+
+        .send-button {
+            width: 50px;
+            height: 50px;
+            border: none;
+            border-radius: 50%;
+            background: #667eea;
+            color: white;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: background 0.3s;
+        }
+
+        .send-button:hover {
+            background: #5a67d8;
+        }
+
+        .send-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+
+        .controls {
+            padding: 15px 20px;
+            background: #f8f9fa;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .control-label {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .control-input {
+            padding: 4px 8px;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+
+        .quick-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .quick-action {
+            padding: 6px 12px;
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.9em;
+            transition: all 0.3s;
+        }
+
+        .quick-action:hover {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+
+        .performance-stats {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.8em;
+            min-width: 200px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .error-message {
+            background: #ffebee;
+            border: 1px solid #f44336;
+            color: #c62828;
+            padding: 10px;
+            border-radius: 8px;
+            margin: 10px 20px;
+        }
+
+        @media (max-width: 850px) {
+            .chat-container {
+                width: 95vw;
+                height: 95vh;
+                margin: 0;
+            }
+
+            .controls {
+                flex-direction: column;
+            }
+
+            .performance-stats {
+                position: relative;
+                top: auto;
+                right: auto;
+                margin: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <div class="chat-title">🤖 TrustformeRS Chatbot</div>
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span id="status-text">Initializing...</span>
+            </div>
+        </div>
+
+        <div class="chat-messages" id="chat-messages">
+            <div class="message bot">
+                <div class="message-avatar">🤖</div>
+                <div>
+                    <div class="message-content">
+                        Hello! I'm a TrustformeRS-powered chatbot. I can help you with questions, generate text, and have conversations. What would you like to talk about?
+                    </div>
+                    <div class="message-time" id="init-time"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="typing-indicator" id="typing-indicator">
+            <div class="message-avatar">🤖</div>
+            <div>
+                Bot is typing
+                <div class="typing-dots">
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                    <div class="typing-dot"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="controls">
+            <div class="control-group">
+                <label class="control-label">Model:</label>
+                <select class="control-input" id="model-select">
+                    <option value="gpt2_base">GPT-2 Base</option>
+                    <option value="t5_small">T5 Small</option>
+                    <option value="bert_base">BERT Base</option>
+                </select>
+            </div>
+            <div class="control-group">
+                <label class="control-label">Temperature:</label>
+                <input type="range" class="control-input" id="temperature" min="0.1" max="1.0" step="0.1" value="0.7">
+                <span id="temperature-value">0.7</span>
+            </div>
+            <div class="control-group">
+                <label class="control-label">Max Length:</label>
+                <input type="number" class="control-input" id="max-length" min="10" max="200" value="50">
+            </div>
+        </div>
+
+        <div class="quick-actions">
+            <div class="quick-action" onclick="addQuickMessage('Tell me a joke')">😄 Tell me a joke</div>
+            <div class="quick-action" onclick="addQuickMessage('Explain quantum computing')">🔬 Explain quantum computing</div>
+            <div class="quick-action" onclick="addQuickMessage('Write a poem about AI')">📝 Write a poem</div>
+            <div class="quick-action" onclick="clearChat()">🗑️ Clear chat</div>
+        </div>
+
+        <div class="chat-input">
+            <div class="input-group">
+                <textarea class="input-field" id="message-input" placeholder="Type your message..." rows="1"></textarea>
+                <button class="send-button" id="send-button" onclick="sendMessage()">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="performance-stats" id="performance-stats">
+        <div class="stat-row">
+            <span>Status:</span>
+            <span id="perf-status">Initializing</span>
+        </div>
+        <div class="stat-row">
+            <span>Messages:</span>
+            <span id="message-count">0</span>
+        </div>
+        <div class="stat-row">
+            <span>Avg Response:</span>
+            <span id="avg-response-time">-</span>
+        </div>
+        <div class="stat-row">
+            <span>Memory:</span>
+            <span id="memory-usage">-</span>
+        </div>
+        <div class="stat-row">
+            <span>Backend:</span>
+            <span id="backend-type">-</span>
+        </div>
+    </div>
+
+    <script type="module">
+        import { 
+            initializeEnhanced, 
+            createModel, 
+            createTokenizer, 
+            Pipeline,
+            performance,
+            enhanced_inference
+        } from '../../dist/trustformers.esm.min.js';
+
+        class ChatbotDemo {
+            constructor() {
+                this.isInitialized = false;
+                this.model = null;
+                this.tokenizer = null;
+                this.pipeline = null;
+                this.messageCount = 0;
+                this.responseTimes = [];
+                this.conversationHistory = [];
+                this.isProcessing = false;
+
+                this.init();
+                this.setupEventListeners();
+            }
+
+            async init() {
+                try {
+                    console.log('Initializing TrustformeRS...');
+                    this.updateStatus('Initializing TrustformeRS...');
+
+                    const capabilities = await initializeEnhanced({
+                        enableWebGL: true,
+                        enableMemoryPool: true,
+                        enableProfiling: true,
+                        enableZeroCopy: true
+                    });
+
+                    console.log('Capabilities:', capabilities);
+                    
+                    await this.loadModel('gpt2_base');
+                    
+                    this.isInitialized = true;
+                    this.updateStatus('Ready');
+                    this.updatePerfStats();
+                    
+                    document.getElementById('init-time').textContent = new Date().toLocaleTimeString();
+                    
+                } catch (error) {
+                    console.error('Initialization failed:', error);
+                    this.showError('Failed to initialize: ' + error.message);
+                    this.updateStatus('Error');
+                }
+            }
+
+            async loadModel(modelType) {
+                try {
+                    this.updateStatus(`Loading ${modelType}...`);
+                    
+                    // Create model
+                    this.model = createModel(modelType);
+                    
+                    // Create tokenizer
+                    this.tokenizer = createTokenizer('bpe');
+                    
+                    // Create text generation pipeline
+                    this.pipeline = Pipeline.textGeneration(this.model, this.tokenizer, {
+                        maxLength: 50,
+                        temperature: 0.7,
+                        doSample: true
+                    });
+
+                    console.log('Model loaded successfully');
+                    
+                } catch (error) {
+                    throw new Error(`Model loading failed: ${error.message}`);
+                }
+            }
+
+            setupEventListeners() {
+                // Message input
+                const messageInput = document.getElementById('message-input');
+                messageInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.sendMessage();
+                    }
+                });
+
+                messageInput.addEventListener('input', () => {
+                    this.autoResize(messageInput);
+                });
+
+                // Temperature slider
+                const temperatureSlider = document.getElementById('temperature');
+                temperatureSlider.addEventListener('input', (e) => {
+                    document.getElementById('temperature-value').textContent = e.target.value;
+                });
+
+                // Model selection
+                const modelSelect = document.getElementById('model-select');
+                modelSelect.addEventListener('change', async (e) => {
+                    if (this.isInitialized && !this.isProcessing) {
+                        await this.loadModel(e.target.value);
+                    }
+                });
+
+                // Performance monitoring
+                setInterval(() => {
+                    if (this.isInitialized) {
+                        this.updatePerfStats();
+                    }
+                }, 2000);
+            }
+
+            autoResize(textarea) {
+                textarea.style.height = 'auto';
+                textarea.style.height = Math.min(textarea.scrollHeight, 100) + 'px';
+            }
+
+            async sendMessage() {
+                const messageInput = document.getElementById('message-input');
+                const message = messageInput.value.trim();
+
+                if (!message || !this.isInitialized || this.isProcessing) {
+                    return;
+                }
+
+                this.isProcessing = true;
+                messageInput.value = '';
+                messageInput.style.height = 'auto';
+                
+                // Add user message
+                this.addMessage('user', message);
+                
+                // Show typing indicator
+                this.showTypingIndicator();
+                
+                try {
+                    const startTime = performance.now();
+                    
+                    // Add context from conversation history
+                    const contextMessage = this.buildContextMessage(message);
+                    
+                    // Generate response
+                    const response = await this.generateResponse(contextMessage);
+                    
+                    const endTime = performance.now();
+                    const responseTime = endTime - startTime;
+                    this.responseTimes.push(responseTime);
+                    
+                    // Hide typing indicator
+                    this.hideTypingIndicator();
+                    
+                    // Add bot response
+                    this.addMessage('bot', response);
+                    
+                    // Update conversation history
+                    this.conversationHistory.push(
+                        { role: 'user', content: message },
+                        { role: 'assistant', content: response }
+                    );
+                    
+                    // Keep only last 10 exchanges
+                    if (this.conversationHistory.length > 20) {
+                        this.conversationHistory = this.conversationHistory.slice(-20);
+                    }
+                    
+                    this.messageCount++;
+                    this.updatePerfStats();
+                    
+                } catch (error) {
+                    console.error('Response generation failed:', error);
+                    this.hideTypingIndicator();
+                    this.addMessage('bot', 'Sorry, I encountered an error while processing your message. Please try again.');
+                    this.showError('Response generation failed: ' + error.message);
+                } finally {
+                    this.isProcessing = false;
+                }
+            }
+
+            buildContextMessage(currentMessage) {
+                if (this.conversationHistory.length === 0) {
+                    return currentMessage;
+                }
+                
+                // Build context from recent conversation
+                let context = 'Previous conversation:\n';
+                const recentHistory = this.conversationHistory.slice(-6); // Last 3 exchanges
+                
+                for (const turn of recentHistory) {
+                    context += `${turn.role === 'user' ? 'Human' : 'Assistant'}: ${turn.content}\n`;
+                }
+                
+                context += `Human: ${currentMessage}\nAssistant:`;
+                return context;
+            }
+
+            async generateResponse(message) {
+                const temperature = parseFloat(document.getElementById('temperature').value);
+                const maxLength = parseInt(document.getElementById('max-length').value);
+                
+                const result = await enhanced_inference.runInference(this.model, 
+                    this.tokenizer.encode(message), {
+                        temperature,
+                        maxLength,
+                        doSample: true,
+                        profile: true
+                    }
+                );
+                
+                // Decode the response
+                const response = this.tokenizer.decode(result.outputTokens || result);
+                
+                // Clean up the response
+                return this.cleanResponse(response, message);
+            }
+
+            cleanResponse(response, originalMessage) {
+                // Remove the original message from response if it's included
+                let cleaned = response.replace(originalMessage, '').trim();
+                
+                // Remove common prefixes
+                cleaned = cleaned.replace(/^(Assistant:|Bot:|AI:)\s*/i, '');
+                
+                // Truncate at sentence boundaries
+                const sentences = cleaned.split(/[.!?]+/);
+                if (sentences.length > 1) {
+                    cleaned = sentences.slice(0, -1).join('.') + '.';
+                }
+                
+                // Fallback responses for very short or empty responses
+                if (cleaned.length < 10) {
+                    const fallbacks = [
+                        "I'm not sure how to respond to that. Could you rephrase your question?",
+                        "That's an interesting point. Can you tell me more?",
+                        "I'd like to help, but I need a bit more context.",
+                        "Could you elaborate on what you're looking for?"
+                    ];
+                    cleaned = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+                }
+                
+                return cleaned;
+            }
+
+            addMessage(sender, content) {
+                const messagesContainer = document.getElementById('chat-messages');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${sender}`;
+                
+                const avatar = sender === 'user' ? '👤' : '🤖';
+                const time = new Date().toLocaleTimeString();
+                
+                messageDiv.innerHTML = `
+                    <div class="message-avatar">${avatar}</div>
+                    <div>
+                        <div class="message-content">${this.escapeHtml(content)}</div>
+                        <div class="message-time">${time}</div>
+                    </div>
+                `;
+                
+                messagesContainer.appendChild(messageDiv);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+            showTypingIndicator() {
+                document.getElementById('typing-indicator').style.display = 'flex';
+                const messagesContainer = document.getElementById('chat-messages');
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+            hideTypingIndicator() {
+                document.getElementById('typing-indicator').style.display = 'none';
+            }
+
+            updateStatus(status) {
+                document.getElementById('status-text').textContent = status;
+                document.getElementById('perf-status').textContent = status;
+            }
+
+            updatePerfStats() {
+                document.getElementById('message-count').textContent = this.messageCount;
+                
+                if (this.responseTimes.length > 0) {
+                    const avgTime = this.responseTimes.reduce((a, b) => a + b, 0) / this.responseTimes.length;
+                    document.getElementById('avg-response-time').textContent = `${avgTime.toFixed(0)}ms`;
+                }
+                
+                // Memory usage
+                if (performance.memory) {
+                    const memoryMB = (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(1);
+                    document.getElementById('memory-usage').textContent = `${memoryMB}MB`;
+                }
+                
+                // Backend type
+                document.getElementById('backend-type').textContent = 'WebAssembly';
+            }
+
+            showError(message) {
+                const messagesContainer = document.getElementById('chat-messages');
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error-message';
+                errorDiv.textContent = message;
+                messagesContainer.appendChild(errorDiv);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+        }
+
+        // Global functions for UI interactions
+        window.addQuickMessage = function(message) {
+            document.getElementById('message-input').value = message;
+            document.getElementById('message-input').focus();
+        };
+
+        window.clearChat = function() {
+            const messagesContainer = document.getElementById('chat-messages');
+            // Keep only the initial bot message
+            const firstMessage = messagesContainer.querySelector('.message.bot');
+            messagesContainer.innerHTML = '';
+            messagesContainer.appendChild(firstMessage);
+        };
+
+        window.sendMessage = function() {
+            chatbot.sendMessage();
+        };
+
+        // Initialize the chatbot
+        const chatbot = new ChatbotDemo();
+    </script>
+</body>
+</html>

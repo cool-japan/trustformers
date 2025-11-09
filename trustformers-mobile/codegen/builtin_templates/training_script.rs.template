@@ -1,0 +1,326 @@
+use std::path::PathBuf;
+use clap::Parser;
+use anyhow::Result;
+use trustformers_core::{
+    Tensor, Device, Optimizer, LossFunction,
+    utils::{set_seed, ProgressBar},
+};
+use trustformers_models::{{model_type|pascal_case}}Model;
+use trustformers_optim::{{{optimizer|pascal_case}}, SchedulerType};
+
+/// {{name|title}} Training Script
+/// 
+/// Train a {{model_type}} model on {{dataset_type}} data.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Path to training data
+    #[arg(short, long)]
+    train_data: PathBuf,
+    
+    /// Path to validation data
+    #[arg(short, long)]
+    val_data: Option<PathBuf>,
+    
+    /// Output directory for checkpoints
+    #[arg(short, long, default_value = "./checkpoints")]
+    output_dir: PathBuf,
+    
+    /// Batch size for training
+    #[arg(short, long, default_value = "{{batch_size|default:32}}")]
+    batch_size: usize,
+    
+    /// Learning rate
+    #[arg(short, long, default_value = "{{learning_rate|default:0.001}}")]
+    learning_rate: f32,
+    
+    /// Number of epochs
+    #[arg(short, long, default_value = "{{num_epochs|default:10}}")]
+    epochs: usize,
+    
+    /// Random seed
+    #[arg(short, long, default_value = "42")]
+    seed: u64,
+    
+    /// Device to use (cpu, cuda, mps)
+    #[arg(short, long, default_value = "{{device|default:cuda}}")]
+    device: String,
+    
+    /// Gradient accumulation steps
+    #[arg(long, default_value = "{{gradient_accumulation|default:1}}")]
+    gradient_accumulation: usize,
+    
+    /// Mixed precision training
+    #[arg(long)]
+    mixed_precision: bool,
+    
+    /// Checkpoint frequency (epochs)
+    #[arg(long, default_value = "1")]
+    checkpoint_every: usize,
+    
+    /// Resume from checkpoint
+    #[arg(long)]
+    resume: Option<PathBuf>,
+    
+    /// Evaluation frequency (steps)
+    #[arg(long, default_value = "{{eval_steps|default:500}}")]
+    eval_steps: usize,
+    
+    /// Logging frequency (steps)
+    #[arg(long, default_value = "10")]
+    log_steps: usize,
+    
+    /// Maximum sequence length
+    {{#if is_sequence_model}}
+    #[arg(long, default_value = "{{max_length|default:512}}")]
+    max_length: usize,
+    {{/if}}
+    
+    /// Warmup steps
+    #[arg(long, default_value = "{{warmup_steps|default:0}}")]
+    warmup_steps: usize,
+    
+    /// Weight decay
+    #[arg(long, default_value = "{{weight_decay|default:0.01}}")]
+    weight_decay: f32,
+    
+    /// Gradient clipping
+    #[arg(long, default_value = "{{gradient_clip|default:1.0}}")]
+    gradient_clip: f32,
+}
+
+fn main() -> Result<()> {
+    // Parse arguments
+    let args = Args::parse();
+    
+    // Set random seed
+    set_seed(args.seed);
+    
+    // Initialize device
+    let device = Device::from_string(&args.device)?;
+    println!("Using device: {:?}", device);
+    
+    // Create output directory
+    std::fs::create_dir_all(&args.output_dir)?;
+    
+    // Load configuration
+    let config = {{model_type|pascal_case}}Config::from_file("{{config_path|default:config.json}}")?;
+    
+    // Initialize model
+    let mut model = {{model_type|pascal_case}}Model::new(&config)?;
+    model.to(device.clone())?;
+    
+    // Resume from checkpoint if specified
+    if let Some(checkpoint_path) = args.resume {
+        println!("Resuming from checkpoint: {:?}", checkpoint_path);
+        model.load_checkpoint(&checkpoint_path)?;
+    }
+    
+    // Initialize optimizer
+    let mut optimizer = {{optimizer|pascal_case}}::new(
+        model.parameters(),
+        args.learning_rate,
+        {{#if optimizer == "adam"}}
+        0.9,  // beta1
+        0.999, // beta2
+        1e-8,  // epsilon
+        {{/if}}
+        args.weight_decay,
+    )?;
+    
+    // Initialize scheduler
+    {{#if use_scheduler}}
+    let scheduler = SchedulerType::{{scheduler_type|pascal_case}} {
+        warmup_steps: args.warmup_steps,
+        {{#if scheduler_type == "cosine"}}
+        total_steps: args.epochs * steps_per_epoch,
+        {{/if}}
+    };
+    {{/if}}
+    
+    // Initialize loss function
+    let loss_fn = LossFunction::{{loss_function|pascal_case}};
+    
+    // Load datasets
+    let train_dataset = {{dataset_type|pascal_case}}Dataset::from_file(
+        &args.train_data,
+        {{#if is_sequence_model}}
+        args.max_length,
+        {{/if}}
+    )?;
+    
+    let val_dataset = if let Some(val_path) = args.val_data {
+        Some({{dataset_type|pascal_case}}Dataset::from_file(
+            &val_path,
+            {{#if is_sequence_model}}
+            args.max_length,
+            {{/if}}
+        )?)
+    } else {
+        None
+    };
+    
+    // Create data loaders
+    let train_loader = DataLoader::new(
+        train_dataset,
+        args.batch_size,
+        true, // shuffle
+        device.clone(),
+    )?;
+    
+    let val_loader = val_dataset.map(|dataset| {
+        DataLoader::new(
+            dataset,
+            args.batch_size,
+            false, // shuffle
+            device.clone(),
+        )
+    }).transpose()?;
+    
+    // Training metrics
+    let mut global_step = 0;
+    let mut best_val_loss = f32::INFINITY;
+    
+    // Training loop
+    for epoch in 0..args.epochs {
+        println!("\nEpoch {}/{}", epoch + 1, args.epochs);
+        
+        // Training phase
+        model.train();
+        let mut epoch_loss = 0.0;
+        let mut num_batches = 0;
+        
+        let progress = ProgressBar::new(train_loader.len());
+        
+        for (batch_idx, batch) in train_loader.enumerate() {
+            // Forward pass
+            let outputs = model.forward(&batch)?;
+            let loss = loss_fn.compute(&outputs, &batch.labels)?;
+            
+            // Scale loss for gradient accumulation
+            let scaled_loss = loss / args.gradient_accumulation as f32;
+            epoch_loss += loss.item();
+            
+            // Backward pass
+            scaled_loss.backward()?;
+            
+            // Gradient accumulation
+            if (batch_idx + 1) % args.gradient_accumulation == 0 {
+                // Gradient clipping
+                if args.gradient_clip > 0.0 {
+                    model.clip_gradients(args.gradient_clip)?;
+                }
+                
+                // Optimizer step
+                optimizer.step()?;
+                optimizer.zero_grad()?;
+                
+                {{#if use_scheduler}}
+                // Update learning rate
+                scheduler.step(&mut optimizer, global_step)?;
+                {{/if}}
+                
+                global_step += 1;
+            }
+            
+            num_batches += 1;
+            progress.update(1);
+            
+            // Logging
+            if global_step % args.log_steps == 0 {
+                let avg_loss = epoch_loss / num_batches as f32;
+                println!(
+                    "Step {}: loss = {:.4}, lr = {:.2e}",
+                    global_step,
+                    avg_loss,
+                    optimizer.get_learning_rate()
+                );
+            }
+            
+            // Evaluation
+            if global_step % args.eval_steps == 0 && val_loader.is_some() {
+                let val_loss = evaluate(&model, val_loader.as_ref().unwrap(), &loss_fn)?;
+                println!("Validation loss: {:.4}", val_loss);
+                
+                // Save best model
+                if val_loss < best_val_loss {
+                    best_val_loss = val_loss;
+                    let checkpoint_path = args.output_dir.join("best_model.pt");
+                    model.save_checkpoint(&checkpoint_path)?;
+                    println!("Saved best model with val_loss = {:.4}", val_loss);
+                }
+                
+                model.train();
+            }
+        }
+        
+        progress.finish();
+        
+        // Epoch checkpoint
+        if (epoch + 1) % args.checkpoint_every == 0 {
+            let checkpoint_path = args.output_dir.join(format!("checkpoint_epoch_{}.pt", epoch + 1));
+            model.save_checkpoint(&checkpoint_path)?;
+            println!("Saved checkpoint: {:?}", checkpoint_path);
+        }
+        
+        // End of epoch evaluation
+        if let Some(ref val_loader) = val_loader {
+            let val_loss = evaluate(&model, val_loader, &loss_fn)?;
+            println!("End of epoch validation loss: {:.4}", val_loss);
+        }
+    }
+    
+    // Save final model
+    let final_path = args.output_dir.join("final_model.pt");
+    model.save_checkpoint(&final_path)?;
+    println!("\nTraining complete! Final model saved to {:?}", final_path);
+    
+    Ok(())
+}
+
+fn evaluate<M: Model>(
+    model: &M,
+    data_loader: &DataLoader,
+    loss_fn: &LossFunction,
+) -> Result<f32> {
+    model.eval();
+    
+    let mut total_loss = 0.0;
+    let mut num_batches = 0;
+    
+    for batch in data_loader {
+        let outputs = model.forward(&batch)?;
+        let loss = loss_fn.compute(&outputs, &batch.labels)?;
+        total_loss += loss.item();
+        num_batches += 1;
+    }
+    
+    Ok(total_loss / num_batches as f32)
+}
+
+{{#if generate_tests}}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_training_loop() {
+        // Test basic training functionality
+        let config = {{model_type|pascal_case}}Config::default();
+        let model = {{model_type|pascal_case}}Model::new(&config).unwrap();
+        
+        // Create dummy data
+        let batch_size = 4;
+        {{#if is_sequence_model}}
+        let seq_length = 32;
+        let inputs = Tensor::randn(&[batch_size, seq_length]);
+        {{else}}
+        let inputs = Tensor::randn(&[batch_size, config.input_size]);
+        {{/if}}
+        
+        // Forward pass
+        let outputs = model.forward(&inputs).unwrap();
+        assert_eq!(outputs.shape()[0], batch_size);
+    }
+}
+{{/if}}

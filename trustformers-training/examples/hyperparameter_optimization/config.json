@@ -1,0 +1,86 @@
+{
+  "demo_config": {
+    "model_name": "bert-base-uncased",
+    "dataset_size": 10000,
+    "max_trials": 30,
+    "optimization_timeout_seconds": 1800,
+    "enable_early_stopping": true,
+    "warm_start_from_history": false
+  },
+  "optimization_strategies": {
+    "grid_search": {
+      "enabled": true,
+      "max_trials": 15,
+      "points_per_dimension": 8
+    },
+    "bayesian_optimization": {
+      "enabled": true,
+      "max_trials": 25,
+      "surrogate_model": "gaussian_process",
+      "acquisition_function": "expected_improvement",
+      "n_initial_points": 5,
+      "xi": 0.01
+    },
+    "population_based_training": {
+      "enabled": true,
+      "population_size": 8,
+      "generations": 5,
+      "perturbation_factor": 0.2,
+      "truncation_threshold": 0.25
+    },
+    "bandit_optimization": {
+      "enabled": true,
+      "algorithm": "ucb",
+      "exploration_param": 1.0,
+      "n_arms": 20,
+      "min_resource": 1,
+      "max_resource": 10,
+      "reduction_factor": 3
+    }
+  },
+  "search_space": {
+    "learning_rate": {
+      "type": "log_uniform",
+      "min": 1e-5,
+      "max": 0.01
+    },
+    "batch_size": {
+      "type": "discrete",
+      "min": 8,
+      "max": 64,
+      "step": 8
+    },
+    "weight_decay": {
+      "type": "log_uniform",
+      "min": 1e-6,
+      "max": 0.01
+    },
+    "optimizer": {
+      "type": "categorical",
+      "choices": ["adamw", "adam", "sgd", "adafactor"]
+    },
+    "warmup_ratio": {
+      "type": "continuous",
+      "min": 0.0,
+      "max": 0.2
+    },
+    "max_grad_norm": {
+      "type": "continuous",
+      "min": 0.5,
+      "max": 2.0
+    }
+  },
+  "early_stopping": {
+    "patience": 5,
+    "min_delta": 0.01,
+    "baseline": 0.8,
+    "mode": "maximize"
+  },
+  "logging": {
+    "level": "info",
+    "log_to_file": true,
+    "log_file": "optimization_demo.log",
+    "include_parameters": true,
+    "include_timing": true
+  }
+}

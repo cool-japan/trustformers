@@ -1,0 +1,169 @@
+---
+# Default variables for common role
+
+# Essential packages to install on all systems
+essential_packages:
+  - curl
+  - wget
+  - git
+  - htop
+  - iotop
+  - netcat
+  - jq
+  - unzip
+  - rsync
+  - logrotate
+  - fail2ban
+  - ufw
+  - chrony
+
+# System configuration
+system_timezone: "UTC"
+system_locale: "en_US.UTF-8"
+
+# User configuration
+app_user: "trustformers"
+app_group: "trustformers"
+app_uid: 1000
+app_gid: 1000
+app_home: "/opt/trustformers"
+app_shell: "/bin/bash"
+
+# System limits
+system_limits:
+  - domain: "{{ app_user }}"
+    limit_type: soft
+    limit_item: nofile
+    value: 65536
+  - domain: "{{ app_user }}"
+    limit_type: hard
+    limit_item: nofile
+    value: 65536
+  - domain: "{{ app_user }}"
+    limit_type: soft
+    limit_item: nproc
+    value: 4096
+  - domain: "{{ app_user }}"
+    limit_type: hard
+    limit_item: nproc
+    value: 4096
+
+# Kernel parameters
+kernel_parameters:
+  - name: vm.max_map_count
+    value: 262144
+  - name: fs.file-max
+    value: 2097152
+  - name: net.core.somaxconn
+    value: 65535
+  - name: net.ipv4.tcp_max_syn_backlog
+    value: 65535
+  - name: net.core.netdev_max_backlog
+    value: 5000
+
+# Firewall configuration
+firewall_enabled: true
+firewall_default_policy: deny
+firewall_allowed_ports:
+  - 22/tcp    # SSH
+  - 8080/tcp  # Application HTTP
+  - 9090/tcp  # gRPC
+  - 9091/tcp  # Metrics
+
+# SSH configuration
+ssh_port: 22
+ssh_permit_root_login: false
+ssh_password_authentication: false
+ssh_pubkey_authentication: true
+ssh_max_auth_tries: 3
+ssh_client_alive_interval: 300
+ssh_client_alive_count_max: 2
+
+# Logging configuration
+log_rotate_retention: 14
+log_rotate_frequency: daily
+log_rotate_compress: true
+log_rotate_create_new: true
+
+# NTP servers
+ntp_servers:
+  - 0.pool.ntp.org
+  - 1.pool.ntp.org
+  - 2.pool.ntp.org
+  - 3.pool.ntp.org
+
+# Monitoring configuration
+monitoring_enabled: true
+node_exporter_port: 9100
+log_exporter_port: 9101
+
+# Backup configuration
+backup_enabled: true
+backup_retention_days: 30
+backup_s3_bucket: ""
+backup_schedule:
+  - name: "system_backup"
+    job: "/opt/trustformers/scripts/backup.sh"
+    minute: "0"
+    hour: "2"
+    day: "*"
+    month: "*"
+    weekday: "*"
+
+# Maintenance cron jobs
+maintenance_jobs:
+  - name: "log_cleanup"
+    job: "find /var/log -name '*.log' -mtime +{{ log_rotate_retention }} -delete"
+    minute: "0"
+    hour: "3"
+    day: "*"
+    month: "*"
+    weekday: "0"
+  
+  - name: "temp_cleanup"
+    job: "find /tmp -type f -mtime +7 -delete"
+    minute: "30"
+    hour: "3"
+    day: "*"
+    month: "*"
+    weekday: "*"
+  
+  - name: "package_update_check"
+    job: "/usr/bin/apt update && /usr/bin/apt list --upgradable"
+    minute: "0"
+    hour: "4"
+    day: "*"
+    month: "*"
+    weekday: "1"
+
+# Security settings
+security_settings:
+  disable_ipv6: false
+  enable_fail2ban: true
+  fail2ban_bantime: 3600
+  fail2ban_findtime: 600
+  fail2ban_maxretry: 5
+  
+  # Disable unused services
+  disable_services:
+    - bluetooth
+    - cups
+    - avahi-daemon
+  
+  # Remove unnecessary packages
+  remove_packages:
+    - telnet
+    - rsh-client
+    - rsh-redone-client
+
+# Directory structure
+app_directories:
+  - "{{ app_home }}"
+  - "{{ app_home }}/bin"
+  - "{{ app_home }}/config"
+  - "{{ app_home }}/data"
+  - "{{ app_home }}/logs"
+  - "{{ app_home }}/scripts"
+  - "{{ app_home }}/tmp"
+  - "/etc/trustformers"
+  - "/var/log/trustformers"

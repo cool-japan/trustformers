@@ -1,0 +1,679 @@
+use std::path::Path;
+use anyhow::Result;
+use trustformers_core::{Tensor, Device};
+{{#if dataset_type == "text"}}
+use tokenizers::Tokenizer;
+{{else if dataset_type == "image"}}
+use image::{DynamicImage, ImageBuffer};
+{{else if dataset_type == "audio"}}
+use hound::WavReader;
+{{/if}}
+
+/// {{name|title}} Dataset
+/// 
+/// Dataset implementation for {{dataset_type}} data.
+pub struct {{name|pascal_case}}Dataset {
+    {{#if dataset_type == "text"}}
+    texts: Vec<String>,
+    labels: Vec<usize>,
+    tokenizer: Tokenizer,
+    max_length: usize,
+    {{else if dataset_type == "image"}}
+    images: Vec<PathBuf>,
+    labels: Vec<usize>,
+    image_size: (u32, u32),
+    normalize: bool,
+    {{else if dataset_type == "audio"}}
+    audio_files: Vec<PathBuf>,
+    labels: Vec<usize>,
+    sample_rate: u32,
+    max_length: usize,
+    {{else}}
+    data: Vec<Tensor>,
+    labels: Vec<usize>,
+    {{/if}}
+    {{#each custom_fields}}
+    {{name}}: {{type}},
+    {{/each}}
+}
+
+impl {{name|pascal_case}}Dataset {
+    /// Create a new dataset from file
+    pub fn from_file<P: AsRef<Path>>(
+        path: P,
+        {{#if dataset_type == "text"}}
+        tokenizer_path: P,
+        max_length: usize,
+        {{else if dataset_type == "image"}}
+        image_size: (u32, u32),
+        {{else if dataset_type == "audio"}}
+        sample_rate: u32,
+        max_length: usize,
+        {{/if}}
+        {{#each constructor_params}}
+        {{name}}: {{type}},
+        {{/each}}
+    ) -> Result<Self> {
+        {{#if dataset_type == "text"}}
+        // Load tokenizer
+        let tokenizer = Tokenizer::from_file(tokenizer_path)?;
+        
+        // Load text data
+        let file_content = std::fs::read_to_string(path)?;
+        let mut texts = Vec::new();
+        let mut labels = Vec::new();
+        
+        for line in file_content.lines() {
+            // Parse format: label\ttext
+            let parts: Vec<&str> = line.splitn(2, '\t').collect();
+            if parts.len() == 2 {
+                labels.push(parts[0].parse()?);
+                texts.push(parts[1].to_string());
+            }
+        }
+        
+        Ok(Self {
+            texts,
+            labels,
+            tokenizer,
+            max_length,
+            {{#each custom_fields}}
+            {{name}},
+            {{/each}}
+        })
+        {{else if dataset_type == "image"}}
+        // Load image paths and labels
+        let file_content = std::fs::read_to_string(path)?;
+        let mut images = Vec::new();
+        let mut labels = Vec::new();
+        
+        let base_dir = path.as_ref().parent().unwrap_or(Path::new("."));
+        
+        for line in file_content.lines() {
+            // Parse format: image_path,label
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() == 2 {
+                let image_path = base_dir.join(parts[0]);
+                images.push(image_path);
+                labels.push(parts[1].parse()?);
+            }
+        }
+        
+        Ok(Self {
+            images,
+            labels,
+            image_size,
+            normalize: true,
+            {{#each custom_fields}}
+            {{name}},
+            {{/each}}
+        })
+        {{else if dataset_type == "audio"}}
+        // Load audio file paths and labels
+        let file_content = std::fs::read_to_string(path)?;
+        let mut audio_files = Vec::new();
+        let mut labels = Vec::new();
+        
+        for line in file_content.lines() {
+            let parts: Vec<&str> = line.split(',').collect();
+            if parts.len() == 2 {
+                audio_files.push(PathBuf::from(parts[0]));
+                labels.push(parts[1].parse()?);
+            }
+        }
+        
+        Ok(Self {
+            audio_files,
+            labels,
+            sample_rate,
+            max_length,
+            {{#each custom_fields}}
+            {{name}},
+            {{/each}}
+        })
+        {{else}}
+        // Load custom data format
+        let mut data = Vec::new();
+        let mut labels = Vec::new();
+        
+        // Read file content and determine format
+        let file_content = std::fs::read_to_string(&path)?;
+        let extension = path.as_ref().extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("");
+            
+        match extension.to_lowercase().as_str() {
+            "json" => {
+                // Parse JSON format: {"data": [...], "labels": [...]}
+                let parsed: serde_json::Value = serde_json::from_str(&file_content)?;
+                
+                if let Some(data_array) = parsed.get("data").and_then(|v| v.as_array()) {
+                    for item in data_array {
+                        if let Some(array) = item.as_array() {
+                            let tensor_data: Vec<f32> = array.iter()
+                                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                .collect();
+                            let shape = vec![tensor_data.len()];
+                            data.push(Tensor::from_vec(tensor_data, &shape)?);
+                        }
+                    }
+                }
+                
+                if let Some(labels_array) = parsed.get("labels").and_then(|v| v.as_array()) {
+                    labels = labels_array.iter()
+                        .filter_map(|v| v.as_u64().map(|u| u as usize))
+                        .collect();
+                }
+            },
+            "csv" => {
+                // Parse CSV format with last column as label
+                for line in file_content.lines().skip(1) { // Skip header
+                    let values: Vec<&str> = line.split(',').collect();
+                    if !values.is_empty() {
+                        // Last column is label, rest is data
+                        let label: usize = values.last()
+                            .and_then(|s| s.trim().parse().ok())
+                            .unwrap_or(0);
+                        labels.push(label);
+                        
+                        let tensor_data: Vec<f32> = values[..values.len()-1].iter()
+                            .filter_map(|s| s.trim().parse().ok())
+                            .collect();
+                        let shape = vec![tensor_data.len()];
+                        data.push(Tensor::from_vec(tensor_data, &shape)?);
+                    }
+                }
+            },
+            "npy" | "npz" => {
+                // Load NumPy format (basic implementation)
+                use std::fs::File;
+                use std::io::Read;
+                
+                let mut file = File::open(&path)?;
+                let mut buffer = Vec::new();
+                file.read_to_end(&mut buffer)?;
+                
+                // Simple NPY header parsing (magic number: \x93NUMPY)
+                if buffer.len() > 10 && &buffer[0..6] == b"\x93NUMPY" {
+                    // Skip header and read data as f32 array
+                    let header_len = u16::from_le_bytes([buffer[8], buffer[9]]) as usize;
+                    let data_start = 10 + header_len;
+                    
+                    if buffer.len() > data_start {
+                        let raw_data = &buffer[data_start..];
+                        let float_data: Vec<f32> = raw_data.chunks_exact(4)
+                            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                            .collect();
+                        
+                        // Assume 1D data for simplicity
+                        let shape = vec![float_data.len()];
+                        data.push(Tensor::from_vec(float_data, &shape)?);
+                        labels.push(0); // Default label
+                    }
+                }
+            },
+            "bin" | "raw" => {
+                // Load binary data format
+                use std::fs::File;
+                use std::io::Read;
+                
+                let mut file = File::open(&path)?;
+                let mut buffer = Vec::new();
+                file.read_to_end(&mut buffer)?;
+                
+                // Interpret as f32 array
+                let float_data: Vec<f32> = buffer.chunks_exact(4)
+                    .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+                
+                if !float_data.is_empty() {
+                    let shape = vec![float_data.len()];
+                    data.push(Tensor::from_vec(float_data, &shape)?);
+                    labels.push(0); // Default label
+                }
+            },
+            _ => {
+                // Fallback: try parsing as simple text format (one value per line)
+                let lines: Vec<&str> = file_content.lines().collect();
+                for line in lines {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        if let Ok(value) = trimmed.parse::<f32>() {
+                            let shape = vec![1];
+                            data.push(Tensor::from_vec(vec![value], &shape)?);
+                            labels.push(0); // Default label
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Ensure data and labels have same length
+        if data.len() != labels.len() {
+            return Err(anyhow::anyhow!(
+                "Data and labels length mismatch: {} vs {}", 
+                data.len(), 
+                labels.len()
+            ));
+        }
+        
+        Ok(Self {
+            data,
+            labels,
+            {{#each custom_fields}}
+            {{name}},
+            {{/each}}
+        })
+        {{/if}}
+    }
+    
+    /// Get the number of samples
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+    
+    /// Check if dataset is empty
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
+    
+    /// Get a single sample
+    pub fn get(&self, index: usize) -> Result<(Tensor, usize)> {
+        if index >= self.len() {
+            return Err(anyhow::anyhow!("Index out of bounds"));
+        }
+        
+        {{#if dataset_type == "text"}}
+        // Tokenize text
+        let text = &self.texts[index];
+        let encoding = self.tokenizer.encode(text, true)?;
+        
+        // Truncate or pad to max_length
+        let mut ids = encoding.get_ids().to_vec();
+        if ids.len() > self.max_length {
+            ids.truncate(self.max_length);
+        } else {
+            ids.resize(self.max_length, 0); // Pad with zeros
+        }
+        
+        // Convert to tensor
+        let input_ids = Tensor::from_vec(ids, &[self.max_length])?;
+        
+        {{else if dataset_type == "image"}}
+        // Load and preprocess image
+        let img = image::open(&self.images[index])?;
+        let img = img.resize_exact(
+            self.image_size.0,
+            self.image_size.1,
+            image::imageops::FilterType::Lanczos3
+        );
+        
+        // Convert to tensor
+        let rgb = img.to_rgb8();
+        let (width, height) = (rgb.width(), rgb.height());
+        let raw_pixels: Vec<f32> = rgb
+            .pixels()
+            .flat_map(|p| {
+                let channels = p.0;
+                channels.iter().map(|&c| {
+                    let val = c as f32 / 255.0;
+                    if self.normalize {
+                        // ImageNet normalization
+                        match channels.iter().position(|&x| x == c).unwrap() {
+                            0 => (val - 0.485) / 0.229, // R
+                            1 => (val - 0.456) / 0.224, // G
+                            2 => (val - 0.406) / 0.225, // B
+                            _ => val,
+                        }
+                    } else {
+                        val
+                    }
+                })
+            })
+            .collect();
+        
+        let input_tensor = Tensor::from_vec(
+            raw_pixels,
+            &[3, height as usize, width as usize]
+        )?;
+        
+        {{else if dataset_type == "audio"}}
+        // Load audio file
+        let reader = WavReader::open(&self.audio_files[index])?;
+        let spec = reader.spec();
+        
+        // Resample if needed
+        let samples: Vec<f32> = if spec.sample_rate != self.sample_rate {
+            // Simple linear interpolation resampling
+            let original_samples: Vec<f32> = reader.into_samples::<f32>().collect::<Result<Vec<_>, _>>()?;
+            let resample_ratio = self.sample_rate as f32 / spec.sample_rate as f32;
+            let new_length = (original_samples.len() as f32 * resample_ratio) as usize;
+            
+            let mut resampled = Vec::with_capacity(new_length);
+            for i in 0..new_length {
+                let source_index = (i as f32 / resample_ratio) as usize;
+                let source_index = source_index.min(original_samples.len() - 1);
+                resampled.push(original_samples[source_index]);
+            }
+            resampled
+        } else {
+            reader.into_samples::<f32>().collect::<Result<Vec<_>, _>>()?
+        };
+        
+        // Truncate or pad to max_length
+        let mut audio_data = samples;
+        if audio_data.len() > self.max_length {
+            audio_data.truncate(self.max_length);
+        } else {
+            audio_data.resize(self.max_length, 0.0);
+        }
+        
+        let input_tensor = Tensor::from_vec(
+            audio_data,
+            &[1, self.max_length]
+        )?;
+        
+        {{else}}
+        // Return custom data
+        let input_tensor = self.data[index].clone();
+        {{/if}}
+        
+        Ok((input_tensor, self.labels[index]))
+    }
+    
+    {{#if supports_augmentation}}
+    /// Apply data augmentation
+    pub fn augment(&self, tensor: &mut Tensor) -> Result<()> {
+        {{#if dataset_type == "image"}}
+        // Random horizontal flip
+        if rand::random::<f32>() > 0.5 {
+            tensor.flip(2)?; // Flip width dimension
+        }
+        
+        // Random crop
+        if rand::random::<f32>() > 0.3 {
+            let shape = tensor.shape();
+            if shape.len() >= 3 && shape[1] > 32 && shape[2] > 32 {
+                let crop_h = (shape[1] as f32 * (0.8 + rand::random::<f32>() * 0.2)) as usize;
+                let crop_w = (shape[2] as f32 * (0.8 + rand::random::<f32>() * 0.2)) as usize;
+                let start_h = rand::random::<usize>() % (shape[1] - crop_h + 1);
+                let start_w = rand::random::<usize>() % (shape[2] - crop_w + 1);
+                
+                *tensor = tensor.slice(&[
+                    0..shape[0],
+                    start_h..start_h + crop_h,
+                    start_w..start_w + crop_w
+                ])?;
+            }
+        }
+        
+        // Color jitter
+        if rand::random::<f32>() > 0.3 {
+            let brightness_factor = 0.9 + rand::random::<f32>() * 0.2; // ±10% brightness
+            let contrast_factor = 0.9 + rand::random::<f32>() * 0.2;   // ±10% contrast
+            let saturation_factor = 0.9 + rand::random::<f32>() * 0.2; // ±10% saturation
+            
+            // Apply brightness adjustment
+            *tensor = tensor.mul_scalar(brightness_factor)?;
+            
+            // Apply contrast adjustment (assuming tensor is normalized)
+            let mean = tensor.mean()?;
+            *tensor = tensor.sub_scalar(mean)?.mul_scalar(contrast_factor)?.add_scalar(mean)?;
+            
+            // Clamp values to valid range
+            *tensor = tensor.clamp(0.0, 1.0)?;
+        }
+        {{else if dataset_type == "audio"}}
+        // Time stretching
+        if rand::random::<f32>() > 0.3 {
+            let stretch_factor = 0.9 + rand::random::<f32>() * 0.2; // ±10% time stretch
+            let shape = tensor.shape();
+            let original_length = shape[shape.len() - 1];
+            let new_length = ((original_length as f32) * stretch_factor) as usize;
+            
+            if new_length > 0 && new_length != original_length {
+                // Simple linear interpolation for time stretching
+                let mut stretched_data = Vec::with_capacity(new_length);
+                for i in 0..new_length {
+                    let source_index = (i as f32 * original_length as f32 / new_length as f32) as usize;
+                    let source_index = source_index.min(original_length - 1);
+                    let sample = tensor.data()[source_index];
+                    stretched_data.push(sample);
+                }
+                
+                let mut new_shape = shape.to_vec();
+                new_shape[new_shape.len() - 1] = new_length;
+                *tensor = Tensor::from_vec(stretched_data, &new_shape)?;
+            }
+        }
+        
+        // Add noise
+        if rand::random::<f32>() > 0.5 {
+            let noise = Tensor::randn(tensor.shape())? * 0.005;
+            *tensor = tensor.add(&noise)?;
+        }
+        {{/if}}
+        
+        Ok(())
+    }
+    {{/if}}
+    
+    /// Create batches
+    pub fn batch(&self, indices: &[usize], device: Device) -> Result<DataBatch> {
+        let mut inputs = Vec::new();
+        let mut labels = Vec::new();
+        
+        for &idx in indices {
+            let (input, label) = self.get(idx)?;
+            inputs.push(input);
+            labels.push(label);
+        }
+        
+        // Stack inputs
+        let input_tensor = Tensor::stack(&inputs, 0)?;
+        let label_tensor = Tensor::from_vec(
+            labels.clone(),
+            &[labels.len()]
+        )?;
+        
+        // Move to device
+        let input_tensor = input_tensor.to(device.clone())?;
+        let label_tensor = label_tensor.to(device)?;
+        
+        Ok(DataBatch {
+            inputs: input_tensor,
+            labels: label_tensor,
+            {{#if dataset_type == "text"}}
+            attention_mask: self.create_attention_mask(&inputs)?,
+            {{/if}}
+            {{#each batch_fields}}
+            {{name}}: {{initializer}},
+            {{/each}}
+        })
+    }
+    
+    {{#if dataset_type == "text"}}
+    /// Create attention mask for text inputs
+    fn create_attention_mask(&self, inputs: &[Tensor]) -> Result<Tensor> {
+        let batch_size = inputs.len();
+        let seq_length = self.max_length;
+        
+        let mut mask = vec![0.0f32; batch_size * seq_length];
+        
+        for (batch_idx, input) in inputs.iter().enumerate() {
+            // Set 1.0 for non-padding tokens
+            let data = input.data()?;
+            for (seq_idx, &token_id) in data.iter().enumerate() {
+                if token_id != 0.0 { // Assuming 0 is padding token
+                    mask[batch_idx * seq_length + seq_idx] = 1.0;
+                }
+            }
+        }
+        
+        Tensor::from_vec(mask, &[batch_size, seq_length])
+    }
+    {{/if}}
+}
+
+/// Batch of data
+pub struct DataBatch {
+    pub inputs: Tensor,
+    pub labels: Tensor,
+    {{#if dataset_type == "text"}}
+    pub attention_mask: Tensor,
+    {{/if}}
+    {{#each batch_fields}}
+    pub {{name}}: {{type}},
+    {{/each}}
+}
+
+{{#if generate_transforms}}
+/// Data transforms
+pub mod transforms {
+    use super::*;
+    
+    {{#if dataset_type == "image"}}
+    /// Normalize image tensor
+    pub fn normalize(tensor: &mut Tensor, mean: &[f32], std: &[f32]) -> Result<()> {
+        for (c, (m, s)) in mean.iter().zip(std.iter()).enumerate() {
+            let channel = tensor.select(0, c)?;
+            channel.sub_scalar(*m)?.div_scalar(*s)?;
+        }
+        Ok(())
+    }
+    
+    /// Random resized crop
+    pub fn random_resized_crop(
+        image: &DynamicImage,
+        size: (u32, u32),
+        scale: (f32, f32),
+        ratio: (f32, f32),
+    ) -> Result<DynamicImage> {
+        let (width, height) = image.dimensions();
+        let area = (width * height) as f32;
+        
+        // Try up to 10 times to find a valid crop
+        for _ in 0..10 {
+            let target_area = area * (scale.0 + rand::random::<f32>() * (scale.1 - scale.0));
+            let aspect_ratio = ratio.0 + rand::random::<f32>() * (ratio.1 - ratio.0);
+            
+            let crop_width = (target_area * aspect_ratio).sqrt() as u32;
+            let crop_height = (target_area / aspect_ratio).sqrt() as u32;
+            
+            if crop_width <= width && crop_height <= height {
+                let x = rand::random::<u32>() % (width - crop_width + 1);
+                let y = rand::random::<u32>() % (height - crop_height + 1);
+                
+                let cropped = image.crop_imm(x, y, crop_width, crop_height);
+                return Ok(cropped.resize_exact(size.0, size.1, image::imageops::FilterType::Lanczos3));
+            }
+        }
+        
+        // Fallback: center crop and resize
+        let crop_size = width.min(height);
+        let x = (width - crop_size) / 2;
+        let y = (height - crop_size) / 2;
+        let cropped = image.crop_imm(x, y, crop_size, crop_size);
+        Ok(cropped.resize_exact(size.0, size.1, image::imageops::FilterType::Lanczos3))
+    }
+    {{else if dataset_type == "audio"}}
+    /// Apply mel-spectrogram transform
+    pub fn mel_spectrogram(
+        audio: &Tensor,
+        n_fft: usize,
+        hop_length: usize,
+        n_mels: usize,
+    ) -> Result<Tensor> {
+        // Simplified mel-spectrogram implementation
+        let audio_data = audio.data();
+        let window_size = n_fft;
+        let num_frames = (audio_data.len() - window_size) / hop_length + 1;
+        
+        // Create mel filter bank (simplified linear spacing)
+        let sample_rate = 22050.0; // Assume standard sample rate
+        let mel_min = 0.0;
+        let mel_max = 2595.0 * (1.0 + sample_rate / 2.0 / 700.0).ln();
+        let mel_points: Vec<f32> = (0..=n_mels + 1)
+            .map(|i| mel_min + (mel_max - mel_min) * i as f32 / (n_mels + 1) as f32)
+            .collect();
+        
+        // Convert mel to Hz
+        let hz_points: Vec<f32> = mel_points
+            .iter()
+            .map(|mel| 700.0 * (mel / 2595.0).exp() - 700.0)
+            .collect();
+        
+        // Convert Hz to FFT bin numbers
+        let bin_points: Vec<usize> = hz_points
+            .iter()
+            .map(|hz| ((n_fft + 1) as f32 * hz / sample_rate) as usize)
+            .collect();
+        
+        // Create simplified spectrogram using windowing
+        let mut spectrogram = Vec::with_capacity(n_mels * num_frames);
+        
+        for frame in 0..num_frames {
+            let start = frame * hop_length;
+            let end = (start + window_size).min(audio_data.len());
+            
+            // Apply Hann window and compute power spectrum (simplified)
+            let mut frame_energy = vec![0.0; n_mels];
+            
+            for mel_idx in 0..n_mels {
+                let bin_start = bin_points[mel_idx];
+                let bin_end = bin_points[mel_idx + 2].min(n_fft / 2);
+                
+                let mut energy = 0.0;
+                for bin in bin_start..bin_end {
+                    if start + bin < end {
+                        let sample = audio_data[start + bin];
+                        let window = 0.5 - 0.5 * (2.0 * std::f32::consts::PI * bin as f32 / n_fft as f32).cos();
+                        energy += (sample * window).powi(2);
+                    }
+                }
+                
+                frame_energy[mel_idx] = (energy + 1e-10).ln(); // Log mel-spectrogram
+            }
+            
+            spectrogram.extend(frame_energy);
+        }
+        
+        Tensor::from_vec(spectrogram, &[n_mels, num_frames])
+    }
+    {{/if}}
+}
+{{/if}}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_dataset_loading() {
+        // Test dataset can be created
+        {{#if dataset_type == "text"}}
+        let dataset = {{name|pascal_case}}Dataset::from_file(
+            "test_data.txt",
+            "tokenizer.json",
+            128,
+        );
+        {{else if dataset_type == "image"}}
+        let dataset = {{name|pascal_case}}Dataset::from_file(
+            "test_images.csv",
+            (224, 224),
+        );
+        {{else if dataset_type == "audio"}}
+        let dataset = {{name|pascal_case}}Dataset::from_file(
+            "test_audio.csv",
+            16000,
+            16000 * 5, // 5 seconds
+        );
+        {{else}}
+        let dataset = {{name|pascal_case}}Dataset::from_file("test_data.bin");
+        {{/if}}
+        
+        // Dataset creation should not panic
+        // Actual file doesn't need to exist for this test
+        let _ = dataset;
+    }
+}

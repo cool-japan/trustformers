@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>TrustformeRS WASM Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+        }
+        .demo-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        .output {
+            background-color: #f9f9f9;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .error {
+            color: red;
+        }
+        .success {
+            color: green;
+        }
+        input, textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TrustformeRS WebAssembly Demo</h1>
+        <p>This demo showcases the TrustformeRS transformer library running entirely in your browser using WebAssembly.</p>
+
+        <div class="demo-section">
+            <h2>1. Basic Tensor Operations</h2>
+            <button id="tensor-demo">Run Tensor Demo</button>
+            <div id="tensor-output" class="output"></div>
+        </div>
+
+        <div class="demo-section">
+            <h2>2. Layer Operations</h2>
+            <button id="layer-demo">Run Layer Demo</button>
+            <div id="layer-output" class="output"></div>
+        </div>
+
+        <div class="demo-section">
+            <h2>3. Model Inference</h2>
+            <p>Input text (token IDs): <input type="text" id="input-ids" value="101,2003,1037,2742,102" placeholder="e.g., 101,2003,1037,2742,102"></p>
+            <button id="model-demo">Run Model Inference</button>
+            <div id="model-output" class="output"></div>
+        </div>
+
+        <div class="demo-section">
+            <h2>4. Performance & Memory</h2>
+            <button id="perf-demo">Check Performance</button>
+            <div id="perf-output" class="output"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        import init, {
+            TrustformersWasm,
+            WasmTensor,
+            Linear,
+            LayerNorm,
+            BertConfig,
+            BertModelWasm,
+            Timer,
+            get_memory_stats,
+            version,
+            features,
+            enable_simd,
+            log
+        } from '../pkg-web/trustformers_wasm.js';
+
+        async function run() {
+            // Initialize the WASM module
+            await init();
+            
+            const tf = new TrustformersWasm();
+            console.log('TrustformeRS WASM initialized:', tf.version);
+
+            // Tensor demo
+            document.getElementById('tensor-demo').addEventListener('click', () => {
+                try {
+                    const output = document.getElementById('tensor-output');
+                    output.textContent = 'Running tensor operations...\n\n';
+
+                    // Create tensors
+                    const a = WasmTensor.new([1, 2, 3, 4], [2, 2]);
+                    const b = WasmTensor.new([5, 6, 7, 8], [2, 2]);
+                    
+                    output.textContent += `Tensor A: ${a.toString()}\n`;
+                    output.textContent += `Data: [${a.data}]\n\n`;
+                    
+                    output.textContent += `Tensor B: ${b.toString()}\n`;
+                    output.textContent += `Data: [${b.data}]\n\n`;
+
+                    // Operations
+                    const c = a.add(b);
+                    output.textContent += `A + B: [${c.data}]\n`;
+
+                    const d = a.matmul(b);
+                    output.textContent += `A @ B: [${d.data}]\n`;
+
+                    const e = a.transpose();
+                    output.textContent += `A.T: [${e.data}]\n`;
+
+                    const f = a.relu();
+                    output.textContent += `ReLU(A): [${f.data}]\n`;
+
+                    output.textContent += '\n✅ Tensor operations completed successfully!';
+                } catch (error) {
+                    document.getElementById('tensor-output').innerHTML = 
+                        `<span class="error">Error: ${error}</span>`;
+                }
+            });
+
+            // Layer demo
+            document.getElementById('layer-demo').addEventListener('click', async () => {
+                try {
+                    const output = document.getElementById('layer-output');
+                    output.textContent = 'Running layer operations...\n\n';
+
+                    // Create a linear layer
+                    const linear = new Linear(4, 2, true);
+                    const input = WasmTensor.new([1, 2, 3, 4, 5, 6, 7, 8], [2, 4]);
+                    
+                    output.textContent += `Linear layer: 4 -> 2\n`;
+                    output.textContent += `Input shape: [2, 4]\n`;
+
+                    const result = linear.forward(input);
+                    output.textContent += `Output shape: [${result.shape}]\n`;
+                    output.textContent += `Output data: [${result.data.map(x => x.toFixed(3)).join(', ')}]\n\n`;
+
+                    // Layer norm
+                    const ln = new LayerNorm([4], 1e-5);
+                    const ln_result = ln.forward(input);
+                    output.textContent += `LayerNorm output: [${ln_result.data.map(x => x.toFixed(3)).join(', ')}]\n`;
+
+                    output.textContent += '\n✅ Layer operations completed successfully!';
+                } catch (error) {
+                    document.getElementById('layer-output').innerHTML = 
+                        `<span class="error">Error: ${error}</span>`;
+                }
+            });
+
+            // Model demo
+            document.getElementById('model-demo').addEventListener('click', async () => {
+                try {
+                    const output = document.getElementById('model-output');
+                    output.textContent = 'Running model inference...\n\n';
+
+                    // Parse input IDs
+                    const inputIdsStr = document.getElementById('input-ids').value;
+                    const inputIds = inputIdsStr.split(',').map(x => parseInt(x.trim()));
+                    
+                    output.textContent += `Input IDs: [${inputIds}]\n`;
+                    output.textContent += `Creating tiny BERT model...\n`;
+
+                    // Create a tiny BERT model
+                    const config = BertConfig.tiny();
+                    const model = new BertModelWasm(config);
+                    
+                    output.textContent += `Model created with config:\n`;
+                    output.textContent += `  - Hidden size: ${config.hidden_size}\n`;
+                    output.textContent += `  - Num layers: ${config.num_hidden_layers}\n`;
+                    output.textContent += `  - Num heads: ${config.num_attention_heads}\n\n`;
+
+                    // Run inference
+                    const timer = new Timer("Inference");
+                    const result = model.forward(inputIds, null);
+                    const elapsed = timer.elapsed();
+                    
+                    output.textContent += `Output shape: [${result.shape}]\n`;
+                    output.textContent += `First few values: [${result.data.slice(0, 5).map(x => x.toFixed(3)).join(', ')}...]\n`;
+                    output.textContent += `Inference time: ${elapsed.toFixed(2)}ms\n`;
+
+                    output.textContent += '\n✅ Model inference completed successfully!';
+                } catch (error) {
+                    document.getElementById('model-output').innerHTML = 
+                        `<span class="error">Error: ${error}</span>`;
+                }
+            });
+
+            // Performance demo
+            document.getElementById('perf-demo').addEventListener('click', () => {
+                try {
+                    const output = document.getElementById('perf-output');
+                    output.textContent = 'Checking performance and capabilities...\n\n';
+
+                    // Version and features
+                    output.textContent += `Version: ${version()}\n`;
+                    output.textContent += `Features: ${features().join(', ')}\n`;
+                    output.textContent += `SIMD enabled: ${enable_simd()}\n\n`;
+
+                    // Memory stats
+                    const memStats = get_memory_stats();
+                    output.textContent += `Memory usage:\n`;
+                    output.textContent += `  - Used: ${memStats.used_mb.toFixed(2)} MB\n`;
+                    output.textContent += `  - Limit: ${memStats.limit_mb.toFixed(2)} MB\n\n`;
+
+                    // Benchmark tensor operations
+                    output.textContent += `Benchmarking tensor operations...\n`;
+                    
+                    const sizes = [100, 500, 1000];
+                    for (const size of sizes) {
+                        const timer = new Timer(`MatMul ${size}x${size}`);
+                        
+                        const a = WasmTensor.randn([size, size]);
+                        const b = WasmTensor.randn([size, size]);
+                        const c = a.matmul(b);
+                        
+                        const elapsed = timer.elapsed();
+                        output.textContent += `  - ${size}x${size} matmul: ${elapsed.toFixed(2)}ms\n`;
+                    }
+
+                    output.textContent += '\n✅ Performance check completed!';
+                } catch (error) {
+                    document.getElementById('perf-output').innerHTML = 
+                        `<span class="error">Error: ${error}</span>`;
+                }
+            });
+        }
+
+        run().catch(console.error);
+    </script>
+</body>
+</html>

@@ -1,0 +1,76 @@
+syntax = "proto3";
+
+package trustformers.serve.v1;
+
+service InferenceService {
+  rpc Predict(PredictRequest) returns (PredictResponse);
+  rpc BatchPredict(BatchPredictRequest) returns (BatchPredictResponse);
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message PredictRequest {
+  string model_name = 1;
+  string model_version = 2;
+  repeated string inputs = 3;
+  map<string, string> parameters = 4;
+}
+
+message PredictResponse {
+  repeated string outputs = 1;
+  PredictionMetadata metadata = 2;
+}
+
+message BatchPredictRequest {
+  string model_name = 1;
+  string model_version = 2;
+  repeated PredictRequest requests = 3;
+}
+
+message BatchPredictResponse {
+  repeated PredictResponse responses = 1;
+  BatchMetadata batch_metadata = 2;
+}
+
+message GetModelInfoRequest {
+  string model_name = 1;
+  string model_version = 2;
+}
+
+message GetModelInfoResponse {
+  ModelInfo model_info = 1;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  HealthStatus status = 1;
+  string message = 2;
+}
+
+message PredictionMetadata {
+  int64 latency_ms = 1;
+  string request_id = 2;
+  int64 timestamp = 3;
+}
+
+message BatchMetadata {
+  int32 batch_size = 1;
+  int64 total_latency_ms = 2;
+  string batch_id = 3;
+}
+
+message ModelInfo {
+  string name = 1;
+  string version = 2;
+  string description = 3;
+  int32 max_sequence_length = 4;
+  string device = 5;
+}
+
+enum HealthStatus {
+  UNKNOWN = 0;
+  SERVING = 1;
+  NOT_SERVING = 2;
+  SERVICE_UNKNOWN = 3;
+}

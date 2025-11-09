@@ -1,0 +1,206 @@
+# Default values for trustformers-serve
+replicaCount: 3
+
+image:
+  repository: trustformers/serve
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 1000
+  runAsNonRoot: true
+  runAsUser: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 1000
+
+service:
+  type: ClusterIP
+  port: 8080
+  grpcPort: 9090
+  metricsPort: 9091
+
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: trustformers-serve.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: trustformers-serve-tls
+      hosts:
+        - trustformers-serve.example.com
+
+grpcIngress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/grpc-backend: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: grpc.trustformers-serve.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: trustformers-serve-grpc-tls
+      hosts:
+        - grpc.trustformers-serve.example.com
+
+resources:
+  requests:
+    memory: "2Gi"
+    cpu: "1000m"
+  limits:
+    memory: "4Gi"
+    cpu: "2000m"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 20
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  customMetrics:
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "100"
+
+nodeSelector: {}
+
+tolerations:
+  - key: "node.kubernetes.io/unreachable"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 30
+  - key: "node.kubernetes.io/not-ready"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 30
+
+affinity: {}
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+networkPolicy:
+  enabled: true
+  ingress:
+    - from:
+      - podSelector:
+          matchLabels:
+            app: load-balancer
+      - namespaceSelector:
+          matchLabels:
+            name: monitoring
+      ports:
+      - protocol: TCP
+        port: 8080
+      - protocol: TCP
+        port: 9090
+      - protocol: TCP
+        port: 9091
+
+config:
+  server:
+    host: "0.0.0.0"
+    port: 8080
+    numWorkers: 4
+    enableMetrics: true
+    enableHealthCheck: true
+
+  model:
+    modelName: ""
+    device: "Cpu"
+    maxSequenceLength: 2048
+    enableCaching: true
+
+  batching:
+    maxBatchSize: 32
+    maxWaitTimeMs: 50
+    enableAdaptiveBatching: true
+
+  caching:
+    enableDistributed: false
+    enableWarming: true
+    resultCache:
+      maxSizeBytes: 1073741824  # 1GB
+      maxEntries: 100000
+      defaultTtl: 3600  # 1 hour
+      evictionPolicy: "LRU"
+    embeddingCache:
+      maxSizeBytes: 536870912  # 512MB
+      maxEntries: 50000
+      defaultTtl: 7200  # 2 hours
+    kvCache:
+      maxSizeBytes: 2147483648  # 2GB
+      maxSequences: 1000
+      maxLayers: 80
+      sharingEnabled: true
+
+  auth:
+    jwtSecret: "your-secret-key-here"
+    issuer: "trustformers-serve"
+    audience: "trustformers-clients"
+
+  metrics:
+    enablePrometheus: true
+    metricsPath: "/metrics"
+
+persistence:
+  modelCache:
+    enabled: true
+    size: 10Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+  
+monitoring:
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    path: /metrics
+    honorLabels: true
+
+redis:
+  enabled: false
+  host: "redis-master"
+  port: 6379
+  password: ""
+  database: 0
+
+env: []
+
+secrets:
+  jwtSecret: "your-secret-key-here"
+  redisPassword: ""
+  apiKey: ""

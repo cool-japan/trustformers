@@ -1,0 +1,91 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "trustformers-tokenizers"
+version = "0.1.0"
+description = "High-performance tokenizers for transformer models"
+authors = [
+    {name = "TrustformeRS Team", email = "team@trustformers.org"},
+]
+readme = "README.md"
+license = {text = "MIT OR Apache-2.0"}
+keywords = ["tokenization", "transformers", "nlp", "rust", "machine-learning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Linguistic",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "numpy>=1.20.0",
+    "typing_extensions>=3.7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=6.0",
+    "pytest-benchmark>=3.4.1",
+    "black>=22.0",
+    "isort>=5.0",
+    "mypy>=0.900",
+    "pre-commit>=2.15.0",
+]
+test = [
+    "pytest>=6.0",
+    "pytest-benchmark>=3.4.1",
+    "datasets>=2.0.0",
+    "transformers>=4.20.0",
+]
+benchmark = [
+    "matplotlib>=3.5.0",
+    "seaborn>=0.11.0",
+    "pandas>=1.3.0",
+    "transformers>=4.20.0",
+    "tokenizers>=0.13.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/cool-japan/trustformers"
+Repository = "https://github.com/cool-japan/trustformers"
+Documentation = "https://docs.trustformers.org"
+"Bug Tracker" = "https://github.com/cool-japan/trustformers/issues"
+
+[tool.maturin]
+features = ["python"]
+python-source = "python"
+module-name = "trustformers_tokenizers"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

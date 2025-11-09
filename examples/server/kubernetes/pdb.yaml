@@ -1,0 +1,16 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: trustformers-server
+  namespace: trustformers
+  labels:
+    app: trustformers-server
+    app.kubernetes.io/name: trustformers-server
+    app.kubernetes.io/instance: trustformers
+    app.kubernetes.io/component: availability
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: trustformers-server
+  unhealthyPodEvictionPolicy: AlwaysAllow

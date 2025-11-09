@@ -1,0 +1,217 @@
+{
+  "name": "@trustformers/mobile-web-app-demo",
+  "version": "1.0.0",
+  "description": "Advanced mobile web application demonstrating TrustformeRS AI capabilities with PWA features",
+  "main": "index.html",
+  "type": "module",
+  "scripts": {
+    "start": "npx live-server --port=3000 --host=0.0.0.0 --cors",
+    "dev": "npm start",
+    "build": "npm run optimize && npm run sw",
+    "optimize": "npm run minify-css && npm run minify-js",
+    "minify-css": "cleancss -o css/styles.min.css css/styles.css",
+    "minify-js": "terser js/main.js -o js/main.min.js --compress --mangle",
+    "sw": "workbox generateSW workbox-config.js",
+    "test": "npm run test:lighthouse && npm run test:pwa",
+    "test:lighthouse": "lighthouse http://localhost:3000 --chrome-flags='--headless' --output=json --output-path=./test-results/lighthouse.json",
+    "test:pwa": "pwa-test-runner --url=http://localhost:3000",
+    "audit": "npm audit && npm run audit:security",
+    "audit:security": "npx audit-ci --config audit-ci.json",
+    "deploy": "npm run build && npx gh-pages -d .",
+    "serve:https": "npx live-server --port=3001 --host=0.0.0.0 --https --cors",
+    "analyze": "npx bundlesize",
+    "check-links": "npx hyperlink index.html",
+    "validate": "npm run validate:html && npm run validate:manifest",
+    "validate:html": "npx html-validate index.html",
+    "validate:manifest": "npx web-app-manifest-validator manifest.json"
+  },
+  "keywords": [
+    "trustformers",
+    "ai",
+    "machine-learning",
+    "mobile",
+    "pwa",
+    "progressive-web-app",
+    "javascript",
+    "webassembly",
+    "sentiment-analysis",
+    "text-generation",
+    "voice-recognition",
+    "computer-vision",
+    "offline-first",
+    "service-worker"
+  ],
+  "author": "TrustformeRS Team <team@trustformers.dev>",
+  "license": "MIT",
+  "homepage": "https://trustformers.dev/demos/mobile-web-app",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trustformers/trustformers-js.git",
+    "directory": "examples/framework-demos/mobile-web-app"
+  },
+  "bugs": {
+    "url": "https://github.com/trustformers/trustformers-js/issues"
+  },
+  "engines": {
+    "node": ">=16.0.0",
+    "npm": ">=8.0.0"
+  },
+  "browserslist": [
+    "last 2 Chrome versions",
+    "last 2 Firefox versions",
+    "last 2 Safari versions",
+    "last 2 Edge versions",
+    "iOS >= 12",
+    "Android >= 8"
+  ],
+  "dependencies": {
+    "@trustformers/js": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/web": "^0.0.138",
+    "audit-ci": "^7.0.1",
+    "bundlesize": "^0.18.1",
+    "clean-css-cli": "^5.6.3",
+    "gh-pages": "^6.1.1",
+    "html-validate": "^8.7.4",
+    "hyperlink": "^5.0.4",
+    "lighthouse": "^11.4.0",
+    "live-server": "^1.2.2",
+    "pwa-test-runner": "^1.0.0",
+    "terser": "^5.26.0",
+    "web-app-manifest-validator": "^1.0.0",
+    "workbox-cli": "^7.0.0"
+  },
+  "bundlesize": [
+    {
+      "path": "./css/styles.css",
+      "maxSize": "50kb"
+    },
+    {
+      "path": "./js/main.js",
+      "maxSize": "100kb"
+    }
+  ],
+  "pwa": {
+    "name": "TrustformeRS Mobile AI Assistant",
+    "short_name": "TrustformeRS AI",
+    "theme_color": "#3B82F6",
+    "background_color": "#FFFFFF",
+    "display": "standalone",
+    "orientation": "portrait",
+    "start_url": "./",
+    "scope": "./"
+  },
+  "workbox": {
+    "globDirectory": "./",
+    "globPatterns": [
+      "**/*.{html,js,css,png,jpg,jpeg,gif,svg,woff2,json,ico}"
+    ],
+    "swDest": "sw.js",
+    "skipWaiting": true,
+    "clientsClaim": true,
+    "runtimeCaching": [
+      {
+        "urlPattern": /^https:\/\/fonts\.googleapis\.com/,
+        "handler": "StaleWhileRevalidate",
+        "options": {
+          "cacheName": "google-fonts-stylesheets"
+        }
+      },
+      {
+        "urlPattern": /^https:\/\/fonts\.gstatic\.com/,
+        "handler": "CacheFirst",
+        "options": {
+          "cacheName": "google-fonts-webfonts",
+          "expiration": {
+            "maxEntries": 30,
+            "maxAgeSeconds": 60 * 60 * 24 * 365
+          }
+        }
+      },
+      {
+        "urlPattern": /\/api\//,
+        "handler": "NetworkFirst",
+        "options": {
+          "cacheName": "api-cache",
+          "expiration": {
+            "maxEntries": 100,
+            "maxAgeSeconds": 60 * 5
+          }
+        }
+      }
+    ]
+  },
+  "capabilities": [
+    "camera",
+    "microphone",
+    "speech-recognition",
+    "speech-synthesis",
+    "geolocation",
+    "notifications",
+    "background-sync",
+    "web-share",
+    "file-system-access"
+  ],
+  "performance": {
+    "budget": {
+      "css": "50kb",
+      "js": "200kb",
+      "images": "500kb",
+      "total": "1mb"
+    }
+  },
+  "accessibility": {
+    "standards": ["WCAG 2.1 AA"],
+    "features": [
+      "keyboard-navigation",
+      "screen-reader-support",
+      "high-contrast-mode",
+      "reduced-motion-support",
+      "focus-management"
+    ]
+  },
+  "security": {
+    "csp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:",
+    "permissions-policy": "camera=self, microphone=self, geolocation=self, notifications=self"
+  },
+  "features": [
+    {
+      "name": "AI Chat Assistant",
+      "description": "Real-time conversation with AI powered by TrustformeRS machine learning models"
+    },
+    {
+      "name": "Text Analysis",
+      "description": "Comprehensive text analysis including sentiment detection, keyword extraction, and statistics"
+    },
+    {
+      "name": "Voice Recognition",
+      "description": "Speech-to-text conversion and voice-controlled AI interaction with text-to-speech responses"
+    },
+    {
+      "name": "Computer Vision",
+      "description": "Image analysis with object detection, text extraction, and scene description using camera or file upload"
+    },
+    {
+      "name": "Offline Support",
+      "description": "Progressive Web App with service worker providing offline functionality and background sync"
+    },
+    {
+      "name": "Mobile Optimized",
+      "description": "Touch-optimized interface with haptic feedback, responsive design, and mobile-specific features"
+    },
+    {
+      "name": "Cross-Platform",
+      "description": "Works on all modern browsers and can be installed as a native-like app on mobile and desktop"
+    }
+  ],
+  "manifest": {
+    "file": "manifest.json",
+    "validated": true
+  },
+  "service-worker": {
+    "file": "sw.js",
+    "scope": "./",
+    "update-via-cache": "none"
+  }
+}

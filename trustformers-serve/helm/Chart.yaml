@@ -1,0 +1,21 @@
+apiVersion: v2
+name: trustformers-serve
+description: A Helm chart for TrustformeRS Inference Server
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/cool-japan/trustformers
+sources:
+  - https://github.com/cool-japan/trustformers
+maintainers:
+  - name: TrustformeRS Team
+    email: team@trustformers.ai
+keywords:
+  - machine-learning
+  - inference
+  - ai
+  - transformer
+  - serving
+annotations:
+  category: Machine Learning
+dependencies: []

@@ -1,0 +1,252 @@
+use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use trustformers_core::{Tensor, Device};
+use trustformers_models::{{model_type|pascal_case}}Model;
+
+/// Benchmark configuration
+struct BenchConfig {
+    batch_sizes: Vec<usize>,
+    {{#if is_sequence_model}}
+    sequence_lengths: Vec<usize>,
+    {{/if}}
+    {{#each bench_params}}
+    {{name}}: Vec<{{type}}>,
+    {{/each}}
+}
+
+impl Default for BenchConfig {
+    fn default() -> Self {
+        Self {
+            batch_sizes: vec![1, 4, 8, 16, 32],
+            {{#if is_sequence_model}}
+            sequence_lengths: vec![128, 256, 512],
+            {{/if}}
+            {{#each bench_params}}
+            {{name}}: vec![{{default_values}}],
+            {{/each}}
+        }
+    }
+}
+
+/// Benchmark forward pass performance
+fn bench_forward_pass(c: &mut Criterion) {
+    let config = BenchConfig::default();
+    let model_config = {{model_type|pascal_case}}Config::default();
+    let model = {{model_type|pascal_case}}Model::new(&model_config).unwrap();
+    
+    // Use CPU for consistent benchmarking
+    let device = Device::Cpu;
+    model.to(device.clone()).unwrap();
+    model.eval();
+    
+    let mut group = c.benchmark_group("forward_pass");
+    
+    for batch_size in &config.batch_sizes {
+        {{#if is_sequence_model}}
+        for seq_length in &config.sequence_lengths {
+            let input_shape = vec![*batch_size, *seq_length];
+            let parameter_string = format!("batch_{}_seq_{}", batch_size, seq_length);
+        {{else}}
+        let input_shape = vec![*batch_size, model_config.input_size];
+        let parameter_string = format!("batch_{}", batch_size);
+        {{/if}}
+        
+        group.throughput(Throughput::Elements(*batch_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("{{name}}", &parameter_string),
+            &input_shape,
+            |b, shape| {
+                let input = Tensor::randn(shape).unwrap();
+                b.iter(|| {
+                    let _output = model.forward(black_box(&input)).unwrap();
+                });
+            },
+        );
+        
+        {{#if is_sequence_model}}
+        }
+        {{/if}}
+    }
+    
+    group.finish();
+}
+
+{{#if benchmark_backward}}
+/// Benchmark backward pass performance
+fn bench_backward_pass(c: &mut Criterion) {
+    let config = BenchConfig::default();
+    let model_config = {{model_type|pascal_case}}Config::default();
+    let mut model = {{model_type|pascal_case}}Model::new(&model_config).unwrap();
+    
+    let device = Device::Cpu;
+    model.to(device.clone()).unwrap();
+    model.train();
+    
+    let mut group = c.benchmark_group("backward_pass");
+    
+    for batch_size in &config.batch_sizes {
+        {{#if is_sequence_model}}
+        for seq_length in &config.sequence_lengths {
+            let input_shape = vec![*batch_size, *seq_length];
+            let parameter_string = format!("batch_{}_seq_{}", batch_size, seq_length);
+        {{else}}
+        let input_shape = vec![*batch_size, model_config.input_size];
+        let parameter_string = format!("batch_{}", batch_size);
+        {{/if}}
+        
+        group.throughput(Throughput::Elements(*batch_size as u64));
+        group.bench_with_input(
+            BenchmarkId::new("{{name}}", &parameter_string),
+            &input_shape,
+            |b, shape| {
+                let input = Tensor::randn(shape).unwrap();
+                b.iter(|| {
+                    let output = model.forward(black_box(&input)).unwrap();
+                    let loss = output.mean().unwrap();
+                    loss.backward().unwrap();
+                    model.zero_grad().unwrap();
+                });
+            },
+        );
+        
+        {{#if is_sequence_model}}
+        }
+        {{/if}}
+    }
+    
+    group.finish();
+}
+{{/if}}
+
+{{#if benchmark_components}}
+/// Benchmark individual model components
+fn bench_components(c: &mut Criterion) {
+    let model_config = {{model_type|pascal_case}}Config::default();
+    let device = Device::Cpu;
+    
+    {{#each components}}
+    {
+        let mut group = c.benchmark_group("{{name}}");
+        let component = {{component_type}}::new({{component_args}}).unwrap();
+        component.to(device.clone()).unwrap();
+        
+        for batch_size in &[1, 8, 32] {
+            let input_shape = vec![*batch_size, {{input_dim}}];
+            
+            group.throughput(Throughput::Elements(*batch_size as u64));
+            group.bench_with_input(
+                BenchmarkId::new("forward", batch_size),
+                &input_shape,
+                |b, shape| {
+                    let input = Tensor::randn(shape).unwrap();
+                    b.iter(|| {
+                        let _output = component.forward(black_box(&input)).unwrap();
+                    });
+                },
+            );
+        }
+        
+        group.finish();
+    }
+    {{/each}}
+}
+{{/if}}
+
+{{#if benchmark_memory}}
+/// Benchmark memory usage
+fn bench_memory_usage(c: &mut Criterion) {
+    let config = BenchConfig::default();
+    let model_config = {{model_type|pascal_case}}Config::default();
+    
+    let mut group = c.benchmark_group("memory_usage");
+    
+    for batch_size in &config.batch_sizes {
+        group.bench_function(
+            BenchmarkId::new("model_creation", batch_size),
+            |b| {
+                b.iter(|| {
+                    let _model = {{model_type|pascal_case}}Model::new(black_box(&model_config)).unwrap();
+                });
+            },
+        );
+    }
+    
+    group.finish();
+}
+{{/if}}
+
+{{#if model_type == "generation"}}
+/// Benchmark text generation
+fn bench_generation(c: &mut Criterion) {
+    let model_config = {{model_type|pascal_case}}Config::default();
+    let model = {{model_type|pascal_case}}Model::new(&model_config).unwrap();
+    let device = Device::Cpu;
+    model.to(device.clone()).unwrap();
+    model.eval();
+    
+    let mut group = c.benchmark_group("generation");
+    
+    let prompt_lengths = vec![10, 50, 100];
+    let max_lengths = vec![50, 100, 200];
+    
+    for prompt_len in &prompt_lengths {
+        for max_len in &max_lengths {
+            if max_len > prompt_len {
+                let input = Tensor::randint(0, model_config.vocab_size as i64, &[1, *prompt_len]).unwrap();
+                
+                group.bench_with_input(
+                    BenchmarkId::new(
+                        format!("prompt_{}_max_{}", prompt_len, max_len),
+                        max_len
+                    ),
+                    max_len,
+                    |b, &max_length| {
+                        b.iter(|| {
+                            let _output = model.generate(
+                                black_box(&input),
+                                max_length,
+                                1.0,  // temperature
+                                None, // top_k
+                                None, // top_p
+                            ).unwrap();
+                        });
+                    },
+                );
+            }
+        }
+    }
+    
+    group.finish();
+}
+{{/if}}
+
+{{#if custom_benchmarks}}
+{{#each custom_benchmarks}}
+/// {{description}}
+fn {{name}}(c: &mut Criterion) {
+    {{implementation}}
+}
+{{/each}}
+{{/if}}
+
+// Register benchmarks
+criterion_group!(
+    benches,
+    bench_forward_pass,
+    {{#if benchmark_backward}}
+    bench_backward_pass,
+    {{/if}}
+    {{#if benchmark_components}}
+    bench_components,
+    {{/if}}
+    {{#if benchmark_memory}}
+    bench_memory_usage,
+    {{/if}}
+    {{#if model_type == "generation"}}
+    bench_generation,
+    {{/if}}
+    {{#each custom_benchmarks}}
+    {{name}},
+    {{/each}}
+);
+
+criterion_main!(benches);

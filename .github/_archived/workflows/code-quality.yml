@@ -1,0 +1,233 @@
+name: Code Quality
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+
+env:
+  RUST_BACKTRACE: 1
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  format:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      
+      - name: Check formatting
+        run: |
+          cargo fmt --all -- --check --config-path rustfmt.toml
+          
+      - name: Suggest formatting fixes
+        if: failure()
+        run: |
+          echo "::error::Code formatting issues found. Run 'cargo fmt' to fix."
+          echo "Checking which files need formatting:"
+          cargo fmt --all -- --check --config-path rustfmt.toml --verbose 2>&1 | grep "Diff" -A 5 || true
+
+  clippy:
+    name: Clippy Analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Run clippy
+        run: |
+          cargo clippy --all-targets --all-features -- \
+            -D warnings \
+            -D clippy::all \
+            -D clippy::pedantic \
+            -D clippy::nursery \
+            -A clippy::missing_docs_in_private_items \
+            -A clippy::must_use_candidate \
+            -A clippy::module_name_repetitions
+      
+      - name: Check clippy for no-std
+        run: |
+          cargo clippy --no-default-features -- -D warnings
+
+  nextest:
+    name: Test with Nextest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
+      
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config cmake
+      
+      - name: Cache cargo
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-nextest-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Run tests with nextest
+        run: |
+          cargo nextest run --all-features --no-fail-fast
+      
+      - name: Generate test report
+        if: always()
+        run: |
+          cargo nextest run --all-features --no-fail-fast \
+            --profile ci --message-format libtest-json \
+            > test-results.json || true
+      
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-${{ matrix.os }}
+          path: test-results.json
+
+  unused-deps:
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+      
+      - name: Install cargo-udeps
+        run: |
+          cargo install cargo-udeps --locked
+      
+      - name: Check for unused dependencies
+        run: |
+          cargo +nightly udeps --all-targets --all-features
+
+  docs-lint:
+    name: Documentation Linting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Check documentation
+        run: |
+          cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings -D missing-docs -D broken-intra-doc-links"
+      
+      - name: Check README examples
+        run: |
+          cargo install cargo-readme
+          cargo readme --check
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v3
+        with:
+          fail-on-severity: moderate
+          
+  typos:
+    name: Spell Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check for typos
+        uses: crate-ci/typos@master
+        with:
+          config: .typos.toml
+        continue-on-error: true
+
+  msrv:
+    name: Minimum Supported Rust Version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Read MSRV from Cargo.toml
+        id: msrv
+        run: |
+          MSRV=$(grep "rust-version" Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "msrv=$MSRV" >> $GITHUB_OUTPUT
+      
+      - name: Install MSRV toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.msrv }}
+      
+      - name: Check MSRV
+        run: |
+          cargo check --all-features
+          cargo test --all-features
+
+  editorconfig:
+    name: EditorConfig Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: EditorConfig Checker
+        uses: editorconfig-checker/action-editorconfig-checker@v1
+        with:
+          config: .editorconfig
+
+  file-permissions:
+    name: File Permissions Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Check file permissions
+        run: |
+          # Check that no source files are executable
+          find . -name "*.rs" -o -name "*.toml" -o -name "*.md" | while read file; do
+            if [[ -x "$file" ]]; then
+              echo "::error::File should not be executable: $file"
+              exit 1
+            fi
+          done
+          
+          # Check that scripts are executable
+          for script in $(find . -name "*.sh"); do
+            if [[ ! -x "$script" ]]; then
+              echo "::warning::Shell script should be executable: $script"
+            fi
+          done

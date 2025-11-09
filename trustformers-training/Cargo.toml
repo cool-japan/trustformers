@@ -1,0 +1,45 @@
+[package]
+name = "trustformers-training"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Training infrastructure for TrustformeRS"
+
+[lints]
+workspace = true
+
+[dependencies]
+trustformers-core.workspace = true
+trustformers-optim.workspace = true
+scirs2-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+ndarray.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+ndarray-rand.workspace = true
+bincode.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+fastrand.workspace = true
+tokio.workspace = true
+sha2.workspace = true
+half.workspace = true
+num-complex.workspace = true
+rayon.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+approx.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+torch = ["trustformers-core/torch"]
+candle = ["trustformers-core/candle"]

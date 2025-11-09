@@ -1,0 +1,291 @@
+name: Memory Pressure Performance Regression Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'src/memory_pressure.rs'
+      - 'benches/memory_pressure_regression.rs'
+      - 'scripts/run_memory_pressure_regression.sh'
+      - '.github/workflows/memory_pressure_regression.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'src/memory_pressure.rs'
+      - 'benches/memory_pressure_regression.rs'
+      - 'scripts/run_memory_pressure_regression.sh'
+      - '.github/workflows/memory_pressure_regression.yml'
+  schedule:
+    # Run regression tests daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Test mode (baseline, check, report)'
+        required: false
+        default: 'check'
+        type: choice
+        options:
+          - baseline
+          - check
+          - report
+      fail_on_regression:
+        description: 'Fail if regression is detected'
+        required: false
+        default: true
+        type: boolean
+      max_degradation:
+        description: 'Maximum allowed performance degradation (%)'
+        required: false
+        default: '15.0'
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  performance-regression-tests:
+    name: Memory Pressure Performance Regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    strategy:
+      matrix:
+        include:
+          - name: "CPU Only"
+            features: ""
+            target: "x86_64-unknown-linux-gnu"
+          - name: "With GPU Support"
+            features: "gpu-support"
+            target: "x86_64-unknown-linux-gnu"
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # Fetch full history for better benchmark comparison
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Install additional dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          pkg-config \
+          libssl-dev \
+          jq \
+          gnuplot
+
+    - name: Cache Rust dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-${{ matrix.features }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-cargo-
+
+    - name: Create baseline directory
+      run: |
+        mkdir -p /tmp/baselines
+        echo "BASELINE_FILE=/tmp/baselines/memory_pressure_baselines.json" >> $GITHUB_ENV
+
+    - name: Download previous baselines (for regression checks)
+      if: github.event_name != 'workflow_dispatch' || github.event.inputs.mode != 'baseline'
+      uses: actions/cache@v4
+      with:
+        path: /tmp/baselines/
+        key: memory-pressure-baselines-${{ github.ref_name }}
+        restore-keys: |
+          memory-pressure-baselines-main
+          memory-pressure-baselines-
+
+    - name: Build benchmarks
+      working-directory: trustformers-serve
+      run: |
+        if [ -n "${{ matrix.features }}" ]; then
+          cargo build --release --bench memory_pressure_regression --features=${{ matrix.features }}
+        else
+          cargo build --release --bench memory_pressure_regression
+        fi
+
+    - name: Run baseline recording (manual dispatch or scheduled)
+      if: |
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'baseline') ||
+        (github.event_name == 'schedule')
+      working-directory: trustformers-serve
+      run: |
+        echo "📊 Recording new performance baselines..."
+        ./scripts/run_memory_pressure_regression.sh \
+          --mode baseline \
+          --baseline-file $BASELINE_FILE \
+          --output-format ci \
+          --verbose
+
+    - name: Run regression check (PR and push events)
+      if: |
+        github.event_name == 'push' || 
+        github.event_name == 'pull_request' ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'check')
+      working-directory: trustformers-serve
+      run: |
+        echo "🔍 Checking for performance regressions..."
+        
+        # Set parameters from workflow dispatch input or defaults
+        MODE="${{ github.event.inputs.mode || 'check' }}"
+        FAIL_ON_REGRESSION="${{ github.event.inputs.fail_on_regression || 'true' }}"
+        MAX_DEGRADATION="${{ github.event.inputs.max_degradation || '15.0' }}"
+        
+        EXTRA_ARGS=""
+        if [ "$FAIL_ON_REGRESSION" = "true" ]; then
+          EXTRA_ARGS="$EXTRA_ARGS --fail-on-regression"
+        fi
+        
+        ./scripts/run_memory_pressure_regression.sh \
+          --mode "$MODE" \
+          --baseline-file $BASELINE_FILE \
+          --output-format ci \
+          --max-degradation "$MAX_DEGRADATION" \
+          $EXTRA_ARGS \
+          --verbose
+
+    - name: Generate performance report
+      if: always()
+      working-directory: trustformers-serve
+      run: |
+        echo "📈 Generating performance report..."
+        ./scripts/run_memory_pressure_regression.sh \
+          --mode report \
+          --baseline-file $BASELINE_FILE \
+          --output-format html \
+          --verbose
+
+    - name: Upload benchmark results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results-${{ matrix.name }}
+        path: |
+          trustformers-serve/target/criterion/
+          /tmp/memory_pressure_report.html
+          /tmp/memory_pressure_report.json
+        retention-days: 30
+
+    - name: Upload performance baselines
+      if: |
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'baseline') ||
+        (github.event_name == 'schedule') ||
+        (github.ref == 'refs/heads/main' && github.event_name == 'push')
+      uses: actions/cache@v4
+      with:
+        path: /tmp/baselines/
+        key: memory-pressure-baselines-${{ github.ref_name }}-${{ github.sha }}
+
+    - name: Comment PR with performance results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const path = '/tmp/memory_pressure_report.html';
+          
+          let comment = '## 🔍 Memory Pressure Performance Regression Test Results\n\n';
+          
+          // Check if regression was detected (this is a simplified check)
+          const workflowResult = '${{ job.status }}';
+          if (workflowResult === 'failure') {
+            comment += '❌ **Performance regression detected!**\n\n';
+            comment += 'Some cleanup handlers are performing significantly worse than the baseline.\n';
+            comment += 'Please review the changes in memory pressure handling code.\n\n';
+          } else {
+            comment += '✅ **No performance regression detected**\n\n';
+            comment += 'All cleanup handlers are performing within acceptable thresholds.\n\n';
+          }
+          
+          comment += '### Test Coverage\n';
+          comment += '- ✅ GarbageCollectionHandler\n';
+          comment += '- ✅ BufferCompactionHandler\n';
+          comment += '- ✅ GPU Cleanup Handlers (10 strategies)\n';
+          comment += '- ✅ Complete pressure scenarios\n';
+          comment += '- ✅ Error handling scenarios\n\n';
+          
+          comment += '### Performance Metrics Checked\n';
+          comment += '- Cleanup execution time\n';
+          comment += '- Memory throughput (bytes/second)\n';
+          comment += '- CPU usage during cleanup\n';
+          comment += '- Scalability with different workloads\n\n';
+          
+          comment += '📊 **Detailed Results**: Check the uploaded artifacts for complete benchmark reports.\n\n';
+          comment += '<details>\n<summary>View Configuration</summary>\n\n';
+          comment += `- Max allowed degradation: ${{ github.event.inputs.max_degradation || '15.0' }}%\n`;
+          comment += `- Fail on regression: ${{ github.event.inputs.fail_on_regression || 'true' }}\n`;
+          comment += `- Test matrix: ${{ matrix.name }}\n`;
+          comment += '</details>';
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  performance-comparison:
+    name: Performance Comparison Report
+    runs-on: ubuntu-latest
+    needs: performance-regression-tests
+    if: always() && (github.event_name == 'pull_request' || github.event_name == 'push')
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Download benchmark results
+      uses: actions/download-artifact@v4
+      with:
+        path: benchmark-results/
+    
+    - name: Generate comparison report
+      run: |
+        echo "# Performance Comparison Report" > comparison.md
+        echo "" >> comparison.md
+        echo "## Summary" >> comparison.md
+        echo "Performance regression tests completed for all cleanup handlers." >> comparison.md
+        echo "" >> comparison.md
+        echo "### Tested Scenarios" >> comparison.md
+        echo "- Different memory pressure levels (Low, Medium, High, Critical)" >> comparison.md
+        echo "- Concurrent cleanup operations" >> comparison.md
+        echo "- Scalability with varying workload sizes" >> comparison.md
+        echo "- Error handling and recovery scenarios" >> comparison.md
+        echo "" >> comparison.md
+        
+        # Count artifacts
+        ARTIFACT_COUNT=$(find benchmark-results/ -name "*.html" | wc -l)
+        echo "📊 Generated $ARTIFACT_COUNT benchmark reports" >> comparison.md
+        echo "" >> comparison.md
+        
+        if [ -f "benchmark-results/benchmark-results-CPU Only/memory_pressure_report.html" ]; then
+          echo "✅ CPU-only benchmark completed successfully" >> comparison.md
+        fi
+        
+        if [ -f "benchmark-results/benchmark-results-With GPU Support/memory_pressure_report.html" ]; then
+          echo "✅ GPU-enabled benchmark completed successfully" >> comparison.md
+        fi
+        
+        echo "" >> comparison.md
+        echo "See uploaded artifacts for detailed performance data and charts." >> comparison.md
+    
+    - name: Upload comparison report
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-comparison-report
+        path: comparison.md

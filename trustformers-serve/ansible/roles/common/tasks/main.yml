@@ -1,0 +1,50 @@
+---
+# Common tasks for all TrustformeRS Serve hosts
+
+- name: Update package cache
+  package:
+    update_cache: yes
+  tags: [packages]
+
+- name: Install essential packages
+  package:
+    name: "{{ essential_packages }}"
+    state: present
+  tags: [packages]
+
+- name: Create system users and groups
+  include_tasks: users.yml
+  tags: [users, security]
+
+- name: Configure system limits
+  include_tasks: limits.yml
+  tags: [limits, performance]
+
+- name: Configure system timezone
+  timezone:
+    name: "{{ system_timezone | default('UTC') }}"
+  tags: [timezone]
+
+- name: Configure NTP
+  include_tasks: ntp.yml
+  tags: [ntp, time]
+
+- name: Configure logging
+  include_tasks: logging.yml
+  tags: [logging]
+
+- name: Configure security settings
+  include_tasks: security.yml
+  tags: [security, hardening]
+
+- name: Configure monitoring
+  include_tasks: monitoring.yml
+  tags: [monitoring]
+
+- name: Configure backup scripts
+  include_tasks: backup.yml
+  tags: [backup]
+
+- name: Configure cron jobs
+  include_tasks: cron.yml
+  tags: [cron, maintenance]

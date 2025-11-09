@@ -1,0 +1,72 @@
+[package]
+name = "trustformers-models"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Model implementations for TrustformeRS"
+
+[lints]
+workspace = true
+
+[dependencies]
+trustformers-core.workspace = true
+scirs2-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+ndarray.workspace = true
+ndarray-linalg.workspace = true
+num-complex.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+uuid.workspace = true
+memmap2.workspace = true
+serde_yaml.workspace = true
+fastrand.workspace = true
+chrono.workspace = true
+half.workspace = true
+tokio.workspace = true
+num_cpus.workspace = true
+regex.workspace = true
+approx.workspace = true
+criterion.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+approx.workspace = true
+pretty_assertions.workspace = true
+proptest.workspace = true
+tokio-test.workspace = true
+
+[features]
+default = ["bert"]
+bert = []
+roberta = []
+distilbert = []
+gpt2 = []
+gpt_neo = []
+gpt_j = []
+t5 = []
+albert = []
+electra = []
+deberta = []
+vit = []
+llama = []
+mistral = []
+clip = []
+gemma = []
+qwen = []
+phi3 = []
+mamba = []
+rwkv = []
+s4 = []
+stablelm = []
+falcon = []
+blip2 = []
+llava = []
+dalle = []
+flamingo = []
+all = ["bert", "roberta", "distilbert", "gpt2", "gpt_neo", "gpt_j", "t5", "albert", "electra", "deberta", "vit", "llama", "mistral", "clip", "gemma", "qwen", "phi3", "mamba", "rwkv", "s4", "stablelm", "falcon", "blip2", "llava", "dalle", "flamingo"]

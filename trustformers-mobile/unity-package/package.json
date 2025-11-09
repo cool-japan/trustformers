@@ -1,0 +1,26 @@
+{
+  "name": "com.trustformers.mobile",
+  "version": "1.0.0",
+  "displayName": "TrustformeRS Mobile",
+  "description": "High-performance mobile machine learning inference for Unity applications",
+  "unity": "2021.3",
+  "unityRelease": "0f1",
+  "documentationUrl": "https://docs.trustformers.ai/unity",
+  "changelogUrl": "https://docs.trustformers.ai/unity/changelog",
+  "licensesUrl": "https://docs.trustformers.ai/unity/licenses",
+  "keywords": [
+    "machine learning",
+    "ai",
+    "inference",
+    "mobile",
+    "performance",
+    "cross-platform"
+  ],
+  "author": {
+    "name": "TrustformeRS Team",
+    "email": "support@trustformers.ai",
+    "url": "https://trustformers.ai"
+  },
+  "type": "library",
+  "hideInEditor": false
+}

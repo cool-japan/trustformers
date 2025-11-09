@@ -1,0 +1,471 @@
+name: Cross-Browser Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'trustformers-wasm/**'
+      - '.github/workflows/cross-browser-tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'trustformers-wasm/**'
+      - '.github/workflows/cross-browser-tests.yml'
+  schedule:
+    # Run nightly at 3 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      browsers:
+        description: 'Browsers to test (comma-separated)'
+        required: false
+        default: 'chromium,firefox,webkit,edge'
+      test_type:
+        description: 'Type of tests to run'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - compatibility
+          - performance
+          - webgpu
+          - error-handling
+
+env:
+  NODE_VERSION: '18'
+  PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/pw-browsers
+
+jobs:
+  setup:
+    name: Setup Test Environment
+    runs-on: ubuntu-latest
+    outputs:
+      browsers: ${{ steps.setup.outputs.browsers }}
+      test-filters: ${{ steps.setup.outputs.test-filters }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup test configuration
+        id: setup
+        run: |
+          # Determine browsers to test
+          if [ "${{ github.event.inputs.browsers }}" != "" ]; then
+            BROWSERS="${{ github.event.inputs.browsers }}"
+          else
+            BROWSERS="chromium,firefox,webkit"
+          fi
+          
+          # Determine test filters
+          case "${{ github.event.inputs.test_type }}" in
+            compatibility)
+              TEST_FILTERS="--grep 'Browser Compatibility|WASM Module Functionality'"
+              ;;
+            performance)
+              TEST_FILTERS="--grep 'Performance'"
+              ;;
+            webgpu)
+              TEST_FILTERS="--grep 'WebGPU'"
+              ;;
+            error-handling)
+              TEST_FILTERS="--grep 'Error Handling'"
+              ;;
+            *)
+              TEST_FILTERS=""
+              ;;
+          esac
+          
+          echo "browsers=$BROWSERS" >> $GITHUB_OUTPUT
+          echo "test-filters=$TEST_FILTERS" >> $GITHUB_OUTPUT
+          
+          echo "🎯 Testing browsers: $BROWSERS"
+          echo "🔍 Test filters: $TEST_FILTERS"
+
+  cross-browser-tests:
+    name: Test on ${{ matrix.browser }}
+    runs-on: ${{ matrix.os }}
+    needs: setup
+    timeout-minutes: 60
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: chromium
+            os: ubuntu-latest
+          - browser: firefox
+            os: ubuntu-latest
+          - browser: webkit
+            os: ubuntu-latest
+          - browser: chromium
+            os: windows-latest
+          - browser: edge
+            os: windows-latest
+          - browser: webkit
+            os: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: 'trustformers-wasm/tests/package-lock.json'
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          key: playwright-browsers-${{ runner.os }}-${{ hashFiles('trustformers-wasm/tests/package-lock.json') }}
+          restore-keys: |
+            playwright-browsers-${{ runner.os }}-
+
+      - name: Install dependencies
+        working-directory: trustformers-wasm/tests
+        run: |
+          npm ci
+          npx playwright install ${{ matrix.browser }} --with-deps
+
+      - name: Build WASM (if needed)
+        working-directory: trustformers-wasm
+        run: |
+          # Install wasm-pack if not available
+          if ! command -v wasm-pack &> /dev/null; then
+            curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+          fi
+          
+          # Build WASM module (or use mock for testing)
+          echo "Using mock WASM module for testing"
+
+      - name: Start test server
+        working-directory: trustformers-wasm/tests
+        run: |
+          npm run serve &
+          echo "TEST_SERVER_PID=$!" >> $GITHUB_ENV
+          
+          # Wait for server to start
+          timeout 30 bash -c 'until curl -s http://localhost:8080; do sleep 1; done'
+
+      - name: Run Jest tests
+        working-directory: trustformers-wasm/tests
+        run: |
+          npm run test:ci
+        env:
+          BROWSER_NAME: ${{ matrix.browser }}
+          CI: true
+
+      - name: Run Playwright tests
+        working-directory: trustformers-wasm/tests
+        run: |
+          npx playwright test --project=${{ matrix.browser }} ${{ needs.setup.outputs.test-filters }}
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ env.PLAYWRIGHT_BROWSERS_PATH }}
+          CI: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.browser }}-${{ matrix.os }}
+          path: |
+            trustformers-wasm/tests/test-results/
+            trustformers-wasm/tests/playwright-report/
+            trustformers-wasm/tests/coverage/
+            trustformers-wasm/tests/*.json
+            trustformers-wasm/tests/*.xml
+            trustformers-wasm/tests/*.md
+          retention-days: 30
+
+      - name: Upload Playwright HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.browser }}-${{ matrix.os }}
+          path: trustformers-wasm/tests/playwright-report/
+          retention-days: 14
+
+      - name: Stop test server
+        if: always()
+        run: |
+          if [ ! -z "$TEST_SERVER_PID" ]; then
+            kill $TEST_SERVER_PID || true
+          fi
+
+  webgpu-specific-tests:
+    name: WebGPU Tests (Chrome Canary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Chrome Canary
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-unstable
+
+      - name: Install dependencies
+        working-directory: trustformers-wasm/tests
+        run: |
+          npm ci
+          npx playwright install chromium
+
+      - name: Run WebGPU tests
+        working-directory: trustformers-wasm/tests
+        run: |
+          npm run serve &
+          sleep 5
+          
+          npx playwright test --project=chrome-webgpu --grep "WebGPU"
+        env:
+          CHROME_CANARY_PATH: /usr/bin/google-chrome-unstable
+
+      - name: Upload WebGPU test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webgpu-test-results
+          path: |
+            trustformers-wasm/tests/test-results/
+            trustformers-wasm/tests/playwright-report/
+          retention-days: 14
+
+  performance-comparison:
+    name: Performance Comparison
+    runs-on: ubuntu-latest
+    needs: cross-browser-tests
+    if: always()
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+        with:
+          path: test-artifacts
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Generate performance comparison report
+        run: |
+          cat > generate_perf_report.js << 'EOF'
+          const fs = require('fs');
+          const path = require('path');
+          
+          const artifacts = './test-artifacts';
+          const browsers = ['chromium', 'firefox', 'webkit', 'edge'];
+          const report = {
+            summary: {},
+            detailed: {},
+            timestamp: new Date().toISOString()
+          };
+          
+          // Collect performance data from test results
+          for (const browser of browsers) {
+            try {
+              const resultFiles = fs.readdirSync(artifacts)
+                .filter(dir => dir.includes(browser))
+                .map(dir => path.join(artifacts, dir))
+                .filter(dir => fs.statSync(dir).isDirectory());
+              
+              for (const resultDir of resultFiles) {
+                const jsonFiles = fs.readdirSync(resultDir)
+                  .filter(file => file.endsWith('.json'))
+                  .map(file => path.join(resultDir, file));
+                
+                for (const jsonFile of jsonFiles) {
+                  try {
+                    const data = JSON.parse(fs.readFileSync(jsonFile, 'utf8'));
+                    if (data.results || data.performance) {
+                      report.detailed[browser] = report.detailed[browser] || [];
+                      report.detailed[browser].push(data);
+                    }
+                  } catch (e) {
+                    // Skip invalid JSON files
+                  }
+                }
+              }
+            } catch (e) {
+              console.warn(`Could not process results for ${browser}:`, e.message);
+            }
+          }
+          
+          // Generate summary
+          for (const browser of browsers) {
+            if (report.detailed[browser]) {
+              report.summary[browser] = {
+                tests: report.detailed[browser].length,
+                status: 'completed'
+              };
+            } else {
+              report.summary[browser] = {
+                tests: 0,
+                status: 'no_data'
+              };
+            }
+          }
+          
+          fs.writeFileSync('performance-comparison.json', JSON.stringify(report, null, 2));
+          console.log('Performance comparison report generated');
+          EOF
+          
+          node generate_perf_report.js
+
+      - name: Generate markdown report
+        run: |
+          cat > performance-report.md << 'EOF'
+          # 🚀 Cross-Browser Performance Comparison
+          
+          ## Test Summary
+          
+          | Browser | Tests Run | Status |
+          |---------|-----------|--------|
+          EOF
+          
+          # Read the JSON report and add to markdown
+          if [ -f performance-comparison.json ]; then
+            node -e "
+              const report = JSON.parse(require('fs').readFileSync('performance-comparison.json', 'utf8'));
+              for (const [browser, data] of Object.entries(report.summary)) {
+                const status = data.status === 'completed' ? '✅' : '❌';
+                console.log(\`| \${browser} | \${data.tests} | \${status} |\`);
+              }
+            " >> performance-report.md
+          fi
+          
+          cat >> performance-report.md << 'EOF'
+          
+          ## Test Environment
+          - **Date:** $(date -u)
+          - **Workflow:** Cross-Browser Tests
+          - **Commit:** ${{ github.sha }}
+          - **Branch:** ${{ github.ref_name }}
+          
+          ## Artifacts
+          - Test results are available in the workflow artifacts
+          - Detailed performance data can be found in the JSON reports
+          
+          ---
+          *Generated by TrustformeRS Cross-Browser Test Suite*
+          EOF
+
+      - name: Upload performance report
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-comparison-report
+          path: |
+            performance-comparison.json
+            performance-report.md
+          retention-days: 30
+
+      - name: Comment on PR (if applicable)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            
+            let reportContent = '# 🧪 Cross-Browser Test Results\n\n';
+            
+            try {
+              if (fs.existsSync('performance-report.md')) {
+                const report = fs.readFileSync('performance-report.md', 'utf8');
+                reportContent += report;
+              } else {
+                reportContent += 'Cross-browser tests completed. Check workflow artifacts for detailed results.\n';
+              }
+            } catch (error) {
+              reportContent += `Error reading report: ${error.message}\n`;
+            }
+            
+            // Find existing comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const existingComment = comments.find(comment => 
+              comment.body.includes('Cross-Browser Test Results')
+            );
+            
+            if (existingComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingComment.id,
+                body: reportContent
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: reportContent
+              });
+            }
+
+  test-report:
+    name: Generate Test Report
+    runs-on: ubuntu-latest
+    needs: [cross-browser-tests, webgpu-specific-tests, performance-comparison]
+    if: always()
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+
+      - name: Generate comprehensive test report
+        run: |
+          echo "# 📊 TrustformeRS WASM Cross-Browser Test Report" > test-report.md
+          echo "" >> test-report.md
+          echo "**Date:** $(date -u)" >> test-report.md
+          echo "**Workflow Run:** [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> test-report.md
+          echo "**Commit:** [${{ github.sha }}](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})" >> test-report.md
+          echo "" >> test-report.md
+          
+          echo "## 🌐 Browser Test Results" >> test-report.md
+          echo "" >> test-report.md
+          
+          # List all test artifacts
+          if [ -d "all-artifacts" ]; then
+            echo "### Available Test Results:" >> test-report.md
+            find all-artifacts -name "*.json" -o -name "*.xml" -o -name "*.html" | head -20 | while read file; do
+              echo "- \`$(basename "$file")\`" >> test-report.md
+            done
+          fi
+          
+          echo "" >> test-report.md
+          echo "## 📈 Performance Analysis" >> test-report.md
+          echo "Performance comparison data is available in the artifacts." >> test-report.md
+          echo "" >> test-report.md
+          echo "## 🔗 Useful Links" >> test-report.md
+          echo "- [Playwright HTML Report](../artifacts)" >> test-report.md
+          echo "- [Jest Coverage Report](../artifacts)" >> test-report.md
+          echo "- [Performance Comparison](../artifacts)" >> test-report.md
+
+      - name: Upload final report
+        uses: actions/upload-artifact@v4
+        with:
+          name: comprehensive-test-report
+          path: test-report.md
+          retention-days: 90

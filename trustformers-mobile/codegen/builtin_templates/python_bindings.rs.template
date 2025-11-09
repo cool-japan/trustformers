@@ -1,0 +1,502 @@
+use pyo3::prelude::*;
+use pyo3::exceptions::PyValueError;
+use numpy::{PyArray1, PyArray2, PyArray3, PyArray4};
+use trustformers_core::{Tensor, Device};
+use trustformers_models::{{model_type|pascal_case}}Model;
+
+/// Python bindings for {{name|title}}
+/// 
+/// Provides a Python interface to the {{model_type}} model.
+#[pymodule]
+fn {{name|snake_case}}(_py: Python, m: &PyModule) -> PyResult<()> {
+    m.add_class::<Py{{name|pascal_case}}>()?;
+    m.add_class::<Py{{name|pascal_case}}Config>()?;
+    m.add_function(wrap_pyfunction!(version, m)?)?;
+    {{#each python_functions}}
+    m.add_function(wrap_pyfunction!({{name}}, m)?)?;
+    {{/each}}
+    Ok(())
+}
+
+/// Get version information
+#[pyfunction]
+fn version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Python wrapper for {{name|pascal_case}}Config
+#[pyclass]
+#[derive(Clone)]
+struct Py{{name|pascal_case}}Config {
+    {{#each config_fields}}
+    #[pyo3(get, set)]
+    {{name}}: {{python_type}},
+    {{/each}}
+}
+
+#[pymethods]
+impl Py{{name|pascal_case}}Config {
+    #[new]
+    fn new(
+        {{#each config_fields}}
+        {{name}}: {{python_type}},
+        {{/each}}
+    ) -> Self {
+        Self {
+            {{#each config_fields}}
+            {{name}},
+            {{/each}}
+        }
+    }
+    
+    /// Create config from dictionary
+    #[staticmethod]
+    fn from_dict(config: &PyDict) -> PyResult<Self> {
+        Ok(Self {
+            {{#each config_fields}}
+            {{name}}: config.get_item("{{name}}")
+                .ok_or_else(|| PyValueError::new_err("Missing '{{name}}' in config"))?
+                .extract()?,
+            {{/each}}
+        })
+    }
+    
+    /// Convert to dictionary
+    fn to_dict(&self, py: Python) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        {{#each config_fields}}
+        dict.set_item("{{name}}", self.{{name}})?;
+        {{/each}}
+        Ok(dict.into())
+    }
+    
+    /// Save config to file
+    fn save(&self, path: &str) -> PyResult<()> {
+        let config = self.to_rust_config();
+        config.save(path)
+            .map_err(|e| PyValueError::new_err(format!("Failed to save config: {}", e)))?;
+        Ok(())
+    }
+    
+    /// Load config from file
+    #[staticmethod]
+    fn load(path: &str) -> PyResult<Self> {
+        let config = {{name|pascal_case}}Config::load(path)
+            .map_err(|e| PyValueError::new_err(format!("Failed to load config: {}", e)))?;
+        Ok(Self::from_rust_config(config))
+    }
+    
+    fn __repr__(&self) -> String {
+        format!("{{name|pascal_case}}Config({:?})", self.to_dict(Python::acquire_gil().python()).ok())
+    }
+}
+
+impl Py{{name|pascal_case}}Config {
+    fn to_rust_config(&self) -> {{name|pascal_case}}Config {
+        {{name|pascal_case}}Config {
+            {{#each config_fields}}
+            {{name}}: self.{{name}}{{#if needs_conversion}}.into(){{/if}},
+            {{/each}}
+        }
+    }
+    
+    fn from_rust_config(config: {{name|pascal_case}}Config) -> Self {
+        Self {
+            {{#each config_fields}}
+            {{name}}: config.{{name}}{{#if needs_conversion}}.into(){{/if}},
+            {{/each}}
+        }
+    }
+}
+
+/// Python wrapper for {{name|pascal_case}} model
+#[pyclass]
+struct Py{{name|pascal_case}} {
+    model: {{name|pascal_case}}Model,
+    device: Device,
+}
+
+#[pymethods]
+impl Py{{name|pascal_case}} {
+    /// Create a new model
+    #[new]
+    fn new(config: &Py{{name|pascal_case}}Config, device: Option<&str>) -> PyResult<Self> {
+        let device = device
+            .map(|d| Device::from_string(d))
+            .transpose()
+            .map_err(|e| PyValueError::new_err(format!("Invalid device: {}", e)))?
+            .unwrap_or(Device::Cpu);
+        
+        let rust_config = config.to_rust_config();
+        let model = {{name|pascal_case}}Model::new(&rust_config)
+            .map_err(|e| PyValueError::new_err(format!("Failed to create model: {}", e)))?;
+        
+        Ok(Self { model, device })
+    }
+    
+    /// Load model from checkpoint
+    #[staticmethod]
+    fn from_pretrained(path: &str, device: Option<&str>) -> PyResult<Self> {
+        let device = device
+            .map(|d| Device::from_string(d))
+            .transpose()
+            .map_err(|e| PyValueError::new_err(format!("Invalid device: {}", e)))?
+            .unwrap_or(Device::Cpu);
+        
+        let model = {{name|pascal_case}}Model::load(path)
+            .map_err(|e| PyValueError::new_err(format!("Failed to load model: {}", e)))?;
+        
+        Ok(Self { model, device })
+    }
+    
+    /// Forward pass
+    {{#if model_type == "classification"}}
+    fn forward(&mut self, py: Python, inputs: &PyArray2<f32>) -> PyResult<PyObject> {
+        let input_tensor = numpy_to_tensor(inputs)?;
+        let input_tensor = input_tensor.to(self.device.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to move tensor to device: {}", e)))?;
+        
+        let outputs = self.model.forward(&input_tensor)
+            .map_err(|e| PyValueError::new_err(format!("Forward pass failed: {}", e)))?;
+        
+        let dict = PyDict::new(py);
+        dict.set_item("logits", tensor_to_numpy(py, &outputs.logits)?)?;
+        {{#if has_hidden_states}}
+        dict.set_item("hidden_states", tensor_to_numpy(py, &outputs.hidden_states)?)?;
+        {{/if}}
+        
+        Ok(dict.into())
+    }
+    {{else if model_type == "generation"}}
+    fn generate(
+        &mut self,
+        py: Python,
+        inputs: &PyArray2<i64>,
+        max_length: Option<usize>,
+        temperature: Option<f32>,
+        top_k: Option<usize>,
+        top_p: Option<f32>,
+    ) -> PyResult<Py<PyArray2<i64>>> {
+        let input_tensor = numpy_to_tensor_i64(inputs)?;
+        let input_tensor = input_tensor.to(self.device.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to move tensor to device: {}", e)))?;
+        
+        let generated = self.model.generate(
+            &input_tensor,
+            max_length.unwrap_or(50),
+            temperature.unwrap_or(1.0),
+            top_k,
+            top_p,
+        ).map_err(|e| PyValueError::new_err(format!("Generation failed: {}", e)))?;
+        
+        tensor_to_numpy_i64(py, &generated)
+    }
+    {{else}}
+    fn forward(&mut self, py: Python, inputs: PyObject) -> PyResult<PyObject> {
+        // Parse inputs based on model requirements
+        let input_tensor = parse_input(py, inputs)?;
+        let input_tensor = input_tensor.to(self.device.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to move tensor to device: {}", e)))?;
+        
+        let outputs = self.model.forward(&input_tensor)
+            .map_err(|e| PyValueError::new_err(format!("Forward pass failed: {}", e)))?;
+        
+        format_output(py, outputs)
+    }
+    {{/if}}
+    
+    /// Save model checkpoint
+    fn save(&self, path: &str) -> PyResult<()> {
+        self.model.save(path)
+            .map_err(|e| PyValueError::new_err(format!("Failed to save model: {}", e)))?;
+        Ok(())
+    }
+    
+    /// Get model configuration
+    fn get_config(&self) -> Py{{name|pascal_case}}Config {
+        Py{{name|pascal_case}}Config::from_rust_config(self.model.config().clone())
+    }
+    
+    /// Set model to training mode
+    fn train(&mut self) {
+        self.model.train();
+    }
+    
+    /// Set model to evaluation mode
+    fn eval(&mut self) {
+        self.model.eval();
+    }
+    
+    /// Get number of parameters
+    fn num_parameters(&self) -> usize {
+        self.model.num_parameters()
+    }
+    
+    /// Move model to device
+    fn to(&mut self, device: &str) -> PyResult<()> {
+        self.device = Device::from_string(device)
+            .map_err(|e| PyValueError::new_err(format!("Invalid device: {}", e)))?;
+        self.model.to(self.device.clone())
+            .map_err(|e| PyValueError::new_err(format!("Failed to move model to device: {}", e)))?;
+        Ok(())
+    }
+    
+    fn __repr__(&self) -> String {
+        format!(
+            "{{name|pascal_case}}(num_parameters={}, device={:?})",
+            self.num_parameters(),
+            self.device
+        )
+    }
+}
+
+// Utility functions for numpy conversion
+fn numpy_to_tensor(array: &PyArray2<f32>) -> PyResult<Tensor> {
+    let shape = array.shape();
+    let data = array.to_vec()?;
+    Tensor::from_vec(data, &shape.to_vec())
+        .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)))
+}
+
+fn numpy_to_tensor_i64(array: &PyArray2<i64>) -> PyResult<Tensor> {
+    let shape = array.shape();
+    let data: Vec<f32> = array.to_vec()?.into_iter().map(|x| x as f32).collect();
+    Tensor::from_vec(data, &shape.to_vec())
+        .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)))
+}
+
+fn tensor_to_numpy<'py>(py: Python<'py>, tensor: &Tensor) -> PyResult<&'py PyArray2<f32>> {
+    let shape = tensor.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("Expected 2D tensor"));
+    }
+    
+    let data = tensor.to_vec::<f32>()
+        .map_err(|e| PyValueError::new_err(format!("Failed to convert tensor: {}", e)))?;
+    
+    Ok(PyArray2::from_vec(py, &data).reshape([shape[0], shape[1]])?)
+}
+
+fn tensor_to_numpy_i64<'py>(py: Python<'py>, tensor: &Tensor) -> PyResult<&'py PyArray2<i64>> {
+    let shape = tensor.shape();
+    if shape.len() != 2 {
+        return Err(PyValueError::new_err("Expected 2D tensor"));
+    }
+    
+    let data: Vec<i64> = tensor.to_vec::<f32>()
+        .map_err(|e| PyValueError::new_err(format!("Failed to convert tensor: {}", e)))?
+        .into_iter()
+        .map(|x| x as i64)
+        .collect();
+    
+    Ok(PyArray2::from_vec(py, &data).reshape([shape[0], shape[1]])?)
+}
+
+{{#if model_type == "custom"}}
+fn parse_input(py: Python, inputs: PyObject) -> PyResult<Tensor> {
+    // Handle different input types
+    if let Ok(array_f32) = inputs.extract::<&PyArray2<f32>>(py) {
+        // 2D float32 numpy array
+        return numpy_to_tensor(array_f32);
+    }
+    
+    if let Ok(array_i64) = inputs.extract::<&PyArray2<i64>>(py) {
+        // 2D int64 numpy array
+        return numpy_to_tensor_i64(array_i64);
+    }
+    
+    if let Ok(array_1d_f32) = inputs.extract::<&PyArray1<f32>>(py) {
+        // 1D float32 numpy array - reshape to 2D
+        let shape = array_1d_f32.shape();
+        let data = array_1d_f32.to_vec()?;
+        return Tensor::from_vec(data, &[1, shape[0]])
+            .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)));
+    }
+    
+    if let Ok(array_3d) = inputs.extract::<&PyArray3<f32>>(py) {
+        // 3D numpy array - flatten to 2D
+        let shape = array_3d.shape();
+        let data = array_3d.to_vec()?;
+        let batch_size = shape[0];
+        let flattened_size = shape[1] * shape[2];
+        return Tensor::from_vec(data, &[batch_size, flattened_size])
+            .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)));
+    }
+    
+    if let Ok(array_4d) = inputs.extract::<&PyArray4<f32>>(py) {
+        // 4D numpy array - flatten to 2D (batch, features)
+        let shape = array_4d.shape();
+        let data = array_4d.to_vec()?;
+        let batch_size = shape[0];
+        let flattened_size = shape[1] * shape[2] * shape[3];
+        return Tensor::from_vec(data, &[batch_size, flattened_size])
+            .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)));
+    }
+    
+    if let Ok(vec_f32) = inputs.extract::<Vec<f32>>(py) {
+        // Python list of floats
+        let len = vec_f32.len();
+        return Tensor::from_vec(vec_f32, &[1, len])
+            .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)));
+    }
+    
+    if let Ok(vec_vec_f32) = inputs.extract::<Vec<Vec<f32>>>(py) {
+        // Python list of lists
+        if vec_vec_f32.is_empty() {
+            return Err(PyValueError::new_err("Empty input list"));
+        }
+        let batch_size = vec_vec_f32.len();
+        let feature_size = vec_vec_f32[0].len();
+        let data: Vec<f32> = vec_vec_f32.into_iter().flatten().collect();
+        return Tensor::from_vec(data, &[batch_size, feature_size])
+            .map_err(|e| PyValueError::new_err(format!("Failed to create tensor: {}", e)));
+    }
+    
+    // If none of the above types work, try to convert via string representation
+    if let Ok(dict) = inputs.extract::<std::collections::HashMap<String, PyObject>>(py) {
+        // Handle dictionary input with tensor data
+        if let Some(data_obj) = dict.get("data") {
+            return parse_input(py, data_obj.clone());
+        }
+    }
+    
+    Err(PyValueError::new_err(
+        "Unsupported input type. Expected numpy array, list, or dictionary with 'data' key"
+    ))
+}
+
+fn format_output(py: Python, outputs: ModelOutput) -> PyResult<PyObject> {
+    use pyo3::types::{PyDict, PyList};
+    
+    let dict = PyDict::new(py);
+    
+    // Handle different output types based on ModelOutput structure
+    // Note: ModelOutput structure varies by model type, so we handle common patterns
+    
+    // For logits/predictions (most common case)
+    if let Some(logits) = outputs.get("logits") {
+        let numpy_array = tensor_to_numpy(py, logits)?;
+        dict.set_item("logits", numpy_array)?;
+        
+        // Add softmax probabilities if logits are present
+        let probs = logits.softmax(-1)
+            .map_err(|e| PyValueError::new_err(format!("Failed to compute softmax: {}", e)))?;
+        let probs_array = tensor_to_numpy(py, &probs)?;
+        dict.set_item("probabilities", probs_array)?;
+        
+        // Add top-k predictions
+        let (top_values, top_indices) = logits.topk(5, -1, true, true)
+            .map_err(|e| PyValueError::new_err(format!("Failed to compute topk: {}", e)))?;
+        
+        let top_values_array = tensor_to_numpy(py, &top_values)?;
+        let top_indices_array = tensor_to_numpy_i64(py, &top_indices)?;
+        dict.set_item("top_values", top_values_array)?;
+        dict.set_item("top_indices", top_indices_array)?;
+    }
+    
+    // For hidden states
+    if let Some(hidden_states) = outputs.get("hidden_states") {
+        let numpy_array = tensor_to_numpy(py, hidden_states)?;
+        dict.set_item("hidden_states", numpy_array)?;
+    }
+    
+    // For attention weights
+    if let Some(attention_weights) = outputs.get("attention_weights") {
+        let numpy_array = tensor_to_numpy(py, attention_weights)?;
+        dict.set_item("attention_weights", numpy_array)?;
+    }
+    
+    // For embeddings
+    if let Some(embeddings) = outputs.get("embeddings") {
+        let numpy_array = tensor_to_numpy(py, embeddings)?;
+        dict.set_item("embeddings", numpy_array)?;
+    }
+    
+    // For sequence outputs (e.g., text generation)
+    if let Some(sequences) = outputs.get("sequences") {
+        let numpy_array = tensor_to_numpy_i64(py, sequences)?;
+        dict.set_item("sequences", numpy_array)?;
+    }
+    
+    // For loss (if training/validation)
+    if let Some(loss) = outputs.get("loss") {
+        // Assuming loss is a scalar tensor
+        let loss_value = loss.data()[0];
+        dict.set_item("loss", loss_value)?;
+    }
+    
+    // For custom metrics
+    if let Some(metrics) = outputs.get("metrics") {
+        let metrics_dict = PyDict::new(py);
+        // Assuming metrics is a dictionary-like structure
+        // This would need to be adapted based on actual metrics structure
+        dict.set_item("metrics", metrics_dict)?;
+    }
+    
+    // Add metadata
+    let metadata = PyDict::new(py);
+    metadata.set_item("model_type", "{{model_type}}")?;
+    metadata.set_item("output_format", "custom")?;
+    
+    // Add timing information if available
+    if let Some(timing) = outputs.get("timing") {
+        let timing_dict = PyDict::new(py);
+        if let Ok(inference_time) = timing.get("inference_time") {
+            timing_dict.set_item("inference_time", inference_time)?;
+        }
+        if let Ok(preprocessing_time) = timing.get("preprocessing_time") {
+            timing_dict.set_item("preprocessing_time", preprocessing_time)?;
+        }
+        metadata.set_item("timing", timing_dict)?;
+    }
+    
+    dict.set_item("metadata", metadata)?;
+    
+    // If no specific outputs found, convert all tensors to numpy arrays
+    if dict.len() == 1 { // Only metadata was added
+        for (key, value) in outputs.iter() {
+            if let Ok(tensor) = value.extract::<&Tensor>() {
+                match tensor.shape().len() {
+                    1 => {
+                        // 1D tensor - convert to list
+                        let data = tensor.to_vec::<f32>()
+                            .map_err(|e| PyValueError::new_err(format!("Failed to convert tensor: {}", e)))?;
+                        let py_list = PyList::new(py, data);
+                        dict.set_item(key, py_list)?;
+                    },
+                    2 => {
+                        // 2D tensor - convert to numpy array
+                        let numpy_array = tensor_to_numpy(py, tensor)?;
+                        dict.set_item(key, numpy_array)?;
+                    },
+                    _ => {
+                        // Higher dimensional tensors - flatten to 2D
+                        let shape = tensor.shape();
+                        let batch_size = shape[0];
+                        let feature_size: usize = shape[1..].iter().product();
+                        let data = tensor.to_vec::<f32>()
+                            .map_err(|e| PyValueError::new_err(format!("Failed to convert tensor: {}", e)))?;
+                        let reshaped_tensor = Tensor::from_vec(data, &[batch_size, feature_size])
+                            .map_err(|e| PyValueError::new_err(format!("Failed to reshape tensor: {}", e)))?;
+                        let numpy_array = tensor_to_numpy(py, &reshaped_tensor)?;
+                        dict.set_item(key, numpy_array)?;
+                    }
+                }
+            } else {
+                // Handle non-tensor outputs (scalars, strings, etc.)
+                dict.set_item(key, value)?;
+            }
+        }
+    }
+    
+    Ok(dict.into())
+}
+{{/if}}
+
+{{#each python_functions}}
+/// {{description}}
+#[pyfunction]
+fn {{name}}({{params}}) -> PyResult<{{return_type}}> {
+    {{implementation}}
+}
+{{/each}}

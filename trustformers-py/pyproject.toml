@@ -1,0 +1,81 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "trustformers"
+version = "0.1.0a1"
+description = "High-performance transformer library for Python, written in Rust"
+readme = "README.md"
+authors = [
+    {name = "TrustformeRS Team", email = "contact@trustformers.dev"}
+]
+license = {text = "Apache-2.0"}
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: Apache Software License",
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+keywords = ["transformers", "machine-learning", "nlp", "deep-learning", "pytorch", "huggingface"]
+dependencies = [
+    "numpy>=1.21.0",
+    "tqdm>=4.62.0",
+    "requests>=2.26.0",
+    "regex>=2021.8.3",
+    "pyyaml>=5.4.1",
+    "packaging>=20.0",
+]
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+torch = ["torch>=1.9.0"]
+tensorflow = ["tensorflow>=2.5.0"]
+dev = [
+    "pytest>=6.0",
+    "pytest-cov>=2.0",
+    "black>=22.0",
+    "isort>=5.0",
+    "mypy>=0.910",
+    "ruff>=0.0.261",
+]
+all = ["torch>=1.9.0", "tensorflow>=2.5.0"]
+
+[project.urls]
+Homepage = "https://github.com/cool-japan/trustformers"
+Documentation = "https://trustformers.readthedocs.io"
+Repository = "https://github.com/cool-japan/trustformers"
+Issues = "https://github.com/cool-japan/trustformers/issues"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"
+module-name = "trustformers._trustformers"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]
+
+[tool.black]
+line-length = 100
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]

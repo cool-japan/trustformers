@@ -1,0 +1,37 @@
+[package]
+name = "trustformers-optim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Optimizers for TrustformeRS"
+
+[lints]
+workspace = true
+
+[dependencies]
+trustformers-core.workspace = true
+scirs2-core.workspace = true
+num-traits.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+rayon.workspace = true
+num_cpus.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+approx.workspace = true
+
+[features]
+default = []
+
+[[bench]]
+name = "optimizer_benchmark"
+harness = false

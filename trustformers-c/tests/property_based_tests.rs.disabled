@@ -1,0 +1,622 @@
+//! Property-based testing for memory safety and correctness
+//!
+//! This module contains property-based tests using the quickcheck framework
+//! to verify memory safety, API correctness, and performance characteristics.
+
+use quickcheck::{quickcheck as qc_test, Arbitrary, Gen, TestResult};
+use quickcheck_macros::quickcheck;
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_float, c_int};
+use std::ptr;
+
+extern crate trustformers_c;
+use trustformers_c::*;
+
+/// Test data structure for arbitrary string generation
+#[derive(Debug, Clone)]
+struct SafeString(String);
+
+impl Arbitrary for SafeString {
+    fn arbitrary(g: &mut Gen) -> Self {
+        let size = usize::arbitrary(g) % 1000; // Limit size to prevent excessive memory usage
+        let chars: String = (0..size)
+            .map(|_| {
+                // Generate safe ASCII characters to avoid invalid UTF-8
+                let c = (u8::arbitrary(g) % 95) + 32; // Printable ASCII range
+                c as char
+            })
+            .collect();
+        SafeString(chars)
+    }
+}
+
+/// Test data structure for matrix dimensions
+#[derive(Debug, Clone)]
+struct MatrixDims {
+    m: usize,
+    n: usize,
+    k: usize,
+}
+
+impl Arbitrary for MatrixDims {
+    fn arbitrary(g: &mut Gen) -> Self {
+        // Limit dimensions to prevent excessive memory usage in tests
+        let m = (usize::arbitrary(g) % 100) + 1;
+        let n = (usize::arbitrary(g) % 100) + 1;
+        let k = (usize::arbitrary(g) % 100) + 1;
+        MatrixDims { m, n, k }
+    }
+}
+
+/// Test data structure for memory allocations
+#[derive(Debug, Clone)]
+struct MemoryAllocation {
+    size: usize,
+    alignment: usize,
+}
+
+impl Arbitrary for MemoryAllocation {
+    fn arbitrary(g: &mut Gen) -> Self {
+        let size = (usize::arbitrary(g) % (1024 * 1024)) + 1; // Max 1MB
+        let alignment = 1 << (usize::arbitrary(g) % 4); // 1, 2, 4, or 8 byte alignment
+        MemoryAllocation { size, alignment }
+    }
+}
+
+/// Property-based test suite for memory safety
+mod memory_safety_tests {
+    use super::*;
+
+    #[quickcheck]
+    fn test_string_memory_safety(input: SafeString) -> TestResult {
+        let SafeString(s) = input;
+
+        // Skip empty strings or strings that might cause issues
+        if s.is_empty() || s.len() > 10000 {
+            return TestResult::discard();
+        }
+
+        // Test string conversion round-trip
+        let c_string = match CString::new(s.clone()) {
+            Ok(cs) => cs,
+            Err(_) => return TestResult::discard(), // Contains null bytes
+        };
+
+        let c_ptr = c_string.as_ptr();
+
+        // Verify we can read the string back
+        let read_back = unsafe {
+            match CStr::from_ptr(c_ptr).to_str() {
+                Ok(s) => s.to_string(),
+                Err(_) => return TestResult::failed(),
+            }
+        };
+
+        TestResult::from_bool(read_back == s)
+    }
+
+    #[quickcheck]
+    fn test_memory_usage_tracking(allocations: Vec<MemoryAllocation>) -> TestResult {
+        // Limit the number of allocations to prevent test timeouts
+        if allocations.len() > 50 {
+            return TestResult::discard();
+        }
+
+        // Initialize TrustformeRS
+        let init_result = trustformers_init();
+        if init_result != TrustformersError::Success {
+            return TestResult::failed();
+        }
+
+        let mut usage = TrustformersMemoryUsage {
+            total_memory_bytes: 0,
+            peak_memory_bytes: 0,
+            allocated_models: 0,
+            allocated_tokenizers: 0,
+            allocated_pipelines: 0,
+            allocated_tensors: 0,
+        };
+
+        // Get initial memory usage
+        let initial_result = trustformers_get_memory_usage(&mut usage);
+        if initial_result != TrustformersError::Success {
+            trustformers_cleanup();
+            return TestResult::failed();
+        }
+
+        let initial_memory = usage.total_memory_bytes;
+
+        // Simulate allocations (we can't actually allocate through the C API directly,
+        // but we can test that memory tracking is consistent)
+
+        // Get memory usage again
+        let final_result = trustformers_get_memory_usage(&mut usage);
+        if final_result != TrustformersError::Success {
+            trustformers_cleanup();
+            return TestResult::failed();
+        }
+
+        // Memory usage should be consistent and non-negative
+        let result = usage.total_memory_bytes >= initial_memory
+            && usage.peak_memory_bytes >= usage.total_memory_bytes
+            && usage.allocated_models >= 0
+            && usage.allocated_tokenizers >= 0
+            && usage.allocated_pipelines >= 0
+            && usage.allocated_tensors >= 0;
+
+        trustformers_cleanup();
+        TestResult::from_bool(result)
+    }
+
+    #[quickcheck]
+    fn test_advanced_memory_cleanup() -> bool {
+        // Initialize TrustformeRS
+        let init_result = trustformers_init();
+        if init_result != TrustformersError::Success {
+            return false;
+        }
+
+        // Get initial memory state
+        let mut initial_usage = TrustformersAdvancedMemoryUsage::default();
+        let initial_result = trustformers_get_advanced_memory_usage(&mut initial_usage);
+        if initial_result != TrustformersError::Success {
+            trustformers_cleanup();
+            return false;
+        }
+
+        // Perform memory cleanup
+        let cleanup_result = trustformers_memory_cleanup();
+        if cleanup_result != TrustformersError::Success {
+            trustformers_cleanup();
+            return false;
+        }
+
+        // Verify cleanup worked
+        let mut final_usage = TrustformersAdvancedMemoryUsage::default();
+        let final_result = trustformers_get_advanced_memory_usage(&mut final_usage);
+
+        // Clean up allocated strings
+        trustformers_advanced_memory_usage_free(&mut initial_usage);
+        trustformers_advanced_memory_usage_free(&mut final_usage);
+
+        trustformers_cleanup();
+
+        final_result == TrustformersError::Success
+    }
+
+    #[quickcheck]
+    fn test_null_pointer_safety(null_test_case: u8) -> bool {
+        // Test various null pointer scenarios
+        match null_test_case % 6 {
+            0 => {
+                // Test null pointer in memory usage function
+                let result = trustformers_get_memory_usage(ptr::null_mut());
+                result == TrustformersError::NullPointer
+            },
+            1 => {
+                // Test null pointer in advanced memory usage
+                let result = trustformers_get_advanced_memory_usage(ptr::null_mut());
+                result == TrustformersError::NullPointer
+            },
+            2 => {
+                // Test null pointer in performance metrics
+                let result = trustformers_get_performance_metrics(ptr::null_mut());
+                result == TrustformersError::NullPointer
+            },
+            3 => {
+                // Test null pointer in build info
+                let result = trustformers_build_info(ptr::null_mut());
+                result == TrustformersError::NullPointer
+            },
+            4 => {
+                // Test null feature string
+                let result = trustformers_has_feature(ptr::null());
+                result == 0
+            },
+            5 => {
+                // Test free with null pointer (should not crash)
+                trustformers_free_string(ptr::null_mut());
+                true
+            },
+            _ => unreachable!(),
+        }
+    }
+}
+
+/// Property-based tests for matrix operations
+mod matrix_operation_tests {
+    use super::*;
+
+    #[quickcheck]
+    fn test_matrix_dimensions_validation(dims: MatrixDims) -> TestResult {
+        // Skip excessively large matrices to prevent test timeouts
+        if dims.m > 50 || dims.n > 50 || dims.k > 50 {
+            return TestResult::discard();
+        }
+
+        // Create test matrices with known values
+        let a: Vec<f32> = (0..dims.m * dims.k).map(|i| i as f32).collect();
+        let b: Vec<f32> = (0..dims.k * dims.n).map(|i| (i + 1) as f32).collect();
+        let mut c: Vec<f32> = vec![0.0; dims.m * dims.n];
+
+        // Test WASM matrix multiplication if WASM features are available
+        #[cfg(target_arch = "wasm32")]
+        {
+            let optimizer = trustformers_wasm_init();
+            if optimizer.is_null() {
+                return TestResult::failed();
+            }
+
+            let result = trustformers_wasm_matrix_multiply(
+                optimizer,
+                a.as_ptr(),
+                b.as_ptr(),
+                c.as_mut_ptr(),
+                dims.m,
+                dims.n,
+                dims.k,
+            );
+
+            trustformers_wasm_free(optimizer);
+
+            if result != 0 {
+                return TestResult::failed();
+            }
+        }
+
+        // Verify the result is finite and reasonable
+        let all_finite = c.iter().all(|&val| val.is_finite());
+        TestResult::from_bool(all_finite)
+    }
+
+    #[quickcheck]
+    fn test_tensor_operations_properties(values: Vec<f32>) -> TestResult {
+        // Limit size to prevent excessive memory usage
+        if values.is_empty() || values.len() > 1000 {
+            return TestResult::discard();
+        }
+
+        let len = values.len();
+        let a = values.clone();
+        let b: Vec<f32> = (0..len).map(|i| i as f32).collect();
+        let mut result = vec![0.0; len];
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let optimizer = trustformers_wasm_init();
+            if optimizer.is_null() {
+                return TestResult::failed();
+            }
+
+            let operation_result = trustformers_wasm_tensor_add(
+                optimizer,
+                a.as_ptr(),
+                b.as_ptr(),
+                result.as_mut_ptr(),
+                len,
+            );
+
+            trustformers_wasm_free(optimizer);
+
+            if operation_result != 0 {
+                return TestResult::failed();
+            }
+
+            // Test properties: result[i] should equal a[i] + b[i]
+            let correct =
+                result.iter().zip(a.iter().zip(b.iter())).all(|(&res, (&a_val, &b_val))| {
+                    if a_val.is_finite() && b_val.is_finite() {
+                        (res - (a_val + b_val)).abs() < 1e-6
+                    } else {
+                        res.is_finite() || (!a_val.is_finite() || !b_val.is_finite())
+                    }
+                });
+
+            TestResult::from_bool(correct)
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // For non-WASM targets, just verify memory safety
+            TestResult::from_bool(true)
+        }
+    }
+}
+
+/// Property-based tests for API consistency
+mod api_consistency_tests {
+    use super::*;
+
+    #[quickcheck]
+    fn test_initialization_cleanup_consistency() -> bool {
+        // Test multiple init/cleanup cycles
+        for _ in 0..10 {
+            let init_result = trustformers_init();
+            if init_result != TrustformersError::Success {
+                return false;
+            }
+
+            let cleanup_result = trustformers_cleanup();
+            if cleanup_result != TrustformersError::Success {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[quickcheck]
+    fn test_version_info_consistency() -> bool {
+        let version_ptr = trustformers_version();
+        if version_ptr.is_null() {
+            return false;
+        }
+
+        // Version string should be readable and non-empty
+        let version_str = unsafe {
+            match CStr::from_ptr(version_ptr).to_str() {
+                Ok(s) => s,
+                Err(_) => return false,
+            }
+        };
+
+        !version_str.is_empty()
+    }
+
+    #[quickcheck]
+    fn test_feature_detection_consistency(feature_name: SafeString) -> TestResult {
+        let SafeString(feature) = feature_name;
+
+        // Skip empty features
+        if feature.is_empty() {
+            return TestResult::discard();
+        }
+
+        let c_feature = match CString::new(feature) {
+            Ok(cf) => cf,
+            Err(_) => return TestResult::discard(),
+        };
+
+        let has_feature = trustformers_has_feature(c_feature.as_ptr());
+
+        // Result should be 0 or 1
+        TestResult::from_bool(has_feature == 0 || has_feature == 1)
+    }
+
+    #[quickcheck]
+    fn test_build_info_consistency() -> bool {
+        let mut build_info = TrustformersBuildInfo {
+            version: ptr::null_mut(),
+            features: ptr::null_mut(),
+            build_date: ptr::null_mut(),
+            target: ptr::null_mut(),
+        };
+
+        let result = trustformers_build_info(&mut build_info);
+        if result != TrustformersError::Success {
+            return false;
+        }
+
+        // Verify all fields are populated
+        let all_valid = !build_info.version.is_null()
+            && !build_info.features.is_null()
+            && !build_info.build_date.is_null()
+            && !build_info.target.is_null();
+
+        // Clean up allocated strings
+        if !build_info.version.is_null() {
+            trustformers_free_string(build_info.version);
+        }
+        if !build_info.features.is_null() {
+            trustformers_free_string(build_info.features);
+        }
+        if !build_info.build_date.is_null() {
+            trustformers_free_string(build_info.build_date);
+        }
+        if !build_info.target.is_null() {
+            trustformers_free_string(build_info.target);
+        }
+
+        all_valid
+    }
+}
+
+/// Performance-related property tests
+mod performance_tests {
+    use super::*;
+
+    #[quickcheck]
+    fn test_performance_tracking_consistency() -> bool {
+        let start_result = trustformers_start_profiling();
+        if start_result != TrustformersError::Success {
+            return false;
+        }
+
+        // Get performance metrics
+        let mut metrics = TrustformersPerformanceMetrics::default();
+        let metrics_result = trustformers_get_performance_metrics(&mut metrics);
+        if metrics_result != TrustformersError::Success {
+            return false;
+        }
+
+        // Verify metrics are reasonable
+        let valid_metrics = metrics.total_operations >= 0
+            && metrics.avg_operation_time_ms >= 0.0
+            && metrics.cache_hit_rate >= 0.0
+            && metrics.cache_hit_rate <= 1.0
+            && metrics.performance_score >= 0.0
+            && metrics.performance_score <= 100.0;
+
+        // Clean up
+        trustformers_performance_metrics_free(&mut metrics);
+
+        let mut report: *mut c_char = ptr::null_mut();
+        let stop_result = trustformers_stop_profiling(&mut report);
+        if stop_result != TrustformersError::Success {
+            return false;
+        }
+
+        if !report.is_null() {
+            trustformers_free_string(report);
+        }
+
+        valid_metrics
+    }
+
+    #[quickcheck]
+    fn test_optimization_config_validation(
+        config_values: (i32, i32, i32, i32, i32, i32, i32),
+    ) -> bool {
+        let (
+            enable_tracking,
+            enable_caching,
+            cache_size,
+            num_threads,
+            enable_simd,
+            optimize_batch,
+            memory_opt,
+        ) = config_values;
+
+        let config = TrustformersOptimizationConfig {
+            enable_tracking: enable_tracking % 2,                // 0 or 1
+            enable_caching: enable_caching % 2,                  // 0 or 1
+            cache_size_mb: cache_size.wrapping_abs() % 1024 + 1, // 1-1024 MB
+            num_threads: num_threads.wrapping_abs() % 32,        // 0-31 threads
+            enable_simd: enable_simd % 2,                        // 0 or 1
+            optimize_batch_size: optimize_batch % 2,             // 0 or 1
+            memory_optimization_level: memory_opt.wrapping_abs() % 4, // 0-3
+        };
+
+        let result = trustformers_apply_optimizations(&config);
+        result == TrustformersError::Success
+    }
+}
+
+/// Memory leak detection tests
+mod leak_detection_tests {
+    use super::*;
+
+    #[quickcheck]
+    fn test_memory_leak_detection() -> bool {
+        // Initialize system
+        let init_result = trustformers_init();
+        if init_result != TrustformersError::Success {
+            return false;
+        }
+
+        // Check for memory leaks
+        let mut leak_report: *mut c_char = ptr::null_mut();
+        let leak_result = trustformers_check_memory_leaks(&mut leak_report);
+        if leak_result != TrustformersError::Success {
+            trustformers_cleanup();
+            return false;
+        }
+
+        // Report should be valid JSON
+        let report_valid = if leak_report.is_null() {
+            false
+        } else {
+            // Try to read the report as a string
+            let report_str = unsafe {
+                match CStr::from_ptr(leak_report).to_str() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        trustformers_free_string(leak_report);
+                        trustformers_cleanup();
+                        return false;
+                    },
+                }
+            };
+
+            // Should be valid JSON (basic check)
+            let is_json = report_str.starts_with('{') && report_str.ends_with('}');
+
+            trustformers_free_string(leak_report);
+            is_json
+        };
+
+        trustformers_cleanup();
+        report_valid
+    }
+
+    #[quickcheck]
+    fn test_platform_info_memory_safety() -> bool {
+        let platform_info = trustformers_get_platform_info();
+        if platform_info.is_null() {
+            return false;
+        }
+
+        // Platform info should be readable
+        let info_valid = unsafe {
+            let info = &*platform_info;
+            !info.architecture.is_empty()
+                && !info.operating_system.is_empty()
+                && info.memory_mb > 0
+                && info.cpu_cores > 0
+        };
+
+        trustformers_free_platform_info(platform_info as *mut _);
+        info_valid
+    }
+}
+
+// Integration test that runs all property-based tests
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    #[test]
+    fn run_all_property_tests() {
+        // This function serves as a documentation of all property-based tests
+        println!("Running comprehensive property-based test suite...");
+
+        // The individual quickcheck tests will be run automatically by the test runner
+        // This test just ensures that the module compiles and basic functionality works
+
+        let init_result = trustformers_init();
+        assert_eq!(init_result, TrustformersError::Success);
+
+        let cleanup_result = trustformers_cleanup();
+        assert_eq!(cleanup_result, TrustformersError::Success);
+
+        println!("Property-based test suite setup completed successfully");
+    }
+
+    #[test]
+    fn test_memory_safety_invariants() {
+        // Test that basic memory safety invariants hold
+        let init_result = trustformers_init();
+        assert_eq!(init_result, TrustformersError::Success);
+
+        // Test null pointer handling
+        assert_eq!(
+            trustformers_get_memory_usage(ptr::null_mut()),
+            TrustformersError::NullPointer
+        );
+        assert_eq!(
+            trustformers_get_advanced_memory_usage(ptr::null_mut()),
+            TrustformersError::NullPointer
+        );
+        assert_eq!(
+            trustformers_get_performance_metrics(ptr::null_mut()),
+            TrustformersError::NullPointer
+        );
+
+        // Test that version info is always valid
+        let version_ptr = trustformers_version();
+        assert!(!version_ptr.is_null());
+
+        let cleanup_result = trustformers_cleanup();
+        assert_eq!(cleanup_result, TrustformersError::Success);
+    }
+}
+
+// Add quickcheck dependency to Cargo.toml in dev-dependencies section
+#[cfg(test)]
+mod test_config {
+    // This ensures that quickcheck is available for property-based testing
+    // To use this module, add the following to Cargo.toml:
+    //
+    // [dev-dependencies]
+    // quickcheck = "1.0"
+    // quickcheck_macros = "1.0"
+}

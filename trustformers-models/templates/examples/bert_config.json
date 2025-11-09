@@ -1,0 +1,44 @@
+{
+  "description": "BERT (Bidirectional Encoder Representations from Transformers)",
+  "architecture_details": "BERT is a transformer-based model that uses bidirectional self-attention. It's pre-trained using masked language modeling and next sentence prediction objectives.",
+  "model_id": "trustformers/bert-base",
+  
+  "vocab_size": 30522,
+  "hidden_size": 768,
+  "num_layers": 12,
+  "num_heads": 12,
+  "intermediate_size": 3072,
+  "activation": "GELU",
+  "max_positions": 512,
+  "type_vocab_size": 2,
+  
+  "is_decoder": false,
+  "is_encoder_decoder": false,
+  "has_pooler": true,
+  "use_position_embeddings": true,
+  "use_token_type_embeddings": true,
+  "use_final_layer_norm": false,
+  
+  "custom_params": [
+    {
+      "name": "layer_norm_eps",
+      "type": "f32",
+      "description": "Layer normalization epsilon",
+      "default": "1e-12"
+    },
+    {
+      "name": "attention_probs_dropout_prob",
+      "type": "f32", 
+      "description": "Attention dropout probability",
+      "default": "0.1"
+    },
+    {
+      "name": "hidden_dropout_prob",
+      "type": "f32",
+      "description": "Hidden layer dropout probability",
+      "default": "0.1"
+    }
+  ],
+  
+  "references": "- Original paper: [BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding](https://arxiv.org/abs/1810.04805)"
+}

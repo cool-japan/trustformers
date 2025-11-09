@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:padding="8dp"
+    android:background="@drawable/detection_item_background"
+    android:gravity="center_vertical">
+
+    <!-- Type Icon -->
+    <ImageView
+        android:id="@+id/detection_type_icon"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginEnd="8dp"
+        android:src="@drawable/ic_object"
+        android:contentDescription="Detection type" />
+
+    <!-- Content -->
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:orientation="vertical">
+
+        <!-- Label -->
+        <TextView
+            android:id="@+id/detection_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Object Label"
+            android:textColor="@color/detection_label_color"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <!-- Confidence -->
+        <TextView
+            android:id="@+id/detection_confidence"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="95%"
+            android:textColor="@color/detection_confidence_color"
+            android:textSize="14sp" />
+
+    </LinearLayout>
+
+    <!-- Action Button -->
+    <Button
+        android:id="@+id/detection_action_button"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="→"
+        android:textSize="18sp"
+        android:minWidth="32dp"
+        android:minHeight="32dp"
+        android:background="@drawable/action_button_background"
+        android:layout_marginStart="8dp" />
+
+</LinearLayout>

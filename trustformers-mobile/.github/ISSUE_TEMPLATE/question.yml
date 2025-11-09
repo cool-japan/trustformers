@@ -1,0 +1,189 @@
+name: ❓ Question / Help
+description: Ask questions or seek help with TrustformeRS
+title: "[QUESTION] "
+labels: ["question", "help-wanted"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Need help with TrustformeRS? Ask your question here! Please provide as much context as possible to help us assist you better.
+        
+        **Note:** For general discussions, consider using our Discord/Slack community instead.
+
+  - type: dropdown
+    id: question-type
+    attributes:
+      label: Question Type
+      description: What kind of help do you need?
+      options:
+        - How to use a specific feature
+        - Best practices recommendation
+        - Performance optimization advice
+        - Architecture/design question
+        - Debugging help
+        - Installation/setup issues
+        - Integration with other tools
+        - Mobile deployment question
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What would you like to know?
+      placeholder: |
+        How can I implement custom attention mechanism in TrustformeRS?
+        
+        What's the best way to fine-tune a BERT model for my specific task?
+        
+        I'm trying to deploy a model on iOS but getting linking errors...
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Provide context about what you're trying to achieve
+      placeholder: |
+        I'm building a text classification system for medical documents...
+        
+        My goal is to deploy a lightweight model on mobile devices with <100MB memory...
+        
+        I need to process 1000 requests/second with <50ms latency...
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted-solutions
+    attributes:
+      label: What I've Tried
+      description: What have you already attempted?
+      placeholder: |
+        - I tried following the tutorial at [link] but got stuck at step 3
+        - I looked at the example code but it doesn't cover my use case
+        - I tried adapting PyTorch code but the APIs are different
+      value: |
+        - 
+        - 
+        - 
+
+  - type: textarea
+    id: code-snippet
+    attributes:
+      label: Code Example
+      description: If applicable, provide your current code
+      placeholder: |
+        ```rust
+        use trustformers_models::bert::BertModel;
+        
+        // My current approach
+        let model = BertModel::from_pretrained("bert-base")?;
+        
+        // This is where I'm stuck:
+        // How do I add a custom classification head?
+        ```
+      render: rust
+
+  - type: dropdown
+    id: experience-level
+    attributes:
+      label: Experience Level
+      description: Your experience with TrustformeRS and Rust
+      options:
+        - New to both TrustformeRS and Rust
+        - Familiar with Rust, new to TrustformeRS
+        - Familiar with TrustformeRS, new to Rust
+        - Experienced with both
+    validations:
+      required: true
+
+  - type: dropdown
+    id: urgency
+    attributes:
+      label: Urgency
+      description: How urgent is this question?
+      options:
+        - Learning/exploring - No rush
+        - Working on a project - Need help soon
+        - Production issue - Urgent
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-messages
+    attributes:
+      label: Error Messages
+      description: If you're getting errors, paste them here
+      placeholder: |
+        error[E0277]: the trait bound `Tensor: From<Vec<f32>>` is not satisfied
+           --> src/main.rs:45:10
+            |
+        45  |     let tensor = Tensor::from(vec![1.0, 2.0, 3.0]);
+            |                  ^^^^^^^^^^^^ the trait `From<Vec<f32>>` is not implemented for `Tensor`
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Details
+      description: Your development environment
+      placeholder: |
+        - TrustformeRS version: 0.1.0
+        - Rust version: 1.75.0
+        - OS: Ubuntu 22.04
+        - Hardware: NVIDIA RTX 3080
+        - Build features: cuda, quantization
+
+  - type: textarea
+    id: related-resources
+    attributes:
+      label: Related Resources
+      description: Any resources you've consulted
+      placeholder: |
+        - Documentation page: https://docs.trustformers.rs/...
+        - Similar issue: #123
+        - Stack Overflow question: https://...
+
+  - type: checkboxes
+    id: documentation-checked
+    attributes:
+      label: Documentation Check
+      description: Have you checked these resources?
+      options:
+        - label: I've read the relevant documentation
+          required: false
+        - label: I've searched existing issues
+          required: false
+        - label: I've looked at example code
+          required: false
+        - label: I've checked the FAQ
+          required: false
+
+  - type: textarea
+    id: expected-outcome
+    attributes:
+      label: Expected Outcome
+      description: What would a helpful answer look like?
+      placeholder: |
+        A code example showing how to add a custom head to BERT
+        
+        Explanation of the memory management strategy for large models
+        
+        Best practices for optimizing inference on mobile devices
+
+  - type: checkboxes
+    id: follow-up
+    attributes:
+      label: Follow-up
+      description: How can we help further?
+      options:
+        - label: I may have follow-up questions
+          required: false
+        - label: I'm willing to contribute documentation once I understand
+          required: false
+        - label: I'd like to be notified of similar discussions
+          required: false

@@ -1,0 +1,78 @@
+# TrustformeRS Inference Server Configuration
+
+[server]
+host = "0.0.0.0"
+port = {{ app_port }}
+workers = {{ ansible_processor_vcpus | default(4) }}
+max_connections = 1000
+keep_alive = 75
+client_timeout = 30
+request_timeout = 300
+
+[logging]
+level = "{{ log_level | default('info') }}"
+format = "json"
+file = "{{ logs_dir }}/server.log"
+max_size = "100MB"
+max_files = 10
+
+[batching]
+enabled = true
+max_batch_size = {{ max_batch_size | default(32) }}
+batch_timeout_ms = 50
+queue_size = 1000
+
+[models]
+cache_size = {{ model_cache_size | default(1024) }}
+model_dir = "{{ models_dir }}"
+auto_reload = true
+preload_models = []
+
+[performance]
+enable_metrics = true
+metrics_port = 9090
+enable_profiling = false
+enable_tracing = {{ enable_monitoring | default(false) }}
+
+[security]
+enable_auth = true
+auth_type = "jwt"
+jwt_secret = "{{ jwt_secret | default('change-this-secret') }}"
+enable_cors = true
+cors_origins = ["*"]
+enable_rate_limiting = true
+rate_limit_requests = 1000
+rate_limit_window = 60
+
+[gpu]
+enabled = true
+device_id = 0
+memory_fraction = 0.8
+allow_growth = true
+
+[monitoring]
+enabled = {{ enable_monitoring | default(false) }}
+prometheus_endpoint = "/metrics"
+health_endpoint = "/health"
+enable_detailed_metrics = true
+
+[caching]
+enabled = true
+cache_type = "redis"
+redis_url = "redis://localhost:6379"
+ttl_seconds = 3600
+max_size = 10000
+
+[distributed]
+enabled = false
+node_id = "{{ ansible_hostname }}"
+cluster_nodes = []
+replication_factor = 1
+
+{% if enable_ssl | default(false) %}
+[ssl]
+enabled = true
+cert_file = "/etc/ssl/certs/trustformers.crt"
+key_file = "/etc/ssl/private/trustformers.key"
+ca_file = "/etc/ssl/certs/ca.crt"
+{% endif %}

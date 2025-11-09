@@ -1,0 +1,79 @@
+{
+  "name": "@trustformers/svelte",
+  "version": "0.1.0",
+  "description": "Svelte stores and utilities for TrustformeRS",
+  "main": "dist/index.cjs.js",
+  "module": "dist/index.esm.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.esm.js",
+      "require": "./dist/index.cjs.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "build:types": "tsc --declaration --emitDeclarationOnly --outDir dist",
+    "clean": "rimraf dist",
+    "dev": "rollup -c --watch",
+    "test": "vitest",
+    "lint": "eslint src/**/*.js",
+    "format": "prettier --write src/**/*.js",
+    "prepublishOnly": "npm run clean && npm run build"
+  },
+  "keywords": [
+    "svelte",
+    "stores",
+    "utilities",
+    "trustformers",
+    "machine-learning",
+    "ai",
+    "transformers"
+  ],
+  "author": "TrustformeRS Contributors",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/trustformers/trustformers.git",
+    "directory": "trustformers-js/packages/svelte"
+  },
+  "bugs": {
+    "url": "https://github.com/trustformers/trustformers/issues"
+  },
+  "homepage": "https://trustformers.ai",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "sideEffects": false,
+  "peerDependencies": {
+    "svelte": ">=3.0.0",
+    "@trustformers/core": "^0.1.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "svelte": "^5.39.6",
+    "@rollup/plugin-node-resolve": "^16.0.1",
+    "@rollup/plugin-commonjs": "^28.0.6",
+    "@rollup/plugin-terser": "^0.4.4",
+    "rollup": "^4.26.0",
+    "rollup-plugin-peer-deps-external": "^2.2.4",
+    "rollup-plugin-svelte": "^7.2.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4",
+    "eslint": "^9.36.0",
+    "prettier": "^3.3.3",
+    "rimraf": "^6.0.1"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

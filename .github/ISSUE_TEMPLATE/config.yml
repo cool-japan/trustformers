@@ -1,0 +1,17 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📚 Documentation
+    url: https://github.com/cool-japan/trustformers/wiki
+    about: Check our comprehensive documentation and guides
+  - name: 💬 Discussions
+    url: https://github.com/cool-japan/trustformers/discussions
+    about: Ask questions, share ideas, and discuss with the community
+  - name: 🚀 Examples Repository
+    url: https://github.com/cool-japan/trustformers/tree/main/examples
+    about: Browse working examples and code samples
+  - name: 📊 Performance Benchmarks
+    url: https://github.com/cool-japan/trustformers/tree/main/benches
+    about: View performance benchmarks and optimization guides
+  - name: 🛠️ Development Setup
+    url: https://github.com/cool-japan/trustformers/blob/main/CONTRIBUTING.md
+    about: Get help setting up your development environment

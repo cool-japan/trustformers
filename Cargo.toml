@@ -1,0 +1,226 @@
+[workspace]
+members = [
+    "trustformers-core",
+    "trustformers-tokenizers",
+    "trustformers-models",
+    "trustformers-optim",
+    "trustformers-training",
+    "trustformers",
+    "trustformers-wasm",
+    "trustformers-py",
+    "trustformers-mobile",
+    "trustformers-debug",
+    "trustformers-serve",
+    "trustformers-c",
+]
+exclude = ["examples/server", "examples/grpc-server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0-alpha.1"
+edition = "2021"
+rust-version = "1.75"
+authors = ["TrustformeRS cool-japan Team (Team KitaSan)"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/cool-japan/trustformers"
+homepage = "https://trustformers.org"
+
+[workspace.dependencies]
+# Internal crate dependencies
+trustformers = { version = "0.1.0-alpha.1", path = "trustformers" }
+trustformers-core = { version = "0.1.0-alpha.1", path = "trustformers-core" }
+trustformers-tokenizers = { version = "0.1.0-alpha.1", path = "trustformers-tokenizers" }
+trustformers-models = { version = "0.1.0-alpha.1", path = "trustformers-models" }
+trustformers-optim = { version = "0.1.0-alpha.1", path = "trustformers-optim" }
+trustformers-training = { version = "0.1.0-alpha.1", path = "trustformers-training" }
+trustformers-wasm = { version = "0.1.0-alpha.1", path = "trustformers-wasm" }
+trustformers-mobile = { version = "0.1.0-alpha.1", path = "trustformers-mobile" }
+trustformers-debug = { version = "0.1.0-alpha.1", path = "trustformers-debug" }
+trustformers-serve = { version = "0.1.0-alpha.1", path = "trustformers-serve" }
+trustformers-c = { version = "0.1.0-alpha.1", path = "trustformers-c" }
+
+# Core dependencies
+anyhow = "1.0.99"
+thiserror = "2.0.15"
+serde = { version = "1.0.227", features = ["derive"] }
+serde_json = "1.0.141"
+serde_yaml = "0.9.34"
+semver = { version = "1.0.23", features = ["serde"] }
+tokio = { version = "1.47.1", features = ["full"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+log = "0.4.22"
+lazy_static = "1.5.0"
+reqwest = { version = "0.12.23", features = ["json", "stream", "blocking"] }
+futures = "0.3.31"
+bytes = "1.9.0"
+indicatif = "0.17.9"
+sha2 = "0.10.8"
+hex = "0.4.3"
+dirs = "5.0.1"
+
+# ML/Math dependencies
+ndarray = { version = "0.16.1", features = ["serde"] }
+ndarray-rand = "0.15.0"
+ndarray-linalg = "0.17.0"
+nalgebra = "0.33.2"
+num-traits = "0.2.19"
+num-complex = { version = "0.4.6", features = ["serde"] }
+ordered-float = "5.1.0"
+rand = "0.9.2"
+rand_distr = "0.5.0"
+rayon = "1.10.0"
+half = { version = "2.6.0", features = ["serde"] }
+parking_lot = "0.12.3"
+memmap2 = "0.9.5"
+
+# Tokenizer dependencies
+tokenizers = "0.21"
+unicode-normalization = "0.1"
+regex = "1.11.1"
+
+# Optional dependencies for different backends
+candle-core = "0.9.1"
+candle-nn = "0.9.1"
+tch = { version = "0.20", features = ["download-libtorch"] }
+ort = "2.0"
+safetensors = "0.4"
+
+# Web/Server dependencies  
+axum = { version = "0.8.4", features = ["ws", "macros"] }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = "9.3"
+num_cpus = "1.16"
+once_cell = "1.21"
+prometheus = "0.14"
+prost = "0.13"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = "0.13.1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+uuid = { version = "1.17.0", features = ["v4", "serde"] }
+tonic-build = "0.13.1"
+
+# Serialization dependencies
+rmp-serde = "1.3"
+
+# Python bindings dependencies
+pyo3 = "0.27.1"
+numpy = "0.27.0"
+
+# Additional core dependencies
+bincode = "1.3"
+byteorder = "1.5"
+dashmap = "6.1"
+zstd = "0.13"
+flate2 = "1.0"
+lz4 = "1.28"
+tar = "0.4"
+libc = "0.2"
+
+# Server and networking dependencies
+tokio-util = "0.7"
+url = "2.5"
+clap = { version = "4.5", features = ["derive"] }
+colored = "2.0"
+env_logger = "0.11"
+tokio-rustls = "0.24"
+base64 = "0.21"
+mime_guess = "2.0"
+fastrand = "2.3.0"
+toml = "0.8.23"
+
+# Dev dependencies
+criterion = { version = "0.5.1", features = ["html_reports", "async_tokio"] }
+proptest = "1.6"
+rstest = "0.23"
+approx = "0.5"
+pretty_assertions = "1.4"
+axum-test = "17.0"
+tokio-test = "0.4"
+tempfile = "3.14"
+paste = "1.0"
+
+# Debug-specific dependencies
+indexmap = { version = "2.7", features = ["serde"] }
+plotters = "0.3"
+tui = "0.19"
+crossterm = "0.28"
+ratatui = "0.29"
+gif = "0.13"
+image = "0.25.8"
+ffmpeg-next = "7.1"
+statrs = "0.18"
+md5 = "0.7"
+
+# MPI dependencies for multi-node training (removed from workspace - now optional per crate)
+# mpi = "0.8"
+# mpi-sys = "0.3"
+
+# Vulkan dependencies for cross-platform GPU computing
+vulkano = "0.35.2"
+vulkano-shaders = "0.35.0"
+bytemuck = { version = "1.23.1", features = ["derive"] }
+
+# SciRS2 dependencies - using rc.2 from crates.io
+# Note: "metal" feature removed from default features as it's Apple-specific
+# Individual crates should enable it conditionally using target-specific dependencies
+scirs2-core = { version = "0.1.0-rc.2", features = [
+    "array",
+    "simd",
+    "parallel",
+    "linalg",
+    "memory_efficient",
+    "array_protocol",
+    "random"  # Required for SciRS2 Integration Policy
+]}
+scirs2-linalg = "0.1.0-rc.2"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 0
+
+[profile.test]
+opt-level = 2
+
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# WASM-specific optimization profiles
+[profile.release-size]
+inherits = "release"
+opt-level = "z"  # Optimize for size
+strip = true     # Strip symbols
+panic = "abort"  # Smaller panic handling
+codegen-units = 1
+lto = true
+
+# Development profile with some optimizations for faster iteration
+[profile.dev-opt]
+inherits = "dev"
+opt-level = 1
+debug = 1
+
+# Profile for testing performance optimizations
+[profile.perf-test]
+inherits = "release"
+debug = true     # Keep debug info for profiling
+strip = false    # Keep symbols for analysis
+
+[workspace.lints.rust]
+unused_variables = "warn"
+unused_imports = "warn"
+dead_code = "warn"
+unused_mut = "warn"
+unused_assignments = "warn"
+deprecated = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

@@ -1,0 +1,177 @@
+# TrustformeRS Migration Configuration
+# This file contains configuration for various migration scenarios
+
+[global]
+# Global migration settings
+backup_before_migration = true
+validate_after_migration = true
+rollback_on_failure = true
+parallel_execution = false
+timeout_seconds = 3600
+log_level = "info"
+
+[versions]
+# Supported version mappings
+supported_versions = ["0.1.0", "1.0.0", "2.0.0", "2.1.0"]
+
+# Version migration rules
+[versions.rules]
+"0.1.0->1.0.0" = { config = true, data = true, models = true }
+"1.0.0->2.0.0" = { config = true, data = true, models = true, breaking = true }
+"2.0.0->2.1.0" = { config = true, data = true, models = true, breaking = false }
+
+[config_migration]
+# Configuration migration settings
+enabled = true
+backup_original = true
+format_validation = true
+
+# Configuration file patterns
+[config_migration.patterns]
+server_config = ["server.toml", "config.toml", "trustformers.toml"]
+model_config = ["model.json", "models.json"]
+deployment_config = ["deployment.yaml", "deploy.yml"]
+
+# Field mappings for different versions
+[config_migration.field_mappings]
+"1.0.0->2.0.0" = [
+    { from = "host", to = "server.host" },
+    { from = "port", to = "server.port" },
+    { from = "debug", to = "logging.level", transform = "debug_to_level" },
+    { from = "verbose", to = "logging.verbose", action = "remove" }
+]
+
+"2.0.0->2.1.0" = [
+    { add = "features.streaming", value = true },
+    { add = "features.websockets", value = false },
+    { add = "security.rate_limiting.enabled", value = true }
+]
+
+[data_migration]
+# Data migration settings
+enabled = true
+backup_data = true
+validate_integrity = true
+compress_backup = true
+
+# Data file patterns
+[data_migration.patterns]
+cache_files = ["*.cache", "*.bin"]
+metadata_files = ["*.json", "*.meta"]
+log_files = ["*.log", "*.log.gz"]
+
+# Data transformation rules
+[data_migration.transformations]
+"1.0.0->2.0.0" = [
+    { field = "timestamp", from = "epoch", to = "iso8601" },
+    { field = "version", add = "2.0.0" },
+    { field = "metadata", add = "migration_info" }
+]
+
+"2.0.0->2.1.0" = [
+    { field = "performance_metrics", add = "default_metrics" },
+    { field = "security.encryption", add = "encryption_config" }
+]
+
+[model_migration]
+# Model migration settings
+enabled = true
+backup_models = true
+validate_models = true
+optimize_models = false
+update_registry = true
+
+# Model file patterns
+[model_migration.patterns]
+model_files = ["*.onnx", "*.pt", "*.pth", "*.safetensors"]
+config_files = ["config.json", "model.json"]
+metadata_files = ["*.meta", "*.metadata"]
+
+# Model optimization settings
+[model_migration.optimization]
+quantization = false
+pruning = false
+compression = false
+format_conversion = false
+
+# Model transformation rules
+[model_migration.transformations]
+"1.0.0->2.0.0" = [
+    { action = "add_metadata", fields = ["version", "format_version", "optimization"] },
+    { action = "update_config", field = "version", value = "2.0.0" }
+]
+
+"2.0.0->2.1.0" = [
+    { action = "add_streaming_config", defaults = { "enabled" = true, "chunk_size" = 1024 } },
+    { action = "add_caching_config", defaults = { "enabled" = true, "cache_size" = 1000 } }
+]
+
+[backup]
+# Backup settings
+enabled = true
+compression = "gzip"
+retention_days = 30
+storage_path = "./backups"
+verify_backup = true
+
+# Backup file patterns
+[backup.patterns]
+exclude = ["*.tmp", "*.log", "*.lock", "node_modules", ".git"]
+include = ["*.toml", "*.json", "*.yaml", "*.yml", "*.bin", "*.cache"]
+
+[validation]
+# Validation settings
+enabled = true
+strict_mode = false
+fail_on_warnings = false
+
+# Validation rules
+[validation.rules]
+config_syntax = { enabled = true, severity = "error" }
+data_integrity = { enabled = true, severity = "error" }
+model_compatibility = { enabled = true, severity = "warning" }
+directory_structure = { enabled = true, severity = "warning" }
+file_permissions = { enabled = true, severity = "info" }
+
+[rollback]
+# Rollback settings
+enabled = true
+automatic = true
+cleanup_failed = true
+preserve_logs = true
+
+[notifications]
+# Notification settings
+enabled = false
+email = { enabled = false, smtp_server = "", recipients = [] }
+webhook = { enabled = false, url = "", headers = {} }
+slack = { enabled = false, webhook_url = "", channel = "" }
+
+[monitoring]
+# Monitoring settings
+enabled = true
+metrics_collection = true
+progress_reporting = true
+performance_tracking = true
+
+# Monitoring thresholds
+[monitoring.thresholds]
+max_duration_seconds = 7200
+max_memory_mb = 4096
+max_disk_usage_mb = 10240
+min_success_rate = 0.95
+
+[advanced]
+# Advanced settings
+parallel_workers = 4
+batch_size = 100
+memory_limit_mb = 2048
+temp_directory = "/tmp/trustformers_migration"
+cleanup_temp = true
+
+# Feature flags
+[advanced.features]
+experimental_optimizations = false
+enhanced_validation = true
+detailed_logging = true
+progress_bar = true

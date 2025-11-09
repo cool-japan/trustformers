@@ -1,0 +1,644 @@
+// Comprehensive integration tests for TrustformeRS C API
+
+use std::ffi::{CStr, CString};
+use std::os::raw::{c_char, c_float, c_int};
+use std::ptr;
+
+use trustformers_c::*;
+
+#[cfg(test)]
+mod api_tests {
+    use super::*;
+
+    #[test]
+    fn test_api_lifecycle() {
+        // Test initialization
+        let init_result = trustformers_init();
+        assert_eq!(init_result, TrustformersError::Success);
+
+        // Test cleanup
+        let cleanup_result = trustformers_cleanup();
+        assert_eq!(cleanup_result, TrustformersError::Success);
+    }
+
+    #[test]
+    fn test_version_and_build_info() {
+        // Test version
+        let version_ptr = trustformers_version();
+        assert!(!version_ptr.is_null());
+
+        // Test build info
+        let mut build_info = TrustformersBuildInfo::default();
+        let result = trustformers_build_info(&mut build_info);
+        assert_eq!(result, TrustformersError::Success);
+        assert!(!build_info.version.is_null());
+
+        // Clean up allocated strings
+        if !build_info.version.is_null() {
+            unsafe {
+                let _ = CString::from_raw(build_info.version);
+            }
+        }
+        if !build_info.features.is_null() {
+            unsafe {
+                let _ = CString::from_raw(build_info.features);
+            }
+        }
+        if !build_info.build_date.is_null() {
+            unsafe {
+                let _ = CString::from_raw(build_info.build_date);
+            }
+        }
+        if !build_info.target.is_null() {
+            unsafe {
+                let _ = CString::from_raw(build_info.target);
+            }
+        }
+    }
+
+    #[test]
+    fn test_feature_detection() {
+        let features = [
+            "tokenizers",
+            "models",
+            "pipelines",
+            "gpu",
+            "onnx",
+            "quantization",
+            "debug",
+        ];
+
+        for feature in &features {
+            let feature_cstr = CString::new(*feature).unwrap();
+            let has_feature = trustformers_has_feature(feature_cstr.as_ptr());
+            // Result should be 0 or 1, not an error
+            assert!(has_feature == 0 || has_feature == 1);
+        }
+
+        // Test invalid feature
+        let invalid_feature = CString::new("nonexistent_feature").unwrap();
+        let has_invalid = trustformers_has_feature(invalid_feature.as_ptr());
+        assert_eq!(has_invalid, 0);
+
+        // Test null pointer
+        let has_null = trustformers_has_feature(ptr::null());
+        assert_eq!(has_null, 0);
+    }
+
+    #[test]
+    fn test_log_level_setting() {
+        // Test valid log levels (0-5)
+        for level in 0..=5 {
+            let result = trustformers_set_log_level(level);
+            assert_eq!(result, TrustformersError::Success);
+        }
+
+        // Test invalid log level
+        let invalid_result = trustformers_set_log_level(10);
+        assert_eq!(invalid_result, TrustformersError::InvalidParameter);
+    }
+}
+
+#[cfg(test)]
+mod error_handling_tests {
+    use super::*;
+
+    #[test]
+    fn test_error_messages() {
+        let error_codes = [
+            TrustformersError::Success,
+            TrustformersError::NullPointer,
+            TrustformersError::InvalidParameter,
+            TrustformersError::OutOfMemory,
+            TrustformersError::FileNotFound,
+            TrustformersError::ModelLoadError,
+            TrustformersError::TokenizerError,
+            TrustformersError::PipelineError,
+            TrustformersError::InferenceError,
+            TrustformersError::RuntimeError,
+        ];
+
+        for error_code in &error_codes {
+            let msg_ptr = trustformers_error_message(*error_code);
+            assert!(!msg_ptr.is_null());
+
+            // Verify the string is valid UTF-8
+            unsafe {
+                let c_str = CStr::from_ptr(msg_ptr);
+                assert!(c_str.to_str().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn test_error_checks() {
+        // Test success check
+        assert_eq!(trustformers_is_success(TrustformersError::Success), 1);
+        assert_eq!(trustformers_is_success(TrustformersError::RuntimeError), 0);
+
+        // Test error check
+        assert_eq!(trustformers_is_error(TrustformersError::Success), 0);
+        assert_eq!(trustformers_is_error(TrustformersError::RuntimeError), 1);
+    }
+
+    #[test]
+    fn test_error_recording() {
+        let function_name = CString::new("test_function").unwrap();
+        let file_name = CString::new("test_file.rs").unwrap();
+        let message = CString::new("Test error message").unwrap();
+
+        let result = trustformers_error_record(
+            TrustformersError::RuntimeError,
+            function_name.as_ptr(),
+            file_name.as_ptr(),
+            42,
+            message.as_ptr(),
+            2, // Error severity
+        );
+        assert_eq!(result, TrustformersError::Success);
+
+        // Test with null parameters
+        let result_null = trustformers_error_record(
+            TrustformersError::RuntimeError,
+            ptr::null(),
+            ptr::null(),
+            0,
+            ptr::null(),
+            1,
+        );
+        assert_eq!(result_null, TrustformersError::Success);
+    }
+
+    #[test]
+    fn test_error_diagnostics() {
+        // Clear any existing error history
+        let clear_result = trustformers_error_clear_history();
+        assert_eq!(clear_result, TrustformersError::Success);
+
+        // Record some test errors
+        let function_name = CString::new("test_diagnostics").unwrap();
+        let file_name = CString::new("test.rs").unwrap();
+        let message = CString::new("Diagnostic test").unwrap();
+
+        for i in 0..3 {
+            let _ = trustformers_error_record(
+                TrustformersError::RuntimeError,
+                function_name.as_ptr(),
+                file_name.as_ptr(),
+                i,
+                message.as_ptr(),
+                1,
+            );
+        }
+
+        // Get diagnostics
+        let mut diagnostics = TrustformersErrorDiagnostics::default();
+        let result = trustformers_error_get_diagnostics(&mut diagnostics);
+        assert_eq!(result, TrustformersError::Success);
+        assert!(diagnostics.total_errors >= 3);
+
+        // Clean up
+        trustformers_error_diagnostics_free(&mut diagnostics);
+    }
+
+    #[test]
+    fn test_error_context() {
+        let mut context = TrustformersErrorContext::default();
+        let result = trustformers_error_get_context(TrustformersError::RuntimeError, &mut context);
+        assert_eq!(result, TrustformersError::Success);
+        assert_eq!(context.error_code, TrustformersError::RuntimeError);
+
+        // Clean up
+        trustformers_error_context_free(&mut context);
+    }
+
+    #[test]
+    fn test_error_recovery() {
+        let recovery_config = TrustformersErrorRecovery::default();
+        let mut success = 0;
+
+        let result = trustformers_error_attempt_recovery(
+            TrustformersError::NetworkError,
+            &recovery_config,
+            &mut success,
+        );
+        assert_eq!(result, TrustformersError::Success);
+        // Success value depends on the recovery strategy implementation
+        assert!(success == 0 || success == 1);
+    }
+}
+
+#[cfg(test)]
+mod memory_management_tests {
+    use super::*;
+
+    #[test]
+    fn test_basic_memory_usage() {
+        let mut usage = TrustformersMemoryUsage::default();
+        let result = trustformers_get_memory_usage(&mut usage);
+        assert_eq!(result, TrustformersError::Success);
+
+        // Memory usage should be non-negative
+        assert!(usage.total_memory_bytes >= 0);
+        assert!(usage.peak_memory_bytes >= 0);
+    }
+
+    #[test]
+    fn test_advanced_memory_usage() {
+        let mut advanced_usage = TrustformersAdvancedMemoryUsage::default();
+        let result = trustformers_get_advanced_memory_usage(&mut advanced_usage);
+        assert_eq!(result, TrustformersError::Success);
+
+        // Fragmentation ratio should be between 0.0 and 1.0
+        assert!(advanced_usage.fragmentation_ratio >= 0.0);
+        assert!(advanced_usage.fragmentation_ratio <= 1.0);
+
+        // Pressure level should be between 0 and 3
+        assert!(advanced_usage.pressure_level >= 0);
+        assert!(advanced_usage.pressure_level <= 3);
+
+        // Clean up
+        trustformers_advanced_memory_usage_free(&mut advanced_usage);
+    }
+
+    #[test]
+    fn test_memory_cleanup() {
+        let result = trustformers_memory_cleanup();
+        assert_eq!(result, TrustformersError::Success);
+    }
+
+    #[test]
+    fn test_memory_limits() {
+        let result = trustformers_set_memory_limits(1024, 512);
+        assert_eq!(result, TrustformersError::Success);
+    }
+
+    #[test]
+    fn test_memory_leak_detection() {
+        let mut leak_report: *mut c_char = ptr::null_mut();
+        let result = trustformers_check_memory_leaks(&mut leak_report);
+        assert_eq!(result, TrustformersError::Success);
+
+        if !leak_report.is_null() {
+            unsafe {
+                let _ = CString::from_raw(leak_report);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod performance_tests {
+    use super::*;
+
+    #[test]
+    fn test_performance_metrics() {
+        let mut metrics = TrustformersPerformanceMetrics::default();
+        let result = trustformers_get_performance_metrics(&mut metrics);
+        assert_eq!(result, TrustformersError::Success);
+
+        // Performance score should be between 0.0 and 100.0
+        assert!(metrics.performance_score >= 0.0);
+        assert!(metrics.performance_score <= 100.0);
+
+        // Cache hit rate should be between 0.0 and 1.0
+        assert!(metrics.cache_hit_rate >= 0.0);
+        assert!(metrics.cache_hit_rate <= 1.0);
+
+        // Clean up
+        trustformers_performance_metrics_free(&mut metrics);
+    }
+
+    #[test]
+    fn test_optimization_config() {
+        let config = TrustformersOptimizationConfig::default();
+        let result = trustformers_apply_optimizations(&config);
+        assert_eq!(result, TrustformersError::Success);
+    }
+
+    #[test]
+    fn test_profiling_session() {
+        // Start profiling
+        let start_result = trustformers_start_profiling();
+        assert_eq!(start_result, TrustformersError::Success);
+
+        // Stop profiling and get report
+        let mut report: *mut c_char = ptr::null_mut();
+        let stop_result = trustformers_stop_profiling(&mut report);
+        assert_eq!(stop_result, TrustformersError::Success);
+
+        if !report.is_null() {
+            unsafe {
+                let _ = CString::from_raw(report);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod model_api_tests {
+    use super::*;
+
+    #[test]
+    fn test_model_config_defaults() {
+        let config = TrustformersModelConfig::default();
+        assert!(config.model_name.is_null());
+        assert_eq!(config.device_type, 0); // CPU
+        assert_eq!(config.precision_type, 0); // float32
+        assert_eq!(config.use_safetensors, 1); // True
+        assert_eq!(config.validate_model, 1); // True
+    }
+
+    #[test]
+    fn test_optimization_config_defaults() {
+        let config = TrustformersOptimizationConfig::default();
+        assert_eq!(config.enable_tracking, 1);
+        assert_eq!(config.enable_caching, 1);
+        assert_eq!(config.cache_size_mb, 256);
+    }
+
+    #[test]
+    fn test_model_format_support() {
+        let formats = [0, 1, 2, 3, 4, 5]; // Auto, PyTorch, ONNX, TensorFlow, Safetensors, GGML
+
+        for format in &formats {
+            let mut supported = 0;
+            let result = trustformers_model_format_supported(*format, &mut supported);
+            assert_eq!(result, TrustformersError::Success);
+            assert!(supported == 0 || supported == 1);
+        }
+    }
+
+    #[test]
+    fn test_model_validation_with_invalid_path() {
+        let invalid_path = CString::new("/nonexistent/path/to/model").unwrap();
+        let mut validation = TrustformersModelValidation::default();
+
+        let result = trustformers_model_validate(invalid_path.as_ptr(), &mut validation);
+        assert_eq!(result, TrustformersError::Success);
+        assert_eq!(validation.is_valid, 0); // Should be invalid
+        assert_eq!(validation.file_integrity_valid, 0);
+
+        // Clean up
+        trustformers_model_validation_free(&mut validation);
+    }
+
+    #[test]
+    fn test_model_format_detection() {
+        let test_path = CString::new("/tmp/test_model").unwrap();
+        let mut format = -1;
+
+        let result = trustformers_model_detect_format(test_path.as_ptr(), &mut format);
+        assert_eq!(result, TrustformersError::Success);
+        assert!(format >= 0 && format <= 5); // Valid format range
+    }
+
+    #[test]
+    fn test_tensor_info_defaults() {
+        let info = TrustformersTensorInfo::default();
+        assert!(info.shape.is_null());
+        assert_eq!(info.ndim, 0);
+        assert_eq!(info.dtype, 0);
+        assert_eq!(info.numel, 0);
+        assert_eq!(info.device_type, 0); // CPU
+    }
+}
+
+#[cfg(test)]
+mod pipeline_api_tests {
+    use super::*;
+
+    #[test]
+    fn test_pipeline_config_defaults() {
+        let config = TrustformersPipelineConfig::default();
+        assert!(config.task.is_null());
+        assert!(config.model.is_null());
+        assert_eq!(config.backend_type, 0); // Native
+        assert_eq!(config.device_type, 0); // CPU
+        assert_eq!(config.batch_size, 1);
+        assert_eq!(config.max_length, 512);
+    }
+
+    #[test]
+    fn test_inference_result_defaults() {
+        let result = TrustformersInferenceResult::default();
+        assert!(result.result_json.is_null());
+        assert_eq!(result.confidence, 0.0);
+        assert_eq!(result.inference_time_ms, 0.0);
+        assert_eq!(result.memory_used_bytes, 0);
+    }
+
+    #[test]
+    fn test_batch_result_defaults() {
+        let result = TrustformersBatchResult::default();
+        assert!(result.results.is_null());
+        assert_eq!(result.num_results, 0);
+        assert!(result.confidences.is_null());
+        assert_eq!(result.total_time_ms, 0.0);
+        assert_eq!(result.avg_time_per_item_ms, 0.0);
+    }
+
+    #[test]
+    fn test_streaming_config_defaults() {
+        let config = TrustformersStreamingConfig::default();
+        assert_eq!(config.max_new_tokens, 100);
+        assert_eq!(config.temperature, 0.8);
+        assert_eq!(config.top_p, 0.9);
+        assert_eq!(config.top_k, 50);
+        assert_eq!(config.repetition_penalty, 1.1);
+        assert_eq!(config.skip_special_tokens, 1);
+        assert_eq!(config.buffer_size, 256);
+    }
+
+    #[test]
+    fn test_conversation_turn_defaults() {
+        let turn = TrustformersConversationTurn::default();
+        assert_eq!(turn.speaker, 0); // User
+        assert!(turn.message.is_null());
+        assert_eq!(turn.timestamp, 0);
+        assert!(turn.metadata.is_null());
+    }
+
+    #[test]
+    fn test_conversation_history_defaults() {
+        let history = TrustformersConversationHistory::default();
+        assert!(history.turns.is_null());
+        assert_eq!(history.num_turns, 0);
+        assert!(history.conversation_id.is_null());
+        assert_eq!(history.max_context_length, 2048);
+    }
+
+    #[test]
+    fn test_multimodal_input_defaults() {
+        let input = TrustformersMultimodalInput::default();
+        assert!(input.text.is_null());
+        assert!(input.image_paths.is_null());
+        assert_eq!(input.num_images, 0);
+        assert!(input.audio_path.is_null());
+        assert!(input.video_path.is_null());
+        assert!(input.metadata.is_null());
+    }
+}
+
+#[cfg(test)]
+mod tokenizer_api_tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenizer_config_defaults() {
+        let config = TrustformersTokenizerConfig::default();
+        assert_eq!(config.max_length, 512);
+        assert_eq!(config.padding, 1); // True - enable padding by default
+        assert_eq!(config.truncation, 1); // True - enable truncation by default
+        assert_eq!(config.return_attention_mask, 1); // True - return attention mask by default
+        assert_eq!(config.return_token_type_ids, 0); // False
+    }
+
+    #[test]
+    fn test_encoding_defaults() {
+        let result = TrustformersEncoding::default();
+        assert!(result.input_ids.ids.is_null());
+        assert_eq!(result.input_ids.length, 0);
+        assert!(result.attention_mask.ids.is_null());
+        assert!(result.token_type_ids.ids.is_null());
+    }
+
+    #[test]
+    fn test_batch_encoding_defaults() {
+        let result = TrustformersBatchEncoding::default();
+        assert!(result.encodings.is_null());
+        assert_eq!(result.num_encodings, 0);
+    }
+}
+
+#[cfg(test)]
+mod utility_tests {
+    use super::*;
+
+    #[test]
+    fn test_string_utilities() {
+        // Test string allocation and deallocation
+        let test_str = "Hello, TrustformeRS!";
+        let c_str = CString::new(test_str).unwrap();
+        let c_ptr = c_str.into_raw();
+
+        // Verify the string can be read back
+        unsafe {
+            let read_back = CStr::from_ptr(c_ptr);
+            assert_eq!(read_back.to_str().unwrap(), test_str);
+        }
+
+        // Free the string
+        trustformers_free_string(c_ptr);
+    }
+
+    #[test]
+    fn test_null_pointer_handling() {
+        // Test that null pointer operations return appropriate errors
+        assert_eq!(trustformers_is_success(TrustformersError::Success), 1);
+        assert_eq!(trustformers_is_error(TrustformersError::NullPointer), 1);
+
+        // Test null string handling
+        trustformers_free_string(ptr::null_mut()); // Should not crash
+    }
+
+    #[test]
+    fn test_garbage_collection() {
+        let result = trustformers_gc();
+        assert_eq!(result, TrustformersError::Success);
+    }
+}
+
+#[cfg(test)]
+mod stress_tests {
+    use super::*;
+
+    #[test]
+    fn test_multiple_error_recordings() {
+        // Clear history first
+        let _ = trustformers_error_clear_history();
+
+        // Record many errors
+        let function_name = CString::new("stress_test").unwrap();
+        let file_name = CString::new("stress_test.rs").unwrap();
+        let message = CString::new("Stress test error").unwrap();
+
+        for i in 0..100 {
+            let result = trustformers_error_record(
+                if i % 2 == 0 {
+                    TrustformersError::RuntimeError
+                } else {
+                    TrustformersError::InvalidParameter
+                },
+                function_name.as_ptr(),
+                file_name.as_ptr(),
+                i,
+                message.as_ptr(),
+                1,
+            );
+            assert_eq!(result, TrustformersError::Success);
+        }
+
+        // Verify diagnostics
+        let mut diagnostics = TrustformersErrorDiagnostics::default();
+        let result = trustformers_error_get_diagnostics(&mut diagnostics);
+        assert_eq!(result, TrustformersError::Success);
+        assert!(diagnostics.total_errors >= 100);
+
+        // Clean up
+        trustformers_error_diagnostics_free(&mut diagnostics);
+    }
+
+    #[test]
+    fn test_memory_tracking_stress() {
+        // Get initial memory state
+        let mut initial_usage = TrustformersMemoryUsage::default();
+        let _ = trustformers_get_memory_usage(&mut initial_usage);
+
+        // Perform multiple memory operations
+        for _ in 0..50 {
+            let mut usage = TrustformersMemoryUsage::default();
+            let result = trustformers_get_memory_usage(&mut usage);
+            assert_eq!(result, TrustformersError::Success);
+
+            let mut advanced_usage = TrustformersAdvancedMemoryUsage::default();
+            let adv_result = trustformers_get_advanced_memory_usage(&mut advanced_usage);
+            assert_eq!(adv_result, TrustformersError::Success);
+
+            trustformers_advanced_memory_usage_free(&mut advanced_usage);
+        }
+
+        // Cleanup
+        let _ = trustformers_memory_cleanup();
+    }
+
+    #[test]
+    fn test_concurrent_access_simulation() {
+        // Simulate concurrent access by rapidly calling different functions
+        let iterations = 100;
+
+        for i in 0..iterations {
+            // Alternate between different API calls
+            match i % 4 {
+                0 => {
+                    let version_ptr = trustformers_version();
+                    assert!(!version_ptr.is_null());
+                },
+                1 => {
+                    let mut usage = TrustformersMemoryUsage::default();
+                    let _ = trustformers_get_memory_usage(&mut usage);
+                },
+                2 => {
+                    let has_feature =
+                        trustformers_has_feature(CString::new("tokenizers").unwrap().as_ptr());
+                    assert!(has_feature == 0 || has_feature == 1);
+                },
+                3 => {
+                    let msg_ptr = trustformers_error_message(TrustformersError::Success);
+                    assert!(!msg_ptr.is_null());
+                },
+                _ => unreachable!(),
+            }
+        }
+    }
+}

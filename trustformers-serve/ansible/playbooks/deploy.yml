@@ -1,0 +1,154 @@
+---
+# TrustformeRS Serve Deployment Playbook
+# This playbook deploys and configures TrustformeRS Serve across multiple environments
+
+- name: Deploy TrustformeRS Serve Infrastructure
+  hosts: localhost
+  gather_facts: true
+  become: false
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  
+  tasks:
+    - name: Include environment-specific variables
+      include_vars: "../group_vars/{{ environment | default('development') }}.yml"
+      tags: [always]
+    
+    - name: Validate deployment prerequisites
+      include_tasks: tasks/validate_prerequisites.yml
+      tags: [validation, always]
+    
+    - name: Deploy infrastructure with Terraform
+      include_tasks: tasks/terraform_deploy.yml
+      when: deploy_infrastructure | default(true)
+      tags: [infrastructure, terraform]
+    
+    - name: Configure AWS resources
+      include_tasks: tasks/aws_configuration.yml
+      when: cloud_provider == "aws"
+      tags: [aws, configuration]
+    
+    - name: Deploy to Kubernetes
+      include_tasks: tasks/kubernetes_deploy.yml
+      when: deployment_type == "kubernetes"
+      tags: [kubernetes, k8s]
+    
+    - name: Deploy to EC2 instances
+      include_tasks: tasks/ec2_deploy.yml
+      when: deployment_type == "ec2"
+      tags: [ec2, instances]
+    
+    - name: Configure monitoring and logging
+      include_tasks: tasks/monitoring_setup.yml
+      tags: [monitoring, logging]
+    
+    - name: Run post-deployment validation
+      include_tasks: tasks/post_deployment_validation.yml
+      tags: [validation, testing]
+    
+    - name: Generate deployment report
+      include_tasks: tasks/deployment_report.yml
+      tags: [reporting]
+
+- name: Configure Application Servers
+  hosts: trustformers_servers
+  gather_facts: true
+  become: true
+  serial: "{{ rolling_update_batch_size | default(2) }}"
+  
+  roles:
+    - common
+    - docker
+    - trustformers-serve
+    - monitoring-agent
+    - security-hardening
+  
+  tasks:
+    - name: Ensure application is healthy
+      uri:
+        url: "http://{{ ansible_default_ipv4.address }}:{{ app_port | default(8080) }}/health"
+        method: GET
+        timeout: 30
+      register: health_check
+      retries: 5
+      delay: 10
+      until: health_check.status == 200
+      tags: [health-check]
+    
+    - name: Update load balancer targets
+      include_tasks: tasks/update_load_balancer.yml
+      when: use_load_balancer | default(true)
+      tags: [load-balancer]
+
+- name: Configure Database Servers
+  hosts: database_servers
+  gather_facts: true
+  become: true
+  
+  roles:
+    - common
+    - postgresql
+    - redis
+    - database-backup
+    - monitoring-agent
+  
+  tasks:
+    - name: Run database migrations
+      include_tasks: tasks/database_migrations.yml
+      run_once: true
+      tags: [database, migrations]
+    
+    - name: Configure database monitoring
+      include_tasks: tasks/database_monitoring.yml
+      tags: [monitoring, database]
+
+- name: Configure Load Balancers
+  hosts: load_balancers
+  gather_facts: true
+  become: true
+  
+  roles:
+    - common
+    - nginx
+    - ssl-certificates
+    - monitoring-agent
+  
+  tasks:
+    - name: Update upstream configuration
+      template:
+        src: nginx_upstream.conf.j2
+        dest: /etc/nginx/conf.d/upstream.conf
+      notify: reload nginx
+      tags: [nginx, configuration]
+    
+    - name: Validate load balancer configuration
+      nginx_config_test:
+      tags: [validation, nginx]
+
+- name: Post-deployment Tasks
+  hosts: localhost
+  gather_facts: false
+  
+  tasks:
+    - name: Run integration tests
+      include_tasks: tasks/integration_tests.yml
+      tags: [testing, integration]
+    
+    - name: Update DNS records
+      include_tasks: tasks/dns_updates.yml
+      when: update_dns | default(false)
+      tags: [dns]
+    
+    - name: Send deployment notifications
+      include_tasks: tasks/notifications.yml
+      tags: [notifications]
+    
+    - name: Clean up temporary resources
+      include_tasks: tasks/cleanup.yml
+      tags: [cleanup]
+
+  handlers:
+    - name: reload nginx
+      service:
+        name: nginx
+        state: reloaded

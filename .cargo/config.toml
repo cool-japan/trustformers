@@ -1,0 +1,16 @@
+# Cargo configuration for TrustformeRS
+
+# Set minimum macOS deployment target to 15.0 to match linked libraries
+[target.aarch64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-mmacosx-version-min=15.0",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+    "-C", "link-arg=-mmacosx-version-min=15.0",
+]
+
+# Build configuration
+[build]
+jobs = 8  # Parallel compilation jobs

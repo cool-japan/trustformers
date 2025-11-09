@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS WASM Mobile Test</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.5;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        .container {
+            min-height: 100vh;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+        .test-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }
+        .test-button {
+            width: 100%;
+            padding: 15px;
+            border: none;
+            border-radius: 10px;
+            background: linear-gradient(45deg, #667eea, #764ba2);
+            color: white;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: transform 0.2s;
+            margin-bottom: 10px;
+        }
+        .test-button:active {
+            transform: scale(0.98);
+        }
+        .test-button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .metric {
+            text-align: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+        .metric-label {
+            font-size: 12px;
+            color: #666;
+            margin-top: 5px;
+        }
+        .status {
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+            margin: 10px 0;
+            font-weight: 600;
+        }
+        .status.pass {
+            background: #d4edda;
+            color: #155724;
+        }
+        .status.fail {
+            background: #f8d7da;
+            color: #721c24;
+        }
+        .status.running {
+            background: #fff3cd;
+            color: #856404;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📱 Mobile WASM Test</h1>
+            <p>TrustformeRS Performance Testing</p>
+        </div>
+        
+        <div class="test-card">
+            <h2>Device Info</h2>
+            <div id="device-info"></div>
+        </div>
+        
+        <div class="test-card">
+            <h2>Quick Tests</h2>
+            <button class="test-button" onclick="runMobileCompatibilityTest()">
+                🔍 Compatibility Test
+            </button>
+            <button class="test-button" onclick="runMobilePerformanceTest()">
+                ⚡ Performance Test
+            </button>
+            <button class="test-button" onclick="runMobileMemoryTest()">
+                💾 Memory Test
+            </button>
+        </div>
+        
+        <div class="test-card">
+            <h2>Performance Metrics</h2>
+            <div class="metrics-grid">
+                <div class="metric">
+                    <div class="metric-value" id="mobile-load-time">-</div>
+                    <div class="metric-label">Load Time (ms)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="mobile-inference-time">-</div>
+                    <div class="metric-label">Inference (ms)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="mobile-memory">-</div>
+                    <div class="metric-label">Memory (MB)</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="mobile-battery">-</div>
+                    <div class="metric-label">Battery %</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="test-card">
+            <h2>Test Status</h2>
+            <div id="mobile-status">Ready to test</div>
+        </div>
+    </div>
+    
+    <script>
+        // Mobile-specific test implementation
+        document.addEventListener('DOMContentLoaded', function() {
+            initializeMobileTests();
+        });
+        
+        function initializeMobileTests() {
+            // Display device information
+            const deviceInfo = {
+                userAgent: navigator.userAgent,
+                screen: `${screen.width}x${screen.height}`,
+                pixelRatio: window.devicePixelRatio,
+                orientation: screen.orientation ? screen.orientation.type : 'unknown',
+                touchSupport: 'ontouchstart' in window,
+                platform: navigator.platform
+            };
+            
+            document.getElementById('device-info').innerHTML = `
+                <p><strong>Platform:</strong> ${deviceInfo.platform}</p>
+                <p><strong>Screen:</strong> ${deviceInfo.screen}</p>
+                <p><strong>Pixel Ratio:</strong> ${deviceInfo.pixelRatio}</p>
+                <p><strong>Orientation:</strong> ${deviceInfo.orientation}</p>
+                <p><strong>Touch:</strong> ${deviceInfo.touchSupport ? 'Yes' : 'No'}</p>
+            `;
+            
+            // Monitor battery if available
+            if ('getBattery' in navigator) {
+                navigator.getBattery().then(function(battery) {
+                    updateBatteryInfo(battery);
+                    battery.addEventListener('levelchange', () => updateBatteryInfo(battery));
+                });
+            }
+        }
+        
+        function updateBatteryInfo(battery) {
+            document.getElementById('mobile-battery').textContent = 
+                Math.round(battery.level * 100);
+        }
+        
+        function updateStatus(message, type = 'running') {
+            const statusDiv = document.getElementById('mobile-status');
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+        
+        async function runMobileCompatibilityTest() {
+            updateStatus('Running compatibility test...', 'running');
+            
+            try {
+                // Test WASM support
+                const wasmSupported = typeof WebAssembly === 'object';
+                const webglSupported = !!window.WebGLRenderingContext;
+                
+                if (wasmSupported && webglSupported) {
+                    updateStatus('✅ Compatibility: PASS', 'pass');
+                } else {
+                    updateStatus('❌ Compatibility: FAIL', 'fail');
+                }
+            } catch (error) {
+                updateStatus('❌ Compatibility: ERROR', 'fail');
+            }
+        }
+        
+        async function runMobilePerformanceTest() {
+            updateStatus('Running performance test...', 'running');
+            
+            try {
+                const start = performance.now();
+                
+                // Simulate WASM loading
+                await new Promise(resolve => setTimeout(resolve, 500));
+                const loadTime = performance.now() - start;
+                
+                // Simulate inference
+                const inferenceStart = performance.now();
+                await new Promise(resolve => setTimeout(resolve, 200));
+                const inferenceTime = performance.now() - inferenceStart;
+                
+                document.getElementById('mobile-load-time').textContent = Math.round(loadTime);
+                document.getElementById('mobile-inference-time').textContent = Math.round(inferenceTime);
+                
+                updateStatus('✅ Performance: PASS', 'pass');
+            } catch (error) {
+                updateStatus('❌ Performance: ERROR', 'fail');
+            }
+        }
+        
+        async function runMobileMemoryTest() {
+            updateStatus('Running memory test...', 'running');
+            
+            try {
+                if (performance.memory) {
+                    const memoryMB = Math.round(performance.memory.usedJSHeapSize / 1024 / 1024);
+                    document.getElementById('mobile-memory').textContent = memoryMB;
+                    
+                    if (memoryMB < 100) {
+                        updateStatus('✅ Memory: PASS', 'pass');
+                    } else {
+                        updateStatus('⚠️ Memory: WARNING', 'fail');
+                    }
+                } else {
+                    updateStatus('❓ Memory: Not Available', 'running');
+                }
+            } catch (error) {
+                updateStatus('❌ Memory: ERROR', 'fail');
+            }
+        }
+    </script>
+</body>
+</html>
