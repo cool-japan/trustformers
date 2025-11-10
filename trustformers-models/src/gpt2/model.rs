@@ -1,6 +1,7 @@
 use scirs2_core::ndarray::{s, ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{invalid_config, tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
@@ -40,20 +41,26 @@ pub struct Gpt2Model {
     wpe: Embedding,    // Positional embeddings
     h: Vec<Gpt2Block>, // Transformer blocks
     ln_f: LayerNorm,   // Final layer norm
+    device: Device,    // Compute device (CPU, Metal, CUDA, etc.)
 }
 
 impl Gpt2Model {
     pub fn new(config: Gpt2Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Create a GPT-2 model with specified device (CPU, Metal, CUDA, etc.)
+    pub fn new_with_device(config: Gpt2Config, device: Device) -> Result<Self> {
         config.validate()?;
 
         // Initialize embeddings
         let wte = Embedding::new(config.vocab_size, config.n_embd, None)?;
         let wpe = Embedding::new(config.n_positions, config.n_embd, None)?;
 
-        // Initialize transformer blocks
+        // Initialize transformer blocks with device
         let mut h = Vec::with_capacity(config.n_layer);
         for _ in 0..config.n_layer {
-            h.push(Gpt2Block::new(&config)?);
+            h.push(Gpt2Block::new_with_device(&config, device)?);
         }
 
         // Initialize final layer norm
@@ -65,7 +72,23 @@ impl Gpt2Model {
             wpe,
             h,
             ln_f,
+            device,
         })
+    }
+
+    /// Get the device this model uses
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Move this model to a different device
+    pub fn to_device(mut self, device: Device) -> Self {
+        self.device = device;
+        // Move all blocks to the new device
+        for block in &mut self.h {
+            *block = block.clone().to_device(device);
+        }
+        self
     }
 
     /// Load weights from a WeightReader (e.g., SafeTensors)
@@ -656,12 +679,22 @@ struct Gpt2Block {
 
 impl Gpt2Block {
     fn new(config: &Gpt2Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &Gpt2Config, device: Device) -> Result<Self> {
         Ok(Self {
             ln_1: LayerNorm::new_simple(config.n_embd, config.layer_norm_epsilon),
-            attn: Gpt2Attention::new(config)?,
+            attn: Gpt2Attention::new_with_device(config, device)?,
             ln_2: LayerNorm::new_simple(config.n_embd, config.layer_norm_epsilon),
-            mlp: Gpt2MLP::new(config)?,
+            mlp: Gpt2MLP::new_with_device(config, device)?,
         })
+    }
+
+    fn to_device(mut self, device: Device) -> Self {
+        self.attn = self.attn.to_device(device);
+        self.mlp = self.mlp.to_device(device);
+        self
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -732,6 +765,10 @@ struct Gpt2Attention {
 
 impl Gpt2Attention {
     fn new(config: &Gpt2Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &Gpt2Config, device: Device) -> Result<Self> {
         if config.n_embd % config.n_head != 0 {
             return Err(invalid_config(
                 "n_embd",
@@ -744,11 +781,22 @@ impl Gpt2Attention {
         Ok(Self {
             n_head: config.n_head,
             d_head,
-            c_attn: Linear::new(config.n_embd, 3 * config.n_embd, true),
-            c_proj: Linear::new(config.n_embd, config.n_embd, true),
+            c_attn: Linear::new_with_device(config.n_embd, 3 * config.n_embd, true, device),
+            c_proj: Linear::new_with_device(config.n_embd, config.n_embd, true, device),
             attn_dropout: config.attn_pdrop,
             resid_dropout: config.resid_pdrop,
         })
+    }
+
+    fn to_device(self, device: Device) -> Self {
+        Self {
+            n_head: self.n_head,
+            d_head: self.d_head,
+            c_attn: self.c_attn.to_device(device),
+            c_proj: self.c_proj.to_device(device),
+            attn_dropout: self.attn_dropout,
+            resid_dropout: self.resid_dropout,
+        }
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -949,14 +997,27 @@ struct Gpt2MLP {
 
 impl Gpt2MLP {
     fn new(config: &Gpt2Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &Gpt2Config, device: Device) -> Result<Self> {
         let inner_dim = if let Some(dim) = config.n_inner { dim } else { 4 * config.n_embd };
 
         Ok(Self {
-            c_fc: Linear::new(config.n_embd, inner_dim, true),
-            c_proj: Linear::new(inner_dim, config.n_embd, true),
+            c_fc: Linear::new_with_device(config.n_embd, inner_dim, true, device),
+            c_proj: Linear::new_with_device(inner_dim, config.n_embd, true, device),
             act_fn: ActivationType::from_str(&config.activation_function)?,
             dropout: config.resid_pdrop,
         })
+    }
+
+    fn to_device(self, device: Device) -> Self {
+        Self {
+            c_fc: self.c_fc.to_device(device),
+            c_proj: self.c_proj.to_device(device),
+            act_fn: self.act_fn,
+            dropout: self.dropout,
+        }
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {

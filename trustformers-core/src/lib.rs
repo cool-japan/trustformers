@@ -14,6 +14,7 @@ pub mod cache;
 pub mod checkpoint;
 pub mod compiler;
 pub mod compression;
+pub mod device;
 pub mod error;
 pub mod errors;
 pub mod evaluation;
@@ -22,6 +23,7 @@ pub mod generation;
 pub mod gpu;
 #[cfg(feature = "cuda")]
 pub mod gpu_accelerated;
+pub mod gpu_ops;
 pub mod hardware;
 pub mod hardware_acceleration;
 pub mod kernel_fusion;
@@ -88,6 +90,7 @@ pub use compiler::{
     OptimizationRecommendations, OptimizationResult, PassResult, RecommendationCategory,
     RecommendationPriority,
 };
+pub use device::Device;
 pub use compression::{
     // Convenience functions
     create_compression_pipeline,

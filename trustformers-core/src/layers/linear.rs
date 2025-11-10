@@ -4,7 +4,9 @@
 //! of the form: `y = xW^T + b`, where `W` is the weight matrix and `b` is the
 //! optional bias vector.
 
+use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
+use crate::gpu_ops::dispatch_matmul;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
 
@@ -49,6 +51,7 @@ use crate::traits::Layer;
 pub struct Linear {
     weight: Tensor,
     bias: Option<Tensor>,
+    device: Device,
 }
 
 impl Linear {
@@ -77,10 +80,55 @@ impl Linear {
     /// let linear2 = Linear::new(512, 1024, true);
     /// ```
     pub fn new(in_features: usize, out_features: usize, bias: bool) -> Self {
+        Self::new_with_device(in_features, out_features, bias, Device::CPU)
+    }
+
+    /// Creates a new linear layer with specified device.
+    ///
+    /// # Arguments
+    ///
+    /// * `in_features` - Size of each input sample
+    /// * `out_features` - Size of each output sample
+    /// * `bias` - Whether to include a learnable bias
+    /// * `device` - Device to use for computations (CPU, Metal, CUDA, etc.)
+    ///
+    /// # Returns
+    ///
+    /// A new `Linear` layer with randomly initialized weights.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use trustformers_core::layers::Linear;
+    /// use trustformers_core::Device;
+    ///
+    /// // Create a linear layer on Metal GPU
+    /// let linear = Linear::new_with_device(768, 3072, true, Device::metal_if_available(0));
+    /// ```
+    pub fn new_with_device(in_features: usize, out_features: usize, bias: bool, device: Device) -> Self {
         let weight = Tensor::randn(&[out_features, in_features]).unwrap();
         let bias = if bias { Some(Tensor::zeros(&[out_features]).unwrap()) } else { None };
 
-        Self { weight, bias }
+        Self { weight, bias, device }
+    }
+
+    /// Returns the device this layer uses for computations.
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Move this layer to a different device.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Target device
+    ///
+    /// # Returns
+    ///
+    /// Self with updated device.
+    pub fn to_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
     }
 
     /// Sets the weight matrix for this layer.
@@ -160,7 +208,12 @@ impl Layer for Linear {
 
         let output = if input_shape.len() == 2 {
             // Standard 2D input: [seq_len, hidden_size] x [hidden_size, out_features]
-            input.matmul(&weight_t)?
+            // Use device-aware dispatch for GPU acceleration
+            if self.device.is_gpu() {
+                dispatch_matmul(&input, &weight_t, &self.device)?
+            } else {
+                input.matmul(&weight_t)?
+            }
         } else if input_shape.len() == 3 {
             // Batched 3D input: [batch, seq_len, hidden_size] x [hidden_size, out_features]
             // Handle manually since tensor.matmul doesn't support 3D x 2D
