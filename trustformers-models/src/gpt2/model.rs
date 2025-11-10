@@ -696,6 +696,7 @@ struct Gpt2Block {
 }
 
 impl Gpt2Block {
+    #[allow(dead_code)]
     fn new(config: &Gpt2Config) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }
@@ -782,6 +783,7 @@ struct Gpt2Attention {
 }
 
 impl Gpt2Attention {
+    #[allow(dead_code)]
     fn new(config: &Gpt2Config) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }
@@ -1014,6 +1016,7 @@ struct Gpt2MLP {
 }
 
 impl Gpt2MLP {
+    #[allow(dead_code)]
     fn new(config: &Gpt2Config) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }

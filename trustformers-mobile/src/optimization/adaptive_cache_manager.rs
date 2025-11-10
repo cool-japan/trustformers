@@ -583,7 +583,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
     /// Update access pattern statistics
     fn update_access_pattern(&self, key: &K) {
         let mut patterns = self.patterns.lock().unwrap();
-        let stats = patterns.entry(key.clone()).or_insert_with(AccessPatternStats::default);
+        let stats = patterns.entry(key.clone()).or_default();
 
         stats.total_accesses += 1;
         stats.recent_accesses.push_back(Instant::now());

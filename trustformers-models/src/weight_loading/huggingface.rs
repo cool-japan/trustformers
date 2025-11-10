@@ -479,6 +479,9 @@ impl HuggingFaceLoader {
     fn load_safetensors_tensor_complete(&mut self, name: &str, filename: &str) -> Result<Tensor> {
         let reader = self.get_file_handle(filename)?;
 
+        // Reset to start of file (critical for cached file handles)
+        reader.seek(SeekFrom::Start(0))?;
+
         // Read header length (first 8 bytes)
         let mut header_len_bytes = [0u8; 8];
         reader.read_exact(&mut header_len_bytes)?;
@@ -502,8 +505,12 @@ impl HuggingFaceLoader {
         })?;
 
         if let Some(tensor_info) = header.tensors.get(name) {
-            // Seek to tensor data
-            reader.seek(SeekFrom::Start(tensor_info.data_offsets[0]))?;
+            // Seek to tensor data (offsets are relative to start of tensor data section)
+            // SafeTensors format: [8 bytes header_len][header_len bytes JSON][tensor data]
+            let tensor_data_start = 8 + header_len;
+            reader.seek(SeekFrom::Start(
+                tensor_data_start + tensor_info.data_offsets[0],
+            ))?;
 
             // Read tensor data
             let data_len = (tensor_info.data_offsets[1] - tensor_info.data_offsets[0]) as usize;

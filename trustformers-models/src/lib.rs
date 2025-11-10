@@ -157,6 +157,9 @@ pub mod vit;
 #[cfg(feature = "llama")]
 pub mod llama;
 
+#[cfg(feature = "gpt_neox")]
+pub mod gpt_neox;
+
 #[cfg(feature = "mistral")]
 pub mod mistral;
 
@@ -374,6 +377,9 @@ pub use vit::{ViTConfig, ViTForImageClassification, ViTModel};
 
 #[cfg(feature = "llama")]
 pub use llama::{LlamaConfig, LlamaForCausalLM, LlamaModel};
+
+#[cfg(feature = "gpt_neox")]
+pub use gpt_neox::{GPTNeoXConfig, GPTNeoXForCausalLM, GPTNeoXModel};
 
 #[cfg(feature = "mistral")]
 pub use mistral::{MistralConfig, MistralForCausalLM, MistralModel};

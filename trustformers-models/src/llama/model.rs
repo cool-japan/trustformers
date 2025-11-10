@@ -327,27 +327,37 @@ impl Layer for LlamaAttention {
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let shape = input.shape();
-        let seq_len = shape[shape.len() - 2];
+        let (_batch_size, seq_len) = if shape.len() == 2 {
+            // No batch dimension: [seq_len, hidden]
+            (1, shape[0])
+        } else if shape.len() == 3 {
+            // Has batch dimension: [batch, seq_len, hidden]
+            (shape[0], shape[1])
+        } else {
+            return Err(tensor_op_error(
+                "LlamaAttention::forward",
+                &format!("Unexpected input shape: {:?}", shape),
+            ));
+        };
 
         // Project to Q, K, V
-        let q = self.q_proj.forward(input.clone())?;
-        let k = self.k_proj.forward(input.clone())?;
-        let v = self.v_proj.forward(input)?;
+        let q = self.q_proj.forward(input.clone())?; // [seq_len, num_heads * head_dim] or [batch, seq_len, ...]
+        let k = self.k_proj.forward(input.clone())?; // [seq_len, num_kv_heads * head_dim] or [batch, seq_len, ...]
+        let _v = self.v_proj.forward(input)?; // [seq_len, num_kv_heads * head_dim] or [batch, seq_len, ...] - TODO: Use in full attention
 
         // Generate position IDs (0, 1, 2, ..., seq_len-1)
         let position_ids: Vec<usize> = (0..seq_len).collect();
 
         // Apply rotary embedding
-        let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?;
+        let (q_rope, _k_rope) = self.rotary_emb.apply_rotary_emb(&q, &k, &position_ids)?; // TODO: Use _k_rope in full attention
 
-        // For now, implement a simplified attention mechanism
-        // This is a placeholder that performs basic scaled dot-product attention
-        match (&q_rope, &k_rope, &v) {
-            (Tensor::F32(q_arr), Tensor::F32(_k_arr), Tensor::F32(v_arr)) => {
-                // Simplified attention: just use Q as the output and mix with V
-                // In a full implementation, this would be proper scaled dot-product attention
-                let attention_output = q_arr + v_arr;
-                self.o_proj.forward(Tensor::F32(attention_output))
+        // Simplified attention for GQA (placeholder - just use Q and project)
+        // TODO: Implement full scaled dot-product attention with proper GQA
+        match &q_rope {
+            Tensor::F32(_q_arr) => {
+                // Simplified: just project Q through output layer
+                // This maintains correct shapes and allows the model to run
+                self.o_proj.forward(q_rope)
             },
             _ => Err(tensor_op_error(
                 "LlamaAttention::forward",
@@ -851,6 +861,30 @@ impl LlamaForCausalLM {
         let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self { model, lm_head })
+    }
+
+    /// Load model weights from a directory containing HuggingFace format weights
+    pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
+        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+
+        // Load base model weights
+        self.model.load_from_path(model_path.as_ref())?;
+
+        // Load lm_head weights
+        let config = WeightLoadingConfig {
+            lazy_loading: true,
+            memory_mapped: false,
+            ..Default::default()
+        };
+
+        let mut loader = auto_create_loader(model_path, Some(config))?;
+
+        if let Ok(lm_head_weights) = loader.load_tensor("lm_head.weight") {
+            self.lm_head.set_weight(lm_head_weights)?;
+        }
+
+        loader.close()?;
+        Ok(())
     }
 }
 
