@@ -67,6 +67,7 @@ impl Default for MobileGGUFConfig {
 
 /// Mobile-optimized GGUF quantization types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum MobileGGUFType {
     /// Q2_K: Ultra-low memory (2.5625 bpw) - for low battery/memory
     Q2_K,

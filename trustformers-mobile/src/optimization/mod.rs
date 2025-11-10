@@ -9,12 +9,14 @@
 //! - Power-aware scheduling
 //! - Cache optimization
 
+pub mod adaptive_cache_manager;
 pub mod adaptive_inference;
 pub mod advanced_profiler;
 pub mod advanced_quantization;
 pub mod ai_powered_optimizer;
 pub mod cache_optimizer;
 pub mod efficient_training;
+pub mod enhanced_int4_quantization;
 pub mod enhanced_memory_manager;
 pub mod fusion;
 pub mod gguf_mobile;
@@ -50,6 +52,11 @@ pub use gguf_mobile::{
     MobileGGUFConfig, MobileGGUFQuantizer, MobileGGUFStats, MobileGGUFType, MobileGGUFUtils,
 };
 
+pub use enhanced_int4_quantization::{
+    BlockSize, EnhancedInt4Config, EnhancedInt4Quantizer, Int4Block, QuantizedInt4Stats,
+    QuantizedInt4Tensor,
+};
+
 pub use fusion::{
     AttentionFusion, ConvBatchNormFusion, FusedOperator, FusionContext, FusionPattern,
     LinearActivationFusion, OperatorFusion,
@@ -72,6 +79,11 @@ pub use kernel_optimizer::{
 pub use power_scheduler::{
     BatteryConstraints, PowerAwareScheduler, PowerProfile,
     SchedulingDecision as PowerSchedulingDecision, SchedulingPolicy, ThermalConstraints,
+};
+
+pub use adaptive_cache_manager::{
+    AdaptiveCacheConfig, AdaptiveCacheManager, CacheEntry, CacheStats as AdaptiveCacheStats,
+    EvictionStrategy,
 };
 
 pub use cache_optimizer::{

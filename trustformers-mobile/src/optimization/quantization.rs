@@ -17,6 +17,7 @@ use trustformers_core::Tensor;
 
 /// Quantization scheme types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum QuantizationScheme {
     Int4,
     Int8,

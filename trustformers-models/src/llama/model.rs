@@ -1,6 +1,7 @@
 use crate::llama::config::LlamaConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{invalid_config, tensor_op_error, Result},
     layers::{Embedding, Linear},
     ops::activations::silu,
@@ -157,6 +158,33 @@ impl LlamaMLP {
             down_proj,
         })
     }
+
+    pub fn new_with_device(config: &LlamaConfig, device: Device) -> Result<Self> {
+        let gate_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.intermediate_size,
+            config.mlp_bias,
+            device,
+        );
+        let up_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.intermediate_size,
+            config.mlp_bias,
+            device,
+        );
+        let down_proj = Linear::new_with_device(
+            config.intermediate_size,
+            config.hidden_size,
+            config.mlp_bias,
+            device,
+        );
+
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+        })
+    }
 }
 
 impl Layer for LlamaMLP {
@@ -247,6 +275,50 @@ impl LlamaAttention {
             head_dim,
         })
     }
+
+    pub fn new_with_device(config: &LlamaConfig, device: Device) -> Result<Self> {
+        let head_dim = config.head_dim();
+        let num_kv_heads = config.num_kv_heads();
+
+        let q_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.num_attention_heads * head_dim,
+            config.attention_bias,
+            device,
+        );
+        let k_proj = Linear::new_with_device(
+            config.hidden_size,
+            num_kv_heads * head_dim,
+            config.attention_bias,
+            device,
+        );
+        let v_proj = Linear::new_with_device(
+            config.hidden_size,
+            num_kv_heads * head_dim,
+            config.attention_bias,
+            device,
+        );
+        let o_proj = Linear::new_with_device(
+            config.num_attention_heads * head_dim,
+            config.hidden_size,
+            config.attention_bias,
+            device,
+        );
+
+        let rotary_emb =
+            RotaryEmbedding::new(head_dim, config.max_position_embeddings, config.rope_theta);
+
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            rotary_emb,
+            num_heads: config.num_attention_heads,
+            num_kv_heads,
+            head_dim,
+        })
+    }
 }
 
 impl Layer for LlamaAttention {
@@ -317,6 +389,20 @@ impl LlamaDecoderLayer {
             post_attention_layernorm,
         })
     }
+
+    pub fn new_with_device(config: &LlamaConfig, device: Device) -> Result<Self> {
+        let self_attn = LlamaAttention::new_with_device(config, device)?;
+        let mlp = LlamaMLP::new_with_device(config, device)?;
+        let input_layernorm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+        let post_attention_layernorm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+
+        Ok(Self {
+            self_attn,
+            mlp,
+            input_layernorm,
+            post_attention_layernorm,
+        })
+    }
 }
 
 impl Layer for LlamaDecoderLayer {
@@ -364,6 +450,26 @@ impl LlamaModel {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
             layers.push(LlamaDecoderLayer::new(&config)?);
+        }
+
+        let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+
+        Ok(Self {
+            config,
+            embed_tokens,
+            layers,
+            norm,
+        })
+    }
+
+    pub fn new_with_device(config: LlamaConfig, device: Device) -> Result<Self> {
+        config.validate()?;
+
+        let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
+
+        let mut layers = Vec::new();
+        for _ in 0..config.num_hidden_layers {
+            layers.push(LlamaDecoderLayer::new_with_device(&config, device)?);
         }
 
         let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
@@ -736,6 +842,13 @@ impl LlamaForCausalLM {
     pub fn new(config: LlamaConfig) -> Result<Self> {
         let model = LlamaModel::new(config.clone())?;
         let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+
+        Ok(Self { model, lm_head })
+    }
+
+    pub fn new_with_device(config: LlamaConfig, device: Device) -> Result<Self> {
+        let model = LlamaModel::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self { model, lm_head })
     }

@@ -3,6 +3,7 @@ use crate::mistral::config::MistralConfig;
 use crate::moe::{Expert, MoEConfig, SparseMoE};
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{Result, TrustformersError},
     layers::{Embedding, Linear},
     tensor::Tensor,
@@ -48,6 +49,51 @@ impl MistralAttention {
             config.num_attention_heads * head_dim,
             config.hidden_size,
             false,
+        );
+
+        let rotary_emb =
+            RotaryEmbedding::new(head_dim, config.max_position_embeddings, config.rope_theta);
+
+        Ok(Self {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            rotary_emb,
+            num_heads: config.num_attention_heads,
+            num_kv_heads: config.num_key_value_heads,
+            head_dim,
+            sliding_window: config.sliding_window,
+            attention_dropout: config.attention_dropout,
+        })
+    }
+
+    pub fn new_with_device(config: &MistralConfig, device: Device) -> Result<Self> {
+        let head_dim = config.head_dim();
+
+        let q_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.num_attention_heads * head_dim,
+            false,
+            device,
+        );
+        let k_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.num_key_value_heads * head_dim,
+            false,
+            device,
+        );
+        let v_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.num_key_value_heads * head_dim,
+            false,
+            device,
+        );
+        let o_proj = Linear::new_with_device(
+            config.num_attention_heads * head_dim,
+            config.hidden_size,
+            false,
+            device,
         );
 
         let rotary_emb =
@@ -231,6 +277,29 @@ impl MistralDecoderLayer {
             post_attention_layernorm,
         })
     }
+
+    pub fn new_with_device(config: &MistralConfig, device: Device) -> Result<Self> {
+        let self_attn = MistralAttention::new_with_device(config, device)?;
+
+        // Convert MistralConfig to LlamaConfig-like structure for MLP
+        let llama_config = crate::llama::config::LlamaConfig {
+            hidden_size: config.hidden_size,
+            intermediate_size: config.intermediate_size,
+            mlp_bias: false, // Mistral doesn't use bias in MLP
+            ..Default::default()
+        };
+        let mlp = LlamaMLP::new_with_device(&llama_config, device)?;
+
+        let input_layernorm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+        let post_attention_layernorm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+
+        Ok(Self {
+            self_attn,
+            mlp,
+            input_layernorm,
+            post_attention_layernorm,
+        })
+    }
 }
 
 impl Layer for MistralDecoderLayer {
@@ -269,6 +338,26 @@ impl MistralModel {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
             layers.push(MistralDecoderLayer::new(&config)?);
+        }
+
+        let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+
+        Ok(Self {
+            config,
+            embed_tokens,
+            layers,
+            norm,
+        })
+    }
+
+    pub fn new_with_device(config: MistralConfig, device: Device) -> Result<Self> {
+        config.validate()?;
+
+        let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
+
+        let mut layers = Vec::new();
+        for _ in 0..config.num_hidden_layers {
+            layers.push(MistralDecoderLayer::new_with_device(&config, device)?);
         }
 
         let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
@@ -368,6 +457,13 @@ impl MistralForCausalLM {
     pub fn new(config: MistralConfig) -> Result<Self> {
         let model = MistralModel::new(config.clone())?;
         let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+
+        Ok(Self { model, lm_head })
+    }
+
+    pub fn new_with_device(config: MistralConfig, device: Device) -> Result<Self> {
+        let model = MistralModel::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self { model, lm_head })
     }

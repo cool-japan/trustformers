@@ -8,6 +8,8 @@
  * 4. Real-time Collaboration - WebSocket-based collaborative features
  */
 
+/* eslint-disable no-unused-vars */
+
 import {
     // ENAS NAS
     ENASOperations,
@@ -80,12 +82,10 @@ const assertArrayClose = (arr1, arr2, tolerance = 1e-5, message = '') => {
 };
 
 // Mock data generators
-const createMockTrainingData = (numSamples = 100, inputDim = 32, outputDim = 10) => {
-    return Array.from({ length: numSamples }, () => ({
+const createMockTrainingData = (numSamples = 100, inputDim = 32, outputDim = 10) => Array.from({ length: numSamples }, () => ({
         input: new Float32Array(inputDim).map(() => Math.random()),
         target: Math.floor(Math.random() * outputDim)
     }));
-};
 
 const createMockModel = (numLayers = 6) => ({
     type: 'transformer',
@@ -96,16 +96,16 @@ const createMockModel = (numLayers = 6) => ({
         weights: new Float32Array(1000).map(() => Math.random() * 0.1),
         bias: new Float32Array(100).map(() => 0.01)
     })),
-    forward: function(input) {
+    forward(input) {
         return new Float32Array(input.length).map(() => Math.random());
     },
-    getGradients: function() {
+    getGradients() {
         return this.layers.map(layer => ({
             weights: new Float32Array(layer.weights.length).map(() => Math.random() * 0.01),
             bias: new Float32Array(layer.bias.length).map(() => Math.random() * 0.01)
         }));
     },
-    updateWeights: function(deltas) {
+    updateWeights(deltas) {
         this.layers.forEach((layer, idx) => {
             const delta = deltas[idx];
             for (let i = 0; i < layer.weights.length; i++) {
@@ -692,7 +692,7 @@ try {
     }
 
     assert(experiment.results.length >= 1, 'Should have at least 1 result');
-    const result = experiment.results[0];
+    const [result] = experiment.results;
     assert(result.config.learningRate === 0.001, 'Config should match');
     assert(result.metrics.accuracy === 0.92, 'Metrics should match');
 
@@ -780,7 +780,7 @@ try {
         },
         metric: 'reward',
         goal: 'maximize',
-        session: session
+        session
     });
 
     // 3. Use ONNX operators for model evaluation

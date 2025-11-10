@@ -462,7 +462,7 @@ export class CollaborativeSession {
    * @param {Object} operation - Local operation
    * @returns {Object} Transformed delta
    */
-  transformOperation(delta, operation) {
+  transformOperation(delta, _operation) {
     // Simplified transformation
     // In production, would implement full OT algorithms (e.g., Google Wave OT)
 
@@ -501,7 +501,7 @@ export class CollaborativeSession {
 
     // Process operations that can be applied
     while (this.pendingOperations.length > 0) {
-      const op = this.pendingOperations[0];
+      const [op] = this.pendingOperations;
 
       if (op.version <= this.remoteVersion) {
         // Already processed
@@ -712,10 +712,10 @@ export class CollaborativeExperiment {
     if (Math.random() < exploitRatio && this.bestResult) {
       // Explore around best result
       return this.perturbConfig(this.bestResult.config);
-    } else {
+    } 
       // Random exploration
       return this.randomSample(this.searchSpace);
-    }
+    
   }
 
   /**
@@ -728,7 +728,7 @@ export class CollaborativeExperiment {
 
     for (const [param, space] of Object.entries(searchSpace)) {
       if (space.type === 'continuous') {
-        config[param] = Math.random() * (space.max - space.min) + space.min;
+        config[param] = (Math.random() * (space.max - space.min)) + space.min;
       } else if (space.type === 'discrete') {
         config[param] = space.values[Math.floor(Math.random() * space.values.length)];
       } else if (space.type === 'integer') {
