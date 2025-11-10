@@ -119,7 +119,7 @@ impl Layer for GPTNeoXAttention {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        use scirs2_core::ndarray::{s, Array2, Axis};
+        use scirs2_core::ndarray::{s, Array2, Ix2};
 
         let shape = input.shape();
         let seq_len = if shape.len() == 2 { shape[0] } else { shape[1] };
@@ -137,55 +137,82 @@ impl Layer for GPTNeoXAttention {
                     ));
                 }
 
-                // Split QKV: [seq_len, 3 * hidden_size] -> Q, K, V each [seq_len, hidden_size]
-                let hidden_size = shape[1] / 3;
-                let q = arr.slice(s![.., 0..hidden_size]).to_owned();
-                let k = arr.slice(s![.., hidden_size..2*hidden_size]).to_owned();
-                let v = arr.slice(s![.., 2*hidden_size..3*hidden_size]).to_owned();
+                // Split QKV using HuggingFace's approach:
+                // 1. Reshape [seq_len, 3*hidden_size] → [seq_len, num_heads, 3*head_dim]
+                // 2. Transpose → [num_heads, seq_len, 3*head_dim]
+                // 3. Chunk → Q, K, V each [num_heads, seq_len, head_dim]
 
-                // Reshape to multi-head: [seq_len, num_heads, head_dim]
-                let head_dim = self.head_dim;
-                let num_heads = self.num_heads;
+                let num_heads = self._num_heads;
+                let head_dim = self._head_dim;
 
-                // Apply rotary embeddings to Q and K
-                let position_ids: Vec<usize> = (0..seq_len).collect();
-                let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(
-                    &Tensor::F32(q.into_dyn()),
-                    &Tensor::F32(k.into_dyn()),
-                    &position_ids,
-                )?;
-
-                // Extract rotary-embedded tensors
-                let (q_arr, k_arr, v_arr) = match (q_rope, k_rope, Tensor::F32(v.into_dyn())) {
-                    (Tensor::F32(q), Tensor::F32(k), Tensor::F32(v)) => {
-                        let q_2d = q.into_dimensionality::<ndarray::Ix2>().map_err(|_| {
-                            tensor_op_error("GPTNeoXAttention", "Q reshape failed")
-                        })?;
-                        let k_2d = k.into_dimensionality::<ndarray::Ix2>().map_err(|_| {
-                            tensor_op_error("GPTNeoXAttention", "K reshape failed")
-                        })?;
-                        let v_2d = v.into_dimensionality::<ndarray::Ix2>().map_err(|_| {
-                            tensor_op_error("GPTNeoXAttention", "V reshape failed")
-                        })?;
-                        (q_2d, k_2d, v_2d)
-                    },
-                    _ => return Err(tensor_op_error("GPTNeoXAttention", "Unexpected tensor type")),
-                };
-
-                // Reshape to [seq_len, num_heads, head_dim]
-                let q_reshaped = q_arr.into_shape((seq_len, num_heads, head_dim)).map_err(|_| {
-                    tensor_op_error("GPTNeoXAttention", "Q multi-head reshape failed")
+                // Step 1: Reshape to [seq_len, num_heads, 3*head_dim]
+                let qkv_reshaped = arr.into_shape((seq_len, num_heads, 3 * head_dim)).map_err(|_| {
+                    tensor_op_error("GPTNeoXAttention", "QKV reshape failed")
                 })?;
-                let k_reshaped = k_arr.into_shape((seq_len, num_heads, head_dim)).map_err(|_| {
-                    tensor_op_error("GPTNeoXAttention", "K multi-head reshape failed")
-                })?;
-                let v_reshaped = v_arr.into_shape((seq_len, num_heads, head_dim)).map_err(|_| {
-                    tensor_op_error("GPTNeoXAttention", "V multi-head reshape failed")
-                })?;
+
+                // Step 2: Transpose to [num_heads, seq_len, 3*head_dim]
+                let qkv_transposed = qkv_reshaped.permuted_axes([1, 0, 2]);
+
+                // Step 3: Split into Q, K, V along last dimension
+                // Each will be [num_heads, seq_len, head_dim]
+                let q = qkv_transposed.slice(s![.., .., 0..head_dim]).to_owned();
+                let k = qkv_transposed.slice(s![.., .., head_dim..2*head_dim]).to_owned();
+                let v = qkv_transposed.slice(s![.., .., 2*head_dim..3*head_dim]).to_owned();
+
+                // Q, K, V are now [num_heads, seq_len, head_dim]
+                // We need to transpose to [seq_len, num_heads, head_dim] for RoPE
+                let rotary_ndims = self._rotary_ndims;
+
+                // Transpose to [seq_len, num_heads, head_dim]
+                let q_transposed = q.permuted_axes([1, 0, 2]);
+                let k_transposed = k.permuted_axes([1, 0, 2]);
+
+                // Apply Rotary Position Embeddings (RoPE) to Q and K
+                let mut q_rope = q_transposed.to_owned();
+                let mut k_rope = k_transposed.to_owned();
+
+                // Apply RoPE to each head
+                // RoPE rotates pairs (i, i + D/2) where D is rotary_ndims
+                // q_rope and k_rope are [seq_len, num_heads, head_dim]
+                let half_rotary_ndims = rotary_ndims / 2;
+                for pos in 0..seq_len {
+                    for h in 0..num_heads {
+                        // Apply rotation to pairs (i, i + D/2) for i in 0..D/2
+                        for i in 0..half_rotary_ndims {
+                            let j = i + half_rotary_ndims;
+
+                            // Calculate rotation angle for this pair
+                            let freq = 1.0 / self._rotary_emb.base.powf(2.0 * i as f32 / rotary_ndims as f32);
+                            let angle = pos as f32 * freq;
+                            let cos_val = angle.cos();
+                            let sin_val = angle.sin();
+
+                            // Rotate Q: (qi, qj) → (qi*cos - qj*sin, qi*sin + qj*cos)
+                            let q_i = q_rope[[pos, h, i]];
+                            let q_j = q_rope[[pos, h, j]];
+                            q_rope[[pos, h, i]] = q_i * cos_val - q_j * sin_val;
+                            q_rope[[pos, h, j]] = q_i * sin_val + q_j * cos_val;
+
+                            // Rotate K: (ki, kj) → (ki*cos - kj*sin, ki*sin + kj*cos)
+                            let k_i = k_rope[[pos, h, i]];
+                            let k_j = k_rope[[pos, h, j]];
+                            k_rope[[pos, h, i]] = k_i * cos_val - k_j * sin_val;
+                            k_rope[[pos, h, j]] = k_i * sin_val + k_j * cos_val;
+                        }
+                    }
+                }
+
+                // After RoPE, q_rope and k_rope are [seq_len, num_heads, head_dim]
+                // V is still [num_heads, seq_len, head_dim], transpose it
+                let v_reshaped = v.permuted_axes([1, 0, 2]);
+
+                let q_reshaped = q_rope;
+                let k_reshaped = k_rope;
 
                 // Compute attention scores for each head
                 // scores = Q @ K^T / sqrt(head_dim)
                 let scale = (head_dim as f32).sqrt();
+                let hidden_size = num_heads * head_dim;
                 let mut attn_output = Array2::<f32>::zeros((seq_len, hidden_size));
 
                 for h in 0..num_heads {
@@ -196,7 +223,14 @@ impl Layer for GPTNeoXAttention {
 
                     // scores = Q @ K^T / sqrt(d_k)
                     let k_t = k_head.t();
-                    let scores = q_head.dot(&k_t) / scale;
+                    let mut scores = q_head.dot(&k_t) / scale;
+
+                    // Apply causal mask: position i can only attend to positions <= i
+                    for i in 0..seq_len {
+                        for j in (i + 1)..seq_len {
+                            scores[[i, j]] = f32::NEG_INFINITY;
+                        }
+                    }
 
                     // Softmax over last dimension
                     let mut attn_weights = Array2::<f32>::zeros(scores.dim());
@@ -277,12 +311,15 @@ impl Layer for GPTNeoXLayer {
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         if self.use_parallel_residual {
-            // Parallel: attn and mlp computed in parallel, then added
-            let ln_out = self.input_layernorm.forward(input.clone())?;
-            let attn_out = self.attention.forward(ln_out.clone())?;
-            let mlp_out = self.mlp.forward(ln_out)?;
+            // Parallel: attn and mlp computed in parallel with different layer norms
+            // Formula: x = x + attn(ln1(x)) + mlp(ln2(x))
+            let ln1_out = self.input_layernorm.forward(input.clone())?;
+            let attn_out = self.attention.forward(ln1_out)?;
 
-            // Add both outputs to residual
+            let ln2_out = self.post_attention_layernorm.forward(input.clone())?;
+            let mlp_out = self.mlp.forward(ln2_out)?;
+
+            // Add both outputs to residual: x + attn + mlp
             match (&input, &attn_out, &mlp_out) {
                 (Tensor::F32(inp), Tensor::F32(attn), Tensor::F32(mlp)) => {
                     Ok(Tensor::F32(inp + attn + mlp))
@@ -323,9 +360,9 @@ impl Layer for GPTNeoXLayer {
 
 /// GPT-NeoX Model
 pub struct GPTNeoXModel {
-    embed_in: Embedding,
-    layers: Vec<GPTNeoXLayer>,
-    final_layer_norm: LayerNorm,
+    pub embed_in: Embedding,
+    pub layers: Vec<GPTNeoXLayer>,
+    pub final_layer_norm: LayerNorm,
     config: GPTNeoXConfig,
 }
 
@@ -366,17 +403,45 @@ impl GPTNeoXModel {
     pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
         use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
 
+        let model_path = model_path.as_ref(); // Convert to &Path so we can reuse it
+
         let config = WeightLoadingConfig {
             lazy_loading: true,
             memory_mapped: false,
             ..Default::default()
         };
 
-        let mut loader = auto_create_loader(model_path, Some(config))?;
+        let mut loader = auto_create_loader(model_path, Some(config.clone()))?;
 
         // Load embedding weights
         if let Ok(embed_weights) = loader.load_tensor("gpt_neox.embed_in.weight") {
             self.embed_in.set_weight(embed_weights)?;
+        }
+
+        // Load final layer norm (now that the loader bug is fixed)
+        match loader.load_tensor("gpt_neox.final_layer_norm.weight") {
+            Ok(final_ln_weight) => {
+                // Debug: check the weight values
+                if let Tensor::F32(ref arr) = final_ln_weight {
+                    use scirs2_core::ndarray::s;
+                    let first_10 = arr.slice(s![0..10]);
+                    eprintln!("[DEBUG] final_layer_norm.weight first 10: {:?}", first_10.iter().take(10).collect::<Vec<_>>());
+                    let mean = arr.mean().unwrap_or(0.0);
+                    eprintln!("[DEBUG] final_layer_norm.weight mean: {:.3} (expected: 6.688)", mean);
+                }
+                self.final_layer_norm.set_weight(final_ln_weight)?;
+            }
+            Err(e) => {
+                eprintln!("[ERROR] Failed to load final_layer_norm.weight: {:?}", e);
+            }
+        }
+        match loader.load_tensor("gpt_neox.final_layer_norm.bias") {
+            Ok(final_ln_bias) => {
+                self.final_layer_norm.set_bias(final_ln_bias)?;
+            }
+            Err(e) => {
+                eprintln!("[ERROR] Failed to load final_layer_norm.bias: {:?}", e);
+            }
         }
 
         // Load layer weights
@@ -389,10 +454,10 @@ impl GPTNeoXModel {
             {
                 layer.attention.query_key_value.set_weight(qkv_weights)?;
             }
-            if let Ok(_qkv_bias) =
+            if let Ok(qkv_bias) =
                 loader.load_tensor(&format!("{}.attention.query_key_value.bias", prefix))
             {
-                // TODO: Set bias when Linear layer supports bias setting
+                layer.attention.query_key_value.set_bias(qkv_bias)?;
             }
 
             if let Ok(dense_weights) =
@@ -400,9 +465,9 @@ impl GPTNeoXModel {
             {
                 layer.attention.dense.set_weight(dense_weights)?;
             }
-            if let Ok(_dense_bias) = loader.load_tensor(&format!("{}.attention.dense.bias", prefix))
+            if let Ok(dense_bias) = loader.load_tensor(&format!("{}.attention.dense.bias", prefix))
             {
-                // TODO: Set bias when Linear layer supports bias setting
+                layer.attention.dense.set_bias(dense_bias)?;
             }
 
             // MLP weights
@@ -411,10 +476,10 @@ impl GPTNeoXModel {
             {
                 layer.mlp.dense_h_to_4h.set_weight(mlp_up_weights)?;
             }
-            if let Ok(_mlp_up_bias) =
+            if let Ok(mlp_up_bias) =
                 loader.load_tensor(&format!("{}.mlp.dense_h_to_4h.bias", prefix))
             {
-                // TODO: Set bias when Linear layer supports bias setting
+                layer.mlp.dense_h_to_4h.set_bias(mlp_up_bias)?;
             }
 
             if let Ok(mlp_down_weights) =
@@ -422,10 +487,10 @@ impl GPTNeoXModel {
             {
                 layer.mlp.dense_4h_to_h.set_weight(mlp_down_weights)?;
             }
-            if let Ok(_mlp_down_bias) =
+            if let Ok(mlp_down_bias) =
                 loader.load_tensor(&format!("{}.mlp.dense_4h_to_h.bias", prefix))
             {
-                // TODO: Set bias when Linear layer supports bias setting
+                layer.mlp.dense_4h_to_h.set_bias(mlp_down_bias)?;
             }
 
             // Layer norms
@@ -448,14 +513,6 @@ impl GPTNeoXModel {
             {
                 layer.post_attention_layernorm.set_bias(ln2_bias)?;
             }
-        }
-
-        // Load final layer norm
-        if let Ok(final_ln_weight) = loader.load_tensor("gpt_neox.final_layer_norm.weight") {
-            self.final_layer_norm.set_weight(final_ln_weight)?;
-        }
-        if let Ok(final_ln_bias) = loader.load_tensor("gpt_neox.final_layer_norm.bias") {
-            self.final_layer_norm.set_bias(final_ln_bias)?;
         }
 
         loader.close()?;
@@ -502,8 +559,8 @@ impl Model for GPTNeoXModel {
 
 /// GPT-NeoX for Causal Language Modeling
 pub struct GPTNeoXForCausalLM {
-    gpt_neox: GPTNeoXModel,
-    embed_out: Linear,
+    pub gpt_neox: GPTNeoXModel,
+    pub embed_out: Linear,
 }
 
 impl GPTNeoXForCausalLM {
@@ -544,8 +601,22 @@ impl GPTNeoXForCausalLM {
 
         let mut loader = auto_create_loader(model_path, Some(config))?;
 
-        if let Ok(embed_out_weights) = loader.load_tensor("embed_out.weight") {
-            self.embed_out.set_weight(embed_out_weights)?;
+        eprintln!("[DEBUG] Loading embed_out.weight...");
+        match loader.load_tensor("embed_out.weight") {
+            Ok(embed_out_weights) => {
+                eprintln!("[DEBUG] ✓ embed_out.weight loaded successfully");
+                if let Tensor::F32(ref arr) = embed_out_weights {
+                    use scirs2_core::ndarray::s;
+                    eprintln!("[DEBUG] embed_out.weight shape: {:?}", arr.shape());
+                    let first_5 = arr.slice(s![0, 0..5]);
+                    eprintln!("[DEBUG] embed_out.weight[0, 0..5]: {:?}", first_5.iter().take(5).collect::<Vec<_>>());
+                }
+                self.embed_out.set_weight(embed_out_weights)?;
+            }
+            Err(e) => {
+                eprintln!("[ERROR] Failed to load embed_out.weight: {:?}", e);
+                eprintln!("[WARNING] LM head will use uninitialized/default weights!");
+            }
         }
 
         loader.close()?;

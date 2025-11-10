@@ -147,4 +147,25 @@ impl GPTNeoXConfig {
             eos_token_id: Some(3),
         }
     }
+
+    /// Create configuration for EleutherAI/pythia-160m
+    pub fn pythia_160m() -> Self {
+        Self {
+            vocab_size: 50304,
+            hidden_size: 768,
+            num_hidden_layers: 12,
+            num_attention_heads: 12,
+            intermediate_size: 3072,
+            max_position_embeddings: 2048,
+            layer_norm_eps: 1e-5,
+            hidden_act: "gelu".to_string(),
+            rotary_emb_base: 10000.0,
+            rotary_pct: 0.25,
+            use_parallel_residual: true,
+            tie_word_embeddings: false,
+            initializer_range: 0.02,
+            bos_token_id: Some(0),
+            eos_token_id: Some(0),
+        }
+    }
 }
