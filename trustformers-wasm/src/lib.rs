@@ -85,6 +85,7 @@ pub mod device_capability_detection;
 pub mod debug;
 pub mod error;
 pub mod events;
+pub mod export;
 // Import optimization modules from the optimization subdirectory
 pub mod optimization;
 pub use optimization::{

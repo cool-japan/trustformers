@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokenizers::{Encoding, Tokenizer as HFTokenizer};
+// SciRS2 Integration Policy: Use re-exported tokenizers types from trustformers_core
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
+use trustformers_core::{Encoding, Tokenizer as HFTokenizer, TokenizerError};
 
 #[derive(Debug, Clone)]
 pub struct TokenizedInputWithOffsets {
@@ -119,7 +120,7 @@ impl TokenizerImpl {
     }
 
     pub fn from_tokenizer_json(json_str: &str) -> Result<Self> {
-        let tokenizer = HFTokenizer::from_str(json_str).map_err(|e: tokenizers::Error| {
+        let tokenizer = HFTokenizer::from_str(json_str).map_err(|e: TokenizerError| {
             TrustformersError::other(anyhow::anyhow!(e).to_string())
         })?;
         Ok(Self {

@@ -359,26 +359,68 @@ impl ResourceManagementSystem {
         let port_stats = self.port_manager.get_statistics().await?;
         let directory_stats = self.temp_dir_manager.get_statistics().await?;
 
+        // Calculate average GPU utilization based on currently allocated vs peak usage
+        let average_utilization = if gpu_manager_stats.peak_usage > 0 {
+            ((gpu_manager_stats.currently_allocated as f32 / gpu_manager_stats.peak_usage as f32)
+                * 100.0) as f32
+        } else {
+            0.0_f32
+        };
+
+        // Calculate performance index based on efficiency and memory usage
+        // Higher efficiency and lower memory usage percentage indicate better performance
+        let performance_index = if gpu_manager_stats.peak_memory_usage_percent > 0.0 {
+            let memory_efficiency = 1.0 - (gpu_manager_stats.peak_memory_usage_percent / 100.0);
+            (gpu_manager_stats.efficiency * 0.6 + memory_efficiency * 0.4).min(1.0) as f32
+        } else {
+            gpu_manager_stats.efficiency
+        };
+
         // Convert gpu_manager::types::GpuUsageStatistics to resource_management::types::GpuUsageStatistics
         let gpu_stats = GpuUsageStatistics {
             total_allocations: gpu_manager_stats.total_allocations,
             currently_allocated: gpu_manager_stats.currently_allocated,
             peak_usage: gpu_manager_stats.peak_usage,
-            average_utilization: 0.0, // TODO: Calculate from gpu_manager_stats
+            average_utilization,
             total_memory_allocated_mb: (gpu_manager_stats.average_memory_allocated_mb
                 * gpu_manager_stats.total_allocations as f64)
                 as u64,
             allocation_efficiency: gpu_manager_stats.efficiency,
-            performance_index: 0.85, // TODO: Calculate from gpu_manager_stats
+            performance_index,
+        };
+
+        // Collect actual CPU and memory utilization using sysinfo
+        let mut system = sysinfo::System::new_all();
+        system.refresh_all();
+
+        // Calculate CPU utilization (average across all CPUs)
+        let cpu_utilization = {
+            let cpus = system.cpus();
+            if !cpus.is_empty() {
+                cpus.iter().map(|cpu| cpu.cpu_usage()).sum::<f32>() / cpus.len() as f32
+            } else {
+                0.0
+            }
+        };
+
+        // Calculate memory utilization percentage
+        let memory_utilization = {
+            let total_memory = system.total_memory();
+            let used_memory = system.used_memory();
+            if total_memory > 0 {
+                ((used_memory as f32 / total_memory as f32) * 100.0) as f32
+            } else {
+                0.0_f32
+            }
         };
 
         let snapshot = SystemPerformanceSnapshot {
             timestamp: chrono::Utc::now(),
-            cpu_utilization: 0.0,    // TODO: Implement actual CPU monitoring
-            memory_utilization: 0.0, // TODO: Implement actual memory monitoring
+            cpu_utilization,
+            memory_utilization,
             gpu_utilization: if gpu_stats.total_allocations > 0 {
-                // TODO: Find correct field name for average utilization in gpu_stats
-                Some(0.0)
+                // Use the calculated average_utilization
+                Some(average_utilization)
             } else {
                 None
             },

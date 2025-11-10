@@ -142,12 +142,27 @@ Application Crates (trustformers-models, trustformers-tokenizers, etc.)
 
 ```rust
 // ❌ FORBIDDEN in ALL crates except trustformers-core source
+
+// Scientific computing
 use rand::*;
 use rand::Rng;
 use rand_distr::{Normal, Uniform, Beta};
 use ndarray::*;
 use ndarray::{Array, Array1, Array2, array, s};
 use num_complex::Complex;
+
+// Parallelization and SIMD
+use rayon::*;
+use rayon::prelude::*;
+
+// GPU and hardware acceleration
+use cudarc::*;       // Use scirs2_core with 'cuda' feature
+use wgpu::*;         // Use scirs2_core with 'wgpu_backend' feature
+use metal::*;        // Use scirs2_core with 'metal' feature
+use opencl3::*;      // Use scirs2_core with 'opencl' feature
+use vulkano::*;      // Use trustformers_core::device
+
+// Tensor backends
 use tokenizers::Tokenizer;
 use candle_core::Tensor;
 use tch::Tensor;
@@ -159,6 +174,7 @@ use tch::Tensor;
 // ✅ REQUIRED - Tensor Operations
 use trustformers_core::tensor::*;        // Unified tensor operations
 use trustformers_core::tensor::Tensor;   // Main tensor type
+use trustformers_core::device::Device;   // Device management (CPU/GPU)
 
 // ✅ REQUIRED - ML Components
 use trustformers_core::layers::*;        // Attention, FFN, LayerNorm, etc.
@@ -171,15 +187,29 @@ use scirs2_core::random::*;              // RNG, distributions (Normal, Beta, et
 use scirs2_core::ndarray::*;             // Arrays, array! macro, s! macro
 use scirs2_core::simd_ops::*;            // SIMD operations
 use scirs2_core::parallel_ops::*;        // Parallel processing (rayon)
-use scirs2_core::complex::*;             // Complex numbers
+use scirs2_core::Complex;                // Complex numbers (at root level)
+
+// ✅ REQUIRED - GPU Operations (via SciRS2-Core features)
+// Enable via Cargo.toml features:
+// scirs2-core = { workspace = true, features = ["gpu", "cuda"] }    # NVIDIA
+// scirs2-core = { workspace = true, features = ["gpu", "metal"] }   # Apple
+// scirs2-core = { workspace = true, features = ["gpu", "wgpu_backend"] } # WebGPU
+// scirs2-core = { workspace = true, features = ["gpu", "opencl"] }  # OpenCL
+use scirs2_core::gpu_ops::*;             // Low-level GPU operations (with 'gpu' feature)
+use scirs2_core::simd_ops::PlatformCapabilities; // GPU detection
 
 // Example: Complete imports for a typical model file
 use trustformers_core::{
     tensor::Tensor,
+    device::Device,
     layers::{Linear, LayerNorm, Dropout},
     error::TrustformersError,
 };
 use scirs2_core::random::*;  // For initialization
+
+// Example: GPU-accelerated model
+let device = Device::cuda_if_available()?;  // Automatic GPU selection
+let tensor = Tensor::randn(&[1024, 768])?.to_device(&device)?;
 ```
 
 ### ✅ Recent SciRS2 Policy Remediation (2025)
@@ -300,6 +330,107 @@ $ cargo check -p trustformers-training
 ```
 
 Both crates now compile cleanly with 100% SciRS2 policy compliance.
+
+### GPU Operations Policy (Critical)
+
+**Important**: TrustformeRS uses a dual-layer approach for GPU operations. All GPU operations must go through either `trustformers-core` or `scirs2-core`.
+
+#### Dual-Layer GPU Architecture
+
+1. **High-level (trustformers-core)**: Tensor operations with automatic GPU dispatch
+   - Device management: `Device::cuda_if_available()`, `Device::metal()`, etc.
+   - Automatic memory transfers
+   - Backend-agnostic tensor API
+
+2. **Low-level (scirs2-core)**: Scientific computing primitives with GPU acceleration
+   - GPU-accelerated BLAS and SIMD
+   - Platform capability detection
+   - Multiple GPU backend support
+
+#### SciRS2-Core GPU Features
+
+SciRS2-Core provides GPU backends through optional feature flags:
+- `gpu` - Base GPU abstractions
+- `cuda` - NVIDIA CUDA support (internally uses `cudarc`)
+- `metal` - Apple Metal support (internally uses `metal`, `objc2-metal`, `objc2-metal-performance-shaders`)
+- `wgpu_backend` - WebGPU support (internally uses `wgpu`, `pollster`)
+- `opencl` - OpenCL support (internally uses `opencl3`)
+
+#### Cargo.toml Configuration for GPU
+
+```toml
+# ✅ CORRECT - Use scirs2-core features
+[dependencies]
+scirs2-core = { workspace = true, features = ["gpu", "cuda"] }    # For NVIDIA
+scirs2-core = { workspace = true, features = ["gpu", "metal"] }   # For Apple
+scirs2-core = { workspace = true, features = ["gpu", "wgpu_backend"] } # For WebGPU
+scirs2-core = { workspace = true, features = ["gpu", "opencl"] }  # For OpenCL
+
+# ❌ INCORRECT - Direct GPU dependencies
+# cudarc = "0.17"      # FORBIDDEN
+# wgpu = "26.0"        # FORBIDDEN
+# metal = "0.32"       # FORBIDDEN
+# opencl3 = "0.9"      # FORBIDDEN
+```
+
+#### GPU Usage Examples
+
+**High-Level Tensor Operations (Recommended)**:
+```rust
+use trustformers_core::tensor::*;
+use trustformers_core::device::Device;
+
+// Automatic GPU selection
+let device = Device::cuda_if_available()?;
+let tensor = Tensor::randn(&[1024, 768])?.to_device(&device)?;
+
+// Operations automatically run on GPU
+let result = tensor.matmul(&weights)?.relu()?;
+
+// Transfer back to CPU if needed
+let cpu_result = result.to_device(&Device::cpu())?;
+```
+
+**Low-Level GPU Operations (Advanced)**:
+```rust
+use scirs2_core::gpu_ops::*;  // With 'gpu' feature enabled
+use scirs2_core::simd_ops::PlatformCapabilities;
+
+// Platform detection
+let caps = PlatformCapabilities::detect();
+if caps.cuda_available {
+    // Use GPU-accelerated scientific operations
+    let result = gpu_accelerated_operation(&data)?;
+}
+```
+
+**Device Detection**:
+```rust
+use trustformers_core::device::Device;
+use scirs2_core::simd_ops::PlatformCapabilities;
+
+let caps = PlatformCapabilities::detect();
+let device = if caps.cuda_available {
+    Device::cuda(0)?
+} else if caps.rocm_available {
+    Device::rocm(0)?
+} else if caps.metal_available {
+    Device::metal(0)?
+} else {
+    Device::cpu()
+};
+```
+
+#### Why This Architecture?
+
+Using scirs2-core for GPU operations provides:
+1. **Consistent API** across all GPU backends
+2. **Automatic platform detection** and fallback
+3. **Centralized version management** (scirs2-core manages cudarc, wgpu, metal versions)
+4. **Unified error handling**
+5. **Cross-platform compatibility** guarantees
+
+**Remember**: Never add direct GPU library dependencies. Always use scirs2-core's feature flags.
 
 ### Real-World Examples
 
@@ -890,6 +1021,56 @@ mod tests {
 }
 ```
 
+### Compilation Error: "cannot find type `cudarc` / `wgpu` / `metal`"
+
+**Cause**: Direct GPU library usage violates SciRS2 policy
+
+**Solution**: Use scirs2-core with appropriate GPU features
+```rust
+// ❌ Wrong - Direct GPU dependency
+// Cargo.toml:
+// cudarc = "0.17"
+use cudarc::*;
+
+// ✅ Correct - Use scirs2-core features
+// Cargo.toml:
+// scirs2-core = { workspace = true, features = ["gpu", "cuda"] }
+use scirs2_core::gpu_ops::*;
+
+// Or use high-level tensor API
+use trustformers_core::tensor::Tensor;
+use trustformers_core::device::Device;
+let device = Device::cuda_if_available()?;
+```
+
+### Runtime Error: "GPU not available"
+
+**Cause**: GPU features not enabled or GPU not detected
+
+**Solution**:
+1. Enable appropriate feature in Cargo.toml:
+```toml
+scirs2-core = { workspace = true, features = ["gpu", "cuda"] }  # For NVIDIA
+# or
+scirs2-core = { workspace = true, features = ["gpu", "metal"] }  # For Apple
+```
+
+2. Check platform capabilities:
+```rust
+use scirs2_core::simd_ops::PlatformCapabilities;
+
+let caps = PlatformCapabilities::detect();
+if !caps.cuda_available {
+    eprintln!("CUDA not available, falling back to CPU");
+}
+```
+
+3. Use safe device selection:
+```rust
+let device = Device::cuda_if_available()
+    .unwrap_or_else(|_| Device::cpu());
+```
+
 ## Quick Reference Card
 
 ### Imports Cheat Sheet
@@ -907,6 +1088,12 @@ use trustformers_core::tokenizer::AutoTokenizer;
 use scirs2_core::random::*;        // RNG and distributions
 use scirs2_core::parallel_ops::*;  // Parallel processing
 use scirs2_core::simd_ops::*;      // SIMD operations
+use scirs2_core::ndarray::*;       // Arrays (Array1, Array2, ArrayD, s!, array!)
+use scirs2_core::Complex;          // Complex numbers
+
+// ✅ GPU operations (with appropriate features enabled)
+use scirs2_core::gpu_ops::*;                         // Low-level GPU ops
+use scirs2_core::simd_ops::PlatformCapabilities;    // Platform/GPU detection
 
 // ✅ Error handling
 use trustformers_core::error::{TrustformersError, Result};
@@ -917,6 +1104,11 @@ use trustformers_core::error::{TrustformersError, Result};
 // use tokenizers::*;
 // use tch::*;
 // use candle_core::*;
+// use rayon::*;
+// use cudarc::*;      // Use scirs2_core with 'cuda' feature
+// use wgpu::*;        // Use scirs2_core with 'wgpu_backend' feature
+// use metal::*;       // Use scirs2_core with 'metal' feature
+// use opencl3::*;     // Use scirs2_core with 'opencl' feature
 ```
 
 ## Minimum Rust Version

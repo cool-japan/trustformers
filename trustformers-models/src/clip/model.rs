@@ -36,9 +36,14 @@ impl CLIPVisionEmbeddings {
     }
 
     /// Load weights for vision embeddings
-    pub fn load_weights(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
         // Load patch embedding weights
-        self.patch_embedding.load_weights(loader, &format!("{}.patch_embedding", prefix))?;
+        self.patch_embedding
+            .load_weights(loader, &format!("{}.patch_embedding", prefix))?;
 
         // Load class embedding
         if let Ok(class_emb) = loader.load_tensor(&format!("{}.class_embedding", prefix)) {
@@ -46,7 +51,8 @@ impl CLIPVisionEmbeddings {
         }
 
         // Load position embeddings
-        if let Ok(pos_weight) = loader.load_tensor(&format!("{}.position_embedding.weight", prefix)) {
+        if let Ok(pos_weight) = loader.load_tensor(&format!("{}.position_embedding.weight", prefix))
+        {
             self.position_embedding.set_weight(pos_weight)?;
         }
 
@@ -139,7 +145,11 @@ impl CLIPPatchEmbedding {
     }
 
     /// Load weights for patch embedding
-    pub fn load_weights(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
         if let Ok(weight) = loader.load_tensor(&format!("{}.weight", prefix)) {
             self.projection.set_weight(weight)?;
         }
@@ -228,7 +238,11 @@ impl CLIPTextTransformer {
     }
 
     /// Load weights for text transformer
-    pub fn load_weights(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
         self.embeddings.load_weights(loader, &format!("{}.embeddings", prefix))?;
         self.encoder.load_weights(loader, &format!("{}.encoder", prefix))?;
 
@@ -275,7 +289,11 @@ impl CLIPVisionTransformer {
     }
 
     /// Load weights for vision transformer
-    pub fn load_weights(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
         self.embeddings.load_weights(loader, &format!("{}.embeddings", prefix))?;
         self.encoder.load_weights(loader, &format!("{}.encoder", prefix))?;
 
@@ -320,14 +338,20 @@ impl CLIPTextEmbeddings {
     }
 
     /// Load weights for text embeddings
-    pub fn load_weights(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
         // Load token embeddings
-        if let Ok(token_weight) = loader.load_tensor(&format!("{}.token_embedding.weight", prefix)) {
+        if let Ok(token_weight) = loader.load_tensor(&format!("{}.token_embedding.weight", prefix))
+        {
             self.token_embedding.set_weight(token_weight)?;
         }
 
         // Load position embeddings
-        if let Ok(pos_weight) = loader.load_tensor(&format!("{}.position_embedding.weight", prefix)) {
+        if let Ok(pos_weight) = loader.load_tensor(&format!("{}.position_embedding.weight", prefix))
+        {
             self.position_embedding.set_weight(pos_weight)?;
         }
 
@@ -388,7 +412,11 @@ where
     }
 
     /// Load weights for all encoder layers
-    pub fn load_weights(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
         for (i, layer) in self.layers.iter_mut().enumerate() {
             layer.load_weights(loader, &format!("{}.layers.{}", prefix, i))?;
         }
@@ -452,7 +480,11 @@ impl CLIPEncoderLayer {
     }
 
     /// Load weights for encoder layer
-    pub fn load_weights(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
         // Load attention weights
         if let Ok(q_weight) = loader.load_tensor(&format!("{}.self_attn.q_proj.weight", prefix)) {
             self.self_attn.set_query_weight(q_weight)?;

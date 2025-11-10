@@ -87,6 +87,13 @@ use rayon::*;
 use rayon::prelude::*;  // Use scirs2_core::parallel_ops instead
 use rayon_core::*;  // Use scirs2_core::parallel_ops instead
 
+// GPU and hardware acceleration (low-level)
+use cudarc::*;       // Use scirs2_core with gpu feature instead
+use wgpu::*;         // Use trustformers_core::tensor with wgpu backend instead
+use opencl3::*;      // Use scirs2_core with gpu feature instead
+use vulkano::*;      // Use scirs2_core with gpu feature instead
+use metal::*;        // Use trustformers_core::device::Device::metal() instead
+
 // Tensor backends
 use tokenizers::*;  // Use trustformers_core::tokenizer instead
 use candle_core::*;  // Use trustformers_core::tensor instead
@@ -247,33 +254,188 @@ All these should use `scirs2_core::simd_ops` when operating on raw arrays.
 
 ### Mandatory Rules
 
-1. **ALWAYS use `trustformers_core::tensor::Tensor`** for GPU operations
-2. **NEVER implement direct CUDA/Metal/ROCm kernels** in modules
-3. **NEVER make direct GPU API calls** outside of core
-4. **Use `trustformers_core::device::Device`** for device management
+1. **ALWAYS use `trustformers_core::tensor::Tensor`** for high-level GPU operations
+2. **ALWAYS use `scirs2_core` with `gpu` feature** for low-level GPU operations
+3. **NEVER implement direct CUDA/Metal/ROCm/OpenCL/Vulkan kernels** in modules
+4. **NEVER make direct GPU API calls** outside of core
+5. **NEVER add direct GPU library dependencies** (cudarc, wgpu, opencl3, vulkano, metal)
+6. **Use `trustformers_core::device::Device`** for device management
+
+**Rationale**: GPU operations require platform-specific code that must be centralized for:
+1. Consistent behavior across different GPU vendors
+2. Unified memory management and kernel optimization
+3. Cross-platform compatibility (CUDA, ROCm, Metal, WebGPU, OpenCL)
+4. Centralized performance tuning and profiling
+5. Simplified dependency management
 
 ### GPU Backend Support
 
 The core tensor module provides unified abstractions for:
-- CUDA (NVIDIA)
-- ROCm (AMD)
-- Metal (Apple)
-- WebGPU (Web/cross-platform)
-- CPU fallback
+- **CUDA** (NVIDIA) - Primary GPU backend
+- **ROCm** (AMD) - AMD GPU support
+- **Metal** (Apple) - Apple Silicon and macOS GPU
+- **WebGPU** (Web/cross-platform) - Browser and portable GPU
+- **OpenCL** (Cross-platform) - Fallback GPU backend
+- **CPU fallback** - Automatic fallback when GPU unavailable
 
-### Usage Pattern
+### Dual-Layer GPU Architecture
+
+TrustformeRS uses a two-layer approach for GPU operations:
+
+1. **High-level (trustformers-core)**: Tensor operations with automatic GPU dispatch
+   - Automatic device selection and placement
+   - Memory transfer management
+   - Kernel fusion and optimization
+   - Backend-agnostic tensor API
+
+2. **Low-level (scirs2-core)**: Scientific computing primitives with GPU acceleration
+   - SIMD and GPU-accelerated BLAS
+   - Parallel reduction operations
+   - Custom kernels for specialized operations
+   - Platform capability detection
+
+### Usage Patterns
+
+#### High-Level Tensor Operations (Recommended)
 
 ```rust
 use trustformers_core::tensor::*;
 use trustformers_core::device::Device;
 
-// CORRECT - Uses core GPU abstractions
+// ✅ CORRECT - Uses core GPU abstractions
 let device = Device::cuda_if_available()?;
 let tensor = Tensor::randn(&[1024, 768])?.to_device(&device)?;
 
-// INCORRECT - Direct CUDA usage
-// use cuda_sys::*;  // FORBIDDEN in modules
+// Automatic GPU dispatch for operations
+let result = tensor.matmul(&weights)?.relu()?;
+
+// Device management
+let is_cuda = device.is_cuda();
+let device_name = device.name();
 ```
+
+#### Low-Level GPU Operations (Advanced)
+
+```rust
+use scirs2_core::gpu_ops::*;  // Available with 'gpu' feature
+use trustformers_core::device::Device;
+
+// ✅ CORRECT - Uses scirs2-core for low-level GPU ops
+let caps = PlatformCapabilities::detect();
+if caps.cuda_available {
+    // Use GPU-accelerated scientific operations
+    let result = gpu_accelerated_operation(&data)?;
+}
+```
+
+#### Forbidden Direct GPU Usage
+
+```rust
+// ❌ INCORRECT - Direct GPU library usage
+use cudarc::driver::*;        // FORBIDDEN in modules
+use wgpu::*;                  // FORBIDDEN in modules
+use opencl3::*;               // FORBIDDEN in modules
+use vulkano::*;               // FORBIDDEN in modules
+use metal::*;                 // FORBIDDEN in modules
+
+// ❌ INCORRECT - Direct kernel implementation
+unsafe {
+    cuda_launch_kernel(...);  // FORBIDDEN in modules
+}
+```
+
+### Feature Flags for GPU Support
+
+SciRS2-Core provides GPU backends through optional feature flags:
+- `gpu` - Base GPU abstractions
+- `cuda` - NVIDIA CUDA support (enables `cudarc` internally)
+- `metal` - Apple Metal support (enables `metal`, `objc2-metal`, `objc2-metal-performance-shaders` internally)
+- `wgpu_backend` - WebGPU support (enables `wgpu`, `pollster` internally)
+- `opencl` - OpenCL support (enables `opencl3` internally)
+
+```toml
+# ✅ CORRECT - Module Cargo.toml using scirs2-core GPU features
+[dependencies]
+scirs2-core = { workspace = true, features = ["gpu", "cuda"] }  # For CUDA
+scirs2-core = { workspace = true, features = ["gpu", "metal"] }  # For Metal
+scirs2-core = { workspace = true, features = ["gpu", "wgpu_backend"] }  # For WebGPU
+scirs2-core = { workspace = true, features = ["gpu", "opencl"] }  # For OpenCL
+
+# For trustformers-core tensor operations with GPU
+trustformers-core = { workspace = true, features = ["cuda"] }  # High-level API
+
+# ❌ INCORRECT - Direct GPU dependency (scirs2-core manages these)
+# cudarc = "0.17"              # FORBIDDEN - use scirs2-core with 'cuda' feature
+# wgpu = "26.0"                # FORBIDDEN - use scirs2-core with 'wgpu_backend' feature
+# metal = "0.32"               # FORBIDDEN - use scirs2-core with 'metal' feature
+# opencl3 = "0.9"              # FORBIDDEN - use scirs2-core with 'opencl' feature
+```
+
+**Important**: SciRS2-Core provides unified wrappers around these GPU libraries. By using scirs2-core's feature flags instead of direct dependencies, you get:
+1. Consistent API across all GPU backends
+2. Automatic platform detection and fallback
+3. Centralized version management
+4. Unified error handling
+5. Cross-platform compatibility guarantees
+
+### GPU Memory Management
+
+```rust
+use trustformers_core::memory::*;
+use trustformers_core::device::Device;
+
+// ✅ CORRECT - Uses core memory management
+let device = Device::cuda(0)?;
+let pool = MemoryPool::for_device(&device)?;
+
+// Allocate GPU memory through pool
+let tensor = pool.allocate_tensor(&[1024, 768], &device)?;
+
+// Automatic transfer between devices
+let cpu_tensor = tensor.to_device(&Device::cpu())?;
+let gpu_tensor = cpu_tensor.to_device(&device)?;
+
+// ❌ INCORRECT - Manual GPU memory management
+// use cuda_sys::cudaMalloc;    // FORBIDDEN
+```
+
+### Platform Detection for GPU
+
+```rust
+use trustformers_core::device::Device;
+use scirs2_core::simd_ops::PlatformCapabilities;
+
+// ✅ CORRECT - Unified platform detection
+let caps = PlatformCapabilities::detect();
+let device = if caps.cuda_available {
+    Device::cuda(0)?
+} else if caps.rocm_available {
+    Device::rocm(0)?
+} else if caps.metal_available {
+    Device::metal(0)?
+} else {
+    Device::cpu()
+};
+
+// Check GPU properties
+if device.is_cuda() {
+    let compute_capability = device.cuda_compute_capability()?;
+    let memory_gb = device.memory_size_gb()?;
+}
+```
+
+### Critical GPU Policy Summary
+
+| Operation Type | Correct Approach | Forbidden Approach |
+|----------------|------------------|-------------------|
+| Tensor ops on GPU | `trustformers_core::tensor` | Direct CUDA/Metal/OpenCL |
+| Low-level GPU ops | `scirs2_core` with `gpu` feature | Direct cudarc/wgpu |
+| Device management | `trustformers_core::device::Device` | Direct GPU device APIs |
+| Memory allocation | `trustformers_core::memory::MemoryPool` | cudaMalloc/Metal buffers |
+| Kernel launch | Core's optimized kernels | Custom kernel launches |
+| Platform detection | `PlatformCapabilities::detect()` | Direct CUDA/Metal queries |
+
+**Remember**: All GPU operations must go through either `trustformers-core` (high-level) or `scirs2-core` (low-level). Direct GPU library usage violates the abstraction policy.
 
 ## Parallel Processing Policy
 
@@ -664,14 +826,39 @@ Add the following checks to `.github/workflows/ci.yml`:
     ! grep -r 'rayon[[:space:]]*=' trustformers-*/Cargo.toml || \
       (echo "ERROR: Direct rayon dependency found. Use scirs2_core with parallel feature" && exit 1)
 
-    # Check Cargo.toml files for forbidden dependencies
+    # GPU library violations
+    ! grep -r "^use cudarc::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct cudarc import found. Use scirs2_core with cuda feature instead" && exit 1)
+
+    ! grep -r "^use wgpu::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct wgpu import found. Use scirs2_core with wgpu_backend feature instead" && exit 1)
+
+    ! grep -r "^use metal::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct metal import found. Use scirs2_core with metal feature instead" && exit 1)
+
+    ! grep -r "^use opencl3::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct opencl3 import found. Use scirs2_core with opencl feature instead" && exit 1)
+
+    ! grep -r "^use vulkano::" trustformers-*/src --include="*.rs" || \
+      (echo "ERROR: Direct vulkano import found. Use trustformers_core::device instead" && exit 1)
+
+    # Check Cargo.toml files for forbidden dependencies (scientific computing)
     ! grep -E '^(ndarray|rand|rand_distr|num-complex|rayon)[[:space:]]*=' \
       trustformers-models/Cargo.toml \
       trustformers-training/Cargo.toml \
       trustformers-optim/Cargo.toml \
       trustformers-tokenizers/Cargo.toml \
       trustformers-py/Cargo.toml || \
-      (echo "ERROR: Forbidden dependency in non-core crate Cargo.toml" && exit 1)
+      (echo "ERROR: Forbidden scientific computing dependency in non-core crate Cargo.toml" && exit 1)
+
+    # Check Cargo.toml files for forbidden GPU dependencies
+    ! grep -E '^(cudarc|wgpu|metal|opencl3|vulkano)[[:space:]]*=' \
+      trustformers-models/Cargo.toml \
+      trustformers-training/Cargo.toml \
+      trustformers-optim/Cargo.toml \
+      trustformers-tokenizers/Cargo.toml \
+      trustformers-serve/Cargo.toml || \
+      (echo "ERROR: Forbidden GPU dependency in non-core crate Cargo.toml. Use scirs2_core with gpu features" && exit 1)
 
 - name: Check for inline ndarray/rand usage
   run: |
@@ -696,6 +883,14 @@ Add the following checks to `.github/workflows/ci.yml`:
 - [ ] No manual SIMD intrinsics (`std::arch`, `packed_simd`)
 - [ ] SIMD operations use `scirs2_core::simd_ops` with feature flags
 
+#### GPU Operations and Low-Level Hardware
+- [ ] No direct GPU library dependencies (`cudarc`, `wgpu`, `metal`, `opencl3`, `vulkano`)
+- [ ] GPU operations use `trustformers_core::tensor` for high-level ops
+- [ ] Low-level GPU ops use `scirs2_core` with appropriate features (`cuda`, `metal`, `wgpu_backend`, `opencl`)
+- [ ] Device management uses `trustformers_core::device::Device`
+- [ ] GPU memory management uses `trustformers_core::memory::MemoryPool`
+- [ ] No direct CUDA/Metal/OpenCL kernel launches outside of core
+
 #### TrustformeRS-Specific
 - [ ] Tensor operations use `trustformers_core::tensor`
 - [ ] Tokenization uses `trustformers_core::tokenizer`
@@ -714,17 +909,27 @@ Add the following checks to `.github/workflows/ci.yml`:
 [bans]
 # Ban direct usage of these crates in non-core modules
 deny = [
+    # Scientific computing - use scirs2-core instead
     { name = "rand", wrappers = ["scirs2-core"] },
     { name = "rand_distr", wrappers = ["scirs2-core"] },
     { name = "ndarray", wrappers = ["scirs2-core"] },
     { name = "num-complex", wrappers = ["scirs2-core"] },
+
+    # Parallelization - use scirs2-core instead
     { name = "rayon", wrappers = ["scirs2-core"] },
     { name = "rayon-core", wrappers = ["scirs2-core"] },
+
+    # GPU libraries - use scirs2-core with gpu features instead
+    { name = "cudarc", wrappers = ["scirs2-core"] },
+    { name = "wgpu", wrappers = ["scirs2-core"] },
+    { name = "metal", wrappers = ["scirs2-core"] },
+    { name = "opencl3", wrappers = ["scirs2-core"] },
+    { name = "vulkano", wrappers = ["trustformers-core"] },
 ]
 
-# Only allow these in trustformers-core
+# Only allow these in trustformers-core and scirs2-core
 [bans.features]
-allow = ["trustformers-core"]
+allow = ["trustformers-core", "scirs2-core"]
 ```
 
 ### Quarterly Dependency Audit
@@ -771,6 +976,11 @@ TrustformeRS leverages SciRS2-Core for:
 - ✅ Random number generation for initialization and sampling
 - ✅ Platform capability detection
 - ✅ Memory-efficient algorithms for large-scale processing
+- ✅ GPU acceleration with unified backends (CUDA, Metal, WebGPU, OpenCL)
+  - `scirs2-core` with `cuda` feature for NVIDIA GPUs
+  - `scirs2-core` with `metal` feature for Apple GPUs
+  - `scirs2-core` with `wgpu_backend` feature for WebGPU
+  - `scirs2-core` with `opencl` feature for cross-platform GPU
 
 TrustformeRS-Core provides:
 - ✅ Tensor abstractions with automatic differentiation

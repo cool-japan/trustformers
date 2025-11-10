@@ -345,7 +345,7 @@ impl ModelCacheManager {
             self.evictions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
-            Err(anyhow!("No models available for eviction"))
+            Err(anyhow!("No models available for eviction").into())
         }
     }
 

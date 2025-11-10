@@ -658,6 +658,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_threading_support_detection() {
         // These tests will only pass in environments with proper threading support
         let _supported = is_threading_supported();

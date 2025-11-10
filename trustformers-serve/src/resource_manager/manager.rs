@@ -164,23 +164,128 @@ impl ResourceManagementSystem {
             ));
         }
 
-        // TODO: Implement resource allocation using the new generic ResourceRequirement structure
-        // The resource_type field should be parsed to determine which type of resource to allocate
-        // For now, using empty allocations as placeholder
-        let ports: Vec<u16> = vec![];
-        let temp_dirs: Vec<String> = vec![];
-        let gpu_devices: Vec<u32> = vec![];
-        let db_connections: Vec<String> = vec![];
+        // Implement resource allocation using the generic ResourceRequirement structure
+        // Parse resource_type and allocate appropriate resources based on requirements
+        let mut ports: Vec<u16> = vec![];
+        let mut temp_dirs: Vec<String> = vec![];
+        let mut gpu_devices: Vec<u32> = vec![];
+        let mut db_connections: Vec<String> = vec![];
 
-        // Create allocation record
+        let resource_type_str = requirements.resource_type.to_lowercase();
+        let amount_needed = requirements.min_amount.ceil() as usize;
+
+        match resource_type_str.as_str() {
+            "network_port" | "port" => {
+                debug!(
+                    "Allocating {} network port(s) for test: {}",
+                    amount_needed, test_id
+                );
+                match self.port_manager.allocate_ports(amount_needed, test_id).await {
+                    Ok(allocated_ports) => {
+                        ports = allocated_ports;
+                    },
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Failed to allocate required ports: {}", e));
+                    },
+                }
+            },
+            "temp_directory" | "temp_dir" | "directory" => {
+                debug!(
+                    "Allocating {} temporary director(y/ies) for test: {}",
+                    amount_needed, test_id
+                );
+                match self.temp_dir_manager.allocate_directories(amount_needed, test_id).await {
+                    Ok(allocated_dirs) => {
+                        temp_dirs = allocated_dirs;
+                    },
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to allocate required temp directories: {}",
+                            e
+                        ));
+                    },
+                }
+            },
+            "gpu_device" | "gpu" => {
+                debug!(
+                    "Allocating {} GPU device(s) for test: {}",
+                    amount_needed, test_id
+                );
+                // Allocate GPU devices based on available device IDs
+                let device_ids: Vec<usize> = (0..amount_needed).collect();
+                match self.gpu_manager.allocate_devices(&device_ids, test_id).await {
+                    Ok(allocated_devices) => {
+                        gpu_devices = allocated_devices.into_iter().map(|id| id as u32).collect();
+                    },
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to allocate required GPU devices: {}",
+                            e
+                        ));
+                    },
+                }
+            },
+            "database_connection" | "database" | "db" => {
+                debug!(
+                    "Allocating {} database connection(s) for test: {}",
+                    amount_needed, test_id
+                );
+                match self.database_manager.allocate_connections(amount_needed, test_id).await {
+                    Ok(allocated_conns) => {
+                        db_connections = allocated_conns;
+                    },
+                    Err(e) => {
+                        return Err(anyhow::anyhow!(
+                            "Failed to allocate required database connections: {}",
+                            e
+                        ));
+                    },
+                }
+            },
+            "custom" => {
+                debug!("Allocating custom resource for test: {}", test_id);
+                // Custom resources are tracked separately and don't return specific IDs
+                // We just track that the allocation happened
+                debug!(
+                    "Custom resource allocated successfully (amount: {})",
+                    requirements.min_amount
+                );
+            },
+            "mixed" | _ => {
+                // Mixed allocation or unknown type: try to intelligently allocate
+                // based on min_amount or use a default mixed allocation
+                debug!(
+                    "Performing mixed resource allocation for test: {} (type: {})",
+                    test_id, resource_type_str
+                );
+
+                // Allocate one of each type for mixed allocation
+                // Port
+                if let Ok(allocated_ports) = self.port_manager.allocate_ports(1, test_id).await {
+                    ports = allocated_ports;
+                }
+
+                // Temp directory
+                if let Ok(allocated_dirs) =
+                    self.temp_dir_manager.allocate_directories(1, test_id).await
+                {
+                    temp_dirs = allocated_dirs;
+                }
+
+                // Note: GPU and database are optional for mixed allocation
+                // to avoid resource exhaustion on systems without GPUs or databases
+            },
+        }
+
+        // Create allocation record with actual allocated resources
         let allocation = ResourceAllocation {
-            resource_type: "mixed".to_string(),
+            resource_type: resource_type_str.clone(),
             resource_id: format!("allocation-{}", test_id),
             allocated_at: chrono::Utc::now(),
             deallocated_at: None,
             duration: std::time::Duration::from_secs(0),
-            utilization: 0.0,
-            efficiency: 0.0,
+            utilization: 0.0, // Will be updated during deallocation
+            efficiency: 0.0,  // Will be calculated based on actual usage
         };
 
         // Track allocation

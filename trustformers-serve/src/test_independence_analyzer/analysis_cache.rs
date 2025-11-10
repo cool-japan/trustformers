@@ -852,9 +852,11 @@ impl CacheSerializer for BincodeCacheSerializer {
     }
 
     fn deserialize<T: for<'de> Deserialize<'de>>(&self, data: &[u8]) -> AnalysisResult<T> {
-        let (result, _): (T, usize) = bincode::serde::decode_from_slice(data, bincode::config::standard())
-            .map_err(|e| AnalysisError::CacheError {
-                message: format!("Bincode deserialization failed: {}", e),
+        let (result, _): (T, usize) =
+            bincode::serde::decode_from_slice(data, bincode::config::standard()).map_err(|e| {
+                AnalysisError::CacheError {
+                    message: format!("Bincode deserialization failed: {}", e),
+                }
             })?;
         Ok(result)
     }

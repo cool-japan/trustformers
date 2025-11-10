@@ -918,14 +918,12 @@ impl AdvancedMixedPrecisionManager {
             },
             Tensor::CF16(arr) => {
                 let factor_f16 = half::f16::from_f32(factor);
-                let scaled =
-                    arr.mapv(|x| Complex::new(x.re * factor_f16, x.im * factor_f16));
+                let scaled = arr.mapv(|x| Complex::new(x.re * factor_f16, x.im * factor_f16));
                 Ok(Tensor::CF16(scaled))
             },
             Tensor::CBF16(arr) => {
                 let factor_bf16 = half::bf16::from_f32(factor);
-                let scaled =
-                    arr.mapv(|x| Complex::new(x.re * factor_bf16, x.im * factor_bf16));
+                let scaled = arr.mapv(|x| Complex::new(x.re * factor_bf16, x.im * factor_bf16));
                 Ok(Tensor::CBF16(scaled))
             },
             Tensor::Sparse(_) => Ok(tensor.clone()), // Don't scale sparse tensors

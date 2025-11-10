@@ -333,7 +333,7 @@ impl GrpcServer {
             .map_err(|_| anyhow!("Failed to acquire lock on running state"))?;
 
         if *is_running {
-            return Err(anyhow!("Server is already running"));
+            return Err(anyhow!("Server is already running").into());
         }
 
         let shutdown_signal = Arc::new(Mutex::new(false));
@@ -516,7 +516,7 @@ impl LoadBalancer {
             },
             LoadBalancingStrategy::LeastConnections => healthy_instances
                 .iter()
-                .min_by_key(|instance| instance.current_requests.lock().unwrap_or_default())
+                .min_by_key(|instance| *instance.current_requests.lock().unwrap())
                 .copied(),
             LoadBalancingStrategy::WeightedRoundRobin => {
                 // Weighted selection (simplified)
@@ -530,10 +530,10 @@ impl LoadBalancer {
             LoadBalancingStrategy::LeastResponseTime => healthy_instances
                 .iter()
                 .min_by_key(|instance| {
-                    let total_requests = instance.total_requests.lock().unwrap_or_default();
-                    let total_time = instance.total_response_time_ms.lock().unwrap_or_default();
-                    if *total_requests > 0 {
-                        *total_time / *total_requests
+                    let total_requests = *instance.total_requests.lock().unwrap();
+                    let total_time = *instance.total_response_time_ms.lock().unwrap();
+                    if total_requests > 0 {
+                        total_time / total_requests
                     } else {
                         0
                     }

@@ -46,6 +46,7 @@ pub mod tensor;
 pub mod testing;
 #[cfg(test)]
 pub mod tests;
+pub mod tokenizer_backend;
 pub mod traits;
 pub mod utils;
 pub mod versioning;
@@ -298,10 +299,12 @@ pub use plugins::{
 };
 pub use quantization::{
     dequantize_bitsandbytes,
+    estimate_quantization_error,
     from_bitsandbytes_format,
     quantize_4bit,
     quantize_dynamic_tree,
     quantize_int8,
+    select_fp8_format,
     to_bitsandbytes_format,
     AWQQuantizer,
     ActivationLayerQuantConfig,
@@ -314,13 +317,27 @@ pub use quantization::{
     AutoBitAllocationStrategy,
     // BitsAndBytes compatibility
     BitsAndBytesConfig,
+    // GGUF K-quant formats
+    BlockQ2K,
+    BlockQ3K,
+    BlockQ4K,
     BnBComputeType,
     BnBConfig,
     BnBQuantType,
     BnBQuantizer,
     BnBStorageType,
+    // FP8 quantization
+    DelayedScalingConfig,
+    FP8Config,
+    FP8Format,
+    FP8Quantizer,
+    FP8Tensor,
     FakeQuantize,
     GPTQQuantizer,
+    KQuantConfig,
+    KQuantTensor,
+    KQuantType,
+    KQuantizer,
     LayerQuantConfig,
     MixedBitConfig,
     MixedBitQuantizedTensor,
@@ -334,6 +351,8 @@ pub use quantization::{
     QuantizedBlock,
     QuantizedTensor,
     Quantizer,
+    ScaleFactors,
+    ScalingStrategy,
     SensitivityConfig,
     SensitivityMetric,
 };
@@ -341,6 +360,7 @@ pub use sparse_tensor::{SparseFormat, SparseIndices, SparseTensor};
 pub use tensor::{
     DType, EvalContext, ExprNode, OpType, OptimizationHints, Tensor, TensorExpr, TensorType,
 };
+pub use tokenizer_backend::{Encoding, Tokenizer, TokenizerError};
 pub use traits::{Config, Layer, Model};
 pub use versioning::{
     ActiveDeployment,

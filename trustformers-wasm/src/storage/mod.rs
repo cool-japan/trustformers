@@ -16,6 +16,8 @@ pub mod streaming_loader;
 #[cfg(feature = "model-splitting")]
 pub mod model_splitting;
 
+pub mod progressive_loader;
+
 // Re-export main types for convenience
 #[cfg(feature = "indexeddb")]
 pub use indexeddb::{CompressionType, ModelMetadata, ModelStorage, StoredModel};
@@ -37,6 +39,12 @@ pub use model_splitting::{
     get_recommended_chunk_size_mb, should_split_model, ChunkConfig, ChunkInfo, ChunkPriority,
     ChunkType, LoadingStrategy as SplittingStrategy, ModelChunk, ModelLoadingSession,
     ModelSplitter,
+};
+
+pub use progressive_loader::{
+    ChunkLoader, LoadPriority, LoadingManifest, LoadingState,
+    LoadingStats as ProgressiveLoadingStats, ModuleMetadata, ProgressiveLoader,
+    ProgressiveLoaderConfig,
 };
 
 /// Storage module initialization

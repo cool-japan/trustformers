@@ -407,7 +407,6 @@ impl FfiParser {
             "f32" | "c_float" => Some(PrimitiveType::Float32),
             "f64" | "c_double" => Some(PrimitiveType::Float64),
             "bool" | "c_bool" => Some(PrimitiveType::Bool),
-            "c_char" => Some(PrimitiveType::Char),
             "c_void" | "()" => Some(PrimitiveType::Void),
             "CString" | "CStr" => Some(PrimitiveType::CString),
             name if name.ends_with("Handle") => Some(PrimitiveType::Handle),

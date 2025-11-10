@@ -41,6 +41,7 @@ mod distributed;
 mod error;
 mod fuzzing;
 mod intel_ai;
+mod memory_pool;
 mod memory_safety;
 mod memory_safety_enhanced;
 mod model;
@@ -53,10 +54,13 @@ mod pipeline;
 mod platform;
 mod profiling_tools;
 mod quantization;
+mod streaming;
+mod tensor;
 mod thread_pool;
 mod tokenizer;
 mod tpu;
 mod utils;
+mod zero_copy;
 
 #[cfg(feature = "codegen")]
 pub mod codegen;
@@ -132,15 +136,46 @@ pub use pipeline::{
 // Platform module exports
 // pub use platform::{...};
 
+pub use memory_pool::{
+    trustformers_memory_pool_alloc, trustformers_memory_pool_create,
+    trustformers_memory_pool_destroy, trustformers_memory_pool_free, trustformers_memory_pool_gc,
+    trustformers_memory_pool_get_stats, trustformers_memory_pool_reset_stats,
+    TrustformersMemoryPoolConfig, TrustformersMemoryPoolHandle, TrustformersMemoryPoolStats,
+};
 pub use quantization::{
     trustformers_advanced_quantization_create, trustformers_advanced_quantization_report,
     trustformers_nas_quantization_optimize, trustformers_quantization_create_engine,
     trustformers_quantization_quantize_model, AdvancedQuantizationConfig,
     AdvancedQuantizationEngine,
 };
+pub use streaming::{
+    trustformers_streaming_create, trustformers_streaming_free, trustformers_streaming_get_text,
+    trustformers_streaming_get_token_count, trustformers_streaming_is_active,
+    trustformers_streaming_start, trustformers_streaming_stop, trustformers_streaming_wait,
+    TrustformersChunkCallback, TrustformersProgressCallback, TrustformersStreamHandle,
+    TrustformersStreamingConfig, TrustformersTokenCallback,
+};
+pub use tensor::{
+    trustformers_tensor_add, trustformers_tensor_clone, trustformers_tensor_copy_data,
+    trustformers_tensor_create_from_data, trustformers_tensor_div, trustformers_tensor_free,
+    trustformers_tensor_gelu, trustformers_tensor_get_data_ptr, trustformers_tensor_matmul,
+    trustformers_tensor_mul, trustformers_tensor_numel, trustformers_tensor_ones,
+    trustformers_tensor_permute, trustformers_tensor_print_info, trustformers_tensor_rand,
+    trustformers_tensor_randn, trustformers_tensor_reduce, trustformers_tensor_relu,
+    trustformers_tensor_reshape, trustformers_tensor_shape, trustformers_tensor_softmax,
+    trustformers_tensor_sub, trustformers_tensor_transpose, trustformers_tensor_zeros,
+    TrustformersDType, TrustformersInterpolationMode, TrustformersReduceOp, TrustformersTensor,
+};
 pub use tokenizer::{
     trustformers_tokenizer_decode, trustformers_tokenizer_destroy, trustformers_tokenizer_encode,
     trustformers_tokenizer_from_pretrained, TrustformersTokenizer, TrustformersTokenizerConfig,
+};
+pub use zero_copy::{
+    trustformers_shared_memory_create, trustformers_shared_memory_free,
+    trustformers_shared_memory_get_ptr, trustformers_shared_memory_open, trustformers_tensor_mmap,
+    trustformers_tensor_zero_copy_view, trustformers_zero_copy_get_stats,
+    TrustformersMemoryMapMode, TrustformersSharedMemHandle, TrustformersZeroCopyConfig,
+    TrustformersZeroCopyStats,
 };
 
 // Re-export utility functions for use throughout the C API

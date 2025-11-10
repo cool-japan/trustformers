@@ -702,6 +702,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_feature_detection() {
         let _streaming_supported = is_streaming_compilation_supported();
         let _cache_supported = is_cache_api_available();

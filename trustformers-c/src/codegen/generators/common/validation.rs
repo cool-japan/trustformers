@@ -158,7 +158,7 @@ pub fn is_valid_type_name(name: &str) -> bool {
 /// Check if a function name is reserved in common programming languages
 pub fn is_reserved_keyword(name: &str, languages: &[crate::codegen::TargetLanguage]) -> bool {
     for language in languages {
-        if is_reserved_in_language(name, *language) {
+        if is_reserved_in_language(name, language.clone()) {
             return true;
         }
     }

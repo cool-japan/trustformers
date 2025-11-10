@@ -56,11 +56,9 @@ impl CrossEntropyLoss {
 
     /// Compute softmax with numerical stability
     fn softmax(logits: &ArrayD<f32>) -> Result<ArrayD<f32>> {
-        let max_vals = logits.fold_axis(
-            Axis(logits.ndim() - 1),
-            f32::NEG_INFINITY,
-            |&a, &b| a.max(b),
-        );
+        let max_vals = logits.fold_axis(Axis(logits.ndim() - 1), f32::NEG_INFINITY, |&a, &b| {
+            a.max(b)
+        });
 
         // Subtract max for numerical stability
         let stable_logits = logits - &max_vals.insert_axis(Axis(logits.ndim() - 1));

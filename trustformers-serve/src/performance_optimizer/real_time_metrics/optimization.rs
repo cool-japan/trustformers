@@ -722,12 +722,17 @@ impl LiveOptimizationAlgorithm for ParallelismOptimizationAlgorithm {
             let confidence = self.calculate_confidence(cpu_utilization, throughput, history);
             let impact = self.estimate_impact(current_parallelism, optimal_parallelism, metrics);
 
+            let action_type = if optimal_parallelism > current_parallelism {
+                ActionType::IncreaseParallelism
+            } else {
+                ActionType::DecreaseParallelism
+            };
+
             recommendations.push(OptimizationRecommendation {
                 id: format!("parallelism_{}", Utc::now().timestamp()),
                 timestamp: Utc::now(),
                 actions: vec![RecommendedAction {
-                    // TODO: ActionType::IncreaseParallelism doesn't exist, using TuneParameters
-                    action_type: ActionType::TuneParameters,
+                    action_type,
                     parameters: {
                         let mut params = HashMap::new();
                         params.insert(

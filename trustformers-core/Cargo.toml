@@ -45,6 +45,7 @@ reqwest.workspace = true
 num_cpus.workspace = true
 approx.workspace = true
 tempfile.workspace = true
+tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS2 Integration Policy
 
 # SciRS2 dependencies - required for SciRS2 Integration Policy
 scirs2-core = { workspace = true, features = ["random"] }

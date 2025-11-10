@@ -318,7 +318,7 @@ impl TPESampler {
                 if let Some(base_float) = base_value.as_float() {
                     // Add Gaussian noise
                     let noise_std = (p.high - p.low) * 0.1; // 10% of range
-                    // Distribution and Normal already available via scirs2_core::random::*
+                                                            // Distribution and Normal already available via scirs2_core::random::*
                     let normal = Normal::new(0.0, noise_std)
                         .unwrap_or_else(|_| Normal::new(0.0, 1.0).unwrap());
                     let noisy_value = base_float + normal.sample(&mut self.rng);

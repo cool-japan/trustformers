@@ -2,6 +2,7 @@
 //!
 //! This module provides full WebGPU support for GPU-accelerated tensor operations.
 
+pub mod advanced_fusion_patterns;
 pub mod advanced_optimizations;
 pub mod async_executor;
 pub mod backend;
@@ -16,6 +17,9 @@ pub mod types;
 pub mod workgroup_tuner;
 
 // Re-export the main types
+pub use advanced_fusion_patterns::{
+    AdvancedFusionOptimizer, FusionPatternConfig, FusionStats, TransformerFusionPattern,
+};
 pub use advanced_optimizations::{
     AdvancedGPUConfig, AdvancedGPUOptimizer, GPUPerformanceMetrics, KernelOptimization,
 };
