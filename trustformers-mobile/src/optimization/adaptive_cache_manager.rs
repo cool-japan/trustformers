@@ -291,7 +291,8 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
     ) -> Result<()> {
         // Check if we need to evict
         let mut current_mem = self.current_memory.lock().unwrap();
-        let soft_limit = (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
+        let soft_limit =
+            (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
 
         if *current_mem + size_bytes > soft_limit {
             drop(current_mem);
@@ -372,7 +373,8 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Evict entries to fit new data
     fn evict_to_fit(&self, required_bytes: usize) -> Result<()> {
-        let target_memory = (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
+        let target_memory =
+            (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
         let current_mem = *self.current_memory.lock().unwrap();
 
         if current_mem + required_bytes <= target_memory {
@@ -385,24 +387,24 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         match self.config.eviction_strategy {
             EvictionStrategy::LRU => {
                 freed = self.evict_lru(to_free)?;
-            }
+            },
             EvictionStrategy::LFU => {
                 freed = self.evict_lfu(to_free)?;
-            }
+            },
             EvictionStrategy::Adaptive => {
                 freed = self.evict_adaptive(to_free)?;
-            }
+            },
             EvictionStrategy::SizeAware => {
                 freed = self.evict_size_aware(to_free)?;
-            }
+            },
             EvictionStrategy::Priority => {
                 freed = self.evict_by_priority(to_free)?;
-            }
+            },
         }
 
         if freed < to_free {
             return Err(TrustformersError::runtime_error(
-                "Failed to free enough memory through eviction".to_string()
+                "Failed to free enough memory through eviction".to_string(),
             ));
         }
 
@@ -423,7 +425,8 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
             if let Some(key) = key {
                 drop(stats);
                 if let Some(entry) = self.remove(&key) {
-                    freed += self.cache.lock().unwrap().get(&key).map(|e| e.size_bytes).unwrap_or(0);
+                    freed +=
+                        self.cache.lock().unwrap().get(&key).map(|e| e.size_bytes).unwrap_or(0);
                     stats = self.stats.lock().unwrap();
                     stats.evictions += 1;
                 } else {
@@ -592,7 +595,10 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
         // Update frequency
         if stats.recent_accesses.len() >= 2 {
-            let time_span = stats.recent_accesses.back().unwrap()
+            let time_span = stats
+                .recent_accesses
+                .back()
+                .unwrap()
                 .duration_since(*stats.recent_accesses.front().unwrap())
                 .as_secs_f64();
             stats.avg_frequency = stats.recent_accesses.len() as f64 / time_span.max(1.0);
@@ -712,7 +718,9 @@ mod tests {
         // Insert with different priorities
         cache.insert_with_priority("low".to_string(), vec![0u8; 300], 300, 1).unwrap();
         cache.insert_with_priority("high".to_string(), vec![0u8; 300], 300, 10).unwrap();
-        cache.insert_with_priority("medium".to_string(), vec![0u8; 300], 300, 5).unwrap();
+        cache
+            .insert_with_priority("medium".to_string(), vec![0u8; 300], 300, 5)
+            .unwrap();
 
         // This should evict "low" (lowest priority)
         cache.insert_with_priority("new".to_string(), vec![0u8; 300], 300, 5).unwrap();

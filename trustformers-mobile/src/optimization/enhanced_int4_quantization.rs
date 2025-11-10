@@ -145,14 +145,17 @@ impl Int4Block {
 
         self.data.get(byte_index).map(|&packed| {
             let (low, high) = Self::unpack_int4(packed);
-            if is_high { high } else { low }
+            if is_high {
+                high
+            } else {
+                low
+            }
         })
     }
 
     /// Dequantize value at index
     pub fn dequantize(&self, index: usize) -> Option<f32> {
-        self.get(index)
-            .map(|q| (q as i32 - self.zero_point as i32) as f32 * self.scale)
+        self.get(index).map(|q| (q as i32 - self.zero_point as i32) as f32 * self.scale)
     }
 }
 
@@ -518,7 +521,15 @@ mod tests {
             max_no_clip,
             max_clipped
         );
-        assert!(max_clipped < 100.0, "Max should be well below outlier range: {}", max_clipped);
-        assert!(min_clipped >= min_no_clip, "Min should be >= 0: {}", min_clipped);
+        assert!(
+            max_clipped < 100.0,
+            "Max should be well below outlier range: {}",
+            max_clipped
+        );
+        assert!(
+            min_clipped >= min_no_clip,
+            "Min should be >= 0: {}",
+            min_clipped
+        );
     }
 }
