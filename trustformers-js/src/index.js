@@ -148,6 +148,62 @@ import {
   createNAS
 } from './neural-architecture-search.js';
 
+// NEW: ENAS NAS (2025-11-10 Session 3)
+import {
+  ENASOperations,
+  ENASController,
+  ENASSharedModel,
+  ENASSearcher,
+  createENASSearcher,
+  ENASSearchSpaces
+} from './nas/enas-nas.js';
+
+// NEW: Enhanced Federated Learning (2025-11-10 Session 3)
+import {
+  FedBNAggregator,
+  FedNovaAggregator,
+  EnhancedFederatedServer,
+  createEnhancedFederatedLearning
+} from './federated-learning-enhanced.js';
+
+// NEW: ONNX Operators (2025-11-10 Session 3)
+import {
+  ONNXOperatorRegistry,
+  createOperatorRegistry,
+  Tensor as ONNXTensor,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  MatMul,
+  Gemm,
+  Relu,
+  Gelu,
+  Sigmoid,
+  Tanh,
+  Softmax,
+  Swish,
+  BatchNormalization,
+  LayerNormalization,
+  Reshape,
+  Transpose,
+  Concat,
+  Slice,
+  ReduceSum,
+  ReduceMean,
+  ReduceMax
+} from './onnx-operators.js';
+
+// NEW: Real-time Collaboration (2025-11-10 Session 3)
+import {
+  CollaborativeSession,
+  CollaborativeExperiment,
+  CollaborativeMetricsDashboard,
+  createCollaborativeSession,
+  createCollaborativeExperiment,
+  createMetricsDashboard
+} from './realtime-collaboration.js';
+
 // Import new performance and infrastructure modules
 import {
   WorkerPool,
@@ -1189,5 +1245,53 @@ export {
   BrowserPerformanceProfiler,
   MetricType,
   PerformanceBudgets,
-  createBrowserProfiler
+  createBrowserProfiler,
+
+  // NEW: ENAS NAS (2025-11-10 Session 3)
+  ENASOperations,
+  ENASController,
+  ENASSharedModel,
+  ENASSearcher,
+  createENASSearcher,
+  ENASSearchSpaces,
+
+  // NEW: Enhanced Federated Learning (2025-11-10 Session 3)
+  FedBNAggregator,
+  FedNovaAggregator,
+  EnhancedFederatedServer,
+  createEnhancedFederatedLearning,
+
+  // NEW: ONNX Operators (2025-11-10 Session 3)
+  ONNXOperatorRegistry,
+  createOperatorRegistry,
+  ONNXTensor,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  MatMul,
+  Gemm,
+  Relu,
+  Gelu,
+  Sigmoid,
+  Tanh,
+  Softmax,
+  Swish,
+  BatchNormalization,
+  LayerNormalization,
+  Reshape,
+  Transpose,
+  Concat,
+  Slice,
+  ReduceSum,
+  ReduceMean,
+  ReduceMax,
+
+  // NEW: Real-time Collaboration (2025-11-10 Session 3)
+  CollaborativeSession,
+  CollaborativeExperiment,
+  CollaborativeMetricsDashboard,
+  createCollaborativeSession,
+  createCollaborativeExperiment,
+  createMetricsDashboard
 };

@@ -285,21 +285,70 @@ impl Layer for Linear {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // Cache weight buffer on Metal GPU if needed (optimization for repeated forward passes)
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        {
-            if self.device.is_gpu() {
-                let _ = self.ensure_weight_buffer_cached();
-            }
-        }
-
         // Handle different input shapes for matmul
         let input_shape = input.shape();
         let weight_t = self.weight.transpose(0, 1)?;
 
         let output = if input_shape.len() == 2 {
             // Standard 2D input: [seq_len, hidden_size] x [hidden_size, out_features]
-            // Use device-aware dispatch for GPU acceleration
+
+            // Try to use cached Metal buffer if available (ZERO-COPY OPTIMIZATION)
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            if matches!(self.device, Device::Metal(_)) {
+                // Ensure buffer is cached
+                self.ensure_weight_buffer_cached()?;
+
+                // Try to use cached buffer
+                if let Ok(buffer_id_guard) = self.weight_buffer_id.read() {
+                    if let Some(buffer_id) = *buffer_id_guard {
+                        // We have a cached buffer! Use it for ZERO-COPY matmul
+                        use crate::gpu_ops::metal::get_metal_backend;
+
+                        if let (Tensor::F32(inp), Tensor::F32(w_t)) = (&input, &weight_t) {
+                            if inp.ndim() == 2 && w_t.ndim() == 2 {
+                                let inp_shape = inp.shape();
+                                let w_shape = w_t.shape();
+                                let m = inp_shape[0];
+                                let k = inp_shape[1];
+                                let k2 = w_shape[0];
+                                let n = w_shape[1];
+
+                                if k == k2 {
+                                    // Get Metal backend
+                                    if let Ok(backend) = get_metal_backend() {
+                                        // Convert input to contiguous
+                                        let input_data: Vec<f32> = inp.iter().copied().collect();
+
+                                        // Call matmul with CACHED weight buffer (no weight transfer!)
+                                        if let Ok(result) = backend.matmul_with_cached_weight(
+                                            &input_data,
+                                            &buffer_id,
+                                            m,
+                                            k,
+                                            n,
+                                        ) {
+                                            let result_arr =
+                                                scirs2_core::ndarray::Array2::from_shape_vec(
+                                                    (m, n),
+                                                    result,
+                                                )
+                                                .map_err(|e| {
+                                                    TrustformersError::shape_error(format!(
+                                                        "Result reshape failed: {}",
+                                                        e
+                                                    ))
+                                                })?;
+                                            return Ok(Tensor::F32(result_arr.into_dyn()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Fallback: Use standard dispatch (for non-Metal or if cached path failed)
             if self.device.is_gpu() {
                 dispatch_matmul(&input, &weight_t, &self.device)?
             } else {
@@ -314,6 +363,70 @@ impl Layer for Linear {
                     let seq_len = input_shape[1];
                     let hidden = input_shape[2];
                     let out_features = w.shape()[1];
+
+                    // Try to use cached Metal buffer for 3D case (CRITICAL OPTIMIZATION)
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
+                    if matches!(self.device, Device::Metal(_)) {
+                        // Ensure buffer is cached
+                        self.ensure_weight_buffer_cached()?;
+
+                        if let Ok(buffer_id_guard) = self.weight_buffer_id.read() {
+                            if let Some(buffer_id) = *buffer_id_guard {
+                                // Reshape 3D input to 2D for matmul
+                                let m = batch * seq_len;
+                                let k = hidden;
+                                let n = out_features;
+
+                                // Get Metal backend
+                                use crate::gpu_ops::metal::get_metal_backend;
+                                if let Ok(backend) = get_metal_backend() {
+                                    // Convert input to contiguous 2D data
+                                    let input_data: Vec<f32> = inp.iter().copied().collect();
+
+                                    // Call matmul with CACHED weight buffer (no weight transfer!)
+                                    if let Ok(result) = backend.matmul_with_cached_weight(
+                                        &input_data,
+                                        &buffer_id,
+                                        m,
+                                        k,
+                                        n,
+                                    ) {
+                                        // Reshape result from 2D [m, n] back to 3D [batch, seq_len, out_features]
+                                        let result_arr =
+                                            scirs2_core::ndarray::Array2::from_shape_vec(
+                                                (m, n),
+                                                result,
+                                            )
+                                            .map_err(
+                                                |e| {
+                                                    TrustformersError::shape_error(format!(
+                                                        "Result reshape failed: {}",
+                                                        e
+                                                    ))
+                                                },
+                                            )?;
+
+                                        let result_3d = result_arr
+                                            .into_shape_with_order(ndarray::IxDyn(&[
+                                                batch,
+                                                seq_len,
+                                                out_features,
+                                            ]))
+                                            .map_err(|e| {
+                                                TrustformersError::shape_error(format!(
+                                                    "3D reshape failed: {}",
+                                                    e
+                                                ))
+                                            })?;
+
+                                        return Ok(Tensor::F32(result_3d));
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Fallback: CPU path with ndarray
 
                     // Ensure contiguous layout before reshaping input to 2D for dot product
                     let inp_contiguous = inp.to_owned();

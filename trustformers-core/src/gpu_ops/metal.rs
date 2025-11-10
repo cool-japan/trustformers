@@ -80,6 +80,8 @@ pub struct MetalBackend {
     device: MetalDevice,
     command_queue: CommandQueue,
     buffer_cache: Arc<std::sync::Mutex<BufferCache>>,
+    // Cached compiled pipeline for matmul (avoid recompilation overhead)
+    matmul_pipeline: Arc<metal::ComputePipelineState>,
 }
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -92,10 +94,62 @@ impl MetalBackend {
 
         let command_queue = device.new_command_queue();
 
+        // Compile matmul shader ONCE during initialization (critical optimization!)
+        let shader_source = r#"
+            #include <metal_stdlib>
+            using namespace metal;
+
+            kernel void matmul(
+                device const float* a [[buffer(0)]],
+                device const float* b [[buffer(1)]],
+                device float* c [[buffer(2)]],
+                constant uint& M [[buffer(3)]],
+                constant uint& N [[buffer(4)]],
+                constant uint& K [[buffer(5)]],
+                uint2 gid [[thread_position_in_grid]]
+            ) {
+                uint row = gid.y;
+                uint col = gid.x;
+
+                if (row >= M || col >= N) return;
+
+                float sum = 0.0;
+                for (uint i = 0; i < K; ++i) {
+                    sum += a[row * K + i] * b[i * N + col];
+                }
+                c[row * N + col] = sum;
+            }
+        "#;
+
+        let library = device
+            .new_library_with_source(shader_source, &CompileOptions::new())
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to compile Metal shader: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        let kernel = library.get_function("matmul", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let matmul_pipeline =
+            device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
         Ok(Self {
             device,
             command_queue,
             buffer_cache: Arc::new(std::sync::Mutex::new(BufferCache::new())),
+            matmul_pipeline: Arc::new(matmul_pipeline),
         })
     }
 
@@ -183,64 +237,13 @@ impl MetalBackend {
             MTLResourceOptions::StorageModeShared,
         );
 
-        // Metal shader for matrix multiplication
-        let shader_source = r#"
-            #include <metal_stdlib>
-            using namespace metal;
-
-            kernel void matmul(
-                device const float* a [[buffer(0)]],
-                device const float* b [[buffer(1)]],
-                device float* c [[buffer(2)]],
-                constant uint& M [[buffer(3)]],
-                constant uint& N [[buffer(4)]],
-                constant uint& K [[buffer(5)]],
-                uint2 gid [[thread_position_in_grid]]
-            ) {
-                uint row = gid.y;
-                uint col = gid.x;
-
-                if (row >= M || col >= N) return;
-
-                float sum = 0.0;
-                for (uint i = 0; i < K; ++i) {
-                    sum += a[row * K + i] * b[i * N + col];
-                }
-                c[row * N + col] = sum;
-            }
-        "#;
-
-        // Compile shader
-        let library = self
-            .device
-            .new_library_with_source(shader_source, &CompileOptions::new())
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to compile Metal shader: {}", e),
-                    "matmul_f32",
-                )
-            })?;
-
-        let kernel = library.get_function("matmul", None).map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("Failed to get kernel function: {}", e),
-                "matmul_f32",
-            )
-        })?;
-
-        let pipeline =
-            self.device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to create pipeline: {}", e),
-                    "matmul_f32",
-                )
-            })?;
+        // Use pre-compiled pipeline (no shader compilation overhead!)
 
         // Create command buffer and encoder
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
 
-        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_compute_pipeline_state(&*self.matmul_pipeline);
         encoder.set_buffer(0, Some(&a_buffer), 0);
         encoder.set_buffer(1, Some(&b_buffer), 0);
         encoder.set_buffer(2, Some(&c_buffer), 0);
@@ -314,64 +317,13 @@ impl MetalBackend {
             MTLResourceOptions::StorageModeShared,
         );
 
-        // Metal shader for matrix multiplication (same as matmul_f32)
-        let shader_source = r#"
-            #include <metal_stdlib>
-            using namespace metal;
-
-            kernel void matmul(
-                device const float* a [[buffer(0)]],
-                device const float* b [[buffer(1)]],
-                device float* c [[buffer(2)]],
-                constant uint& M [[buffer(3)]],
-                constant uint& N [[buffer(4)]],
-                constant uint& K [[buffer(5)]],
-                uint2 gid [[thread_position_in_grid]]
-            ) {
-                uint row = gid.y;
-                uint col = gid.x;
-
-                if (row >= M || col >= N) return;
-
-                float sum = 0.0;
-                for (uint i = 0; i < K; ++i) {
-                    sum += a[row * K + i] * b[i * N + col];
-                }
-                c[row * N + col] = sum;
-            }
-        "#;
-
-        // Compile shader
-        let library = self
-            .device
-            .new_library_with_source(shader_source, &CompileOptions::new())
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to compile Metal shader: {}", e),
-                    "matmul_with_cached_weight",
-                )
-            })?;
-
-        let kernel = library.get_function("matmul", None).map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("Failed to get kernel function: {}", e),
-                "matmul_with_cached_weight",
-            )
-        })?;
-
-        let pipeline =
-            self.device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to create pipeline: {}", e),
-                    "matmul_with_cached_weight",
-                )
-            })?;
+        // Use pre-compiled pipeline (no shader compilation overhead!)
 
         // Create command buffer and encoder
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
 
-        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_compute_pipeline_state(&*self.matmul_pipeline);
         encoder.set_buffer(0, Some(&a_buffer), 0);
         encoder.set_buffer(1, Some(&*b_buffer), 0); // Use cached weight buffer
         encoder.set_buffer(2, Some(&c_buffer), 0);
@@ -460,6 +412,7 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
             device: backend.device.clone(),
             command_queue: backend.command_queue.clone(),
             buffer_cache: Arc::clone(&backend.buffer_cache),
+            matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
         })
 }
 

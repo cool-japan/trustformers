@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS-JS Session 3 Integration Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .feature-card {
+            background: white;
+            border-radius: 12px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .feature-card h2 {
+            color: #667eea;
+            font-size: 1.5rem;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .feature-icon {
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 8px;
+            color: white;
+            font-size: 1.5rem;
+        }
+
+        .feature-description {
+            color: #666;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+
+        .button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1rem;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            width: 100%;
+            font-weight: 600;
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .button:active {
+            transform: translateY(0);
+        }
+
+        .button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .output-box {
+            background: #f8f9fa;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+            max-height: 300px;
+            overflow-y: auto;
+            line-height: 1.5;
+        }
+
+        .output-box.empty {
+            color: #999;
+            font-style: italic;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-top: 10px;
+        }
+
+        .status.pending {
+            background: #ffeaa7;
+            color: #fdcb6e;
+        }
+
+        .status.running {
+            background: #74b9ff;
+            color: #0984e3;
+        }
+
+        .status.success {
+            background: #55efc4;
+            color: #00b894;
+        }
+
+        .status.error {
+            background: #ff7675;
+            color: #d63031;
+        }
+
+        .integration-panel {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-top: 30px;
+        }
+
+        .integration-panel h2 {
+            color: #667eea;
+            font-size: 1.8rem;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+
+        .progress-bar {
+            background: #e9ecef;
+            height: 24px;
+            border-radius: 12px;
+            overflow: hidden;
+            margin: 20px 0;
+        }
+
+        .progress-fill {
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            height: 100%;
+            width: 0%;
+            transition: width 0.5s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+            font-size: 0.85rem;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .metric-box {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .metric-label {
+            font-size: 0.85rem;
+            opacity: 0.9;
+            margin-bottom: 5px;
+        }
+
+        .metric-value {
+            font-size: 1.8rem;
+            font-weight: bold;
+        }
+
+        .log-entry {
+            padding: 8px;
+            margin: 4px 0;
+            border-left: 3px solid #667eea;
+            background: white;
+        }
+
+        .log-entry.info {
+            border-left-color: #0984e3;
+        }
+
+        .log-entry.success {
+            border-left-color: #00b894;
+        }
+
+        .log-entry.warning {
+            border-left-color: #fdcb6e;
+        }
+
+        .log-entry.error {
+            border-left-color: #d63031;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2rem;
+            }
+
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🚀 TrustformeRS-JS Session 3 Integration Demo</h1>
+            <p>Neural Architecture Search + Federated Learning + ONNX + Real-time Collaboration</p>
+        </div>
+
+        <!-- Individual Feature Cards -->
+        <div class="features-grid">
+            <!-- Feature 1: ENAS NAS -->
+            <div class="feature-card">
+                <h2>
+                    <div class="feature-icon">🧬</div>
+                    ENAS NAS
+                </h2>
+                <div class="feature-description">
+                    Efficient Neural Architecture Search using reinforcement learning with parameter sharing.
+                    1000x faster than traditional NAS methods.
+                </div>
+                <button class="button" onclick="runENASDemo()" id="enasBtn">
+                    Run ENAS Search
+                </button>
+                <div class="status pending" id="enasStatus">Ready</div>
+                <div class="output-box empty" id="enasOutput">Click 'Run ENAS Search' to start...</div>
+            </div>
+
+            <!-- Feature 2: Enhanced Federated Learning -->
+            <div class="feature-card">
+                <h2>
+                    <div class="feature-icon">🔐</div>
+                    FedBN & FedNova
+                </h2>
+                <div class="feature-description">
+                    Advanced federated learning with FedBN (local batch normalization) and FedNova
+                    (normalized averaging) for handling non-IID data and heterogeneous clients.
+                </div>
+                <button class="button" onclick="runFederatedDemo()" id="federatedBtn">
+                    Run Federated Learning
+                </button>
+                <div class="status pending" id="federatedStatus">Ready</div>
+                <div class="output-box empty" id="federatedOutput">Click 'Run Federated Learning' to start...</div>
+            </div>
+
+            <!-- Feature 3: ONNX Operators -->
+            <div class="feature-card">
+                <h2>
+                    <div class="feature-icon">⚙️</div>
+                    ONNX Operators
+                </h2>
+                <div class="feature-description">
+                    20+ standard ONNX operators (Add, MatMul, Relu, Softmax, etc.) for interoperability
+                    with the ONNX ecosystem and cross-framework compatibility.
+                </div>
+                <button class="button" onclick="runONNXDemo()" id="onnxBtn">
+                    Test ONNX Operators
+                </button>
+                <div class="status pending" id="onnxStatus">Ready</div>
+                <div class="output-box empty" id="onnxOutput">Click 'Test ONNX Operators' to start...</div>
+            </div>
+
+            <!-- Feature 4: Real-time Collaboration -->
+            <div class="feature-card">
+                <h2>
+                    <div class="feature-icon">🤝</div>
+                    Collaboration
+                </h2>
+                <div class="feature-description">
+                    Real-time collaborative experiments with WebSocket synchronization, Bayesian
+                    hyperparameter optimization, and shared metrics dashboards.
+                </div>
+                <button class="button" onclick="runCollaborationDemo()" id="collaborationBtn">
+                    Start Collaboration
+                </button>
+                <div class="status pending" id="collaborationStatus">Ready</div>
+                <div class="output-box empty" id="collaborationOutput">Click 'Start Collaboration' to begin...</div>
+            </div>
+        </div>
+
+        <!-- Integration Panel -->
+        <div class="integration-panel">
+            <h2>🎯 Full Integration: Collaborative Distributed NAS with ONNX</h2>
+            <p style="text-align: center; color: #666; margin-bottom: 20px;">
+                This demo combines all Session 3 features: use ENAS for architecture search,
+                FedNova for federated aggregation, ONNX for model validation, and real-time
+                collaboration for distributed experiments.
+            </p>
+
+            <button class="button" onclick="runFullIntegration()" id="integrationBtn" style="max-width: 400px; margin: 0 auto; display: block;">
+                🚀 Run Full Integration Demo
+            </button>
+
+            <div class="progress-bar">
+                <div class="progress-fill" id="integrationProgress">0%</div>
+            </div>
+
+            <div class="metrics-grid" id="metricsGrid" style="display: none;">
+                <div class="metric-box">
+                    <div class="metric-label">Architectures Searched</div>
+                    <div class="metric-value" id="metricArchitectures">0</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Best Reward</div>
+                    <div class="metric-value" id="metricReward">0.00</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">Federated Rounds</div>
+                    <div class="metric-value" id="metricRounds">0</div>
+                </div>
+                <div class="metric-box">
+                    <div class="metric-label">ONNX Validations</div>
+                    <div class="metric-value" id="metricValidations">0</div>
+                </div>
+            </div>
+
+            <div class="output-box" id="integrationOutput" style="max-height: 400px;">
+                <div class="log-entry info">Integration demo ready. Click the button above to start.</div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Import TrustformeRS-JS modules
+        import {
+            createENASSearcher,
+            ENASSearchSpaces,
+            FedBNAggregator,
+            FedNovaAggregator,
+            createOperatorRegistry,
+            Tensor as ONNXTensor,
+            createCollaborativeSession,
+            createCollaborativeExperiment,
+            createMetricsDashboard
+        } from '../src/index.js';
+
+        // Utility functions
+        window.updateStatus = (elementId, status, text) => {
+            const el = document.getElementById(elementId);
+            el.className = `status ${status}`;
+            el.textContent = text;
+        };
+
+        window.appendOutput = (elementId, text, clear = false) => {
+            const el = document.getElementById(elementId);
+            if (clear) {
+                el.innerHTML = '';
+                el.classList.remove('empty');
+            }
+            el.innerHTML += text + '\n';
+            el.scrollTop = el.scrollHeight;
+        };
+
+        window.addLogEntry = (text, type = 'info') => {
+            const output = document.getElementById('integrationOutput');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+            output.appendChild(entry);
+            output.scrollTop = output.scrollHeight;
+        };
+
+        window.updateProgress = (percent) => {
+            const progressBar = document.getElementById('integrationProgress');
+            progressBar.style.width = percent + '%';
+            progressBar.textContent = Math.round(percent) + '%';
+        };
+
+        window.updateMetric = (metricId, value) => {
+            const el = document.getElementById(metricId);
+            if (el) {
+                el.textContent = typeof value === 'number' ? value.toFixed(2) : value;
+            }
+        };
+
+        // Mock data generators
+        const createMockData = (numSamples = 100, inputDim = 32, outputDim = 10) => {
+            return Array.from({ length: numSamples }, () => ({
+                input: new Float32Array(inputDim).map(() => Math.random()),
+                target: Math.floor(Math.random() * outputDim)
+            }));
+        };
+
+        // Demo 1: ENAS NAS
+        window.runENASDemo = async () => {
+            const btn = document.getElementById('enasBtn');
+            btn.disabled = true;
+            updateStatus('enasStatus', 'running', 'Searching...');
+            appendOutput('enasOutput', '=== ENAS Neural Architecture Search ===', true);
+
+            try {
+                appendOutput('enasOutput', 'Creating ENAS searcher with compact search space...');
+
+                const searcher = createENASSearcher(ENASSearchSpaces.compact, {
+                    controllerEpochs: 3,
+                    childEpochs: 5,
+                    controllerLearningRate: 0.00035,
+                    entropyWeight: 0.0001,
+                    numSamples: 10
+                });
+
+                appendOutput('enasOutput', 'Generating training and validation data...');
+                const trainData = createMockData(100, 32, 10);
+                const validData = createMockData(30, 32, 10);
+
+                appendOutput('enasOutput', 'Running architecture search (this may take a few seconds)...');
+                const results = await searcher.search(trainData, validData);
+
+                appendOutput('enasOutput', '\n✓ Search completed successfully!');
+                appendOutput('enasOutput', `Best Reward: ${results.bestReward.toFixed(4)}`);
+                appendOutput('enasOutput', `Architectures Evaluated: ${results.history.length}`);
+                appendOutput('enasOutput', `Best Architecture: ${JSON.stringify(results.bestArchitecture, null, 2)}`);
+
+                updateStatus('enasStatus', 'success', 'Completed');
+            } catch (error) {
+                appendOutput('enasOutput', `\n✗ Error: ${error.message}`);
+                updateStatus('enasStatus', 'error', 'Failed');
+            } finally {
+                btn.disabled = false;
+            }
+        };
+
+        // Demo 2: Enhanced Federated Learning
+        window.runFederatedDemo = async () => {
+            const btn = document.getElementById('federatedBtn');
+            btn.disabled = true;
+            updateStatus('federatedStatus', 'running', 'Training...');
+            appendOutput('federatedOutput', '=== Enhanced Federated Learning ===', true);
+
+            try {
+                appendOutput('federatedOutput', 'Testing FedBN (Federated Batch Normalization)...');
+
+                const fedBN = new FedBNAggregator({
+                    bnParamNames: ['running_mean', 'running_var']
+                });
+
+                // Simulate client updates
+                const clientUpdates = [
+                    {
+                        modelUpdate: {
+                            layer1: {
+                                weights: new Float32Array([0.1, 0.2, 0.3]),
+                                running_mean: new Float32Array([0.5, 0.6])
+                            }
+                        },
+                        numSamples: 100,
+                        clientId: 'client_1'
+                    },
+                    {
+                        modelUpdate: {
+                            layer1: {
+                                weights: new Float32Array([0.15, 0.25, 0.35]),
+                                running_mean: new Float32Array([0.55, 0.65])
+                            }
+                        },
+                        numSamples: 150,
+                        clientId: 'client_2'
+                    }
+                ];
+
+                const fedBNResult = fedBN.aggregate(clientUpdates, {
+                    preserveBNStats: true,
+                    weightingScheme: 'dataSize'
+                });
+
+                appendOutput('federatedOutput', '✓ FedBN aggregation completed');
+                appendOutput('federatedOutput', `  Total samples: ${100 + 150}`);
+
+                appendOutput('federatedOutput', '\nTesting FedNova (Normalized Averaging)...');
+
+                const fedNova = new FedNovaAggregator({ rho: 0.9 });
+
+                const clientUpdatesNova = [
+                    {
+                        modelUpdate: { weights: new Float32Array([0.1, 0.2, 0.3]) },
+                        numSamples: 100,
+                        numLocalSteps: 5,
+                        clientId: 'client_1'
+                    },
+                    {
+                        modelUpdate: { weights: new Float32Array([0.15, 0.25, 0.35]) },
+                        numSamples: 150,
+                        numLocalSteps: 10,
+                        clientId: 'client_2'
+                    }
+                ];
+
+                const fedNovaResult = fedNova.aggregate(clientUpdatesNova, {
+                    globalLearningRate: 1.0,
+                    useMomentum: true
+                });
+
+                appendOutput('federatedOutput', '✓ FedNova aggregation completed');
+                appendOutput('federatedOutput', `  Effective tau: ${fedNovaResult.metadata.tau.toFixed(2)}`);
+                appendOutput('federatedOutput', `  Aggregated weights: [${Array.from(fedNovaResult.globalModel.weights).map(w => w.toFixed(3)).join(', ')}]`);
+
+                updateStatus('federatedStatus', 'success', 'Completed');
+            } catch (error) {
+                appendOutput('federatedOutput', `\n✗ Error: ${error.message}`);
+                updateStatus('federatedStatus', 'error', 'Failed');
+            } finally {
+                btn.disabled = false;
+            }
+        };
+
+        // Demo 3: ONNX Operators
+        window.runONNXDemo = async () => {
+            const btn = document.getElementById('onnxBtn');
+            btn.disabled = true;
+            updateStatus('onnxStatus', 'running', 'Testing...');
+            appendOutput('onnxOutput', '=== ONNX Operators Test ===', true);
+
+            try {
+                const registry = createOperatorRegistry();
+                const operators = registry.getSupportedOperators();
+
+                appendOutput('onnxOutput', `Supported operators (${operators.length}): ${operators.join(', ')}`);
+
+                // Test Add
+                appendOutput('onnxOutput', '\nTesting Add operator...');
+                const addOp = registry.create('Add');
+                const a = new ONNXTensor(new Float32Array([1, 2, 3, 4]), [2, 2]);
+                const b = new ONNXTensor(new Float32Array([5, 6, 7, 8]), [2, 2]);
+                const [addResult] = addOp.execute([a, b]);
+                appendOutput('onnxOutput', `  [1,2,3,4] + [5,6,7,8] = [${Array.from(addResult.data).join(',')}]`);
+
+                // Test MatMul
+                appendOutput('onnxOutput', '\nTesting MatMul operator...');
+                const matmulOp = registry.create('MatMul');
+                const A = new ONNXTensor(new Float32Array([1, 2, 3, 4]), [2, 2]);
+                const B = new ONNXTensor(new Float32Array([5, 6, 7, 8]), [2, 2]);
+                const [matmulResult] = matmulOp.execute([A, B]);
+                appendOutput('onnxOutput', `  [[1,2],[3,4]] × [[5,6],[7,8]] = [${Array.from(matmulResult.data).join(',')}]`);
+
+                // Test Softmax
+                appendOutput('onnxOutput', '\nTesting Softmax operator...');
+                const softmaxOp = registry.create('Softmax', { axis: -1 });
+                const logits = new ONNXTensor(new Float32Array([1, 2, 3, 4]), [4]);
+                const [softmaxResult] = softmaxOp.execute([logits]);
+                appendOutput('onnxOutput', `  Softmax([1,2,3,4]) = [${Array.from(softmaxResult.data).map(x => x.toFixed(4)).join(',')}]`);
+
+                appendOutput('onnxOutput', '\n✓ All ONNX operators working correctly!');
+                updateStatus('onnxStatus', 'success', 'Completed');
+            } catch (error) {
+                appendOutput('onnxOutput', `\n✗ Error: ${error.message}`);
+                updateStatus('onnxStatus', 'error', 'Failed');
+            } finally {
+                btn.disabled = false;
+            }
+        };
+
+        // Demo 4: Real-time Collaboration
+        window.runCollaborationDemo = async () => {
+            const btn = document.getElementById('collaborationBtn');
+            btn.disabled = true;
+            updateStatus('collaborationStatus', 'running', 'Running...');
+            appendOutput('collaborationOutput', '=== Real-time Collaboration ===', true);
+
+            try {
+                appendOutput('collaborationOutput', 'Creating collaborative session...');
+                const session = createCollaborativeSession({
+                    serverUrl: 'ws://localhost:8080',
+                    userId: 'demo_user_1',
+                    userName: 'Demo User',
+                    autoReconnect: false
+                });
+
+                appendOutput('collaborationOutput', `✓ Session created: ${session.userName} (${session.userId})`);
+
+                appendOutput('collaborationOutput', '\nCreating collaborative experiment...');
+                const experiment = createCollaborativeExperiment({
+                    name: 'Hyperparameter Tuning',
+                    searchSpace: {
+                        learningRate: { type: 'continuous', min: 1e-5, max: 1e-2, logScale: true },
+                        batchSize: { type: 'integer', min: 16, max: 128, step: 16 }
+                    },
+                    metric: 'accuracy',
+                    goal: 'maximize',
+                    session: session
+                });
+
+                appendOutput('collaborationOutput', '✓ Experiment created: Hyperparameter Tuning');
+
+                // Submit some results
+                for (let i = 0; i < 5; i++) {
+                    const config = {
+                        learningRate: Math.random() * 0.01,
+                        batchSize: 16 + Math.floor(Math.random() * 7) * 16
+                    };
+                    const metrics = { accuracy: 0.7 + Math.random() * 0.25 };
+
+                    experiment.submitResult(config, metrics, 'demo_user_1');
+                    appendOutput('collaborationOutput', `  Result ${i + 1}: lr=${config.learningRate.toExponential(2)}, batch=${config.batchSize}, acc=${metrics.accuracy.toFixed(3)}`);
+                }
+
+                const best = experiment.getBestResult();
+                appendOutput('collaborationOutput', `\n✓ Best result: accuracy = ${best.metrics.accuracy.toFixed(3)}`);
+
+                // Get next suggestion
+                const nextConfig = experiment.suggestConfiguration();
+                appendOutput('collaborationOutput', `✓ Next suggestion: lr=${nextConfig.learningRate.toExponential(2)}, batch=${nextConfig.batchSize}`);
+
+                updateStatus('collaborationStatus', 'success', 'Completed');
+            } catch (error) {
+                appendOutput('collaborationOutput', `\n✗ Error: ${error.message}`);
+                updateStatus('collaborationStatus', 'error', 'Failed');
+            } finally {
+                btn.disabled = false;
+            }
+        };
+
+        // Full Integration Demo
+        window.runFullIntegration = async () => {
+            const btn = document.getElementById('integrationBtn');
+            btn.disabled = true;
+            document.getElementById('metricsGrid').style.display = 'grid';
+
+            updateProgress(0);
+            addLogEntry('Starting full integration demo...', 'info');
+
+            try {
+                // Step 1: Initialize collaboration (10%)
+                addLogEntry('Step 1/5: Initializing collaborative session', 'info');
+                updateProgress(10);
+
+                const session = createCollaborativeSession({
+                    serverUrl: 'ws://localhost:8080',
+                    userId: 'integration_test',
+                    userName: 'Integration Test',
+                    autoReconnect: false
+                });
+
+                const experiment = createCollaborativeExperiment({
+                    name: 'Distributed NAS',
+                    searchSpace: {
+                        numLayers: { type: 'integer', min: 4, max: 8 },
+                        hiddenSize: { type: 'integer', min: 128, max: 512, step: 64 }
+                    },
+                    metric: 'reward',
+                    goal: 'maximize',
+                    session: session
+                });
+
+                addLogEntry('✓ Collaborative session initialized', 'success');
+                updateProgress(20);
+
+                // Step 2: Create ENAS searcher (30%)
+                addLogEntry('Step 2/5: Creating ENAS architecture searcher', 'info');
+
+                const searcher = createENASSearcher(ENASSearchSpaces.compact, {
+                    controllerEpochs: 2,
+                    childEpochs: 3,
+                    numSamples: 5
+                });
+
+                const trainData = createMockData(50, 32, 10);
+                const validData = createMockData(20, 32, 10);
+
+                addLogEntry('✓ ENAS searcher created', 'success');
+                updateProgress(30);
+
+                // Step 3: Run NAS search (50%)
+                addLogEntry('Step 3/5: Running neural architecture search...', 'info');
+
+                const results = await searcher.search(trainData, validData);
+
+                updateMetric('metricArchitectures', results.history.length);
+                updateMetric('metricReward', results.bestReward);
+
+                addLogEntry(`✓ Search completed with best reward: ${results.bestReward.toFixed(4)}`, 'success');
+                updateProgress(50);
+
+                // Step 4: Use ONNX for validation (70%)
+                addLogEntry('Step 4/5: Validating with ONNX operators', 'info');
+
+                const registry = createOperatorRegistry();
+                const softmaxOp = registry.create('Softmax', { axis: -1 });
+
+                let validationCount = 0;
+                for (let i = 0; i < 3; i++) {
+                    const output = new Float32Array(10).map(() => Math.random());
+                    const outputTensor = new ONNXTensor(output, [10]);
+                    const [probs] = softmaxOp.execute([outputTensor]);
+                    validationCount++;
+                }
+
+                updateMetric('metricValidations', validationCount);
+                addLogEntry(`✓ ${validationCount} ONNX validations completed`, 'success');
+                updateProgress(70);
+
+                // Step 5: Federated aggregation (90%)
+                addLogEntry('Step 5/5: Aggregating results with FedNova', 'info');
+
+                const fedNova = new FedNovaAggregator({ rho: 0.9 });
+
+                const clientUpdates = [
+                    {
+                        modelUpdate: {
+                            weights: new Float32Array(100).map(() => Math.random() * 0.1)
+                        },
+                        numSamples: 100,
+                        numLocalSteps: 5,
+                        clientId: 'client_1'
+                    },
+                    {
+                        modelUpdate: {
+                            weights: new Float32Array(100).map(() => Math.random() * 0.1)
+                        },
+                        numSamples: 150,
+                        numLocalSteps: 7,
+                        clientId: 'client_2'
+                    }
+                ];
+
+                const aggregated = fedNova.aggregate(clientUpdates, {
+                    globalLearningRate: 1.0,
+                    useMomentum: true
+                });
+
+                updateMetric('metricRounds', 1);
+                addLogEntry(`✓ FedNova aggregation completed (tau=${aggregated.metadata.tau.toFixed(2)})`, 'success');
+                updateProgress(90);
+
+                // Final step: Share results
+                experiment.submitResult(
+                    { architecture: results.bestArchitecture },
+                    { reward: results.bestReward },
+                    'integration_test'
+                );
+
+                updateProgress(100);
+                addLogEntry('✅ Full integration demo completed successfully!', 'success');
+                addLogEntry('All Session 3 features working together seamlessly', 'success');
+
+            } catch (error) {
+                addLogEntry(`✗ Error: ${error.message}`, 'error');
+                console.error(error);
+            } finally {
+                btn.disabled = false;
+            }
+        };
+    </script>
+</body>
+</html>

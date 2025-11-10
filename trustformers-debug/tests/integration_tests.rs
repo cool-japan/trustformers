@@ -31,10 +31,10 @@ async fn test_basic_debugging_workflow() -> Result<()> {
     // Start session
     debug_session.start().await?;
 
-    // Create test tensors
+    // Create test tensors with different means for MSE comparison
     let input_tensor =
         Array::linspace(0.0, 1.0, 100).to_shape(IxDyn(&[10, 10])).unwrap().to_owned();
-    let weight_tensor = Array::<f32, _>::ones(IxDyn(&[10, 10])) * 0.5;
+    let weight_tensor = Array::<f32, _>::ones(IxDyn(&[10, 10])) * 0.8; // Different mean from input (0.8 vs 0.5)
 
     // Inspect tensors
     let input_id = debug_session.tensor_inspector_mut().inspect_tensor(

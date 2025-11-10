@@ -18,7 +18,8 @@
     "test": "node test/test-suite.js",
     "test:advanced": "node test/advanced-features.test.js",
     "test:ai": "node test/advanced-ai-features.test.js",
-    "test:all": "npm run test && npm run test:advanced && npm run test:ai",
+    "test:session3": "node test/session3-features.test.js",
+    "test:all": "npm run test && npm run test:advanced && npm run test:ai && npm run test:session3",
     "test:workspaces": "npm run test --workspaces",
     "test:coverage": "npm run test:coverage --workspaces",
     "lint": "npm run lint --workspaces",
@@ -31,7 +32,10 @@
     "size-check": "npm run size-check --workspaces",
     "security-audit": "npm audit --workspaces",
     "update-deps": "npm update --workspaces",
-    "demo:advanced": "npx http-server -p 8080 -o examples/advanced-ai-features-demo.html"
+    "demo:advanced": "npx http-server -p 8080 -o examples/advanced-ai-features-demo.html",
+    "demo:session3": "npx http-server -p 8080 -o examples/session3-integration-demo.html",
+    "demo:chatbot": "npx http-server -p 8080 -o examples/chatbot-demo.html",
+    "demo:classifier": "npx http-server -p 8080 -o examples/image-classifier-demo.html"
   },
   "devDependencies": {
     "@changesets/changelog-github": "^0.5.1",

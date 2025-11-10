@@ -53,14 +53,20 @@ impl Device {
     /// Create a Metal device, or CPU if Metal is not available
     #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn metal_if_available(device_id: usize) -> Device {
-        use scirs2_core::simd_ops::PlatformCapabilities;
-
-        let caps = PlatformCapabilities::detect();
-        if caps.metal_available {
-            Device::Metal(device_id)
-        } else {
-            Device::CPU
+        // Try to initialize Metal backend to check availability
+        // This is more reliable than scirs2's platform detection
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            use metal::Device as MetalDevice;
+            if MetalDevice::system_default().is_some() {
+                Device::Metal(device_id)
+            } else {
+                Device::CPU
+            }
         }
+
+        #[cfg(not(all(target_os = "macos", feature = "metal")))]
+        Device::CPU
     }
 
     #[cfg(not(all(target_os = "macos", feature = "metal")))]

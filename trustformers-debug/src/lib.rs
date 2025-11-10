@@ -18,10 +18,13 @@
 pub mod activation_visualizer;
 pub mod attention_visualizer;
 pub mod graph_visualizer;
+pub mod mlflow_integration;
 pub mod netron_export;
+pub mod performance_tuning;
 pub mod stability_checker;
 pub mod tensorboard_integration;
 pub mod unified_debug_session;
+pub mod visualization_plugins;
 pub mod weight_analyzer;
 
 pub mod advanced_gpu_profiler;
@@ -38,6 +41,7 @@ pub mod dashboard;
 pub mod data_export;
 pub mod differential_debugging;
 pub mod distributed_debugger;
+pub mod distributed_profiling;
 pub mod environmental_monitor;
 pub mod error_recovery;
 pub mod flame_graph_profiler;
@@ -48,6 +52,7 @@ pub mod ide_integration;
 pub mod interactive_debugger;
 pub mod interpretability_tools;
 pub mod kernel_optimizer;
+pub mod large_model_viz;
 pub mod llm_debugging;
 pub mod memory_profiler;
 pub mod model_diagnostics;
@@ -188,6 +193,24 @@ pub use weight_analyzer::{
     WeightStatistics,
 };
 
+// MLflow Integration
+pub use mlflow_integration::{
+    ArtifactType, MLflowClient, MLflowConfig, MLflowDebugSession, MetricPoint, RunInfo, RunStatus,
+};
+
+// Visualization Plugin System
+pub use visualization_plugins::{
+    OutputFormat as PluginOutputFormat, PluginConfig, PluginManager, PluginMetadata, PluginResult,
+    VisualizationData, VisualizationPlugin,
+};
+
+// Performance Tuning
+pub use performance_tuning::{
+    Difficulty, HardwareType, ImpactEstimate, PerformanceSnapshot,
+    PerformanceSummary as TuningPerformanceSummary, PerformanceTuner, Priority, Recommendation,
+    RecommendationCategory, TunerConfig, TuningReport,
+};
+
 // ============================================================================
 // Module Re-exports
 // ============================================================================
@@ -245,6 +268,7 @@ pub use dashboard::*;
 pub use data_export::*;
 pub use differential_debugging::*;
 pub use distributed_debugger::*;
+pub use distributed_profiling::*;
 pub use environmental_monitor::*;
 pub use error_recovery::*;
 pub use flame_graph_profiler::*;
@@ -253,6 +277,7 @@ pub use health_checker::*;
 pub use hooks::*;
 pub use ide_integration::*;
 pub use interactive_debugger::*;
+pub use large_model_viz::*;
 pub use llm_debugging::*;
 pub use memory_profiler::*;
 pub use model_diagnostics::*;
