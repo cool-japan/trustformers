@@ -252,7 +252,11 @@ impl Linear {
             }
 
             // Get weight data as f32 slice
-            match &self.weight {
+            // CRITICAL FIX: Cache the TRANSPOSED weight, not the original!
+            // The Metal shader expects weight in [in_features, out_features] layout
+            // but self.weight is stored as [out_features, in_features]
+            let weight_t = self.weight.transpose(0, 1)?;
+            match &weight_t {
                 Tensor::F32(arr) => {
                     if arr.ndim() != 2 {
                         return Err(TrustformersError::shape_error(
@@ -261,7 +265,9 @@ impl Linear {
                     }
 
                     // Convert to contiguous vec for GPU upload
-                    let weight_data: Vec<f32> = arr.iter().copied().collect();
+                    // Using as_standard_layout() ensures proper row-major order
+                    let contiguous_arr = arr.as_standard_layout();
+                    let weight_data: Vec<f32> = contiguous_arr.iter().copied().collect();
 
                     // Get Metal backend and cache the buffer
                     let backend = get_metal_backend()?;

@@ -392,9 +392,9 @@ impl GPTNeoXModel {
         }
 
         Ok(Self {
-            embed_in: Embedding::new(config.vocab_size, config.hidden_size, None)?,
+            embed_in: Embedding::new_with_device(config.vocab_size, config.hidden_size, None, device)?,
             layers,
-            final_layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            final_layer_norm: LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?,
             config,
         })
     }
