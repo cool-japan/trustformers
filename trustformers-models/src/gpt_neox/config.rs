@@ -78,36 +78,44 @@ impl Default for GPTNeoXConfig {
 impl Config for GPTNeoXConfig {
     fn validate(&self) -> Result<()> {
         if self.hidden_size == 0 {
-            return Err(trustformers_core::errors::TrustformersError::invalid_config(
-                "hidden_size must be greater than 0".to_string(),
-            ));
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(
+                    "hidden_size must be greater than 0".to_string(),
+                ),
+            );
         }
 
         if self.num_hidden_layers == 0 {
-            return Err(trustformers_core::errors::TrustformersError::invalid_config(
-                "num_hidden_layers must be greater than 0".to_string(),
-            ));
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(
+                    "num_hidden_layers must be greater than 0".to_string(),
+                ),
+            );
         }
 
         if self.num_attention_heads == 0 {
-            return Err(trustformers_core::errors::TrustformersError::invalid_config(
-                "num_attention_heads must be greater than 0".to_string(),
-            ));
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(
+                    "num_attention_heads must be greater than 0".to_string(),
+                ),
+            );
         }
 
         if self.hidden_size % self.num_attention_heads != 0 {
-            return Err(trustformers_core::errors::TrustformersError::invalid_config(
-                format!(
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(format!(
                     "hidden_size must be divisible by num_attention_heads ({})",
                     self.num_attention_heads
-                ),
-            ));
+                )),
+            );
         }
 
         if self.rotary_pct < 0.0 || self.rotary_pct > 1.0 {
-            return Err(trustformers_core::errors::TrustformersError::invalid_config(
-                "rotary_pct must be between 0.0 and 1.0".to_string(),
-            ));
+            return Err(
+                trustformers_core::errors::TrustformersError::invalid_config(
+                    "rotary_pct must be between 0.0 and 1.0".to_string(),
+                ),
+            );
         }
 
         Ok(())

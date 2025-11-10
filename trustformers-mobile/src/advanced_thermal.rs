@@ -110,8 +110,6 @@ impl ThermalPredictionModel {
         let t = horizon_secs as f32;
         let decay = (-t / tau).exp();
 
-        
-
         self.ambient_temperature
             + (current_temp - self.ambient_temperature) * decay
             + thermal_rise * (1.0 - decay)
@@ -142,7 +140,6 @@ impl ThermalPredictionModel {
         let sum_xy: f32 = recent.iter().enumerate().map(|(i, &y)| i as f32 * y).sum();
         let sum_x2: f32 = (0..recent.len()).map(|i| (i as f32).powi(2)).sum();
 
-        
         (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x.powi(2))
     }
 

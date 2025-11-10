@@ -118,14 +118,14 @@ impl HuggingFaceLoader {
     }
 
     fn create_single_file_index(model_dir: &Path) -> Result<HuggingFaceIndex> {
-        // Look for single weight file
+        // Look for single weight file (prefer SafeTensors over PyTorch)
         let bin_path = model_dir.join("pytorch_model.bin");
         let safetensors_path = model_dir.join("model.safetensors");
 
-        let weight_file = if bin_path.exists() {
-            "pytorch_model.bin"
-        } else if safetensors_path.exists() {
+        let weight_file = if safetensors_path.exists() {
             "model.safetensors"
+        } else if bin_path.exists() {
+            "pytorch_model.bin"
         } else {
             return Err(TrustformersError::file_not_found(
                 "No weight files found in model directory".to_string(),

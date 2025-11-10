@@ -59,8 +59,8 @@ impl Layer for GPTNeoXMLP {
 
 /// GPT-NeoX Attention layer with Rotary Position Embeddings
 pub struct GPTNeoXAttention {
-    query_key_value: Linear, // Combined QKV projection
-    dense: Linear,           // Output projection
+    query_key_value: Linear,      // Combined QKV projection
+    dense: Linear,                // Output projection
     _rotary_emb: RotaryEmbedding, // TODO: Use in full attention implementation
     _num_heads: usize,
     _head_dim: usize,
@@ -119,21 +119,108 @@ impl Layer for GPTNeoXAttention {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        use scirs2_core::ndarray::{s, Array2, Axis};
+
         let shape = input.shape();
         let seq_len = if shape.len() == 2 { shape[0] } else { shape[1] };
 
-        // Project to QKV
-        let qkv = self.query_key_value.forward(input)?;
+        // Project to combined QKV
+        let qkv = self.query_key_value.forward(input.clone())?;
 
-        // Generate position IDs
-        let _position_ids: Vec<usize> = (0..seq_len).collect();
-
-        // Split QKV (simplified - just use Q for now)
-        // TODO: Implement proper split and attention computation using _position_ids and RoPE
         match qkv {
-            Tensor::F32(_) => {
-                // Simplified: skip RoPE and attention, just project through dense
-                self.dense.forward(qkv)
+            Tensor::F32(arr) => {
+                let shape = arr.shape();
+                if shape.len() != 2 {
+                    return Err(tensor_op_error(
+                        "GPTNeoXAttention::forward",
+                        &format!("Expected 2D tensor, got shape: {:?}", shape),
+                    ));
+                }
+
+                // Split QKV: [seq_len, 3 * hidden_size] -> Q, K, V each [seq_len, hidden_size]
+                let hidden_size = shape[1] / 3;
+                let q = arr.slice(s![.., 0..hidden_size]).to_owned();
+                let k = arr.slice(s![.., hidden_size..2*hidden_size]).to_owned();
+                let v = arr.slice(s![.., 2*hidden_size..3*hidden_size]).to_owned();
+
+                // Reshape to multi-head: [seq_len, num_heads, head_dim]
+                let head_dim = self.head_dim;
+                let num_heads = self.num_heads;
+
+                // Apply rotary embeddings to Q and K
+                let position_ids: Vec<usize> = (0..seq_len).collect();
+                let (q_rope, k_rope) = self.rotary_emb.apply_rotary_emb(
+                    &Tensor::F32(q.into_dyn()),
+                    &Tensor::F32(k.into_dyn()),
+                    &position_ids,
+                )?;
+
+                // Extract rotary-embedded tensors
+                let (q_arr, k_arr, v_arr) = match (q_rope, k_rope, Tensor::F32(v.into_dyn())) {
+                    (Tensor::F32(q), Tensor::F32(k), Tensor::F32(v)) => {
+                        let q_2d = q.into_dimensionality::<ndarray::Ix2>().map_err(|_| {
+                            tensor_op_error("GPTNeoXAttention", "Q reshape failed")
+                        })?;
+                        let k_2d = k.into_dimensionality::<ndarray::Ix2>().map_err(|_| {
+                            tensor_op_error("GPTNeoXAttention", "K reshape failed")
+                        })?;
+                        let v_2d = v.into_dimensionality::<ndarray::Ix2>().map_err(|_| {
+                            tensor_op_error("GPTNeoXAttention", "V reshape failed")
+                        })?;
+                        (q_2d, k_2d, v_2d)
+                    },
+                    _ => return Err(tensor_op_error("GPTNeoXAttention", "Unexpected tensor type")),
+                };
+
+                // Reshape to [seq_len, num_heads, head_dim]
+                let q_reshaped = q_arr.into_shape((seq_len, num_heads, head_dim)).map_err(|_| {
+                    tensor_op_error("GPTNeoXAttention", "Q multi-head reshape failed")
+                })?;
+                let k_reshaped = k_arr.into_shape((seq_len, num_heads, head_dim)).map_err(|_| {
+                    tensor_op_error("GPTNeoXAttention", "K multi-head reshape failed")
+                })?;
+                let v_reshaped = v_arr.into_shape((seq_len, num_heads, head_dim)).map_err(|_| {
+                    tensor_op_error("GPTNeoXAttention", "V multi-head reshape failed")
+                })?;
+
+                // Compute attention scores for each head
+                // scores = Q @ K^T / sqrt(head_dim)
+                let scale = (head_dim as f32).sqrt();
+                let mut attn_output = Array2::<f32>::zeros((seq_len, hidden_size));
+
+                for h in 0..num_heads {
+                    // Extract head: [seq_len, head_dim]
+                    let q_head = q_reshaped.slice(s![.., h, ..]).to_owned();
+                    let k_head = k_reshaped.slice(s![.., h, ..]).to_owned();
+                    let v_head = v_reshaped.slice(s![.., h, ..]).to_owned();
+
+                    // scores = Q @ K^T / sqrt(d_k)
+                    let k_t = k_head.t();
+                    let scores = q_head.dot(&k_t) / scale;
+
+                    // Softmax over last dimension
+                    let mut attn_weights = Array2::<f32>::zeros(scores.dim());
+                    for i in 0..seq_len {
+                        let row = scores.row(i);
+                        let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                        let exp_row: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
+                        let sum: f32 = exp_row.iter().sum();
+                        for (j, &val) in exp_row.iter().enumerate() {
+                            attn_weights[[i, j]] = val / sum;
+                        }
+                    }
+
+                    // Apply attention to values: attn_weights @ V
+                    let head_output = attn_weights.dot(&v_head);
+
+                    // Place head output in the correct position
+                    let start_idx = h * head_dim;
+                    let end_idx = start_idx + head_dim;
+                    attn_output.slice_mut(s![.., start_idx..end_idx]).assign(&head_output);
+                }
+
+                // Project through output layer
+                self.dense.forward(Tensor::F32(attn_output.into_dyn()))
             },
             _ => Err(tensor_op_error(
                 "GPTNeoXAttention::forward",

@@ -280,7 +280,7 @@ fn run_profiling_session(
     println!(" Done");
 
     // Calculate statistics
-    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap().into());
+    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let avg_latency_ms = latencies.iter().sum::<f64>() / latencies.len() as f64;
     let min_latency_ms = *latencies.first().unwrap_or(&0.0);
     let max_latency_ms = *latencies.last().unwrap_or(&0.0);
@@ -310,7 +310,7 @@ fn run_profiling_session(
 
 fn create_sample_input(batch_size: usize, sequence_length: usize) -> Result<Tensor> {
     // Create random input tensor for profiling
-    Ok(Tensor::randn(&[batch_size, sequence_length])?)
+    Tensor::randn(&[batch_size, sequence_length])
 }
 
 fn simulate_inference(config: &MobileConfig, _input: &Tensor, profile: bool) -> Result<Tensor> {
@@ -335,7 +335,7 @@ fn simulate_inference(config: &MobileConfig, _input: &Tensor, profile: bool) -> 
     }
 
     // Return mock output tensor
-    Ok(Tensor::randn(&[1, 768])?) // Simple output
+    Tensor::randn(&[1, 768]) // Simple output
 }
 
 fn generate_optimization_recommendations(
@@ -411,8 +411,7 @@ fn save_profiling_report(report: &ProfilingReport, output_file: &str, format: &s
             return Err(TrustformersError::tensor_op_error(
                 "Unsupported output format",
                 "save_report",
-            )
-            .into());
+            ));
         },
     }
 

@@ -2,7 +2,7 @@
 mod tests {
     use crate::gpt_neox::config::GPTNeoXConfig;
     use crate::gpt_neox::model::{GPTNeoXForCausalLM, GPTNeoXModel};
-    use trustformers_core::traits::Config;
+    use trustformers_core::traits::{Config, Model};
 
     #[test]
     fn test_gpt_neox_config_validation() {
