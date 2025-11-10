@@ -255,13 +255,30 @@ pub struct Gpt2LMHeadModel {
 
 impl Gpt2LMHeadModel {
     pub fn new(config: Gpt2Config) -> Result<Self> {
-        let transformer = Gpt2Model::new(config.clone())?;
-        let lm_head = Linear::new(config.n_embd, config.vocab_size, true);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Create a GPT-2 LM Head model with specified device (CPU, Metal, CUDA, etc.)
+    pub fn new_with_device(config: Gpt2Config, device: Device) -> Result<Self> {
+        let transformer = Gpt2Model::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.n_embd, config.vocab_size, true, device);
 
         Ok(Self {
             transformer,
             lm_head,
         })
+    }
+
+    /// Get the device this model uses
+    pub fn device(&self) -> Device {
+        self.transformer.device()
+    }
+
+    /// Move this model to a different device
+    pub fn to_device(mut self, device: Device) -> Self {
+        self.transformer = self.transformer.to_device(device);
+        self.lm_head = self.lm_head.to_device(device);
+        self
     }
 
     /// Load weights from a WeightReader (e.g., SafeTensors)

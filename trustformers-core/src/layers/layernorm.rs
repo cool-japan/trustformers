@@ -1,18 +1,63 @@
+//! Layer Normalization implementations
+//!
+//! This module provides LayerNorm and RMSNorm layers with device support.
+
+use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use ndarray::Axis;
+use scirs2_core::ndarray::{Axis, IxDyn};
 
+/// Layer Normalization
+///
+/// Normalizes activations across the feature dimension, providing more stable training
+/// and faster convergence. Used extensively in transformer architectures.
+///
+/// # Parameters
+///
+/// - `weight`: Learnable affine transform weight (gamma)
+/// - `bias`: Learnable affine transform bias (beta)
+/// - `eps`: Small constant added to variance for numerical stability
+///
+/// # Example
+///
+/// ```no_run
+/// use trustformers_core::layers::LayerNorm;
+/// use trustformers_core::tensor::Tensor;
+/// use trustformers_core::traits::Layer;
+/// use trustformers_core::device::Device;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Create LayerNorm for hidden size 768
+/// let layer_norm = LayerNorm::new_with_device(vec![768], 1e-5, Device::CPU)?;
+///
+/// // Apply normalization
+/// let input = Tensor::randn(&[4, 128, 768])?;
+/// let normalized = layer_norm.forward(input)?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct LayerNorm {
     normalized_shape: Vec<usize>,
     weight: Tensor,
     bias: Tensor,
     eps: f32,
+    device: Device,
 }
 
 impl LayerNorm {
+    /// Creates a new LayerNorm layer on CPU
     pub fn new(normalized_shape: Vec<usize>, eps: f32) -> Result<Self> {
+        Self::new_with_device(normalized_shape, eps, Device::CPU)
+    }
+
+    /// Creates a new LayerNorm layer on specified device
+    pub fn new_with_device(
+        normalized_shape: Vec<usize>,
+        eps: f32,
+        device: Device,
+    ) -> Result<Self> {
         let weight = Tensor::ones(&normalized_shape)?;
         let bias = Tensor::zeros(&normalized_shape)?;
 
@@ -21,28 +66,39 @@ impl LayerNorm {
             weight,
             bias,
             eps,
+            device,
         })
     }
 
+    /// Creates a simple 1D LayerNorm on CPU
     pub fn new_simple(normalized_shape: usize, eps: f32) -> Self {
         Self::new(vec![normalized_shape], eps).unwrap()
     }
 
+    /// Sets the weight tensor
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
         self.weight = weight;
         Ok(())
     }
 
+    /// Sets the bias tensor
     pub fn set_bias(&mut self, bias: Tensor) -> Result<()> {
         self.bias = bias;
         Ok(())
     }
 
-    /// Returns the total number of learnable parameters in this layer.
-    ///
-    /// # Returns
-    ///
-    /// The total parameter count including weight and bias tensors.
+    /// Returns the device this layer uses for computations
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Moves this layer to a different device
+    pub fn to_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
+    }
+
+    /// Returns the total number of learnable parameters in this layer
     pub fn parameter_count(&self) -> usize {
         let weight_count = self.weight.len();
         let bias_count = self.bias.len();
@@ -88,35 +144,34 @@ impl Layer for LayerNorm {
                             broadcast_shape[ndim - norm_ndim + i] = dim;
                         }
 
-                        use ndarray::IxDyn;
                         let w_broadcast = w
                             .view()
                             .into_shape_with_order(IxDyn(&broadcast_shape))
                             .map_err(|e| {
-                            TrustformersError::shape_error(format!(
-                                "Failed to broadcast weight: {}",
-                                e
-                            ))
-                        })?;
+                                TrustformersError::shape_error(format!(
+                                    "Failed to broadcast weight: {}",
+                                    e
+                                ))
+                            })?;
                         let b_broadcast = b
                             .view()
                             .into_shape_with_order(IxDyn(&broadcast_shape))
                             .map_err(|e| {
-                            TrustformersError::shape_error(format!(
-                                "Failed to broadcast bias: {}",
-                                e
-                            ))
-                        })?;
+                                TrustformersError::shape_error(format!(
+                                    "Failed to broadcast bias: {}",
+                                    e
+                                ))
+                            })?;
 
                         let output = &normalized * &w_broadcast + &b_broadcast;
                         Ok(Tensor::F32(output))
-                    },
+                    }
                     _ => Err(TrustformersError::tensor_op_error(
                         "LayerNorm weight/bias type mismatch",
                         "LayerNorm::forward",
                     )),
                 }
-            },
+            }
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for LayerNorm",
                 "LayerNorm::forward",
@@ -130,28 +185,66 @@ impl Layer for LayerNorm {
 /// RMSNorm normalizes the input using only the root mean square (RMS) of the input,
 /// without centering by subtracting the mean. This is computationally more efficient
 /// than standard LayerNorm and is used in many modern architectures like LLaMA.
+///
+/// # Example
+///
+/// ```no_run
+/// use trustformers_core::layers::RMSNorm;
+/// use trustformers_core::tensor::Tensor;
+/// use trustformers_core::traits::Layer;
+/// use trustformers_core::device::Device;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Create RMSNorm for hidden size 768
+/// let rms_norm = RMSNorm::new_with_device(768, 1e-5, Device::CPU)?;
+///
+/// // Apply normalization
+/// let input = Tensor::randn(&[4, 128, 768])?;
+/// let normalized = rms_norm.forward(input)?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct RMSNorm {
     weight: Tensor,
     eps: f32,
+    device: Device,
 }
 
 impl RMSNorm {
+    /// Creates a new RMSNorm layer on CPU
     pub fn new(hidden_size: usize, eps: f32) -> Result<Self> {
-        let weight = Tensor::ones(&[hidden_size])?;
-        Ok(Self { weight, eps })
+        Self::new_with_device(hidden_size, eps, Device::CPU)
     }
 
+    /// Creates a new RMSNorm layer on specified device
+    pub fn new_with_device(hidden_size: usize, eps: f32, device: Device) -> Result<Self> {
+        let weight = Tensor::ones(&[hidden_size])?;
+        Ok(Self {
+            weight,
+            eps,
+            device,
+        })
+    }
+
+    /// Sets the weight tensor
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
         self.weight = weight;
         Ok(())
     }
 
-    /// Returns the total number of learnable parameters in this layer.
-    ///
-    /// # Returns
-    ///
-    /// The total parameter count for the weight tensor.
+    /// Returns the device this layer uses for computations
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Moves this layer to a different device
+    pub fn to_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
+    }
+
+    /// Returns the total number of learnable parameters in this layer
     pub fn parameter_count(&self) -> usize {
         self.weight.len()
     }
@@ -182,26 +275,25 @@ impl Layer for RMSNorm {
                         let mut broadcast_shape = vec![1; ndim];
                         broadcast_shape[last_dim] = w.len();
 
-                        use ndarray::IxDyn;
                         let w_broadcast = w
                             .view()
                             .into_shape_with_order(IxDyn(&broadcast_shape))
                             .map_err(|e| {
-                            TrustformersError::shape_error(format!(
-                                "Failed to broadcast weight: {}",
-                                e
-                            ))
-                        })?;
+                                TrustformersError::shape_error(format!(
+                                    "Failed to broadcast weight: {}",
+                                    e
+                                ))
+                            })?;
 
                         let output = &normalized * &w_broadcast;
                         Ok(Tensor::F32(output))
-                    },
+                    }
                     _ => Err(TrustformersError::tensor_op_error(
                         "RMSNorm weight type mismatch",
                         "RMSNorm::forward",
                     )),
                 }
-            },
+            }
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for RMSNorm",
                 "RMSNorm::forward",

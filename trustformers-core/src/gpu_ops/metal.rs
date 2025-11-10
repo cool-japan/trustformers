@@ -4,19 +4,75 @@
 //! Uses metal-rs for direct Metal API access.
 
 use crate::device::Device;
-use crate::errors::{Result, TrustformersError};
+use crate::errors::Result;
 use crate::tensor::Tensor;
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
+use crate::errors::TrustformersError;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use metal::{Buffer, CommandQueue, CompileOptions, Device as MetalDevice, MTLResourceOptions};
 #[cfg(all(target_os = "macos", feature = "metal"))]
+use std::collections::HashMap;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use std::mem;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use std::sync::Arc;
+
+/// Buffer ID for persistent GPU buffers
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BufferId(u64);
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl BufferId {
+    pub fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        BufferId(COUNTER.fetch_add(1, Ordering::SeqCst))
+    }
+}
+
+/// Persistent buffer cache for Metal GPU
+#[cfg(all(target_os = "macos", feature = "metal"))]
+struct BufferCache {
+    buffers: HashMap<BufferId, Arc<Buffer>>,
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl BufferCache {
+    fn new() -> Self {
+        Self {
+            buffers: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, id: BufferId, buffer: Arc<Buffer>) {
+        self.buffers.insert(id, buffer);
+    }
+
+    fn get(&self, id: &BufferId) -> Option<Arc<Buffer>> {
+        self.buffers.get(id).cloned()
+    }
+
+    fn remove(&mut self, id: &BufferId) -> Option<Arc<Buffer>> {
+        self.buffers.remove(id)
+    }
+
+    fn clear(&mut self) {
+        self.buffers.clear();
+    }
+
+    fn len(&self) -> usize {
+        self.buffers.len()
+    }
+}
 
 /// Metal GPU backend for matrix multiplication
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub struct MetalBackend {
     device: MetalDevice,
     command_queue: CommandQueue,
+    buffer_cache: Arc<std::sync::Mutex<BufferCache>>,
 }
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -32,7 +88,64 @@ impl MetalBackend {
         Ok(Self {
             device,
             command_queue,
+            buffer_cache: Arc::new(std::sync::Mutex::new(BufferCache::new())),
         })
+    }
+
+    /// Create a persistent GPU buffer and return its ID
+    pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
+        let buffer = Arc::new(self.create_buffer(data)?);
+        let buffer_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "create_persistent_buffer")
+        })?;
+
+        cache.insert(buffer_id, buffer);
+        Ok(buffer_id)
+    }
+
+    /// Get a persistent buffer by ID
+    pub fn get_persistent_buffer(&self, id: &BufferId) -> Result<Arc<Buffer>> {
+        let cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "get_persistent_buffer")
+        })?;
+
+        cache.get(id).ok_or_else(|| {
+            TrustformersError::hardware_error(
+                &format!("Buffer {:?} not found in cache", id),
+                "get_persistent_buffer",
+            )
+        })
+    }
+
+    /// Remove a persistent buffer from cache
+    pub fn remove_persistent_buffer(&self, id: &BufferId) -> Result<()> {
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "remove_persistent_buffer")
+        })?;
+
+        cache.remove(id);
+        Ok(())
+    }
+
+    /// Clear all persistent buffers
+    pub fn clear_buffer_cache(&self) -> Result<()> {
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "clear_buffer_cache")
+        })?;
+
+        cache.clear();
+        Ok(())
+    }
+
+    /// Get the number of cached buffers
+    pub fn buffer_cache_size(&self) -> Result<usize> {
+        let cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "buffer_cache_size")
+        })?;
+
+        Ok(cache.len())
     }
 
     /// Perform matrix multiplication on Metal GPU
@@ -100,10 +213,145 @@ impl MetalBackend {
         })?;
 
         let pipeline =
-            self.device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
+            self.device
+                .new_compute_pipeline_state_with_function(&kernel)
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to create pipeline: {}", e),
+                        "matmul_f32",
+                    )
+                })?;
+
+        // Create command buffer and encoder
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(0, Some(&a_buffer), 0);
+        encoder.set_buffer(1, Some(&b_buffer), 0);
+        encoder.set_buffer(2, Some(&c_buffer), 0);
+
+        // Set dimensions as constants
+        let m_u32 = m as u32;
+        let n_u32 = n as u32;
+        let k_u32 = k as u32;
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &m_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &n_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &k_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch threads
+        let threadgroup_size = metal::MTLSize {
+            width: 16,
+            height: 16,
+            depth: 1,
+        };
+
+        let threadgroups = metal::MTLSize {
+            width: (n as u64 + 15) / 16,
+            height: (m as u64 + 15) / 16,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        // Execute
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Copy result back to CPU
+        let result_ptr = c_buffer.contents() as *const f32;
+        let result = unsafe { std::slice::from_raw_parts(result_ptr, result_size) }.to_vec();
+
+        Ok(result)
+    }
+
+    /// Perform matrix multiplication with cached weight buffer
+    /// This avoids transferring weight data on each forward pass
+    pub fn matmul_with_cached_weight(
+        &self,
+        a: &[f32],
+        weight_buffer_id: &BufferId,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<f32>> {
+        // Get cached weight buffer
+        let b_buffer = self.get_persistent_buffer(weight_buffer_id)?;
+
+        // Create buffer for input (activations change on each forward pass)
+        let a_buffer = self.create_buffer(a)?;
+
+        let result_size = m * n;
+        let c_buffer = self.device.new_buffer(
+            (result_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Metal shader for matrix multiplication (same as matmul_f32)
+        let shader_source = r#"
+            #include <metal_stdlib>
+            using namespace metal;
+
+            kernel void matmul(
+                device const float* a [[buffer(0)]],
+                device const float* b [[buffer(1)]],
+                device float* c [[buffer(2)]],
+                constant uint& M [[buffer(3)]],
+                constant uint& N [[buffer(4)]],
+                constant uint& K [[buffer(5)]],
+                uint2 gid [[thread_position_in_grid]]
+            ) {
+                uint row = gid.y;
+                uint col = gid.x;
+
+                if (row >= M || col >= N) return;
+
+                float sum = 0.0;
+                for (uint i = 0; i < K; ++i) {
+                    sum += a[row * K + i] * b[i * N + col];
+                }
+                c[row * N + col] = sum;
+            }
+        "#;
+
+        // Compile shader
+        let library = self
+            .device
+            .new_library_with_source(shader_source, &CompileOptions::new())
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to compile Metal shader: {}", e),
+                    "matmul_with_cached_weight",
+                )
+            })?;
+
+        let kernel = library.get_function("matmul", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get kernel function: {}", e),
+                "matmul_with_cached_weight",
+            )
+        })?;
+
+        let pipeline = self
+            .device
+            .new_compute_pipeline_state_with_function(&kernel)
+            .map_err(|e| {
                 TrustformersError::hardware_error(
                     &format!("Failed to create pipeline: {}", e),
-                    "matmul_f32",
+                    "matmul_with_cached_weight",
                 )
             })?;
 
@@ -113,7 +361,7 @@ impl MetalBackend {
 
         encoder.set_compute_pipeline_state(&pipeline);
         encoder.set_buffer(0, Some(&a_buffer), 0);
-        encoder.set_buffer(1, Some(&b_buffer), 0);
+        encoder.set_buffer(1, Some(&*b_buffer), 0); // Use cached weight buffer
         encoder.set_buffer(2, Some(&c_buffer), 0);
 
         // Set dimensions as constants
@@ -181,9 +429,12 @@ static METAL_BACKEND: once_cell::sync::Lazy<std::sync::Mutex<Option<MetalBackend
 
 /// Get or create Metal backend instance
 #[cfg(all(target_os = "macos", feature = "metal"))]
-fn get_metal_backend() -> Result<MetalBackend> {
+pub fn get_metal_backend() -> Result<MetalBackend> {
     let mut cache = METAL_BACKEND.lock().map_err(|_| {
-        TrustformersError::hardware_error("Failed to lock Metal backend cache", "get_metal_backend")
+        TrustformersError::hardware_error(
+            "Failed to lock Metal backend cache",
+            "get_metal_backend",
+        )
     })?;
 
     if cache.is_none() {
@@ -194,21 +445,24 @@ fn get_metal_backend() -> Result<MetalBackend> {
     cache
         .as_ref()
         .ok_or_else(|| {
-            TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend")
+            TrustformersError::hardware_error(
+                "Metal backend not initialized",
+                "get_metal_backend",
+            )
         })
         .map(|backend| MetalBackend {
             device: backend.device.clone(),
             command_queue: backend.command_queue.clone(),
+            buffer_cache: Arc::clone(&backend.buffer_cache),
         })
 }
 
 /// Dispatch matrix multiplication to appropriate backend based on device
+#[allow(unused_variables)]
 pub fn dispatch_matmul(a: &Tensor, b: &Tensor, device: &Device) -> Result<Tensor> {
-    match device {
-        #[cfg(all(target_os = "macos", feature = "metal"))]
-        Device::Metal(_device_id) => {
-            use scirs2_core::ndarray::ArrayD;
-
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    {
+        if let Device::Metal(_device_id) = device {
             match (a, b) {
                 (Tensor::F32(a_arr), Tensor::F32(b_arr)) => {
                     // Convert to 2D arrays
@@ -258,37 +512,27 @@ pub fn dispatch_matmul(a: &Tensor, b: &Tensor, device: &Device) -> Result<Tensor
                     let result_data = backend.matmul_f32(&a_data, &b_data, m, k, n)?;
 
                     // Convert back to tensor
-                    let result_2d = scirs2_core::ndarray::Array2::from_shape_vec(
-                        (m, n),
-                        result_data,
-                    )
-                    .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
-                    })?;
+                    let result_2d =
+                        scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
+                            .map_err(|e| {
+                                TrustformersError::shape_error(format!(
+                                    "Failed to reshape result: {}",
+                                    e
+                                ))
+                            })?;
 
                     let result_dyn = result_2d.into_dyn();
-                    Ok(Tensor::F32(result_dyn))
-                },
+                    return Ok(Tensor::F32(result_dyn));
+                }
                 _ => {
                     // Fallback to CPU matmul for non-F32 tensors
-                    a.matmul(b)
-                },
+                    return a.matmul(b);
+                }
             }
-        },
-        Device::CPU => {
-            // CPU matmul
-            a.matmul(b)
-        },
-        _ => {
-            // Unsupported device, fallback to CPU
-            a.matmul(b)
-        },
+        }
     }
-}
 
-#[cfg(not(all(target_os = "macos", feature = "metal")))]
-pub fn dispatch_matmul(a: &Tensor, b: &Tensor, _device: &Device) -> Result<Tensor> {
-    // No Metal support, fallback to CPU
+    // Default: CPU matmul (or if Metal not available/configured)
     a.matmul(b)
 }
 

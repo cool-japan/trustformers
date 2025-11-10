@@ -52,6 +52,8 @@ pub struct Linear {
     weight: Tensor,
     bias: Option<Tensor>,
     device: Device,
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    weight_buffer_id: std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::BufferId>>>,
 }
 
 impl Linear {
@@ -118,6 +120,8 @@ impl Linear {
             weight,
             bias,
             device,
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            weight_buffer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -137,6 +141,13 @@ impl Linear {
     /// Self with updated device.
     pub fn to_device(mut self, device: Device) -> Self {
         self.device = device;
+        // Clear cached buffer when changing device
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            if let Ok(mut buffer_id) = self.weight_buffer_id.write() {
+                *buffer_id = None;
+            }
+        }
         self
     }
 
@@ -155,6 +166,13 @@ impl Linear {
     /// This method is typically used when loading pretrained weights.
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
         self.weight = weight;
+        // Clear cached buffer when weights are updated
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            if let Ok(mut buffer_id) = self.weight_buffer_id.write() {
+                *buffer_id = None;
+            }
+        }
         Ok(())
     }
 
@@ -204,6 +222,62 @@ impl Linear {
         let bias_count = self.bias.as_ref().map_or(0, |b| b.len());
         weight_count + bias_count
     }
+
+    /// Initialize persistent GPU weight buffer for Metal device
+    /// This is called automatically on first forward pass with Metal device
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    fn ensure_weight_buffer_cached(&self) -> Result<()> {
+        use crate::gpu_ops::metal::get_metal_backend;
+
+        // Check if already cached (read lock is cheaper)
+        if let Ok(buffer_id) = self.weight_buffer_id.read() {
+            if buffer_id.is_some() {
+                return Ok(());  // Already cached
+            }
+        }
+
+        // Only cache if using Metal
+        if matches!(self.device, Device::Metal(_)) {
+            // Get write lock to cache the buffer
+            let mut buffer_id_guard = self.weight_buffer_id.write().map_err(|_| {
+                TrustformersError::hardware_error(
+                    "Failed to acquire write lock on buffer cache",
+                    "ensure_weight_buffer_cached",
+                )
+            })?;
+
+            // Double-check after acquiring write lock (another thread might have cached it)
+            if buffer_id_guard.is_some() {
+                return Ok(());
+            }
+
+            // Get weight data as f32 slice
+            match &self.weight {
+                Tensor::F32(arr) => {
+                    if arr.ndim() != 2 {
+                        return Err(TrustformersError::shape_error(
+                            "Weight tensor must be 2D for Metal caching".to_string()
+                        ));
+                    }
+
+                    // Convert to contiguous vec for GPU upload
+                    let weight_data: Vec<f32> = arr.iter().copied().collect();
+
+                    // Get Metal backend and cache the buffer
+                    let backend = get_metal_backend()?;
+                    let new_buffer_id = backend.create_persistent_buffer(&weight_data)?;
+                    *buffer_id_guard = Some(new_buffer_id);
+                }
+                _ => {
+                    return Err(TrustformersError::tensor_op_error(
+                        "Only F32 tensors supported for Metal caching",
+                        "ensure_weight_buffer_cached",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Layer for Linear {
@@ -211,6 +285,14 @@ impl Layer for Linear {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        // Cache weight buffer on Metal GPU if needed (optimization for repeated forward passes)
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        {
+            if self.device.is_gpu() {
+                let _ = self.ensure_weight_buffer_cached();
+            }
+        }
+
         // Handle different input shapes for matmul
         let input_shape = input.shape();
         let weight_t = self.weight.transpose(0, 1)?;

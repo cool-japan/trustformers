@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_greedy_generation_interface() -> Result<()> {
-        let gpt2_config = Gpt2Config::gpt2_base();
+        let gpt2_config = Gpt2Config::small();
         let model = Gpt2LMHeadModel::new(gpt2_config)?;
 
         let input_ids = vec![1, 2, 3];

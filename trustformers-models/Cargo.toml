@@ -11,7 +11,7 @@ description = "Model implementations for TrustformeRS"
 workspace = true
 
 [dependencies]
-trustformers-core.workspace = true
+trustformers-core = { workspace = true }
 scirs2-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -64,4 +64,5 @@ blip2 = []
 llava = []
 dalle = []
 flamingo = []
+metal = ["trustformers-core/metal"]
 all = ["bert", "roberta", "distilbert", "gpt2", "gpt_neo", "gpt_j", "t5", "albert", "electra", "deberta", "vit", "llama", "mistral", "clip", "gemma", "qwen", "phi3", "mamba", "rwkv", "s4", "stablelm", "falcon", "blip2", "llava", "dalle", "flamingo"]
