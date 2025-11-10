@@ -104,8 +104,8 @@
 //! - Respect OpenAI's responsible use guidelines
 
 pub mod config;
-pub mod model;
 pub mod generation;
+pub mod model;
 
 #[cfg(test)]
 mod tests;

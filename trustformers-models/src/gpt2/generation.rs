@@ -5,9 +5,7 @@
 //! This module provides advanced generation capabilities using the unified
 //! generation utilities from `trustformers_models::generation_utils`.
 
-use crate::generation_utils::{
-    GenerationConfig, GenerationMode, GenerationUtils, KVCache,
-};
+use crate::generation_utils::{GenerationConfig, GenerationMode, GenerationUtils, KVCache};
 use crate::gpt2::model::{Gpt2LMHeadModel, Gpt2LMOutput};
 use scirs2_core::ndarray::s;
 use scirs2_core::random::*;
@@ -124,8 +122,7 @@ impl GenerativeModel for Gpt2LMHeadModel {
                     &mut rng,
                     |logits, rng| {
                         let probs = GenerationUtils::softmax(logits);
-                        GenerationUtils::sample_from_probs(&probs, rng)
-                            .map(|idx| idx as u32)
+                        GenerationUtils::sample_from_probs(&probs, rng).map(|idx| idx as u32)
                     },
                 )?;
                 Ok(vec![result])
@@ -203,13 +200,9 @@ impl GenerativeModel for Gpt2LMHeadModel {
         config.max_length = max_length;
 
         let mut rng = thread_rng();
-        self.generate_sampling_internal(
-            input_ids,
-            max_length,
-            &config,
-            &mut rng,
-            |logits, rng| GenerationUtils::sample_top_k(logits, k, rng),
-        )
+        self.generate_sampling_internal(input_ids, max_length, &config, &mut rng, |logits, rng| {
+            GenerationUtils::sample_top_k(logits, k, rng)
+        })
     }
 
     fn generate_top_p(
@@ -224,13 +217,9 @@ impl GenerativeModel for Gpt2LMHeadModel {
         config.max_length = max_length;
 
         let mut rng = thread_rng();
-        self.generate_sampling_internal(
-            input_ids,
-            max_length,
-            &config,
-            &mut rng,
-            |logits, rng| GenerationUtils::sample_top_p(logits, p, rng),
-        )
+        self.generate_sampling_internal(input_ids, max_length, &config, &mut rng, |logits, rng| {
+            GenerationUtils::sample_top_p(logits, p, rng)
+        })
     }
 }
 
@@ -261,8 +250,16 @@ impl Gpt2LMHeadModel {
                 config.repetition_penalty,
                 config.repetition_penalty_decay,
             );
-            GenerationUtils::apply_frequency_penalty(&mut logits, &generated, config.frequency_penalty);
-            GenerationUtils::apply_presence_penalty(&mut logits, &generated, config.presence_penalty);
+            GenerationUtils::apply_frequency_penalty(
+                &mut logits,
+                &generated,
+                config.frequency_penalty,
+            );
+            GenerationUtils::apply_presence_penalty(
+                &mut logits,
+                &generated,
+                config.presence_penalty,
+            );
             GenerationUtils::apply_bad_words_filter(&mut logits, &generated, &config.bad_words_ids);
 
             // Select argmax
@@ -308,8 +305,16 @@ impl Gpt2LMHeadModel {
                 config.repetition_penalty,
                 config.repetition_penalty_decay,
             );
-            GenerationUtils::apply_frequency_penalty(&mut logits, &generated, config.frequency_penalty);
-            GenerationUtils::apply_presence_penalty(&mut logits, &generated, config.presence_penalty);
+            GenerationUtils::apply_frequency_penalty(
+                &mut logits,
+                &generated,
+                config.frequency_penalty,
+            );
+            GenerationUtils::apply_presence_penalty(
+                &mut logits,
+                &generated,
+                config.presence_penalty,
+            );
             GenerationUtils::apply_bad_words_filter(&mut logits, &generated, &config.bad_words_ids);
 
             // Sample using the provided sampling function
@@ -364,10 +369,8 @@ impl Gpt2LMHeadModel {
                 );
 
                 // Convert to log probabilities
-                let log_probs = GenerationUtils::softmax(&logits)
-                    .iter()
-                    .map(|&p| p.ln())
-                    .collect::<Vec<_>>();
+                let log_probs =
+                    GenerationUtils::softmax(&logits).iter().map(|&p| p.ln()).collect::<Vec<_>>();
 
                 // Get top k tokens
                 let mut token_scores: Vec<(f32, usize)> =

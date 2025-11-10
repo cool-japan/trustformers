@@ -21,14 +21,23 @@ mod tests {
         let tiny = ViTConfig::tiny();
         assert_eq!(tiny.hidden_size, 192);
         assert_eq!(tiny.num_attention_heads, 3);
+        assert_eq!(tiny.num_hidden_layers, 12);
 
         let small = ViTConfig::small();
         assert_eq!(small.hidden_size, 384);
         assert_eq!(small.num_attention_heads, 6);
+        assert_eq!(small.num_hidden_layers, 12);
 
         let large = ViTConfig::large();
         assert_eq!(large.hidden_size, 1024);
         assert_eq!(large.num_attention_heads, 16);
+        assert_eq!(large.num_hidden_layers, 24);
+
+        let huge = ViTConfig::huge();
+        assert_eq!(huge.hidden_size, 1280);
+        assert_eq!(huge.num_attention_heads, 16);
+        assert_eq!(huge.num_hidden_layers, 32);
+        assert_eq!(huge.patch_size, 14); // Huge uses 14x14 patches
     }
 
     #[test]

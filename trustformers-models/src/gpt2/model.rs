@@ -9,6 +9,29 @@ use trustformers_core::{
 
 use super::config::Gpt2Config;
 
+/// Transpose a 2D tensor (swap dimensions 0 and 1)
+/// PyTorch Linear weights are [out_features, in_features]
+/// but we need [in_features, out_features] for our matmul
+fn transpose_tensor(tensor: Tensor) -> Result<Tensor> {
+    match tensor {
+        Tensor::F32(arr) => {
+            if arr.ndim() != 2 {
+                return Err(TrustformersError::shape_error(format!(
+                    "Expected 2D tensor, got {}D",
+                    arr.ndim()
+                )));
+            }
+            // Transpose using ndarray's .t() and convert back to owned
+            let transposed = arr.t().to_owned();
+            Ok(Tensor::F32(transposed))
+        },
+        _ => Err(TrustformersError::tensor_op_error(
+            "Only F32 tensors supported",
+            "transpose",
+        )),
+    }
+}
+
 /// GPT-2 base model (decoder-only transformer)
 #[derive(Clone)]
 pub struct Gpt2Model {
@@ -668,13 +691,14 @@ impl Gpt2Attention {
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
         // Load combined QKV weights
-        self.c_attn
-            .set_weight(reader.read_tensor(&format!("{}.c_attn.weight", prefix))?)?;
+        // PyTorch stores as [out, in], we need [in, out], so transpose
+        let c_attn_weight = reader.read_tensor(&format!("{}.c_attn.weight", prefix))?;
+        self.c_attn.set_weight(transpose_tensor(c_attn_weight)?)?;
         self.c_attn.set_bias(reader.read_tensor(&format!("{}.c_attn.bias", prefix))?)?;
 
-        // Load output projection weights
-        self.c_proj
-            .set_weight(reader.read_tensor(&format!("{}.c_proj.weight", prefix))?)?;
+        // Load output projection weights (also needs transpose)
+        let c_proj_weight = reader.read_tensor(&format!("{}.c_proj.weight", prefix))?;
+        self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(reader.read_tensor(&format!("{}.c_proj.bias", prefix))?)?;
 
         Ok(())
@@ -874,13 +898,13 @@ impl Gpt2MLP {
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
-        // Load feedforward weights
-        self.c_fc.set_weight(reader.read_tensor(&format!("{}.c_fc.weight", prefix))?)?;
+        // Transpose MLP weights too
+        let c_fc_weight = reader.read_tensor(&format!("{}.c_fc.weight", prefix))?;
+        self.c_fc.set_weight(transpose_tensor(c_fc_weight)?)?;
         self.c_fc.set_bias(reader.read_tensor(&format!("{}.c_fc.bias", prefix))?)?;
 
-        // Load projection weights
-        self.c_proj
-            .set_weight(reader.read_tensor(&format!("{}.c_proj.weight", prefix))?)?;
+        let c_proj_weight = reader.read_tensor(&format!("{}.c_proj.weight", prefix))?;
+        self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(reader.read_tensor(&format!("{}.c_proj.bias", prefix))?)?;
 
         Ok(())

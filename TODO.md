@@ -232,7 +232,9 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
   - Dual encoder architecture (text + vision)
   - Contrastive learning objective
   - Zero-shot image classification
-  - Note: Weight loading placeholder for encoders
+  - ✅ Complete weight loading for text and vision encoders
+  - ✅ HuggingFace model loading support
+  - ✅ Load from path, lazy loading, memory-mapped modes
 
 - ✅ **CogVLM** - Visual language model with temporal processing
   - Temporal encoder for video understanding
@@ -413,12 +415,6 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 
 ## Known Limitations
 
-### Model-Specific Limitations
-- **CLIP Weight Loading:** Currently placeholder (logit_scale only)
-  - Text encoder weight loading requires additional work
-  - Vision encoder weight loading requires additional work
-  - Complex multimodal architecture integration needed
-
 ### Platform Limitations
 - **Metal Flash Attention:** Requires macOS 10.15+ or iOS 13+
 - **TPU Backend:** Requires Google Cloud TPU access
@@ -429,10 +425,11 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 ## Future Enhancements
 
 ### High Priority
-- Complete CLIP text/vision encoder weight loading
-- Enhanced multimodal model support
-- Additional vision transformer variants
+- ✅ Complete CLIP text/vision encoder weight loading (COMPLETED - see trustformers-models/src/clip/)
+- Enhanced multimodal model support and integration examples
+- Additional vision transformer variants (ViT-Tiny, ViT-Huge, DeiT, Swin)
 - Latest research architectures (as they emerge)
+- Advanced generation examples and tutorials
 
 ### Performance Optimizations
 - Further SIMD optimizations via SciRS2
@@ -522,6 +519,37 @@ cargo doc --all-features --no-deps
 cargo build --release --all-features
 ```
 
+### Example Applications
+TrustformeRS includes comprehensive examples demonstrating real-world usage:
+
+#### Workspace Examples (examples/)
+- **adaptive_inference_demo.rs** - Adaptive inference strategies
+- **advanced_composition.rs** - Model composition techniques
+- **basic_pipeline.rs** - Simple pipeline usage
+- **batch_inference_example.rs** - Efficient batch processing with batch utilities
+- **custom_backend_examples.rs** - Custom hardware backend integration
+- **dynamic_batching.rs** - Dynamic batch sizing
+- **ensemble_models.rs** - Model ensemble techniques
+- **generation_advanced_example.rs** - Advanced text generation strategies
+- **interactive_cli.rs** - Interactive command-line interface
+- **realtime_streaming.rs** - Real-time streaming inference
+- **tensorrt_demo.rs** - TensorRT integration
+- **web_demo.rs** - Web-based demo applications
+
+#### Trustformers Crate Examples (trustformers/examples/)
+- **batch_inference_example.rs** - Batch inference patterns and optimization strategies
+- **generation_advanced_example.rs** - Comprehensive text generation showcase
+- **clip_multimodal_example.rs** - CLIP multimodal vision-language capabilities
+
+Run examples with:
+```bash
+# Workspace examples
+cargo run --example batch_inference_example --features "bert,gpt2"
+
+# Trustformers crate examples
+cargo run -p trustformers --example clip_multimodal_example --features "clip,vit"
+```
+
 ### Community
 - **Issues:** https://github.com/cool-japan/trustformers/issues
 - **Discussions:** https://github.com/cool-japan/trustformers/discussions
@@ -529,6 +557,10 @@ cargo build --release --all-features
 
 ---
 
-**Last Updated:** Refactored for alpha.1 release (removed date-based tracking)
+**Last Updated:** 2025-11-10 - Added CLIP weight loading completion, new example files
 **Next Milestone:** Alpha 1.0 Release
 **Target Audience:** ML engineers, researchers, and production deployment teams
+**Recent Updates:**
+- ✅ CLIP text/vision encoder weight loading fully implemented
+- ✅ Added comprehensive example files for batch inference, generation, and multimodal
+- ✅ Enhanced GPT-2 generation with advanced sampling strategies
