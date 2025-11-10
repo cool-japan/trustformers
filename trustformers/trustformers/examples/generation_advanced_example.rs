@@ -60,7 +60,7 @@ fn example_greedy_generation() -> Result<()> {
     // let config = GenerationConfig::greedy();
     // config.max_length = max_length;
     // let output = model.generate_with_config(tokenize(prompt), config)?;
-    
+
     println!("{}", prompt);
     println!("... [generated text would appear here]");
 
@@ -373,7 +373,7 @@ fn example_long_form_generation() -> Result<()> {
 
     print_subsection("Generation Progress");
     println!("Starting generation...");
-    
+
     // Simulate progress updates
     let milestones = vec![25, 50, 75, 100, 150, 200];
     for milestone in milestones {
@@ -401,8 +401,7 @@ fn main() -> Result<()> {
     example_top_p_sampling().context("Top-p sampling example failed")?;
     example_temperature_effects().context("Temperature example failed")?;
     example_repetition_penalty().context("Repetition penalty example failed")?;
-    example_frequency_presence_penalties()
-        .context("Frequency/presence penalty example failed")?;
+    example_frequency_presence_penalties().context("Frequency/presence penalty example failed")?;
     example_combined_sampling().context("Combined sampling example failed")?;
     example_bad_words_filtering().context("Bad words filtering example failed")?;
     example_early_stopping().context("Early stopping example failed")?;

@@ -74,7 +74,10 @@ impl BatchStats {
         println!("Successful inferences:      {}", self.successful_inferences);
         println!("Failed inferences:          {}", self.failed_inferences);
         println!("Total time:                 {} ms", self.total_time_ms);
-        println!("Average latency per sample: {:.2} ms", self.average_latency_ms);
+        println!(
+            "Average latency per sample: {:.2} ms",
+            self.average_latency_ms
+        );
         println!(
             "Throughput:                 {:.2} samples/sec",
             self.throughput_samples_per_sec
@@ -107,8 +110,7 @@ impl DynamicBatchProcessor {
 
     /// Adjust batch size based on performance metrics
     fn adjust_batch_size(&mut self, latency_ms: u128, target_latency_ms: u64) {
-        if latency_ms < target_latency_ms as u128 && self.current_batch_size < self.max_batch_size
-        {
+        if latency_ms < target_latency_ms as u128 && self.current_batch_size < self.max_batch_size {
             // Increase batch size if we're under the target latency
             self.current_batch_size = (self.current_batch_size * 2).min(self.max_batch_size);
             println!(
@@ -133,11 +135,7 @@ impl DynamicBatchProcessor {
 }
 
 /// Process a batch of texts with error handling
-fn process_batch(
-    texts: &[String],
-    batch_id: usize,
-) -> Result<(usize, usize, u128)>
-{
+fn process_batch(texts: &[String], batch_id: usize) -> Result<(usize, usize, u128)> {
     let start = Instant::now();
 
     println!("\n{}", "-".repeat(80));
@@ -319,17 +317,13 @@ fn example_memory_efficient_batch_inference() -> Result<()> {
     let total_samples = 1000;
     let memory_limit_mb = 512; // Simulated memory limit
     let estimated_sample_size_kb = 100;
-    let max_samples_in_memory =
-        (memory_limit_mb * 1024) / estimated_sample_size_kb;
+    let max_samples_in_memory = (memory_limit_mb * 1024) / estimated_sample_size_kb;
 
     println!(
         "\nProcessing {} samples with memory limit of {}MB",
         total_samples, memory_limit_mb
     );
-    println!(
-        "Max samples in memory: {}",
-        max_samples_in_memory
-    );
+    println!("Max samples in memory: {}", max_samples_in_memory);
 
     let mut stats = BatchStats::new();
     let batch_size = 10;

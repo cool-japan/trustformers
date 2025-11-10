@@ -46,7 +46,7 @@ fn example_zero_shot_classification() -> Result<()> {
     let image_path = "path/to/image.jpg";
     let candidate_labels = vec![
         "a photo of a cat",
-        "a photo of a dog", 
+        "a photo of a dog",
         "a photo of a bird",
         "a photo of a car",
         "a photo of a building",
@@ -77,7 +77,11 @@ fn example_zero_shot_classification() -> Result<()> {
         println!("  {:<30} {:>6.2}% {}", label, prob * 100.0, bar);
     }
 
-    println!("\nTop prediction: {} ({:.2}%)", candidate_labels[1], mock_probs[1] * 100.0);
+    println!(
+        "\nTop prediction: {} ({:.2}%)",
+        candidate_labels[1],
+        mock_probs[1] * 100.0
+    );
 
     Ok(())
 }
@@ -113,10 +117,7 @@ fn example_text_to_image_retrieval() -> Result<()> {
     // }
 
     let mock_similarities = vec![0.92, 0.45, 0.38, 0.42, 0.85];
-    let mut ranked: Vec<_> = image_database
-        .iter()
-        .zip(mock_similarities.iter())
-        .collect();
+    let mut ranked: Vec<_> = image_database.iter().zip(mock_similarities.iter()).collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
 
     println!("\nTop matches:");
@@ -149,10 +150,7 @@ fn example_image_to_text_retrieval() -> Result<()> {
 
     print_subsection("Retrieval Results");
     let mock_similarities = vec![0.88, 0.35, 0.28, 0.22, 0.91];
-    let mut ranked: Vec<_> = text_database
-        .iter()
-        .zip(mock_similarities.iter())
-        .collect();
+    let mut ranked: Vec<_> = text_database.iter().zip(mock_similarities.iter()).collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
 
     println!("\nTop matching descriptions:");
@@ -215,8 +213,9 @@ fn example_batch_processing() -> Result<()> {
     print_subsection("Processing");
     println!("\nEncoding images:");
     for batch_id in 0..(total_images / batch_size_images) {
-        println!("  Batch {}/{}: {} images encoded", 
-            batch_id + 1, 
+        println!(
+            "  Batch {}/{}: {} images encoded",
+            batch_id + 1,
             total_images / batch_size_images,
             batch_size_images
         );
@@ -224,7 +223,8 @@ fn example_batch_processing() -> Result<()> {
 
     println!("\nEncoding texts:");
     for batch_id in 0..(total_texts / batch_size_texts) {
-        println!("  Batch {}/{}: {} texts encoded", 
+        println!(
+            "  Batch {}/{}: {} texts encoded",
             batch_id + 1,
             total_texts / batch_size_texts,
             batch_size_texts
@@ -298,7 +298,7 @@ fn example_fine_grained_understanding() -> Result<()> {
 
     print_subsection("Classification Results");
     let mock_probs = vec![0.62, 0.24, 0.08, 0.04, 0.02];
-    
+
     println!("\nPredictions:");
     for (label, prob) in fine_grained_labels.iter().zip(mock_probs.iter()) {
         println!("  {:<25} {:>6.2}%", label, prob * 100.0);
@@ -330,7 +330,7 @@ fn example_multilingual_support() -> Result<()> {
 
     print_subsection("Similarity Scores");
     let mock_similarities = vec![0.85, 0.82, 0.84, 0.83, 0.78];
-    
+
     println!("\nText-image similarities across languages:");
     for ((lang, text), sim) in multilingual_queries.iter().zip(mock_similarities.iter()) {
         println!("\n  {:<12} (similarity: {:.3})", lang, sim);
@@ -349,9 +349,24 @@ fn example_model_variants() -> Result<()> {
     println!("\nCLIP comes in multiple sizes trading off accuracy and speed.");
 
     let variants = vec![
-        ("ViT-B/32", "Base model, 32x32 patches", "86M params", "Fast"),
-        ("ViT-B/16", "Base model, 16x16 patches", "86M params", "Medium"),
-        ("ViT-L/14", "Large model, 14x14 patches", "304M params", "Accurate"),
+        (
+            "ViT-B/32",
+            "Base model, 32x32 patches",
+            "86M params",
+            "Fast",
+        ),
+        (
+            "ViT-B/16",
+            "Base model, 16x16 patches",
+            "86M params",
+            "Medium",
+        ),
+        (
+            "ViT-L/14",
+            "Large model, 14x14 patches",
+            "304M params",
+            "Accurate",
+        ),
     ];
 
     print_subsection("Available Variants");
@@ -363,11 +378,23 @@ fn example_model_variants() -> Result<()> {
     }
 
     print_subsection("Performance Comparison");
-    println!("\n{:<15} {:<12} {:<15} {:<15}", "Model", "Accuracy", "Speed (img/s)", "Memory");
+    println!(
+        "\n{:<15} {:<12} {:<15} {:<15}",
+        "Model", "Accuracy", "Speed (img/s)", "Memory"
+    );
     println!("{}", "-".repeat(60));
-    println!("{:<15} {:<12} {:<15} {:<15}", "ViT-B/32", "76.3%", "~120", "~4 GB");
-    println!("{:<15} {:<12} {:<15} {:<15}", "ViT-B/16", "78.5%", "~60", "~4 GB");
-    println!("{:<15} {:<12} {:<15} {:<15}", "ViT-L/14", "80.4%", "~30", "~12 GB");
+    println!(
+        "{:<15} {:<12} {:<15} {:<15}",
+        "ViT-B/32", "76.3%", "~120", "~4 GB"
+    );
+    println!(
+        "{:<15} {:<12} {:<15} {:<15}",
+        "ViT-B/16", "78.5%", "~60", "~4 GB"
+    );
+    println!(
+        "{:<15} {:<12} {:<15} {:<15}",
+        "ViT-L/14", "80.4%", "~30", "~12 GB"
+    );
 
     Ok(())
 }
@@ -381,24 +408,15 @@ fn main() -> Result<()> {
     println!("and cross-modal search applications.");
 
     // Run all examples
-    example_zero_shot_classification()
-        .context("Zero-shot classification example failed")?;
-    example_text_to_image_retrieval()
-        .context("Text-to-image retrieval example failed")?;
-    example_image_to_text_retrieval()
-        .context("Image-to-text retrieval example failed")?;
-    example_embedding_space()
-        .context("Embedding space example failed")?;
-    example_batch_processing()
-        .context("Batch processing example failed")?;
-    example_cross_modal_search()
-        .context("Cross-modal search example failed")?;
-    example_fine_grained_understanding()
-        .context("Fine-grained understanding example failed")?;
-    example_multilingual_support()
-        .context("Multi-lingual support example failed")?;
-    example_model_variants()
-        .context("Model variants example failed")?;
+    example_zero_shot_classification().context("Zero-shot classification example failed")?;
+    example_text_to_image_retrieval().context("Text-to-image retrieval example failed")?;
+    example_image_to_text_retrieval().context("Image-to-text retrieval example failed")?;
+    example_embedding_space().context("Embedding space example failed")?;
+    example_batch_processing().context("Batch processing example failed")?;
+    example_cross_modal_search().context("Cross-modal search example failed")?;
+    example_fine_grained_understanding().context("Fine-grained understanding example failed")?;
+    example_multilingual_support().context("Multi-lingual support example failed")?;
+    example_model_variants().context("Model variants example failed")?;
 
     println!("\n{}", "▓".repeat(80));
     println!("All CLIP multimodal examples completed successfully!");
