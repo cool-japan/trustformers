@@ -6,10 +6,10 @@
 //! generation utilities from `trustformers_models::generation_utils`.
 
 use crate::generation_utils::{
-    GenerationConfig, GenerationMode, GenerationUtils, KVCache, StoppingCriteria,
+    GenerationConfig, GenerationMode, GenerationUtils, KVCache,
 };
-use crate::gpt2::{Gpt2LMHeadModel, Gpt2LMOutput};
-use scirs2_core::ndarray::{s, ArrayD, IxDyn};
+use crate::gpt2::model::{Gpt2LMHeadModel, Gpt2LMOutput};
+use scirs2_core::ndarray::s;
 use scirs2_core::random::*;
 use trustformers_core::{
     errors::{tensor_op_error, Result, TrustformersError},
@@ -66,11 +66,7 @@ impl GenerativeModel for Gpt2LMHeadModel {
         config.validate()?;
 
         // Initialize RNG if seed is provided
-        let mut rng = if let Some(seed) = config.seed {
-            StdRng::seed_from_u64(seed)
-        } else {
-            StdRng::from_entropy()
-        };
+        let mut rng = thread_rng(); // Use thread_rng from scirs2_core
 
         // Determine effective max length
         let max_length = if let Some(max_new_tokens) = config.max_new_tokens {
@@ -170,7 +166,7 @@ impl GenerativeModel for Gpt2LMHeadModel {
                 )?;
                 Ok(vec![result])
             },
-            GenerationMode::ContrastiveSearch { top_k, alpha } => {
+            GenerationMode::ContrastiveSearch { top_k: _, alpha: _ } => {
                 // Contrastive search requires tracking hidden states
                 // For now, return an error indicating this is not yet implemented
                 Err(TrustformersError::model_error(
@@ -206,7 +202,7 @@ impl GenerativeModel for Gpt2LMHeadModel {
         config.temperature = temperature;
         config.max_length = max_length;
 
-        let mut rng = StdRng::from_entropy();
+        let mut rng = thread_rng();
         self.generate_sampling_internal(
             input_ids,
             max_length,
@@ -227,7 +223,7 @@ impl GenerativeModel for Gpt2LMHeadModel {
         config.temperature = temperature;
         config.max_length = max_length;
 
-        let mut rng = StdRng::from_entropy();
+        let mut rng = thread_rng();
         self.generate_sampling_internal(
             input_ids,
             max_length,
@@ -278,16 +274,17 @@ impl Gpt2LMHeadModel {
     }
 
     /// Internal sampling generation with configurable sampling function
-    fn generate_sampling_internal<F>(
+    fn generate_sampling_internal<F, R>(
         &self,
         input_ids: Vec<u32>,
         max_length: usize,
         config: &GenerationConfig,
-        rng: &mut StdRng,
+        rng: &mut R,
         sample_fn: F,
     ) -> Result<Vec<u32>>
     where
-        F: Fn(&[f32], &mut StdRng) -> Result<u32>,
+        F: Fn(&[f32], &mut R) -> Result<u32>,
+        R: Rng,
     {
         let mut generated = input_ids.clone();
         let mut kv_cache = if !config.no_kv_cache { Some(KVCache::new()) } else { None };
