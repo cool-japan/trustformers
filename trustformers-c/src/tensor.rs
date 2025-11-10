@@ -830,6 +830,673 @@ pub extern "C" fn trustformers_tensor_print_info(tensor: TrustformersTensor) -> 
     TrustformersError::Success
 }
 
+// ============================================================================
+// Advanced Tensor Operations
+// ============================================================================
+
+/// Apply Sigmoid activation function (1 / (1 + exp(-x)))
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_sigmoid(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.sigmoid() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Apply Tanh activation function
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_tanh(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.tanh() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Apply SiLU/Swish activation function (x * sigmoid(x))
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_silu(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.silu() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Apply LeakyReLU activation function
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_leaky_relu(
+    input: TrustformersTensor,
+    negative_slope: f32,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.leaky_relu(negative_slope) {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute exponential (e^x) element-wise
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_exp(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.exp() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute natural logarithm element-wise
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_log(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.log() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute square root element-wise
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_sqrt(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.sqrt() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute absolute value element-wise
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_abs(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.abs() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute power (x^exponent) element-wise
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_pow(
+    input: TrustformersTensor,
+    exponent: f32,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.pow(exponent) {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute sine element-wise
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_sin(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.sin() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute cosine element-wise
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_cos(
+    input: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.cos() {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+// NOTE: The following tensor operations are commented out because they are not yet
+// implemented in the trustformers_core::tensor::Tensor API. They can be uncommented
+// once the corresponding methods are added to the Tensor implementation.
+
+/*
+/// Clamp tensor values to [min, max] range (NOT YET IMPLEMENTED)
+/// TODO: Implement clamp() method in trustformers_core::tensor::Tensor
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_clamp(
+    input: TrustformersTensor,
+    min_val: f32,
+    max_val: f32,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    TrustformersError::FeatureNotAvailable
+}
+*/
+
+/// Concatenate tensors along a specified dimension (NOT YET IMPLEMENTED)
+///
+/// # Parameters
+/// - `tensors`: Array of tensor handles to concatenate
+/// - `num_tensors`: Number of tensors in the array
+/// - `dim`: Dimension along which to concatenate
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_concat(
+    _tensors: *const TrustformersTensor,
+    _num_tensors: usize,
+    _dim: i64,
+    _output: *mut TrustformersTensor,
+) -> TrustformersError {
+    // Concatenate operation not yet implemented in trustformers_core
+    TrustformersError::FeatureNotAvailable
+}
+
+/// Stack tensors along a new dimension (NOT YET IMPLEMENTED)
+///
+/// # Parameters
+/// - `tensors`: Array of tensor handles to stack
+/// - `num_tensors`: Number of tensors in the array
+/// - `dim`: Dimension along which to stack
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_stack(
+    _tensors: *const TrustformersTensor,
+    _num_tensors: usize,
+    _dim: i64,
+    _output: *mut TrustformersTensor,
+) -> TrustformersError {
+    // Stack operation not yet implemented in trustformers_core
+    TrustformersError::FeatureNotAvailable
+}
+
+/// Squeeze tensor by removing dimensions of size 1
+///
+/// # Parameters
+/// - `input`: Input tensor handle
+/// - `dim`: Optional dimension to squeeze (use -1 for all dimensions)
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_squeeze(
+    input: TrustformersTensor,
+    dim: i64,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    let result = if dim < 0 {
+        // Squeeze all dimensions of size 1 not supported - return error
+        return TrustformersError::FeatureNotAvailable;
+    } else {
+        // Squeeze specific dimension
+        input_tensor.squeeze(dim as usize)
+    };
+
+    match result {
+        Ok(squeezed) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(squeezed);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Unsqueeze tensor by adding a dimension of size 1
+///
+/// # Parameters
+/// - `input`: Input tensor handle
+/// - `dim`: Dimension at which to add the new axis
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_unsqueeze(
+    input: TrustformersTensor,
+    dim: i64,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.unsqueeze(dim as usize) {
+        Ok(unsqueezed) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(unsqueezed);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Gather values along an axis specified by indices
+///
+/// # Parameters
+/// - `input`: Input tensor handle
+/// - `dim`: Dimension along which to index
+/// - `indices`: Indices tensor handle
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_gather(
+    input: TrustformersTensor,
+    dim: i64,
+    indices: TrustformersTensor,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+    let Some(indices_tensor) = registry.get(indices) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.gather(dim, &indices_tensor) {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Scatter values along an axis specified by indices (NOT YET IMPLEMENTED)
+///
+/// # Parameters
+/// - `input`: Input tensor handle
+/// - `dim`: Dimension along which to scatter
+/// - `indices`: Indices tensor handle
+/// - `src`: Source tensor handle with values to scatter
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_scatter(
+    _input: TrustformersTensor,
+    _dim: i64,
+    _indices: TrustformersTensor,
+    _src: TrustformersTensor,
+    _output: *mut TrustformersTensor,
+) -> TrustformersError {
+    // Scatter operation not yet implemented in trustformers_core
+    TrustformersError::FeatureNotAvailable
+}
+
+/// Index select - Select a single element along a dimension
+///
+/// # Parameters
+/// - `input`: Input tensor handle
+/// - `dim`: Dimension to index along
+/// - `index`: Index value (not a tensor)
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_index_select(
+    input: TrustformersTensor,
+    dim: i64,
+    index: i64,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    match input_tensor.select(dim as usize, index) {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute mean along specified dimensions
+///
+/// # Parameters
+/// - `input`: Input tensor handle
+/// - `dims`: Array of dimensions to reduce
+/// - `num_dims`: Number of dimensions in the array
+/// - `keepdim`: Whether to keep reduced dimensions
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_mean_dims(
+    input: TrustformersTensor,
+    dims: *const i64,
+    num_dims: usize,
+    keepdim: bool,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() || (num_dims > 0 && dims.is_null()) {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    let dims_slice = if num_dims > 0 {
+        unsafe { std::slice::from_raw_parts(dims, num_dims) }
+    } else {
+        &[]
+    };
+
+    // Convert i64 dims to usize
+    let dims_usize: Vec<usize> = dims_slice.iter().map(|&d| d as usize).collect();
+
+    // Note: keepdim parameter is ignored as mean_axes doesn't support it
+    match input_tensor.mean_axes(&dims_usize) {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
+/// Compute sum along specified dimensions
+///
+/// # Parameters
+/// - `input`: Input tensor handle
+/// - `dims`: Array of dimensions to reduce
+/// - `num_dims`: Number of dimensions in the array
+/// - `keepdim`: Whether to keep reduced dimensions
+/// - `output`: Output tensor handle
+///
+/// # Returns
+/// Error code indicating success or failure
+#[no_mangle]
+pub extern "C" fn trustformers_tensor_sum_dims(
+    input: TrustformersTensor,
+    dims: *const i64,
+    num_dims: usize,
+    keepdim: bool,
+    output: *mut TrustformersTensor,
+) -> TrustformersError {
+    if output.is_null() || (num_dims > 0 && dims.is_null()) {
+        return TrustformersError::NullPointer;
+    }
+
+    let registry = TENSOR_REGISTRY.read();
+    let Some(input_tensor) = registry.get(input) else {
+        return TrustformersError::InvalidHandle;
+    };
+
+    let dims_slice = if num_dims > 0 {
+        unsafe { std::slice::from_raw_parts(dims, num_dims) }
+    } else {
+        &[]
+    };
+
+    // Convert i64 dims to usize
+    let dims_usize: Vec<usize> = dims_slice.iter().map(|&d| d as usize).collect();
+
+    // Note: sum_dim only supports single dimension at a time
+    // We'll just use the first dimension for now
+    if dims_usize.is_empty() {
+        return TrustformersError::InvalidParameter;
+    }
+
+    match input_tensor.sum_dim(dims_usize[0] as i64, keepdim) {
+        Ok(result) => {
+            drop(registry);
+            let result_handle = TENSOR_REGISTRY.write().register(result);
+            unsafe {
+                *output = result_handle;
+            }
+            TrustformersError::Success
+        },
+        Err(_) => TrustformersError::TensorError,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -66,6 +66,12 @@ pub enum TrustformersError {
     InitializationError = -26,
     /// Optimization error
     OptimizationError = -27,
+    /// Plugin initialization error
+    PluginInitError = -28,
+    /// Plugin not found
+    PluginNotFound = -29,
+    /// Operation not found
+    OperationNotFound = -30,
     /// Unknown error
     Unknown = -100,
 }
@@ -104,6 +110,9 @@ impl fmt::Display for TrustformersError {
             TrustformersError::InitializationError => "Initialization error",
             TrustformersError::OptimizationError => "Optimization error",
             TrustformersError::InvalidPath => "Invalid file path",
+            TrustformersError::PluginInitError => "Plugin initialization failed",
+            TrustformersError::PluginNotFound => "Plugin not found",
+            TrustformersError::OperationNotFound => "Operation not found",
             TrustformersError::Unknown => "Unknown error",
         };
         write!(f, "{}", message)
@@ -380,6 +389,9 @@ pub extern "C" fn trustformers_error_message(error: TrustformersError) -> *const
         TrustformersError::InitializationError => "Initialization error",
         TrustformersError::OptimizationError => "Optimization error",
         TrustformersError::InvalidPath => "Invalid path provided",
+        TrustformersError::PluginInitError => "Plugin initialization failed",
+        TrustformersError::PluginNotFound => "Plugin not found",
+        TrustformersError::OperationNotFound => "Operation not found",
         TrustformersError::Unknown => "Unknown error",
     };
 

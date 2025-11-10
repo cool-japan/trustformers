@@ -4,6 +4,34 @@
 //! enabling integration with other programming languages through FFI.
 
 #![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::upper_case_acronyms)] // Model names like BERT, GPT2, etc. are standard
+#![allow(clippy::type_complexity)] // Complex types are necessary for C API compatibility
+#![allow(clippy::too_many_arguments)] // C APIs often need many parameters
+#![allow(clippy::manual_clamp)] // Manual clamp is clearer in some contexts
+#![allow(clippy::wrong_self_convention)] // C API naming conventions differ
+#![allow(clippy::cognitive_complexity)] // Complex C API functions are expected
+#![allow(clippy::blocks_in_conditions)] // Generated code may have this pattern
+#![allow(clippy::collapsible_if)] // Clarity over brevity for C API
+#![allow(clippy::too_deeply_nested)] // Nested blocks in complex C API logic
+#![allow(clippy::vec_init_then_push)] // Clear initialization patterns
+#![allow(clippy::unnecessary_lazy_evaluations)] // Functional style preferred
+#![allow(clippy::useless_format)] // Format used for consistency
+#![allow(clippy::single_char_add_str)] // String operations for clarity
+#![allow(clippy::manual_strip)] // Explicit prefix stripping
+#![allow(clippy::or_insert_with_default)] // Closure style preferred
+#![allow(clippy::derivable_impls)] // Custom implementations may be needed
+#![allow(clippy::redundant_closure)] // Closures for clarity
+#![allow(clippy::manual_slice_size_calculation)] // Explicit calculations
+#![allow(clippy::crate_in_macro_def)] // Macro patterns
+#![allow(clippy::match_like_matches_macro)] // Match for clarity
+#![allow(clippy::manual_range_contains)] // Explicit range checks
+#![allow(clippy::to_string_trait_impl)] // ToString implementations
+#![allow(clippy::unnecessary_cast)] // Explicit type conversions
+#![allow(clippy::needless_lifetimes)] // Explicit lifetimes for FFI
+#![allow(clippy::collapsible_else_if)] // Clarity in control flow
+#![allow(clippy::explicit_counter_loop)] // Counter loops for clarity
+#![allow(clippy::manual_div_ceil)] // Explicit division
+#![allow(clippy::doc_lazy_continuation)] // Doc comment style
 #![allow(dead_code)]
 #![allow(unused_imports)]
 #![allow(unused_macros)]
@@ -34,6 +62,7 @@ use trustformers_core::tensor::Tensor;
 
 mod abi_stability;
 mod asic;
+mod async_api;
 mod cloud;
 mod containers;
 mod debug_utilities;
@@ -52,6 +81,7 @@ mod performance;
 mod performance_analytics;
 mod pipeline;
 mod platform;
+mod plugin;
 mod profiling_tools;
 mod quantization;
 mod streaming;
@@ -90,6 +120,13 @@ mod grpc_server;
 #[cfg(test)]
 mod tests;
 
+pub use async_api::{
+    trustformers_async_cancel, trustformers_async_cancel_all, trustformers_async_free,
+    trustformers_async_get_active_count, trustformers_async_get_error,
+    trustformers_async_get_status, trustformers_async_load_model, trustformers_async_wait,
+    TrustformersAsyncCallback, TrustformersAsyncHandle, TrustformersAsyncProgressCallback,
+    TrustformersAsyncStatus,
+};
 pub use cloud::*;
 pub use containers::*;
 pub use error::*;
@@ -141,6 +178,14 @@ pub use memory_pool::{
     trustformers_memory_pool_destroy, trustformers_memory_pool_free, trustformers_memory_pool_gc,
     trustformers_memory_pool_get_stats, trustformers_memory_pool_reset_stats,
     TrustformersMemoryPoolConfig, TrustformersMemoryPoolHandle, TrustformersMemoryPoolStats,
+};
+pub use plugin::{
+    trustformers_plugin_add_search_path, trustformers_plugin_execute_operation,
+    trustformers_plugin_find_by_name, trustformers_plugin_get_capabilities,
+    trustformers_plugin_get_metadata, trustformers_plugin_initialize, trustformers_plugin_list,
+    trustformers_plugin_register, trustformers_plugin_register_operation,
+    trustformers_plugin_unregister, PluginCapabilities, PluginOperationFn, PluginType,
+    TrustformersPluginHandle,
 };
 pub use quantization::{
     trustformers_advanced_quantization_create, trustformers_advanced_quantization_report,

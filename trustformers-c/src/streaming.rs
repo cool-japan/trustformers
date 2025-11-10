@@ -374,7 +374,7 @@ fn simulate_streaming_generation(
     let start_time = state.read().start_time;
 
     // Simulate token-by-token generation
-    let sample_tokens = vec![
+    let sample_tokens = [
         "Hello",
         " world",
         "!",

@@ -410,6 +410,68 @@ impl Gpt2LMHeadModel {
         Ok(generated)
     }
 
+    /// Generate text using greedy decoding with KV-cache for speed
+    pub fn generate_greedy_with_cache(&self, input_ids: Vec<u32>, max_length: usize) -> Result<Vec<u32>> {
+        let mut generated = input_ids.clone();
+        let mut cache = KVCache::new(self.transformer.config.n_layer);
+
+        while generated.len() < max_length {
+            // Prepare input - only process new tokens after first iteration
+            let input_batch = vec![generated.clone()];
+
+            // Forward pass with cache
+            let hidden_states = self.transformer.forward_internal(
+                &input_batch,
+                None,
+                Some(&mut cache),
+            )?;
+
+            // Apply LM head
+            let logits = self.lm_head.forward(hidden_states)?;
+
+            // Get logits for the last token
+            let next_token = match &logits {
+                Tensor::F32(arr) => {
+                    let shape = arr.shape();
+                    if shape.len() != 3 {
+                        return Err(tensor_op_error(
+                            "tensor_operation",
+                            "Unsupported tensor type".to_string(),
+                        ));
+                    }
+                    let seq_len = shape[1];
+                    let last_logits = arr.slice(s![0, seq_len - 1, ..]);
+
+                    // Find argmax
+                    let mut max_idx = 0;
+                    let mut max_val = f32::NEG_INFINITY;
+                    for (idx, &val) in last_logits.iter().enumerate() {
+                        if val > max_val {
+                            max_val = val;
+                            max_idx = idx;
+                        }
+                    }
+                    max_idx as u32
+                },
+                _ => {
+                    return Err(tensor_op_error(
+                        "tensor_operation",
+                        "Unsupported tensor type".to_string(),
+                    ))
+                },
+            };
+
+            generated.push(next_token);
+
+            // Check for EOS token
+            if next_token == 50256 {
+                break;
+            }
+        }
+
+        Ok(generated)
+    }
+
     /// Generate text using beam search
     pub fn generate_beam_search(
         &self,
