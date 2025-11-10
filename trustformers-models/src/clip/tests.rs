@@ -5,11 +5,17 @@ use super::model::{
     CLIPEncoderLayer, CLIPEncoderLayerConfig, CLIPModel, CLIPTextEmbeddings, CLIPVisionEmbeddings,
 };
 use trustformers_core::tensor::Tensor;
-use trustformers_core::traits::{Layer, Model};
+use trustformers_core::traits::{Config, Layer, Model};
 
 #[test]
 fn test_clip_config_validation() {
     let text_config = CLIPTextConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
+        pad_token_id: 1,
+        bos_token_id: 49406,
+        eos_token_id: 49407,
         vocab_size: 49408,
         hidden_size: 512,
         intermediate_size: 2048,
@@ -22,6 +28,9 @@ fn test_clip_config_validation() {
     };
 
     let vision_config = CLIPVisionConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         hidden_size: 768,
         intermediate_size: 3072,
         num_hidden_layers: 12,
@@ -35,6 +44,8 @@ fn test_clip_config_validation() {
     };
 
     let config = CLIPConfig {
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         text_config,
         vision_config,
         projection_dim: 512,
@@ -47,6 +58,12 @@ fn test_clip_config_validation() {
 #[test]
 fn test_clip_model_creation() {
     let text_config = CLIPTextConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
+        pad_token_id: 1,
+        bos_token_id: 49406,
+        eos_token_id: 49407,
         vocab_size: 1000, // Smaller for testing
         hidden_size: 128,
         intermediate_size: 256,
@@ -59,6 +76,9 @@ fn test_clip_model_creation() {
     };
 
     let vision_config = CLIPVisionConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         hidden_size: 128,
         intermediate_size: 256,
         num_hidden_layers: 2,
@@ -72,6 +92,8 @@ fn test_clip_model_creation() {
     };
 
     let config = CLIPConfig {
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         text_config,
         vision_config,
         projection_dim: 64,
@@ -91,9 +113,15 @@ fn test_clip_text_embeddings() {
         num_hidden_layers: 2,
         num_attention_heads: 4,
         max_position_embeddings: 77,
+        hidden_act: "quick_gelu".to_string(),
         layer_norm_eps: 1e-5,
         dropout: 0.0,
         attention_dropout: 0.0,
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
+        pad_token_id: 1,
+        bos_token_id: 49406,
+        eos_token_id: 49407,
     };
 
     let embeddings = CLIPTextEmbeddings::new(&config);
@@ -121,9 +149,12 @@ fn test_clip_vision_embeddings() {
         num_channels: 3,
         image_size: 32,
         patch_size: 16,
+        hidden_act: "quick_gelu".to_string(),
         layer_norm_eps: 1e-5,
         dropout: 0.0,
         attention_dropout: 0.0,
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
     };
 
     let embeddings = CLIPVisionEmbeddings::new(&config);
@@ -159,6 +190,12 @@ fn test_clip_encoder_layer() {
 #[test]
 fn test_clip_parameter_count() {
     let text_config = CLIPTextConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
+        pad_token_id: 1,
+        bos_token_id: 49406,
+        eos_token_id: 49407,
         vocab_size: 1000,
         hidden_size: 128,
         intermediate_size: 256,
@@ -171,6 +208,9 @@ fn test_clip_parameter_count() {
     };
 
     let vision_config = CLIPVisionConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         hidden_size: 128,
         intermediate_size: 256,
         num_hidden_layers: 2,
@@ -184,6 +224,8 @@ fn test_clip_parameter_count() {
     };
 
     let config = CLIPConfig {
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         text_config,
         vision_config,
         projection_dim: 64,
@@ -205,6 +247,12 @@ fn test_clip_parameter_count() {
 fn test_clip_weight_loading_methods_exist() {
     // Test that weight loading methods compile and are accessible
     let text_config = CLIPTextConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
+        pad_token_id: 1,
+        bos_token_id: 49406,
+        eos_token_id: 49407,
         vocab_size: 1000,
         hidden_size: 128,
         intermediate_size: 256,
@@ -217,6 +265,9 @@ fn test_clip_weight_loading_methods_exist() {
     };
 
     let vision_config = CLIPVisionConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         hidden_size: 128,
         intermediate_size: 256,
         num_hidden_layers: 2,
@@ -230,6 +281,8 @@ fn test_clip_weight_loading_methods_exist() {
     };
 
     let config = CLIPConfig {
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         text_config,
         vision_config,
         projection_dim: 64,
@@ -246,6 +299,12 @@ fn test_clip_weight_loading_methods_exist() {
 #[test]
 fn test_clip_logit_scale() {
     let text_config = CLIPTextConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
+        pad_token_id: 1,
+        bos_token_id: 49406,
+        eos_token_id: 49407,
         vocab_size: 1000,
         hidden_size: 128,
         intermediate_size: 256,
@@ -258,6 +317,9 @@ fn test_clip_logit_scale() {
     };
 
     let vision_config = CLIPVisionConfig {
+        hidden_act: "quick_gelu".to_string(),
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         hidden_size: 128,
         intermediate_size: 256,
         num_hidden_layers: 2,
@@ -271,6 +333,8 @@ fn test_clip_logit_scale() {
     };
 
     let config = CLIPConfig {
+        initializer_range: 0.02,
+        initializer_factor: 1.0,
         text_config,
         vision_config,
         projection_dim: 64,

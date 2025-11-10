@@ -520,7 +520,7 @@ impl TrainingDynamicsAnalyzer {
                     .sqrt();
                 Ok(norm)
             },
-            Tensor::Sparse(_) | _ => Ok(1.0), // Default norm for sparse and other tensor types
+            _ => Ok(1.0), // Default norm for sparse and other tensor types
         }
     }
 

@@ -7,7 +7,7 @@
 
 use clap::Parser;
 use colored::*;
-use scirs2_core::random::*; // SciRS2 Integration Policy
+use rand::Rng; // For examples, using rand directly is acceptable
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;

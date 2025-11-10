@@ -105,9 +105,11 @@
 
 pub mod config;
 pub mod model;
+pub mod generation;
 
 #[cfg(test)]
 mod tests;
 
 pub use config::Gpt2Config;
 pub use model::{Gpt2LMHeadModel, Gpt2Model};
+pub use generation::GenerativeModel;

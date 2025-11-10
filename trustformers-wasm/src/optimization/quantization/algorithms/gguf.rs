@@ -172,6 +172,7 @@ impl GGUFConfig {
 /// GGUF block quantizer
 pub struct GGUFBlockQuantizer {
     config: GGUFConfig,
+    #[allow(dead_code)]
     importance_weights: Vec<f32>,
 }
 

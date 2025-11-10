@@ -202,7 +202,7 @@ impl LossScaler {
                 }
                 Ok(false)
             },
-            Tensor::Sparse(_) | _ => Ok(false), // Assume sparse and other tensor types are validated
+            _ => Ok(false), // Assume sparse and other tensor types are validated
         }
     }
 }
@@ -261,7 +261,7 @@ impl AMPManager {
             Tensor::C64(_) => Ok(tensor.clone()),
             Tensor::CF16(_) => Ok(tensor.clone()), // Already fp16 precision
             Tensor::CBF16(_) => Ok(tensor.clone()), // Already reduced precision
-            Tensor::Sparse(_) | _ => Ok(tensor.clone()), // Sparse and other tensor types unchanged
+            _ => Ok(tensor.clone()),               // Sparse and other tensor types unchanged
         }
     }
 
@@ -401,7 +401,7 @@ pub mod utils {
             },
             Tensor::CF16(_) => Ok(true),  // Already fp16, so always safe
             Tensor::CBF16(_) => Ok(true), // BF16 has similar range to fp16
-            Tensor::Sparse(_) | _ => Ok(true), // Assume sparse and other tensor types are safe
+            _ => Ok(true),                // Assume sparse and other tensor types are safe
         }
     }
 
@@ -519,7 +519,7 @@ pub mod utils {
 
                 Ok((min_val, max_val))
             },
-            Tensor::Sparse(_) | _ => Ok((0.0, 1.0)), // Default range for sparse and other tensor types
+            _ => Ok((0.0, 1.0)), // Default range for sparse and other tensor types
         }
     }
 }
@@ -862,7 +862,7 @@ impl AdvancedMixedPrecisionManager {
                     .sqrt();
                 Ok(norm)
             },
-            Tensor::Sparse(_) | _ => Ok(1.0), // Default norm for sparse and other tensor types
+            _ => Ok(1.0), // Default norm for sparse and other tensor types
         }
     }
 
@@ -906,7 +906,7 @@ impl AdvancedMixedPrecisionManager {
                 let scaled = arr.mapv(|x| Complex::new(x.re * factor_bf16, x.im * factor_bf16));
                 Ok(Tensor::CBF16(scaled))
             },
-            Tensor::Sparse(_) | _ => Ok(tensor.clone()), // Don't scale sparse and other tensor types
+            _ => Ok(tensor.clone()), // Don't scale sparse and other tensor types
         }
     }
 
@@ -978,7 +978,7 @@ impl AdvancedMixedPrecisionManager {
                 }
                 Ok(false)
             },
-            Tensor::Sparse(_) | _ => Ok(false), // Assume sparse and other tensor types don't overflow
+            _ => Ok(false), // Assume sparse and other tensor types don't overflow
         }
     }
 

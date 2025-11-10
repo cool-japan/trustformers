@@ -93,6 +93,7 @@ pub struct CoreMLExportConfig {
     compute_unit: CoreMLComputeUnit,
     precision: CoreMLPrecision,
     optimize_for_neural_engine: bool,
+    #[allow(dead_code)]
     enable_flexible_shapes: bool,
     batch_size: usize,
     sequence_length: usize,

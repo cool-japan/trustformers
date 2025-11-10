@@ -60,7 +60,9 @@ pub struct MemoryCoalescingOptimizer {
     bank_config: MemoryBankConfig,
     optimization_level: u32,
     enable_vectorization: bool,
+    #[allow(dead_code)]
     enable_shared_memory: bool,
+    #[allow(dead_code)]
     enable_constant_cache: bool,
 }
 

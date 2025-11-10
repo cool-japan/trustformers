@@ -439,7 +439,7 @@ impl PyTokenizerTrainer {
         Ok(PyBPETokenizer::new(vocab, merges))
     }
 
-    fn train_from_iterator(&self, py: Python, iterator: PyObject) -> PyResult<PyBPETokenizer> {
+    fn train_from_iterator(&self, py: Python, iterator: Py<PyAny>) -> PyResult<PyBPETokenizer> {
         // Convert Python iterator to Rust iterator
         let texts: Vec<String> = iterator.extract(py)?;
 

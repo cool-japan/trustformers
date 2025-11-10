@@ -108,8 +108,11 @@ pub enum WebNNOperator {
 pub struct WebNNGraphBuilder {
     device_type: WebNNDeviceType,
     power_preference: WebNNPowerPreference,
+    #[allow(dead_code)]
     operators: Vec<String>,
+    #[allow(dead_code)]
     inputs: HashMap<String, Vec<usize>>,
+    #[allow(dead_code)]
     outputs: HashMap<String, Vec<usize>>,
     enable_profiling: bool,
     optimization_level: u32,
@@ -181,6 +184,7 @@ impl WebNNGraphBuilder {
 #[wasm_bindgen]
 pub struct WebNNContext {
     device_type: WebNNDeviceType,
+    #[allow(dead_code)]
     power_preference: WebNNPowerPreference,
     supported_operators: Vec<String>,
     max_tensor_size: usize,
@@ -384,10 +388,12 @@ impl WebNNExecutionPlan {
 /// WebNN model adapter for converting transformer models to WebNN format
 #[wasm_bindgen]
 pub struct WebNNModelAdapter {
+    #[allow(dead_code)]
     model_name: String,
     device_type: WebNNDeviceType,
     num_layers: usize,
     hidden_size: usize,
+    #[allow(dead_code)]
     num_attention_heads: usize,
 }
 

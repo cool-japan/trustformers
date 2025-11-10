@@ -70,7 +70,9 @@ impl Default for FusionPatternConfig {
 
 /// Advanced fusion pattern optimizer
 pub struct AdvancedFusionOptimizer {
+    #[allow(dead_code)]
     capabilities: DeviceCapabilities,
+    #[allow(dead_code)]
     pattern_configs: HashMap<TransformerFusionPattern, FusionPatternConfig>,
     fusion_cache: HashMap<String, String>, // shader cache
     profiling_enabled: bool,

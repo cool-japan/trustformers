@@ -69,6 +69,7 @@ pub struct ProgressiveLoaderConfig {
     enable_cache: bool,
     max_concurrent_loads: usize,
     prefetch_threshold_ms: f32,
+    #[allow(dead_code)]
     cache_version: String,
 }
 
@@ -137,7 +138,9 @@ impl ProgressiveLoaderConfig {
 pub struct ProgressiveLoader {
     config: ProgressiveLoaderConfig,
     modules: HashMap<String, ModuleMetadata>,
+    #[allow(dead_code)]
     loading_queue: VecDeque<String>,
+    #[allow(dead_code)]
     loaded_modules: HashMap<String, LoadingState>,
     loading_stats: LoadingStats,
 }

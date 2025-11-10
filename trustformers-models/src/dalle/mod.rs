@@ -17,7 +17,7 @@ pub use model::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trustformers_core::{traits::Layer, Tensor, TensorType};
+    use trustformers_core::{Tensor, TensorType};
 
     #[test]
     fn test_dalle_module_imports() {

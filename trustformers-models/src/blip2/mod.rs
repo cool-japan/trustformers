@@ -7,7 +7,7 @@ pub use model::*;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use trustformers_core::{traits::Layer, Tensor};
+    use trustformers_core::Tensor;
 
     #[test]
     fn test_blip2_model_creation() {

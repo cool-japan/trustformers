@@ -225,6 +225,13 @@ pub mod hierarchical;
 pub mod advanced_quantization;
 pub mod ring_attention;
 pub mod weight_loading;
+
+// Generation utilities for text generation
+pub mod generation_utils;
+
+// Batch inference optimization utilities
+pub mod batch_inference;
+
 // Dynamic token pruning for efficiency
 pub mod dynamic_pruning;
 

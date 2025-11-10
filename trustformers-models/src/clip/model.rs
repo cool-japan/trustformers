@@ -569,7 +569,7 @@ pub struct CLIPModel {
     vision_model: CLIPVisionTransformer,
     text_projection: Linear,
     visual_projection: Linear,
-    logit_scale: Tensor,
+    pub logit_scale: Tensor,
 }
 
 impl CLIPModel {
