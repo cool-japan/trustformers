@@ -689,23 +689,22 @@ fn to_pascal_case(s: &str) -> String {
 }
 
 /// Convert to snake_case
+/// Handles acronyms by inserting underscores between each capital letter
 fn to_snake_case(s: &str) -> String {
     let mut result = String::new();
-    let mut prev_is_upper = false;
+    let chars: Vec<char> = s.chars().collect();
 
-    for (i, ch) in s.chars().enumerate() {
+    for (i, &ch) in chars.iter().enumerate() {
         if ch.is_uppercase() {
-            if i > 0 && !prev_is_upper {
+            // Add underscore if not at start
+            if i > 0 {
                 result.push('_');
             }
             result.push(ch.to_lowercase().next().unwrap());
-            prev_is_upper = true;
         } else if ch == '-' {
             result.push('_');
-            prev_is_upper = false;
         } else {
             result.push(ch);
-            prev_is_upper = false;
         }
     }
 

@@ -1302,6 +1302,7 @@ mod tests {
                 license: "MIT".to_string(),
                 repository: "https://github.com/test/repo".to_string(),
             },
+            package_name: Some("com.trustformers.openapi".to_string()),
             features: HashMap::new(),
             type_mappings: HashMap::new(),
         }

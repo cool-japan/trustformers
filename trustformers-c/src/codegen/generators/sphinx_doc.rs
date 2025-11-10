@@ -1455,6 +1455,7 @@ mod tests {
                 license: "MIT".to_string(),
                 repository: "https://github.com/test/test".to_string(),
             },
+            package_name: Some("com.trustformers.sphinx".to_string()),
             features: HashMap::new(),
             type_mappings: HashMap::new(),
         };
