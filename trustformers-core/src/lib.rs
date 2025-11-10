@@ -90,7 +90,6 @@ pub use compiler::{
     OptimizationRecommendations, OptimizationResult, PassResult, RecommendationCategory,
     RecommendationPriority,
 };
-pub use device::Device;
 pub use compression::{
     // Convenience functions
     create_compression_pipeline,
@@ -138,6 +137,7 @@ pub use compression::{
     TeacherModel,
     UnstructuredPruner,
 };
+pub use device::Device;
 pub use errors::{Result, TrustformersError};
 pub use evaluation::{
     Accuracy, DatasetLoader, DatasetManager, DatasetSample, EvaluationConfig, EvaluationDataset,

@@ -105,11 +105,20 @@ impl Linear {
     /// // Create a linear layer on Metal GPU
     /// let linear = Linear::new_with_device(768, 3072, true, Device::metal_if_available(0));
     /// ```
-    pub fn new_with_device(in_features: usize, out_features: usize, bias: bool, device: Device) -> Self {
+    pub fn new_with_device(
+        in_features: usize,
+        out_features: usize,
+        bias: bool,
+        device: Device,
+    ) -> Self {
         let weight = Tensor::randn(&[out_features, in_features]).unwrap();
         let bias = if bias { Some(Tensor::zeros(&[out_features]).unwrap()) } else { None };
 
-        Self { weight, bias, device }
+        Self {
+            weight,
+            bias,
+            device,
+        }
     }
 
     /// Returns the device this layer uses for computations.

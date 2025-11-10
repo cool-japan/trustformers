@@ -1,11 +1,6 @@
 //! Test device-aware Linear layer functionality
 
-use trustformers_core::{
-    device::Device,
-    layers::Linear,
-    tensor::Tensor,
-    traits::Layer,
-};
+use trustformers_core::{device::Device, layers::Linear, tensor::Tensor, traits::Layer};
 
 #[test]
 fn test_linear_cpu() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,7 +65,10 @@ fn test_linear_parameter_count() -> Result<(), Box<dyn std::error::Error>> {
     // Test with bias
     let linear_with_bias = Linear::new_with_device(768, 3072, true, Device::CPU);
     let expected_params_with_bias = (768 * 3072) + 3072; // weights + bias
-    assert_eq!(linear_with_bias.parameter_count(), expected_params_with_bias);
+    assert_eq!(
+        linear_with_bias.parameter_count(),
+        expected_params_with_bias
+    );
 
     // Test without bias
     let linear_no_bias = Linear::new_with_device(768, 3072, false, Device::CPU);

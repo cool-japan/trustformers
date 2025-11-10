@@ -434,7 +434,11 @@ impl Gpt2LMHeadModel {
     }
 
     /// Generate text using greedy decoding with KV-cache for speed
-    pub fn generate_greedy_with_cache(&self, input_ids: Vec<u32>, max_length: usize) -> Result<Vec<u32>> {
+    pub fn generate_greedy_with_cache(
+        &self,
+        input_ids: Vec<u32>,
+        max_length: usize,
+    ) -> Result<Vec<u32>> {
         let mut generated = input_ids.clone();
         let mut cache = KVCache::new(self.transformer.config.n_layer);
 
@@ -443,11 +447,8 @@ impl Gpt2LMHeadModel {
             let input_batch = vec![generated.clone()];
 
             // Forward pass with cache
-            let hidden_states = self.transformer.forward_internal(
-                &input_batch,
-                None,
-                Some(&mut cache),
-            )?;
+            let hidden_states =
+                self.transformer.forward_internal(&input_batch, None, Some(&mut cache))?;
 
             // Apply LM head
             let logits = self.lm_head.forward(hidden_states)?;

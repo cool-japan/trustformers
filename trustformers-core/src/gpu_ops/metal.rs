@@ -23,8 +23,9 @@ pub struct MetalBackend {
 impl MetalBackend {
     /// Create a new Metal backend
     pub fn new() -> Result<Self> {
-        let device = MetalDevice::system_default()
-            .ok_or_else(|| TrustformersError::hardware_error("No Metal device found", "MetalBackend::new"))?;
+        let device = MetalDevice::system_default().ok_or_else(|| {
+            TrustformersError::hardware_error("No Metal device found", "MetalBackend::new")
+        })?;
 
         let command_queue = device.new_command_queue();
 
@@ -35,7 +36,14 @@ impl MetalBackend {
     }
 
     /// Perform matrix multiplication on Metal GPU
-    pub fn matmul_f32(&self, a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Result<Vec<f32>> {
+    pub fn matmul_f32(
+        &self,
+        a: &[f32],
+        b: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<Vec<f32>> {
         // Create Metal buffers
         let a_buffer = self.create_buffer(a)?;
         let b_buffer = self.create_buffer(b)?;
@@ -74,16 +82,30 @@ impl MetalBackend {
         "#;
 
         // Compile shader
-        let library = self.device
+        let library = self
+            .device
             .new_library_with_source(shader_source, &CompileOptions::new())
-            .map_err(|e| TrustformersError::hardware_error(&format!("Failed to compile Metal shader: {}", e), "matmul_f32"))?;
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to compile Metal shader: {}", e),
+                    "matmul_f32",
+                )
+            })?;
 
-        let kernel = library.get_function("matmul", None)
-            .map_err(|e| TrustformersError::hardware_error(&format!("Failed to get kernel function: {}", e), "matmul_f32"))?;
+        let kernel = library.get_function("matmul", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get kernel function: {}", e),
+                "matmul_f32",
+            )
+        })?;
 
-        let pipeline = self.device
-            .new_compute_pipeline_state_with_function(&kernel)
-            .map_err(|e| TrustformersError::hardware_error(&format!("Failed to create pipeline: {}", e), "matmul_f32"))?;
+        let pipeline =
+            self.device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create pipeline: {}", e),
+                    "matmul_f32",
+                )
+            })?;
 
         // Create command buffer and encoder
         let command_buffer = self.command_queue.new_command_buffer();
@@ -98,9 +120,21 @@ impl MetalBackend {
         let m_u32 = m as u32;
         let n_u32 = n as u32;
         let k_u32 = k as u32;
-        encoder.set_bytes(3, mem::size_of::<u32>() as u64, &m_u32 as *const u32 as *const _);
-        encoder.set_bytes(4, mem::size_of::<u32>() as u64, &n_u32 as *const u32 as *const _);
-        encoder.set_bytes(5, mem::size_of::<u32>() as u64, &k_u32 as *const u32 as *const _);
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &m_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &n_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &k_u32 as *const u32 as *const _,
+        );
 
         // Dispatch threads
         let threadgroup_size = metal::MTLSize {
@@ -157,8 +191,11 @@ fn get_metal_backend() -> Result<MetalBackend> {
     }
 
     // Clone the cached backend (device and command queue are Arc-based internally)
-    cache.as_ref()
-        .ok_or_else(|| TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend"))
+    cache
+        .as_ref()
+        .ok_or_else(|| {
+            TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend")
+        })
         .map(|backend| MetalBackend {
             device: backend.device.clone(),
             command_queue: backend.command_queue.clone(),
@@ -177,14 +214,28 @@ pub fn dispatch_matmul(a: &Tensor, b: &Tensor, device: &Device) -> Result<Tensor
                     // Convert to 2D arrays
                     if a_arr.ndim() != 2 || b_arr.ndim() != 2 {
                         return Err(TrustformersError::shape_error(
-                            "Metal dispatch currently only supports 2D tensors".to_string()
+                            "Metal dispatch currently only supports 2D tensors".to_string(),
                         ));
                     }
 
-                    let a_2d = a_arr.clone().into_dimensionality::<scirs2_core::ndarray::Ix2>()
-                        .map_err(|e| TrustformersError::shape_error(format!("Failed to convert to 2D: {}", e)))?;
-                    let b_2d = b_arr.clone().into_dimensionality::<scirs2_core::ndarray::Ix2>()
-                        .map_err(|e| TrustformersError::shape_error(format!("Failed to convert to 2D: {}", e)))?;
+                    let a_2d = a_arr
+                        .clone()
+                        .into_dimensionality::<scirs2_core::ndarray::Ix2>()
+                        .map_err(|e| {
+                            TrustformersError::shape_error(format!(
+                                "Failed to convert to 2D: {}",
+                                e
+                            ))
+                        })?;
+                    let b_2d = b_arr
+                        .clone()
+                        .into_dimensionality::<scirs2_core::ndarray::Ix2>()
+                        .map_err(|e| {
+                            TrustformersError::shape_error(format!(
+                                "Failed to convert to 2D: {}",
+                                e
+                            ))
+                        })?;
 
                     let (m, k) = a_2d.dim();
                     let (k2, n) = b_2d.dim();
@@ -207,26 +258,31 @@ pub fn dispatch_matmul(a: &Tensor, b: &Tensor, device: &Device) -> Result<Tensor
                     let result_data = backend.matmul_f32(&a_data, &b_data, m, k, n)?;
 
                     // Convert back to tensor
-                    let result_2d = scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
-                        .map_err(|e| TrustformersError::shape_error(format!("Failed to reshape result: {}", e)))?;
+                    let result_2d = scirs2_core::ndarray::Array2::from_shape_vec(
+                        (m, n),
+                        result_data,
+                    )
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
+                    })?;
 
                     let result_dyn = result_2d.into_dyn();
                     Ok(Tensor::F32(result_dyn))
-                }
+                },
                 _ => {
                     // Fallback to CPU matmul for non-F32 tensors
                     a.matmul(b)
-                }
+                },
             }
-        }
+        },
         Device::CPU => {
             // CPU matmul
             a.matmul(b)
-        }
+        },
         _ => {
             // Unsupported device, fallback to CPU
             a.matmul(b)
-        }
+        },
     }
 }
 
@@ -279,7 +335,13 @@ mod tests {
         let expected = vec![19.0, 22.0, 43.0, 50.0];
 
         for (i, (&res, &exp)) in result.iter().zip(expected.iter()).enumerate() {
-            assert!((res - exp).abs() < 1e-5, "Mismatch at index {}: {} vs {}", i, res, exp);
+            assert!(
+                (res - exp).abs() < 1e-5,
+                "Mismatch at index {}: {} vs {}",
+                i,
+                res,
+                exp
+            );
         }
 
         Ok(())
