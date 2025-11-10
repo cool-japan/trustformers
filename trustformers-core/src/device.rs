@@ -6,9 +6,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Device specification for tensor operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum Device {
     /// CPU execution
+    #[default]
     CPU,
     /// NVIDIA CUDA GPU (with device ID)
     CUDA(usize),
@@ -105,12 +106,6 @@ impl Device {
             }
         }
 
-        Device::CPU
-    }
-}
-
-impl Default for Device {
-    fn default() -> Self {
         Device::CPU
     }
 }

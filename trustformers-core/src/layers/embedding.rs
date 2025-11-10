@@ -132,7 +132,7 @@ impl Layer for Embedding {
                 }
 
                 Ok(Tensor::F32(output.into_dyn()))
-            }
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for embedding",
                 "Embedding::forward",

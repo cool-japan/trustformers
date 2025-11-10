@@ -32,6 +32,13 @@ impl BufferId {
     }
 }
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl Default for BufferId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Persistent buffer cache for Metal GPU
 #[cfg(all(target_os = "macos", feature = "metal"))]
 struct BufferCache {
@@ -98,7 +105,10 @@ impl MetalBackend {
         let buffer_id = BufferId::new();
 
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error("Failed to lock buffer cache", "create_persistent_buffer")
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "create_persistent_buffer",
+            )
         })?;
 
         cache.insert(buffer_id, buffer);
@@ -108,7 +118,10 @@ impl MetalBackend {
     /// Get a persistent buffer by ID
     pub fn get_persistent_buffer(&self, id: &BufferId) -> Result<Arc<Buffer>> {
         let cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error("Failed to lock buffer cache", "get_persistent_buffer")
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "get_persistent_buffer",
+            )
         })?;
 
         cache.get(id).ok_or_else(|| {
@@ -122,7 +135,10 @@ impl MetalBackend {
     /// Remove a persistent buffer from cache
     pub fn remove_persistent_buffer(&self, id: &BufferId) -> Result<()> {
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error("Failed to lock buffer cache", "remove_persistent_buffer")
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "remove_persistent_buffer",
+            )
         })?;
 
         cache.remove(id);
@@ -213,14 +229,12 @@ impl MetalBackend {
         })?;
 
         let pipeline =
-            self.device
-                .new_compute_pipeline_state_with_function(&kernel)
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create pipeline: {}", e),
-                        "matmul_f32",
-                    )
-                })?;
+            self.device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create pipeline: {}", e),
+                    "matmul_f32",
+                )
+            })?;
 
         // Create command buffer and encoder
         let command_buffer = self.command_queue.new_command_buffer();
@@ -345,10 +359,8 @@ impl MetalBackend {
             )
         })?;
 
-        let pipeline = self
-            .device
-            .new_compute_pipeline_state_with_function(&kernel)
-            .map_err(|e| {
+        let pipeline =
+            self.device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
                 TrustformersError::hardware_error(
                     &format!("Failed to create pipeline: {}", e),
                     "matmul_with_cached_weight",
@@ -412,7 +424,7 @@ impl MetalBackend {
     }
 
     fn create_buffer(&self, data: &[f32]) -> Result<Buffer> {
-        let byte_size = (data.len() * mem::size_of::<f32>()) as u64;
+        let byte_size = std::mem::size_of_val(data) as u64;
         let buffer = self.device.new_buffer_with_data(
             data.as_ptr() as *const _,
             byte_size,
@@ -431,10 +443,7 @@ static METAL_BACKEND: once_cell::sync::Lazy<std::sync::Mutex<Option<MetalBackend
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub fn get_metal_backend() -> Result<MetalBackend> {
     let mut cache = METAL_BACKEND.lock().map_err(|_| {
-        TrustformersError::hardware_error(
-            "Failed to lock Metal backend cache",
-            "get_metal_backend",
-        )
+        TrustformersError::hardware_error("Failed to lock Metal backend cache", "get_metal_backend")
     })?;
 
     if cache.is_none() {
@@ -445,10 +454,7 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
     cache
         .as_ref()
         .ok_or_else(|| {
-            TrustformersError::hardware_error(
-                "Metal backend not initialized",
-                "get_metal_backend",
-            )
+            TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend")
         })
         .map(|backend| MetalBackend {
             device: backend.device.clone(),
@@ -512,22 +518,21 @@ pub fn dispatch_matmul(a: &Tensor, b: &Tensor, device: &Device) -> Result<Tensor
                     let result_data = backend.matmul_f32(&a_data, &b_data, m, k, n)?;
 
                     // Convert back to tensor
-                    let result_2d =
-                        scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
-                            .map_err(|e| {
-                                TrustformersError::shape_error(format!(
-                                    "Failed to reshape result: {}",
-                                    e
-                                ))
-                            })?;
+                    let result_2d = scirs2_core::ndarray::Array2::from_shape_vec(
+                        (m, n),
+                        result_data,
+                    )
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
+                    })?;
 
                     let result_dyn = result_2d.into_dyn();
                     return Ok(Tensor::F32(result_dyn));
-                }
+                },
                 _ => {
                     // Fallback to CPU matmul for non-F32 tensors
                     return a.matmul(b);
-                }
+                },
             }
         }
     }

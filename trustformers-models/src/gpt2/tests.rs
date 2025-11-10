@@ -1,10 +1,10 @@
 use crate::gpt2::{Gpt2Config, Gpt2LMHeadModel, Gpt2Model};
+use std::time::Instant;
 use trustformers_core::{
     device::Device,
     tensor::Tensor,
     traits::{Model, TokenizedInput},
 };
-use std::time::Instant;
 
 #[test]
 fn test_gpt2_model_creation() {
@@ -154,8 +154,15 @@ fn test_gpt2_metal_sampling() {
     let generated = model.generate_top_k(input_ids.clone(), max_length, k, temperature).unwrap();
     let elapsed = start.elapsed();
 
-    println!("Generated {} tokens in {:?}", generated.len() - input_ids.len(), elapsed);
-    println!("Tokens/sec: {:.2}", (generated.len() - input_ids.len()) as f64 / elapsed.as_secs_f64());
+    println!(
+        "Generated {} tokens in {:?}",
+        generated.len() - input_ids.len(),
+        elapsed
+    );
+    println!(
+        "Tokens/sec: {:.2}",
+        (generated.len() - input_ids.len()) as f64 / elapsed.as_secs_f64()
+    );
 
     // Verify output
     assert!(generated.len() >= input_ids.len());
@@ -179,7 +186,7 @@ fn test_gpt2_metal_vs_cpu_performance() {
     };
 
     let input_ids = vec![1, 2, 3, 4, 5];
-    let max_length = 25;  // Generate 20 new tokens
+    let max_length = 25; // Generate 20 new tokens
     let k = 20;
     let temperature = 1.0;
 
@@ -187,7 +194,8 @@ fn test_gpt2_metal_vs_cpu_performance() {
     println!("\n=== CPU Benchmark ===");
     let cpu_model = Gpt2LMHeadModel::new_with_device(config.clone(), Device::CPU).unwrap();
     let cpu_start = Instant::now();
-    let cpu_generated = cpu_model.generate_top_k(input_ids.clone(), max_length, k, temperature).unwrap();
+    let cpu_generated =
+        cpu_model.generate_top_k(input_ids.clone(), max_length, k, temperature).unwrap();
     let cpu_elapsed = cpu_start.elapsed();
     let cpu_tokens = cpu_generated.len() - input_ids.len();
     let cpu_tok_per_sec = cpu_tokens as f64 / cpu_elapsed.as_secs_f64();
@@ -201,12 +209,17 @@ fn test_gpt2_metal_vs_cpu_performance() {
         println!("\n=== Metal GPU Benchmark ===");
         let metal_model = Gpt2LMHeadModel::new_with_device(config.clone(), device).unwrap();
         let metal_start = Instant::now();
-        let metal_generated = metal_model.generate_top_k(input_ids.clone(), max_length, k, temperature).unwrap();
+        let metal_generated = metal_model
+            .generate_top_k(input_ids.clone(), max_length, k, temperature)
+            .unwrap();
         let metal_elapsed = metal_start.elapsed();
         let metal_tokens = metal_generated.len() - input_ids.len();
         let metal_tok_per_sec = metal_tokens as f64 / metal_elapsed.as_secs_f64();
 
-        println!("Metal: Generated {} tokens in {:?}", metal_tokens, metal_elapsed);
+        println!(
+            "Metal: Generated {} tokens in {:?}",
+            metal_tokens, metal_elapsed
+        );
         println!("Metal: {:.2} tokens/sec", metal_tok_per_sec);
 
         // Calculate speedup

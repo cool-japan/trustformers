@@ -3,9 +3,11 @@
 //! This module provides GPU-accelerated operations for tensors using various
 //! GPU backends (Metal, CUDA, etc.).
 
-pub mod metal;
+#[cfg(feature = "cuda")]
+pub mod advanced_kernels;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+pub mod metal;
 
 pub use metal::dispatch_matmul;
 

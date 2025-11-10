@@ -3,6 +3,7 @@
 // This is intentional as each backend provides its own implementation of common types.
 #![allow(ambiguous_glob_reexports)]
 
+pub mod advanced_simd;
 pub mod fused_ops;
 pub mod rope;
 pub mod simd;

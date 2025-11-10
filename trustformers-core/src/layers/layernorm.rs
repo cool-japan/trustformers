@@ -53,11 +53,7 @@ impl LayerNorm {
     }
 
     /// Creates a new LayerNorm layer on specified device
-    pub fn new_with_device(
-        normalized_shape: Vec<usize>,
-        eps: f32,
-        device: Device,
-    ) -> Result<Self> {
+    pub fn new_with_device(normalized_shape: Vec<usize>, eps: f32, device: Device) -> Result<Self> {
         let weight = Tensor::ones(&normalized_shape)?;
         let bias = Tensor::zeros(&normalized_shape)?;
 
@@ -148,30 +144,30 @@ impl Layer for LayerNorm {
                             .view()
                             .into_shape_with_order(IxDyn(&broadcast_shape))
                             .map_err(|e| {
-                                TrustformersError::shape_error(format!(
-                                    "Failed to broadcast weight: {}",
-                                    e
-                                ))
-                            })?;
+                            TrustformersError::shape_error(format!(
+                                "Failed to broadcast weight: {}",
+                                e
+                            ))
+                        })?;
                         let b_broadcast = b
                             .view()
                             .into_shape_with_order(IxDyn(&broadcast_shape))
                             .map_err(|e| {
-                                TrustformersError::shape_error(format!(
-                                    "Failed to broadcast bias: {}",
-                                    e
-                                ))
-                            })?;
+                            TrustformersError::shape_error(format!(
+                                "Failed to broadcast bias: {}",
+                                e
+                            ))
+                        })?;
 
                         let output = &normalized * &w_broadcast + &b_broadcast;
                         Ok(Tensor::F32(output))
-                    }
+                    },
                     _ => Err(TrustformersError::tensor_op_error(
                         "LayerNorm weight/bias type mismatch",
                         "LayerNorm::forward",
                     )),
                 }
-            }
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for LayerNorm",
                 "LayerNorm::forward",
@@ -279,21 +275,21 @@ impl Layer for RMSNorm {
                             .view()
                             .into_shape_with_order(IxDyn(&broadcast_shape))
                             .map_err(|e| {
-                                TrustformersError::shape_error(format!(
-                                    "Failed to broadcast weight: {}",
-                                    e
-                                ))
-                            })?;
+                            TrustformersError::shape_error(format!(
+                                "Failed to broadcast weight: {}",
+                                e
+                            ))
+                        })?;
 
                         let output = &normalized * &w_broadcast;
                         Ok(Tensor::F32(output))
-                    }
+                    },
                     _ => Err(TrustformersError::tensor_op_error(
                         "RMSNorm weight type mismatch",
                         "RMSNorm::forward",
                     )),
                 }
-            }
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for RMSNorm",
                 "RMSNorm::forward",

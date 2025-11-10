@@ -131,13 +131,15 @@ impl CudaBackend {
         "#;
 
         // Load kernel module
-        let module = self.device.load_ptx(PTX_SRC.into(), "matmul", &["matmul_kernel"])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to load CUDA kernel: {}", e),
-                    "matmul_f32",
-                )
-            })?;
+        let module =
+            self.device
+                .load_ptx(PTX_SRC.into(), "matmul", &["matmul_kernel"])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to load CUDA kernel: {}", e),
+                        "matmul_f32",
+                    )
+                })?;
 
         // Allocate device memory
         let a_dev = self.device.htod_copy(a.to_vec()).map_err(|e| {
@@ -180,17 +182,7 @@ impl CudaBackend {
         unsafe {
             kernel
                 .clone()
-                .launch(
-                    cfg,
-                    (
-                        &a_dev,
-                        &b_dev,
-                        &mut c_dev,
-                        m_u32,
-                        n_u32,
-                        k_u32,
-                    ),
-                )
+                .launch(cfg, (&a_dev, &b_dev, &mut c_dev, m_u32, n_u32, k_u32))
                 .map_err(|e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to launch kernel: {}", e),
@@ -282,18 +274,18 @@ pub fn dispatch_cuda_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Result<
                 let result_data = backend.matmul_f32(&a_data, &b_data, m, k, n)?;
 
                 // Convert back to tensor
-                let result_2d =
-                    scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data).map_err(
-                        |e| TrustformersError::shape_error(format!("Failed to reshape result: {}", e)),
-                    )?;
+                let result_2d = scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
+                    .map_err(|e| {
+                    TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
+                })?;
 
                 let result_dyn = result_2d.into_dyn();
                 return Ok(Tensor::F32(result_dyn));
-            }
+            },
             _ => {
                 // Fallback to CPU matmul for non-F32 tensors
                 return a.matmul(b);
-            }
+            },
         }
     }
 
@@ -335,7 +327,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         // Simple 2x2 matrix multiplication

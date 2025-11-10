@@ -232,7 +232,7 @@ impl Linear {
         // Check if already cached (read lock is cheaper)
         if let Ok(buffer_id) = self.weight_buffer_id.read() {
             if buffer_id.is_some() {
-                return Ok(());  // Already cached
+                return Ok(()); // Already cached
             }
         }
 
@@ -256,7 +256,7 @@ impl Linear {
                 Tensor::F32(arr) => {
                     if arr.ndim() != 2 {
                         return Err(TrustformersError::shape_error(
-                            "Weight tensor must be 2D for Metal caching".to_string()
+                            "Weight tensor must be 2D for Metal caching".to_string(),
                         ));
                     }
 
@@ -267,13 +267,13 @@ impl Linear {
                     let backend = get_metal_backend()?;
                     let new_buffer_id = backend.create_persistent_buffer(&weight_data)?;
                     *buffer_id_guard = Some(new_buffer_id);
-                }
+                },
                 _ => {
                     return Err(TrustformersError::tensor_op_error(
                         "Only F32 tensors supported for Metal caching",
                         "ensure_weight_buffer_cached",
                     ));
-                }
+                },
             }
         }
         Ok(())
