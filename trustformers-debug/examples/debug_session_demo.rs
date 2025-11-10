@@ -577,7 +577,7 @@ async fn performance_profiling_demo() -> Result<()> {
     }
 
     // 3. Model inference profiling
-    for batch_size in vec![1, 8, 32] {
+    for batch_size in [1, 8, 32] {
         let sequence_length = 128;
         let inference_time = Duration::from_millis(batch_size as u64 * 50);
 
@@ -705,7 +705,7 @@ async fn visualization_demo() -> Result<()> {
     let steps: Vec<f64> = (0..50).map(|x| x as f64).collect();
     let gradient_norms: Vec<f64> = steps
         .iter()
-        .map(|&step| 0.1 * (-0.02 * step as f64).exp() + 0.01 * (step as f64 * 0.3).sin().abs())
+        .map(|&step| 0.1 * (-0.02 * step).exp() + 0.01 * (step * 0.3).sin().abs())
         .collect();
 
     let grad_plot = visualizer.plot_gradient_flow("attention_layer", &steps, &gradient_norms)?;
@@ -714,10 +714,8 @@ async fn visualization_demo() -> Result<()> {
     // 3. Plot training metrics
     println!("\n--- Creating training metrics plot ---");
     let train_steps: Vec<f64> = (0..100).map(|x| x as f64).collect();
-    let losses: Vec<f64> = train_steps
-        .iter()
-        .map(|&step| 2.0 * (-0.05 * step as f64).exp() + 0.1)
-        .collect();
+    let losses: Vec<f64> =
+        train_steps.iter().map(|&step| 2.0 * (-0.05 * step).exp() + 0.1).collect();
     let accuracies: Vec<f64> =
         losses.iter().map(|&loss| (1.0 - loss / 2.5).max(0.0).min(1.0)).collect();
 
@@ -769,7 +767,7 @@ async fn visualization_demo() -> Result<()> {
 
     // ASCII line plot
     let line_plot = terminal_viz.ascii_line_plot(
-        &steps[0..20].iter().map(|&x| x as f64).collect::<Vec<_>>(),
+        &steps[0..20].iter().map(|&x| x).collect::<Vec<_>>(),
         &gradient_norms[0..20],
         "Gradient Norm Over Time",
     );

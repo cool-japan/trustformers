@@ -3,7 +3,7 @@
 //! Parses Rust source files to extract FFI function definitions, structs, enums,
 //! and other interface elements that can be used to generate language bindings.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use quote::ToTokens;
 use regex::Regex;
 use std::collections::HashMap;
@@ -12,6 +12,7 @@ use std::path::Path;
 use syn::{File, ForeignItemFn, Item, ItemConst, ItemEnum, ItemFn, ItemStruct, ItemType};
 
 use super::ast::*;
+use crate::error::TrustformersResult;
 
 /// Parser for extracting FFI interface from Rust source code
 pub struct FfiParser {

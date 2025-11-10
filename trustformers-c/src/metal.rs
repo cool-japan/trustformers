@@ -4,7 +4,7 @@
 //! and iOS devices with Apple Silicon. It offers optimized tensor operations and model
 //! inference using the unified memory architecture of Apple Silicon.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};

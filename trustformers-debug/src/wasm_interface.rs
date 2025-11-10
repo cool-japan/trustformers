@@ -670,6 +670,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_wasm_session_creation() {
         let session = WasmDebugSession::new();
         assert!(!session.is_initialized);
@@ -677,6 +678,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_tensor_addition() {
         let mut session = WasmDebugSession::new();
         let _ = session.initialize(r#"{"browser_optimizations": true}"#);
@@ -689,6 +691,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_tensor_analysis() {
         let mut session = WasmDebugSession::new();
         let _ = session.initialize(r#"{"browser_optimizations": true}"#);
@@ -704,6 +707,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_anomaly_detection() {
         let mut session = WasmDebugSession::new();
         let _ = session.initialize(r#"{"browser_optimizations": true}"#);
@@ -718,6 +722,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_export_functionality() {
         let mut session = WasmDebugSession::new();
         let _ = session.initialize(r#"{"browser_optimizations": true}"#);

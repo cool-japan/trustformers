@@ -4,7 +4,8 @@
 //! with placeholder substitution and basic control structures.
 
 use super::{ast, CodeGenConfig};
-use anyhow::{anyhow, Result};
+use crate::error::TrustformersResult;
+use anyhow::anyhow;
 use std::collections::HashMap;
 
 /// Simple template engine for code generation

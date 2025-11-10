@@ -40,11 +40,8 @@
 //! ```
 
 use crate::errors::{Result, TrustformersError};
-use crate::tensor::{DType, Tensor};
-use scirs2_core::ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
-use scirs2_core::random::*;
+use crate::tensor::Tensor;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 /// FP8 data format specification
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -282,20 +279,14 @@ pub struct FP8Quantizer {
 
     /// Statistics for delayed scaling (per channel or per tensor)
     stats: Option<Vec<QuantStats>>,
-
-    /// Random number generator for stochastic rounding
-    rng: Option<ThreadRng>,
 }
 
 impl FP8Quantizer {
     /// Create a new FP8 quantizer
     pub fn new(config: FP8Config) -> Result<Self> {
-        let rng = if config.stochastic_rounding { Some(thread_rng()) } else { None };
-
         Ok(Self {
             config,
             stats: None,
-            rng,
         })
     }
 
@@ -564,7 +555,7 @@ impl FP8Quantizer {
             }
             return Ok((sign as u8) << 7);
         }
-        if exp >= max_exp as i32 {
+        if exp >= max_exp {
             // Overflow - saturate to max
             if let Some(stats) = &mut self.stats {
                 stats[0].overflow_count += 1;
@@ -581,28 +572,13 @@ impl FP8Quantizer {
         let mant_shift = 23 - mant_bits;
         let mut mant = (mant_f32 >> mant_shift) as u8;
 
-        // Stochastic rounding
-        if self.config.stochastic_rounding {
-            if let Some(rng) = &mut self.rng {
-                let remainder = mant_f32 & ((1 << mant_shift) - 1);
-                let threshold = 1 << (mant_shift - 1);
-                let uniform: f32 = rng.gen();
-                if remainder as f32 > uniform * (1 << mant_shift) as f32 {
-                    mant = mant.saturating_add(1);
-                    if mant >= (1 << mant_bits) {
-                        mant = 0;
-                        // Carry to exponent - simplified
-                    }
-                }
-            }
-        } else {
-            // Round to nearest even
-            let remainder = mant_f32 & ((1 << mant_shift) - 1);
-            if remainder > (1 << (mant_shift - 1))
-                || (remainder == (1 << (mant_shift - 1)) && (mant & 1) == 1)
-            {
-                mant = mant.saturating_add(1);
-            }
+        // Round to nearest even (stochastic rounding disabled for now)
+        // TODO: Implement stochastic rounding when scirs2_core Random API is clearer
+        let remainder = mant_f32 & ((1 << mant_shift) - 1);
+        if remainder > (1 << (mant_shift - 1))
+            || (remainder == (1 << (mant_shift - 1)) && (mant & 1) == 1)
+        {
+            mant = mant.saturating_add(1);
         }
 
         // Combine sign, exponent, mantissa
@@ -633,7 +609,7 @@ impl FP8Quantizer {
 
         // Handle special cases
         let max_exp = (1 << exp_bits) - 1;
-        if exp == max_exp as i32 {
+        if exp == max_exp {
             return if sign == 1 {
                 -self.config.format.max_value()
             } else {
@@ -720,7 +696,6 @@ impl FP8Quantizer {
 }
 
 /// Utility functions for FP8 quantization
-
 /// Automatic format selection based on tensor characteristics
 pub fn select_fp8_format(tensor: &Tensor, use_case: &str) -> FP8Format {
     match use_case {
@@ -746,7 +721,7 @@ pub fn select_fp8_format(tensor: &Tensor, use_case: &str) -> FP8Format {
 }
 
 /// Estimate quantization error
-pub fn estimate_quantization_error(original: &Tensor, quantized: &FP8Tensor) -> Result<f32> {
+pub fn estimate_quantization_error(_original: &Tensor, _quantized: &FP8Tensor) -> Result<f32> {
     // This would require dequantization and comparison
     // Simplified implementation
     Ok(0.0)

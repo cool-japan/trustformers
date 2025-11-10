@@ -116,34 +116,90 @@ Application Crates (trustformers-models, trustformers-tokenizers, etc.)
       External Dependencies (rand, ndarray, tokenizers, etc.)
 ```
 
-**Key Principle**: Only `trustformers-core` can use external dependencies directly. All other crates must use abstractions from either `trustformers-core` or `scirs2-core`.
+**Key Principle**: Only `trustformers-core` can use external dependencies directly. All other crates must use abstractions from either `trustformers-core` or `scirs2-core`. **See [Critical Development Policies](#critical-development-policies) below for detailed requirements.**
 
 ## Critical Development Policies
 
-### ⚠️ MANDATORY: SciRS2 Integration Policy
+**READ THIS FIRST**: TrustformeRS follows **two distinct dependency policies**. Understanding the difference is critical for proper development.
 
-**READ THIS FIRST**: TrustformeRS follows a strict dependency abstraction policy documented in `SCIRS2_INTEGRATION_POLICY.md`. Failure to follow this policy will result in compilation errors and rejected PRs.
+### 📊 Quick Reference: Which Policy Applies?
 
-#### What This Means for You
+| Dependency Type | Example Libraries | Policy | Import Via |
+|----------------|-------------------|--------|------------|
+| **ML/DL Frameworks** | `tch`, `candle_core`, `ort` | **TrustformeRS Core Usage** | `trustformers_core::tensor` |
+| **Tokenization** | `tokenizers` | **TrustformeRS Core Usage** | `trustformers_core::Tokenizer` |
+| **Scientific Computing** | `rand`, `ndarray` | **SciRS2 Integration** | `scirs2_core::random`, `scirs2_core::ndarray` |
+| **Parallelization** | `rayon` | **SciRS2 Integration** | `scirs2_core::parallel_ops` |
+| **GPU Libraries** | `cudarc`, `wgpu`, `metal` | **SciRS2 Integration** | `scirs2_core` features |
 
-1. **In trustformers-models, trustformers-tokenizers, trustformers-serve, etc.**:
-   - ❌ NEVER import `rand`, `ndarray`, `tokenizers`, or other external crates directly
-   - ✅ ALWAYS use `trustformers_core::*` or `scirs2_core::*` abstractions
+---
 
-2. **In ALL tests and examples (including in trustformers-core)**:
-   - ❌ NEVER import external crates directly
-   - ✅ ALWAYS use the unified abstractions
+### 1️⃣ TrustformeRS Core Usage Policy
 
-3. **Only in trustformers-core source code**:
-   - ✅ Can import external dependencies directly
-   - ✅ Must re-export them for other crates to use
+**Scope**: ML/Deep Learning frameworks and model-specific libraries
+
+**Rule**: Only `trustformers-core` can import ML framework dependencies directly. All other crates must use `trustformers_core` abstractions.
 
 #### Prohibited Direct Imports
 
 ```rust
 // ❌ FORBIDDEN in ALL crates except trustformers-core source
 
-// Scientific computing
+// ML/DL Tensor Backends
+use tch::*;                    // PyTorch - Use trustformers_core::tensor instead
+use tch::Tensor;
+use candle_core::*;            // Candle - Use trustformers_core::tensor instead
+use candle_core::Tensor;
+use ort::*;                    // ONNX Runtime - Use trustformers_core::tensor instead
+
+// Tokenization Libraries
+use tokenizers::*;             // HuggingFace - Use trustformers_core::Tokenizer instead
+use tokenizers::Tokenizer;
+```
+
+#### Required Abstractions
+
+```rust
+// ✅ CORRECT - TrustformeRS Core Usage Policy
+
+// Tensor Operations
+use trustformers_core::tensor::Tensor;        // Unified tensor type
+use trustformers_core::tensor::*;             // Tensor operations
+use trustformers_core::device::Device;        // Device management (CPU/GPU)
+
+// ML Components
+use trustformers_core::layers::*;             // Attention, FFN, LayerNorm, etc.
+use trustformers_core::models::*;             // AutoModel and model loading
+use trustformers_core::quantization::*;       // Quantization operations
+
+// Tokenization
+use trustformers_core::{Tokenizer, Encoding}; // Re-exported from tokenizers crate
+
+// Example: Typical model file imports
+use trustformers_core::{
+    tensor::Tensor,
+    device::Device,
+    layers::{Linear, LayerNorm, Dropout},
+    error::TrustformersError,
+};
+```
+
+---
+
+### 2️⃣ SciRS2 Integration Policy
+
+**Scope**: Scientific computing and numerical libraries
+
+**Rule**: Only `trustformers-core` and `scirs2-core` can import scientific computing dependencies. All other crates must use `scirs2_core` abstractions.
+
+**Full documentation**: See `SCIRS2_INTEGRATION_POLICY.md`
+
+#### Prohibited Direct Imports
+
+```rust
+// ❌ FORBIDDEN in ALL crates except trustformers-core source
+
+// Scientific Computing
 use rand::*;
 use rand::Rng;
 use rand_distr::{Normal, Uniform, Beta};
@@ -155,42 +211,37 @@ use num_complex::Complex;
 use rayon::*;
 use rayon::prelude::*;
 
-// GPU and hardware acceleration
+// GPU and Hardware Acceleration (low-level)
 use cudarc::*;       // Use scirs2_core with 'cuda' feature
 use wgpu::*;         // Use scirs2_core with 'wgpu_backend' feature
 use metal::*;        // Use scirs2_core with 'metal' feature
 use opencl3::*;      // Use scirs2_core with 'opencl' feature
-use vulkano::*;      // Use trustformers_core::device
-
-// Tensor backends
-use tokenizers::Tokenizer;
-use candle_core::Tensor;
-use tch::Tensor;
+use vulkano::*;      // Use scirs2_core with 'vulkan' feature
 ```
 
 #### Required Abstractions
 
 ```rust
-// ✅ REQUIRED - Tensor Operations
-use trustformers_core::tensor::*;        // Unified tensor operations
-use trustformers_core::tensor::Tensor;   // Main tensor type
-use trustformers_core::device::Device;   // Device management (CPU/GPU)
+// ✅ CORRECT - SciRS2 Integration Policy
 
-// ✅ REQUIRED - ML Components
-use trustformers_core::layers::*;        // Attention, FFN, LayerNorm, etc.
-use trustformers_core::tokenizer::*;     // AutoTokenizer and tokenization
-use trustformers_core::models::*;        // AutoModel and model loading
-use trustformers_core::quantization::*;  // Quantization operations
-
-// ✅ REQUIRED - Scientific Computing (via SciRS2-Core)
+// Random Number Generation
 use scirs2_core::random::*;              // RNG, distributions (Normal, Beta, etc.)
+
+// Array Operations
 use scirs2_core::ndarray::*;             // Arrays, array! macro, s! macro
-use scirs2_core::simd_ops::*;            // SIMD operations
-use scirs2_core::parallel_ops::*;        // Parallel processing (rayon)
+use scirs2_core::ndarray::{Array1, Array2, ArrayD, Axis, s};
+
+// Complex Numbers
 use scirs2_core::Complex;                // Complex numbers (at root level)
 
-// ✅ REQUIRED - GPU Operations (via SciRS2-Core features)
-// Enable via Cargo.toml features:
+// Parallelization
+use scirs2_core::parallel_ops::*;        // Parallel processing (via rayon)
+
+// SIMD Operations
+use scirs2_core::simd_ops::*;            // SIMD operations
+
+// GPU Operations (via features)
+// Enable in Cargo.toml:
 // scirs2-core = { workspace = true, features = ["gpu", "cuda"] }    # NVIDIA
 // scirs2-core = { workspace = true, features = ["gpu", "metal"] }   # Apple
 // scirs2-core = { workspace = true, features = ["gpu", "wgpu_backend"] } # WebGPU
@@ -198,18 +249,53 @@ use scirs2_core::Complex;                // Complex numbers (at root level)
 use scirs2_core::gpu_ops::*;             // Low-level GPU operations (with 'gpu' feature)
 use scirs2_core::simd_ops::PlatformCapabilities; // GPU detection
 
-// Example: Complete imports for a typical model file
+// Example: Scientific computing with random initialization
+use scirs2_core::random::*;
+let mut rng = thread_rng();
+let dist = Normal::new(0.0, 1.0)?;
+```
+
+---
+
+### ⚙️ General Policy Rules
+
+**Applies to BOTH policies:**
+
+1. **In trustformers-models, trustformers-tokenizers, trustformers-serve, etc.**:
+   - ❌ NEVER import external dependencies directly
+   - ✅ ALWAYS use `trustformers_core` or `scirs2_core` abstractions
+
+2. **In ALL tests and examples (including in trustformers-core)**:
+   - ❌ NEVER import external crates directly
+   - ✅ ALWAYS use the unified abstractions
+
+3. **Only in trustformers-core source code**:
+   - ✅ Can import external dependencies directly
+   - ✅ Must re-export them for other crates to use
+
+---
+
+### 💡 Complete Example: Combining Both Policies
+
+```rust
+// A typical model implementation file should use BOTH policies:
+
+// TrustformeRS Core Usage Policy (ML frameworks)
 use trustformers_core::{
     tensor::Tensor,
     device::Device,
     layers::{Linear, LayerNorm, Dropout},
     error::TrustformersError,
 };
-use scirs2_core::random::*;  // For initialization
 
-// Example: GPU-accelerated model
-let device = Device::cuda_if_available()?;  // Automatic GPU selection
-let tensor = Tensor::randn(&[1024, 768])?.to_device(&device)?;
+// SciRS2 Integration Policy (scientific computing)
+use scirs2_core::random::*;              // For weight initialization
+use scirs2_core::ndarray::{Array2, s};   // If needed for array operations
+
+// Now you can use unified APIs
+let mut rng = thread_rng();              // From scirs2_core
+let tensor = Tensor::randn(&[512, 768])?;  // From trustformers_core
+let device = Device::cuda_if_available()?; // From trustformers_core
 ```
 
 ### ✅ Recent SciRS2 Policy Remediation (2025)
@@ -577,7 +663,7 @@ serde = { workspace = true }
 5. Add feature gate in `trustformers-models/Cargo.toml`
 6. Export types in `trustformers-models/src/lib.rs`
 7. Add tests comparing outputs with Hugging Face reference implementation
-8. **IMPORTANT**: Use only `trustformers_core` and `scirs2_core` abstractions
+8. **IMPORTANT**: Follow the [Critical Development Policies](#critical-development-policies) - use only `trustformers_core` and `scirs2_core` abstractions
 
 ### Model Structure Pattern
 
@@ -750,7 +836,7 @@ let tensor = tensor.to_device(&device)?;
 - Benchmark tests use `criterion` in `benches/` directories
 - Tests should use `rstest` for parameterized tests when applicable
 - Compare numerical outputs with Hugging Face for model correctness
-- **IMPORTANT**: Tests must use `scirs2_core::random` for RNG, not `rand` directly
+- **IMPORTANT**: Tests must follow the [Critical Development Policies](#critical-development-policies) - use `scirs2_core::random` for RNG, not `rand` directly
 
 ### Test Template
 

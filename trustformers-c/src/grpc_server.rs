@@ -3,7 +3,7 @@
 //! This module provides a high-performance gRPC server for serving TrustformeRS models
 //! with load balancing and advanced serving capabilities.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json;
@@ -488,7 +488,7 @@ impl LoadBalancer {
         }
     }
 
-    fn select_instance(&self, instances: &[ModelInstance]) -> Option<&ModelInstance> {
+    fn select_instance<'a>(&self, instances: &'a [ModelInstance]) -> Option<&'a ModelInstance> {
         if instances.is_empty() {
             return None;
         }

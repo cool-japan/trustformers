@@ -148,6 +148,56 @@ import {
   createNAS
 } from './neural-architecture-search.js';
 
+// Import new performance and infrastructure modules
+import {
+  WorkerPool,
+  ParallelProcessor,
+  createWorkerPool,
+  createParallelProcessor,
+  TaskPriority,
+  TaskStatus
+} from './worker-pool.js';
+
+import {
+  IndexedDBCache,
+  ModelCache,
+  createCache,
+  createModelCache
+} from './indexeddb-cache.js';
+
+// Import pipeline modules
+import * as ImagePipeline from './pipeline/image-pipeline.js';
+import * as AudioPipeline from './pipeline/audio-pipeline.js';
+
+// Import GGUF quantization
+import * as GGUFQuantization from './quantization/gguf-quantization.js';
+
+// Import DARTS NAS
+import * as DARTSNAS from './nas/darts-nas.js';
+
+// Import streaming model loader
+import {
+  StreamingModelLoader,
+  LayerPriority,
+  LayerStatus,
+  createStreamingLoader
+} from './streaming-model-loader.js';
+
+// Import WebGPU compute shaders
+import {
+  WGSLShaders,
+  WebGPUComputeShaders,
+  createComputeShaders
+} from './webgpu-compute-shaders.js';
+
+// Import browser performance profiler
+import {
+  BrowserPerformanceProfiler,
+  MetricType,
+  PerformanceBudgets,
+  createBrowserProfiler
+} from './browser-performance-profiler.js';
+
 import {
   DistillationLoss,
   TeacherModel,
@@ -1096,5 +1146,48 @@ export {
   BottleneckDetector,
   MLBasedOptimizer,
   AutoPerformanceOptimizer,
-  createAutoOptimizer
+  createAutoOptimizer,
+
+  // NEW: Web Worker Pool (2025-11-10)
+  WorkerPool,
+  ParallelProcessor,
+  createWorkerPool,
+  createParallelProcessor,
+  TaskPriority,
+  TaskStatus,
+
+  // NEW: IndexedDB Cache (2025-11-10)
+  IndexedDBCache,
+  ModelCache,
+  createCache,
+  createModelCache,
+
+  // NEW: Image Pipeline (2025-11-10)
+  ImagePipeline,
+
+  // NEW: Audio Pipeline (2025-11-10)
+  AudioPipeline,
+
+  // NEW: GGUF Quantization (2025-11-10)
+  GGUFQuantization,
+
+  // NEW: DARTS NAS (2025-11-10)
+  DARTSNAS,
+
+  // NEW: Streaming Model Loader (2025-11-10)
+  StreamingModelLoader,
+  LayerPriority,
+  LayerStatus,
+  createStreamingLoader,
+
+  // NEW: WebGPU Compute Shaders (2025-11-10)
+  WGSLShaders,
+  WebGPUComputeShaders,
+  createComputeShaders,
+
+  // NEW: Browser Performance Profiler (2025-11-10)
+  BrowserPerformanceProfiler,
+  MetricType,
+  PerformanceBudgets,
+  createBrowserProfiler
 };

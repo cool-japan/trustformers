@@ -1143,7 +1143,10 @@ mod tests {
 
     #[test]
     fn test_utils_optimal_lmul() {
-        assert_eq!(utils::calculate_optimal_lmul(2, 256), 0.125);
+        // With vlen=256 and 32-bit elements: max_elements = 8
+        // LMUL=0.125 can hold 1 element, LMUL=0.25 can hold 2 elements
+        assert_eq!(utils::calculate_optimal_lmul(1, 256), 0.125);
+        assert_eq!(utils::calculate_optimal_lmul(2, 256), 0.25);
         assert_eq!(utils::calculate_optimal_lmul(8, 256), 1.0);
         assert_eq!(utils::calculate_optimal_lmul(32, 256), 4.0);
     }

@@ -65,7 +65,7 @@ mod zero_copy;
 #[cfg(feature = "codegen")]
 pub mod codegen;
 
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 mod cuda;
 
 #[cfg(target_os = "macos")]

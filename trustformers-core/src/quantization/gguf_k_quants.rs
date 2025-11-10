@@ -38,13 +38,12 @@
 
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
-use scirs2_core::ndarray::{Array1, Array2, ArrayD, Axis, IxDyn};
-use scirs2_core::random::*;
 use serde::{Deserialize, Serialize};
 use std::f32;
 
 /// K-quant format types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum KQuantType {
     /// 2-bit K-quant: 2.5625 bits per weight
     /// Best for: Maximum compression with acceptable quality loss
@@ -131,13 +130,13 @@ pub struct BlockQ2K {
     pub dmin: F16,
 
     /// 4-bit quantized scales for 16 sub-blocks (8 bytes)
-    pub scales: [u8; 8],
+    pub scales: Vec<u8>,
 
     /// 4-bit quantized min values for 16 sub-blocks (8 bytes)
-    pub mins: [u8; 8],
+    pub mins: Vec<u8>,
 
     /// 2-bit quantized weights (64 bytes = 256 weights * 2 bits / 8)
-    pub qs: [u8; 64],
+    pub qs: Vec<u8>,
 }
 
 /// Q3_K quantization block (256 weights in 110 bytes)
@@ -146,16 +145,16 @@ pub struct BlockQ3K {
     /// 16 sub-blocks of 16 weights each
 
     /// High bits for quantized scales (2 bytes)
-    pub hmask: [u8; 2],
+    pub hmask: Vec<u8>,
 
     /// 6-bit quantized scales for 16 sub-blocks (12 bytes)
-    pub scales: [u8; 12],
+    pub scales: Vec<u8>,
 
     /// Super-block scale (FP16)
     pub d: F16,
 
     /// 3-bit quantized weights (96 bytes = 256 weights * 3 bits / 8)
-    pub qs: [u8; 96],
+    pub qs: Vec<u8>,
 }
 
 /// Q4_K quantization block (256 weights in 144 bytes)
@@ -170,13 +169,13 @@ pub struct BlockQ4K {
     pub dmin: F16,
 
     /// 6-bit quantized scales for 8 sub-blocks (6 bytes)
-    pub scales: [u8; 6],
+    pub scales: Vec<u8>,
 
     /// 6-bit quantized min values for 8 sub-blocks (6 bytes)
-    pub mins: [u8; 6],
+    pub mins: Vec<u8>,
 
     /// 4-bit quantized weights (128 bytes = 256 weights * 4 bits / 8)
-    pub qs: [u8; 128],
+    pub qs: Vec<u8>,
 }
 
 /// K-quant configuration
@@ -318,6 +317,7 @@ impl KQuantizer {
 
             // Quantize weights to 2 bits
             let sb_scale = f16_to_f32(d) * (scale_q as f32 / 15.0);
+            #[allow(clippy::needless_range_loop)]
             for i in 0..subblock_size {
                 let weight = sb_data[i];
                 let quant = ((weight / sb_scale) + 1.5).round().clamp(0.0, 3.0) as u8;
@@ -330,7 +330,7 @@ impl KQuantizer {
         }
 
         // Serialize to bytes
-        let mut bytes = Vec::with_capacity(82);
+        let mut bytes = Vec::with_capacity(84);
         bytes.extend(&d.to_le_bytes());
         bytes.extend(&dmin.to_le_bytes());
         bytes.extend(&scales);
@@ -387,6 +387,7 @@ impl KQuantizer {
 
             // Quantize weights to 3 bits
             let sb_scale = f16_to_f32(d) * (scale_6bit as f32 / 63.0);
+            #[allow(clippy::needless_range_loop)]
             for i in 0..subblock_size {
                 let weight = sb_data[i];
                 let quant = ((weight / sb_scale) + 4.0).round().clamp(0.0, 7.0) as u8;
@@ -463,6 +464,7 @@ impl KQuantizer {
 
             // Quantize weights to 4 bits
             let sb_scale = f16_to_f32(d) * (scale_q as f32 / 63.0);
+            #[allow(clippy::needless_range_loop)]
             for i in 0..subblock_size {
                 let weight = sb_data[i];
                 let quant = ((weight / sb_scale) + 8.0).round().clamp(0.0, 15.0) as u8;
@@ -522,17 +524,18 @@ impl KQuantizer {
 
     /// Dequantize Q2_K block
     fn dequantize_q2k(&self, bytes: &[u8]) -> Result<Vec<f32>> {
-        if bytes.len() < 82 {
+        // Q2_K block: 2 (d) + 2 (dmin) + 8 (scales) + 8 (mins) + 64 (qs) = 84 bytes
+        if bytes.len() < 84 {
             return Err(TrustformersError::quantization_error(
                 "Invalid Q2_K block size".to_string(),
             ));
         }
 
         let d = f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
-        let dmin = f16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+        let _dmin = f16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
 
         let scales = &bytes[4..12];
-        let mins = &bytes[12..20];
+        let _mins = &bytes[12..20];
         let qs = &bytes[20..84];
 
         let mut weights = Vec::with_capacity(256);
@@ -620,10 +623,10 @@ impl KQuantizer {
         }
 
         let d = f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
-        let dmin = f16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
+        let _dmin = f16_to_f32(u16::from_le_bytes([bytes[2], bytes[3]]));
 
         let scales = &bytes[4..10];
-        let mins = &bytes[10..16];
+        let _mins = &bytes[10..16];
         let qs = &bytes[16..144];
 
         let mut weights = Vec::with_capacity(256);

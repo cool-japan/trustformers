@@ -1,6 +1,6 @@
 //! Pipeline C API for TrustformeRS
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};

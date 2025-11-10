@@ -54,21 +54,19 @@ impl RocmManager {
             return Err(anyhow!(
                 "Failed to initialize HIP runtime: error code {}",
                 hip_init_result
-            ));
+            )
+            .into());
         }
 
         // Get device count
         let mut device_count: c_int = 0;
         let result = unsafe { self.hip_get_device_count(&mut device_count) };
         if result != 0 {
-            return Err(anyhow!(
-                "Failed to get HIP device count: error code {}",
-                result
-            ));
+            return Err(anyhow!("Failed to get HIP device count: error code {}", result).into());
         }
 
         if device_count == 0 {
-            return Err(anyhow!("No ROCm/HIP devices found"));
+            return Err(anyhow!("No ROCm/HIP devices found").into());
         }
 
         for device_id in 0..device_count {
@@ -179,7 +177,7 @@ impl RocmManager {
 
     pub(crate) fn set_current_device(&mut self, device_id: i32) -> TrustformersResult<()> {
         if device_id < 0 || device_id >= self.devices.len() as i32 {
-            return Err(anyhow!("Invalid device ID: {}", device_id));
+            return Err(anyhow!("Invalid device ID: {}", device_id).into());
         }
 
         self.current_device = Some(device_id);
@@ -193,7 +191,8 @@ impl RocmManager {
                     "Failed to set HIP device {}: error code {}",
                     device_id,
                     result
-                ));
+                )
+                .into());
             }
 
             // Initialize ROCblas handle for this device if not already done

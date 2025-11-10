@@ -22,6 +22,16 @@ pub enum QuantizationScheme {
     Int8,
     FP16,
     Dynamic,
+    /// GGUF Q2_K: 2.5625 bits per weight, ultra-low memory
+    GGUF_Q2_K,
+    /// GGUF Q3_K: 3.4375 bits per weight, balanced
+    GGUF_Q3_K,
+    /// GGUF Q4_K: 4.5 bits per weight, high quality
+    GGUF_Q4_K,
+    /// GGUF Q5_0: 5.5 bits per weight, very high quality
+    GGUF_Q5_0,
+    /// GGUF Q6_K: 6.5 bits per weight, near-lossless
+    GGUF_Q6_K,
 }
 
 impl std::fmt::Display for QuantizationScheme {
@@ -31,6 +41,11 @@ impl std::fmt::Display for QuantizationScheme {
             QuantizationScheme::Int8 => write!(f, "INT8"),
             QuantizationScheme::FP16 => write!(f, "FP16"),
             QuantizationScheme::Dynamic => write!(f, "Dynamic"),
+            QuantizationScheme::GGUF_Q2_K => write!(f, "GGUF_Q2_K"),
+            QuantizationScheme::GGUF_Q3_K => write!(f, "GGUF_Q3_K"),
+            QuantizationScheme::GGUF_Q4_K => write!(f, "GGUF_Q4_K"),
+            QuantizationScheme::GGUF_Q5_0 => write!(f, "GGUF_Q5_0"),
+            QuantizationScheme::GGUF_Q6_K => write!(f, "GGUF_Q6_K"),
         }
     }
 }
@@ -706,6 +721,16 @@ impl MobileQuantizer for DynamicQuantizer {
             },
             QuantizationScheme::Int8 => self.int8_quantizer.quantize_tensor(tensor),
             QuantizationScheme::FP16 => self.fp16_quantizer.quantize_tensor(tensor),
+            // GGUF schemes fall back to INT8 (will be handled by dedicated GGUF quantizer)
+            QuantizationScheme::GGUF_Q2_K
+            | QuantizationScheme::GGUF_Q3_K
+            | QuantizationScheme::GGUF_Q4_K
+            | QuantizationScheme::GGUF_Q5_0
+            | QuantizationScheme::GGUF_Q6_K => {
+                // Note: GGUF quantization should use MobileGGUFQuantizer directly
+                // For now, fall back to INT8
+                self.int8_quantizer.quantize_tensor(tensor)
+            },
             QuantizationScheme::Dynamic => {
                 // This shouldn't happen after our check above, but handle gracefully
                 let selected_scheme = self.select_quantization_scheme(tensor)?;
@@ -716,6 +741,12 @@ impl MobileQuantizer for DynamicQuantizer {
                     },
                     QuantizationScheme::Int8 => self.int8_quantizer.quantize_tensor(tensor),
                     QuantizationScheme::FP16 => self.fp16_quantizer.quantize_tensor(tensor),
+                    // GGUF schemes fall back to INT8
+                    QuantizationScheme::GGUF_Q2_K
+                    | QuantizationScheme::GGUF_Q3_K
+                    | QuantizationScheme::GGUF_Q4_K
+                    | QuantizationScheme::GGUF_Q5_0
+                    | QuantizationScheme::GGUF_Q6_K => self.int8_quantizer.quantize_tensor(tensor),
                     QuantizationScheme::Dynamic => {
                         // If still Dynamic, default to Int8 as fallback
                         self.int8_quantizer.quantize_tensor(tensor)
@@ -745,6 +776,16 @@ impl MobileQuantizer for DynamicQuantizer {
                 // For int4, we need to create a quantizer instance
                 let int4_quantizer = Int4Quantizer::new();
                 int4_quantizer.dequantize_tensor(tensor)
+            },
+            // GGUF schemes fall back to INT8 dequantization
+            QuantizationScheme::GGUF_Q2_K
+            | QuantizationScheme::GGUF_Q3_K
+            | QuantizationScheme::GGUF_Q4_K
+            | QuantizationScheme::GGUF_Q5_0
+            | QuantizationScheme::GGUF_Q6_K => {
+                // Note: GGUF dequantization should use MobileGGUFQuantizer directly
+                // For now, fall back to INT8
+                self.int8_quantizer.dequantize_tensor(tensor)
             },
             QuantizationScheme::Dynamic => {
                 // For dynamic schemes, fall back to the selection logic
@@ -788,10 +829,15 @@ impl QuantizationUtils {
     /// Get compression ratio
     pub fn compression_ratio(scheme: QuantizationScheme) -> f32 {
         match scheme {
-            QuantizationScheme::Int4 => 8.0,    // 32-bit to 4-bit
-            QuantizationScheme::Int8 => 4.0,    // 32-bit to 8-bit
-            QuantizationScheme::FP16 => 2.0,    // 32-bit to 16-bit
-            QuantizationScheme::Dynamic => 3.0, // Average
+            QuantizationScheme::Int4 => 8.0,                // 32-bit to 4-bit
+            QuantizationScheme::Int8 => 4.0,                // 32-bit to 8-bit
+            QuantizationScheme::FP16 => 2.0,                // 32-bit to 16-bit
+            QuantizationScheme::Dynamic => 3.0,             // Average
+            QuantizationScheme::GGUF_Q2_K => 32.0 / 2.5625, // 32-bit to 2.5625-bit
+            QuantizationScheme::GGUF_Q3_K => 32.0 / 3.4375, // 32-bit to 3.4375-bit
+            QuantizationScheme::GGUF_Q4_K => 32.0 / 4.5,    // 32-bit to 4.5-bit
+            QuantizationScheme::GGUF_Q5_0 => 32.0 / 5.5,    // 32-bit to 5.5-bit
+            QuantizationScheme::GGUF_Q6_K => 32.0 / 6.5,    // 32-bit to 6.5-bit
         }
     }
 

@@ -14,6 +14,16 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::excessive_nesting)]
 
+// New visualization and analysis modules
+pub mod activation_visualizer;
+pub mod attention_visualizer;
+pub mod graph_visualizer;
+pub mod netron_export;
+pub mod stability_checker;
+pub mod tensorboard_integration;
+pub mod unified_debug_session;
+pub mod weight_analyzer;
+
 pub mod advanced_gpu_profiler;
 pub mod advanced_ml_debugging;
 pub mod ai_code_analyzer;
@@ -131,6 +141,54 @@ pub use kernel_optimizer::{
 };
 
 // ============================================================================
+// New Visualization and Analysis Tools (TODO.md implementations)
+// ============================================================================
+
+// TensorBoard Integration
+pub use tensorboard_integration::{
+    create_graph_node, tensor_to_histogram_values, GraphDef, GraphNode as TensorBoardGraphNode,
+    HistogramEvent, ScalarEvent, TensorBoardWriter, TextEvent,
+};
+
+// Netron/ONNX Export
+pub use netron_export::{
+    AttributeValue, ExportFormat, GraphNode as NetronGraphNode, ModelGraph, ModelMetadata,
+    NetronExporter, NetronModel, TensorData, TensorInfo,
+};
+
+// Activation Visualizer
+pub use activation_visualizer::{
+    ActivationConfig, ActivationData, ActivationHeatmap as ActivationVisualizerHeatmap,
+    ActivationHistogram, ActivationStatistics, ActivationVisualizer,
+};
+
+// Attention Visualizer
+pub use attention_visualizer::{
+    AttentionAnalysis, AttentionFlow, AttentionHeatmap as AttentionVisualizerHeatmap,
+    AttentionType, AttentionVisualizer, AttentionVisualizerConfig, AttentionWeights, ColorScheme,
+};
+
+// Stability Checker
+pub use stability_checker::{
+    IssueKind, StabilityChecker, StabilityConfig, StabilityIssue, StabilitySummary,
+};
+
+// Graph Visualizer
+pub use graph_visualizer::{
+    ComputationGraph, GraphColorScheme, GraphEdge, GraphNode as GraphVisualizerNode,
+    GraphStatistics, GraphVisualizer, GraphVisualizerConfig, LayoutDirection,
+};
+
+// Unified Debug Session Manager
+pub use unified_debug_session::{SessionSummary, UnifiedDebugSession, UnifiedDebugSessionConfig};
+
+// Weight Analyzer
+pub use weight_analyzer::{
+    InitializationScheme, WeightAnalysis, WeightAnalyzer, WeightAnalyzerConfig, WeightHistogram,
+    WeightStatistics,
+};
+
+// ============================================================================
 // Module Re-exports
 // ============================================================================
 //
@@ -173,6 +231,7 @@ pub use kernel_optimizer::{
 // ============================================================================
 
 // Primary exports (order determines which type wins for ambiguous names)
+// Note: New visualization modules are explicitly imported above to avoid conflicts
 pub use advanced_ml_debugging::*;
 pub use ai_code_analyzer::*;
 pub use anomaly_detector::*;

@@ -25,6 +25,7 @@ pub mod gpu_accelerated;
 pub mod hardware;
 pub mod hardware_acceleration;
 pub mod kernel_fusion;
+pub mod kernel_tuning;
 pub mod kernels;
 pub mod layers;
 pub mod leaderboard;
@@ -41,8 +42,10 @@ pub mod performance;
 pub mod plugins;
 pub mod quantization;
 pub mod quantum;
+pub mod sparse_ops;
 pub mod sparse_tensor;
 pub mod tensor;
+pub mod tensor_debugger;
 pub mod testing;
 #[cfg(test)]
 pub mod tests;
@@ -164,6 +167,10 @@ pub use kernel_fusion::{
     GraphNode as FusionGraphNode, KernelFusionEngine, KernelImplementation, MemoryLayout,
     NodeMetadata, OperationType, TensorInfo,
 };
+pub use kernel_tuning::{
+    get_kernel_tuner, Backend as TuningBackend, KernelParams, KernelTuner,
+    Operation as TuningOperation, PlatformInfo, TuningConfig, TuningStatistics,
+};
 pub use kernels::fused_ops::ActivationType;
 pub use kernels::{
     FusedAttentionDropout, FusedBiasActivation, FusedGELU, FusedLinear, FusedMatmulScale,
@@ -214,8 +221,9 @@ pub use leaderboard::{
     LeaderboardSubmission, RankingCriteria, SubmissionValidator,
 };
 pub use memory::{
-    get_memory_manager, get_tensor, init_memory_manager, return_tensor, MemoryConfig,
-    MemoryMappedTensor, MemoryPoolStats, TensorMemoryPool, TensorView,
+    get_memory_manager, get_tensor, init_memory_manager, return_tensor, AdaptiveStrategy,
+    MemoryConfig, MemoryEvictionPolicy, MemoryMappedTensor, MemoryPoolStats, TensorMemoryPool,
+    TensorView,
 };
 pub use monitoring::{
     AttentionPattern, AttentionPatternType, AttentionReport, AttentionVisualizer,
@@ -356,9 +364,17 @@ pub use quantization::{
     SensitivityConfig,
     SensitivityMetric,
 };
+pub use sparse_ops::{
+    conversion, pruning, sparse_attention, sparse_matmul, BlockSparsity, NMSparsity,
+    StructuredSparsityPattern,
+};
 pub use sparse_tensor::{SparseFormat, SparseIndices, SparseTensor};
 pub use tensor::{
     DType, EvalContext, ExprNode, OpType, OptimizationHints, Tensor, TensorExpr, TensorType,
+};
+pub use tensor_debugger::{
+    DebugTensorStats, OperationTrace, Severity, TensorDebugIssue, TensorDebugger,
+    TensorDebuggerConfig, TensorIssueType, WatchCondition, Watchpoint,
 };
 pub use tokenizer_backend::{Encoding, Tokenizer, TokenizerError};
 pub use traits::{Config, Layer, Model};

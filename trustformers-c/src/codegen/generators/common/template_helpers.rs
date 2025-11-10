@@ -78,7 +78,7 @@ pub fn generate_function_call(
         TargetLanguage::Ruby => {
             format!("{}({})", function_name, param_names.join(", "))
         },
-        TargetLanguage::Php => {
+        TargetLanguage::PHP => {
             format!("{}({})", function_name, param_names.join(", "))
         },
         _ => {
@@ -153,7 +153,7 @@ pub fn generate_class_declaration(
                 format!("class {}", class_name)
             }
         },
-        TargetLanguage::Php => {
+        TargetLanguage::PHP => {
             if let Some(base) = base_class {
                 format!("class {} extends {} {{", class_name, base)
             } else {
@@ -239,7 +239,7 @@ pub fn generate_method_declaration(
         TargetLanguage::Ruby => {
             format!("def {}({})", method_name, param_list)
         },
-        TargetLanguage::Php => {
+        TargetLanguage::PHP => {
             let static_keyword = if is_static { "static " } else { "" };
             format!(
                 "public {}function {}({})",

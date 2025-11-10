@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::error::{TrustformersError, TrustformersResult};
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 
 use super::config::*;
 use super::types::*;

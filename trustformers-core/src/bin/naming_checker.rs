@@ -205,19 +205,19 @@ fn create_checker_from_args(_args: &[String]) -> Result<NamingChecker, Box<dyn s
 }
 
 fn create_trustformers_conventions() -> NamingConventions {
-    let mut conventions = NamingConventions::default();
-
-    // Customize for TrustformeRS project
-    conventions.functions = NamingRule::SnakeCase;
-    conventions.structs = NamingRule::PascalCase;
-    conventions.enums = NamingRule::PascalCase;
-    conventions.traits = NamingRule::PascalCase;
-    conventions.constants = NamingRule::ScreamingSnakeCase;
-    conventions.variables = NamingRule::SnakeCase;
-    conventions.modules = NamingRule::SnakeCase;
-    conventions.macros = NamingRule::SnakeCase;
-    conventions.type_aliases = NamingRule::PascalCase;
-    conventions.generics = NamingRule::SingleUppercase;
+    let mut conventions = NamingConventions {
+        functions: NamingRule::SnakeCase,
+        structs: NamingRule::PascalCase,
+        enums: NamingRule::PascalCase,
+        traits: NamingRule::PascalCase,
+        constants: NamingRule::ScreamingSnakeCase,
+        variables: NamingRule::SnakeCase,
+        modules: NamingRule::SnakeCase,
+        macros: NamingRule::SnakeCase,
+        type_aliases: NamingRule::PascalCase,
+        generics: NamingRule::SingleUppercase,
+        ..Default::default()
+    };
 
     // Add custom rules for domain-specific naming
     conventions.custom_rules.insert("tensor_ops".to_string(), NamingRule::SnakeCase);

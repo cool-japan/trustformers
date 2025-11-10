@@ -602,7 +602,7 @@ mod cross_platform_tests {
 
     #[test]
     fn test_performance_parity() -> TestResult<()> {
-        let _config = HardwareTestConfig::default();
+        let config = HardwareTestConfig::default();
 
         // Benchmark the same operation across backends
         let sizes = vec![512, 1024, 2048];
@@ -659,11 +659,11 @@ mod cross_platform_tests {
 
     #[test]
     fn test_memory_usage_consistency() -> TestResult<()> {
-        let _config = HardwareTestConfig::default();
+        let config = HardwareTestConfig::default();
 
         // Test memory usage patterns across backends
         let tensor_size = [1024, 1024];
-        let _tensor = TensorTestUtils::random_f32(&tensor_size)?;
+        let tensor = TensorTestUtils::random_f32(&tensor_size)?;
 
         // Test memory allocation and deallocation patterns
         #[cfg(feature = "cuda")]
@@ -712,8 +712,8 @@ mod performance_tests {
 
         // Test GEMM performance
         let size = 1024;
-        let _a = TensorTestUtils::random_f32(&[size, size])?;
-        let _b = TensorTestUtils::random_f32(&[size, size])?;
+        let a = TensorTestUtils::random_f32(&[size, size])?;
+        let b = TensorTestUtils::random_f32(&[size, size])?;
 
         #[cfg(feature = "cuda")]
         {
@@ -816,7 +816,7 @@ mod integration_tests {
         let seq_len = 512;
         let hidden_dim = 768;
 
-        let _input_fp32 = TensorTestUtils::random_f32(&[batch_size, seq_len, hidden_dim])?;
+        let input_fp32 = TensorTestUtils::random_f32(&[batch_size, seq_len, hidden_dim])?;
 
         #[cfg(feature = "cuda")]
         {

@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use trustformers_c::codegen::*;
 
 #[cfg(feature = "codegen")]
-#[derive(Clone, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Language {
     Python,
     Java,
@@ -79,7 +79,6 @@ fn main() -> anyhow::Result<()> {
                 .short('l')
                 .value_name("LANG")
                 .help("Target languages to generate bindings for")
-                .value_enum()
                 .action(ArgAction::Append)
                 .default_values(["python", "typescript"]),
         )
@@ -225,6 +224,7 @@ fn main() -> anyhow::Result<()> {
             license: "MIT".to_string(),
             repository: "https://github.com/trustformers/trustformers".to_string(),
         },
+        package_name: None,
         features: HashMap::new(),
         type_mappings: HashMap::new(),
     };

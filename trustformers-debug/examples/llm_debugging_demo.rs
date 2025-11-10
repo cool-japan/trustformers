@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     println!("   Overall Score: {:.2}", safety_analysis.overall_score);
     println!(
         "   Has Critical Issues: {}",
-        safety_analysis.recommendations.len() > 0
+        !safety_analysis.recommendations.is_empty()
     );
 
     println!("\n⚡ 3. Performance-Focused Analysis");

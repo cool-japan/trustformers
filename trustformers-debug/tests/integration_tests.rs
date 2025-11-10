@@ -71,7 +71,8 @@ async fn test_basic_debugging_workflow() -> Result<()> {
 
     // Compare tensors
     let comparison = debug_session.tensor_inspector_mut().compare_tensors(input_id, weight_id)?;
-    assert!(!comparison.shape_match); // Different values, should not match exactly
+    assert!(comparison.shape_match); // Same shape [10, 10]
+    assert!(comparison.mse > 0.0); // Different values, MSE should be > 0
 
     // Generate report
     let report = debug_session.stop().await?;

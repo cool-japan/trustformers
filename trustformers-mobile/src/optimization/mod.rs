@@ -17,6 +17,7 @@ pub mod cache_optimizer;
 pub mod efficient_training;
 pub mod enhanced_memory_manager;
 pub mod fusion;
+pub mod gguf_mobile;
 pub mod graph_optimizer;
 pub mod intelligent_config_optimizer;
 pub mod kernel_optimizer;
@@ -43,6 +44,10 @@ use trustformers_core::TrustformersError;
 pub use quantization::{
     CalibrationMethod, DynamicQuantizer, FP16Quantizer, Int4Quantizer, Int8Quantizer,
     MobileQuantizer, QuantizationCalibration, QuantizationContext, QuantizationScheme,
+};
+
+pub use gguf_mobile::{
+    MobileGGUFConfig, MobileGGUFQuantizer, MobileGGUFStats, MobileGGUFType, MobileGGUFUtils,
 };
 
 pub use fusion::{
@@ -605,6 +610,11 @@ impl MobileOptimizationEngine {
                 QuantizationScheme::Int8 => 40.0,
                 QuantizationScheme::FP16 => 20.0,
                 QuantizationScheme::Dynamic => 30.0,
+                QuantizationScheme::GGUF_Q2_K => 70.0, // Highest savings
+                QuantizationScheme::GGUF_Q3_K => 65.0,
+                QuantizationScheme::GGUF_Q4_K => 55.0,
+                QuantizationScheme::GGUF_Q5_0 => 45.0,
+                QuantizationScheme::GGUF_Q6_K => 35.0,
             };
         }
 
@@ -638,10 +648,15 @@ impl MobileOptimizationEngine {
         // Quantization is the primary memory saver
         if self.stats.tensors_quantized > 0 {
             savings += match self.quantizer.get_scheme() {
-                QuantizationScheme::Int4 => 87.5,    // 4-bit vs 32-bit
-                QuantizationScheme::Int8 => 75.0,    // 8-bit vs 32-bit
-                QuantizationScheme::FP16 => 50.0,    // 16-bit vs 32-bit
-                QuantizationScheme::Dynamic => 60.0, // Average
+                QuantizationScheme::Int4 => 87.5,      // 4-bit vs 32-bit
+                QuantizationScheme::Int8 => 75.0,      // 8-bit vs 32-bit
+                QuantizationScheme::FP16 => 50.0,      // 16-bit vs 32-bit
+                QuantizationScheme::Dynamic => 60.0,   // Average
+                QuantizationScheme::GGUF_Q2_K => 92.0, // 2.5625-bit vs 32-bit (highest savings)
+                QuantizationScheme::GGUF_Q3_K => 89.3, // 3.4375-bit vs 32-bit
+                QuantizationScheme::GGUF_Q4_K => 85.9, // 4.5-bit vs 32-bit
+                QuantizationScheme::GGUF_Q5_0 => 82.8, // 5.5-bit vs 32-bit
+                QuantizationScheme::GGUF_Q6_K => 79.7, // 6.5-bit vs 32-bit
             };
         }
 

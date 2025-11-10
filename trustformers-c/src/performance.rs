@@ -5,7 +5,6 @@
 //! - Dynamic batching for improved throughput
 //! - Kernel fusion for reduced memory bandwidth
 
-use anyhow::Result;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::os::raw::{c_char, c_double, c_float, c_int};

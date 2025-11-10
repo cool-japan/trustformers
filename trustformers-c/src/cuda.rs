@@ -2,7 +2,7 @@
 //!
 //! This module provides real CUDA GPU acceleration for tensor operations and model inference.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -192,7 +192,7 @@ impl CudaManager {
             .map_err(|e| anyhow!("Failed to get CUDA device count: {:?}", e))?;
 
         if device_count == 0 {
-            return Err(anyhow!("No CUDA devices found"));
+            return Err(anyhow!("No CUDA devices found").into());
         }
 
         for device_id in 0..device_count {
@@ -281,7 +281,7 @@ impl CudaManager {
 
     fn set_current_device(&mut self, device_id: i32) -> TrustformersResult<()> {
         if device_id < 0 || device_id >= self.devices.len() as i32 {
-            return Err(anyhow!("Invalid device ID: {}", device_id));
+            return Err(anyhow!("Invalid device ID: {}", device_id).into());
         }
 
         self.current_device = Some(device_id);
@@ -355,7 +355,7 @@ impl CudaOperations {
         }
 
         #[cfg(feature = "cuda")]
-        Err(anyhow!("CUDA device {} not found", device_id))
+        Err(anyhow!("CUDA device {} not found", device_id).into())
     }
 
     /// Free CUDA tensor memory
@@ -379,9 +379,7 @@ impl CudaOperations {
         tensor: &mut CudaTensor,
     ) -> TrustformersResult<()> {
         if host_data.len() * std::mem::size_of::<f32>() != tensor.size_bytes {
-            return Err(anyhow!(
-                "Size mismatch: host data size doesn't match tensor size"
-            ));
+            return Err(anyhow!("Size mismatch: host data size doesn't match tensor size").into());
         }
 
         #[cfg(feature = "cuda")]
@@ -408,7 +406,7 @@ impl CudaOperations {
         }
 
         #[cfg(feature = "cuda")]
-        Err(anyhow!("CUDA device {} not found", tensor.device_id))
+        Err(anyhow!("CUDA device {} not found", tensor.device_id).into())
     }
 
     /// Copy data from device to host
@@ -417,9 +415,7 @@ impl CudaOperations {
         host_data: &mut [f32],
     ) -> TrustformersResult<()> {
         if host_data.len() * std::mem::size_of::<f32>() != tensor.size_bytes {
-            return Err(anyhow!(
-                "Size mismatch: host data size doesn't match tensor size"
-            ));
+            return Err(anyhow!("Size mismatch: host data size doesn't match tensor size").into());
         }
 
         #[cfg(feature = "cuda")]
@@ -446,7 +442,7 @@ impl CudaOperations {
         }
 
         #[cfg(feature = "cuda")]
-        Err(anyhow!("CUDA device {} not found", tensor.device_id))
+        Err(anyhow!("CUDA device {} not found", tensor.device_id).into())
     }
 
     /// Matrix multiplication using CUDA
@@ -460,7 +456,7 @@ impl CudaOperations {
     ) -> TrustformersResult<()> {
         // Validate dimensions
         if a.shape != [m, k] || b.shape != [k, n] || c.shape != [m, n] {
-            return Err(anyhow!("Matrix dimension mismatch"));
+            return Err(anyhow!("Matrix dimension mismatch").into());
         }
 
         #[cfg(feature = "cuda")]
@@ -500,10 +496,7 @@ impl CudaOperations {
         }
 
         #[cfg(feature = "cuda")]
-        Err(anyhow!(
-            "cuBLAS handle not found for device {}",
-            a.device_id
-        ))
+        Err(anyhow!("cuBLAS handle not found for device {}", a.device_id).into())
     }
 
     /// Element-wise addition using CUDA
@@ -513,7 +506,7 @@ impl CudaOperations {
         result: &mut CudaTensor,
     ) -> TrustformersResult<()> {
         if a.shape != b.shape || a.shape != result.shape {
-            return Err(anyhow!("Tensor shape mismatch for addition"));
+            return Err(anyhow!("Tensor shape mismatch for addition").into());
         }
 
         #[cfg(feature = "cuda")]
@@ -548,7 +541,7 @@ impl CudaOperations {
         }
 
         #[cfg(feature = "cuda")]
-        Err(anyhow!("CUDA device {} not found", a.device_id))
+        Err(anyhow!("CUDA device {} not found", a.device_id).into())
     }
 
     /// Activation functions (ReLU, GELU, etc.)
@@ -558,7 +551,7 @@ impl CudaOperations {
         activation: &str,
     ) -> TrustformersResult<()> {
         if input.shape != output.shape {
-            return Err(anyhow!("Input and output tensor shapes must match"));
+            return Err(anyhow!("Input and output tensor shapes must match").into());
         }
 
         #[cfg(feature = "cuda")]
@@ -583,7 +576,11 @@ impl CudaOperations {
                     "tanh" => {
                         // Launch tanh kernel (placeholder)
                     },
-                    _ => return Err(anyhow!("Unsupported activation function: {}", activation)),
+                    _ => {
+                        return Err(
+                            anyhow!("Unsupported activation function: {}", activation).into()
+                        )
+                    },
                 }
 
                 return Ok(());
@@ -609,13 +606,13 @@ impl CudaOperations {
                     output.device_ptr,
                     input.shape.iter().product(),
                 ),
-                _ => return Err(anyhow!("Unsupported activation function: {}", activation)),
+                _ => return Err(anyhow!("Unsupported activation function: {}", activation).into()),
             }
             return Ok(());
         }
 
         #[cfg(feature = "cuda")]
-        Err(anyhow!("CUDA device {} not found", input.device_id))
+        Err(anyhow!("CUDA device {} not found", input.device_id).into())
     }
 
     // Simulation functions (would be replaced with real CUDA calls)

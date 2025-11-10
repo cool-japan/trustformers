@@ -3,7 +3,8 @@
 //! Automatically generates language bindings (Python, Java, Go, C#, TypeScript)
 //! from the Rust FFI interface definitions.
 
-use anyhow::{anyhow, Result};
+use crate::error::TrustformersResult;
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -36,6 +37,9 @@ pub struct CodeGenConfig {
     pub target_languages: Vec<TargetLanguage>,
     /// Package/namespace information
     pub package_info: PackageInfo,
+    /// Package name for Java/Kotlin (e.g., "com.trustformers.ffi")
+    #[serde(default)]
+    pub package_name: Option<String>,
     /// Feature flags for conditional generation
     pub features: HashMap<String, bool>,
     /// Custom type mappings
@@ -43,7 +47,7 @@ pub struct CodeGenConfig {
 }
 
 /// Supported target languages for binding generation
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetLanguage {
     Python,
     Java,
@@ -113,6 +117,7 @@ impl Default for CodeGenConfig {
                 license: "MIT".to_string(),
                 repository: "https://github.com/trustformers/trustformers".to_string(),
             },
+            package_name: None,
             features: HashMap::new(),
             type_mappings: HashMap::new(),
         }
@@ -129,6 +134,11 @@ impl CodeGenerator {
             interface: FfiInterface::default(),
             templates,
         })
+    }
+
+    /// Get a reference to the configuration
+    pub fn config(&self) -> &CodeGenConfig {
+        &self.config
     }
 
     /// Parse the FFI interface from Rust source files
@@ -163,6 +173,11 @@ impl CodeGenerator {
             TargetLanguage::Swift => Box::new(SwiftGenerator::new(&self.config)?),
             TargetLanguage::Ruby => Box::new(RubyGenerator::new(&self.config)?),
             TargetLanguage::PHP => Box::new(PhpGenerator::new(&self.config)?),
+            TargetLanguage::Sphinx => Box::new(SphinxDocGenerator::new(&self.config)?),
+            TargetLanguage::Markdown => Box::new(MarkdownDocGenerator::new(&self.config)?),
+            TargetLanguage::OpenApi => Box::new(OpenApiGenerator::new(&self.config)?),
+            TargetLanguage::Javadoc => Box::new(JavadocGenerator::new(&self.config)?),
+            TargetLanguage::TypeDoc => Box::new(TypeDocGenerator::new(&self.config)?),
         };
 
         let output_dir = self.config.output_dir.join(language.directory_name());
@@ -311,6 +326,58 @@ pub enum ValidationWarning {
         function_name: String,
         replacement: Option<String>,
     },
+}
+
+impl std::fmt::Display for ValidationWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ValidationWarning::MissingDocumentation {
+                item_type,
+                item_name,
+            } => {
+                write!(f, "Missing documentation for {} '{}'", item_type, item_name)
+            },
+            ValidationWarning::UnsafePattern {
+                function_name,
+                issue,
+            } => {
+                write!(
+                    f,
+                    "Unsafe pattern in function '{}': {}",
+                    function_name, issue
+                )
+            },
+            ValidationWarning::MissingErrorHandling { function_name } => {
+                write!(f, "Missing error handling in function '{}'", function_name)
+            },
+            ValidationWarning::TypeMismatch {
+                function_name,
+                parameter_name,
+                expected_type,
+                actual_type,
+            } => {
+                write!(
+                    f,
+                    "Type mismatch in function '{}' parameter '{}': expected {}, got {}",
+                    function_name, parameter_name, expected_type, actual_type
+                )
+            },
+            ValidationWarning::DeprecatedFunction {
+                function_name,
+                replacement,
+            } => {
+                if let Some(repl) = replacement {
+                    write!(
+                        f,
+                        "Function '{}' is deprecated, use '{}' instead",
+                        function_name, repl
+                    )
+                } else {
+                    write!(f, "Function '{}' is deprecated", function_name)
+                }
+            },
+        }
+    }
 }
 
 impl TargetLanguage {
@@ -473,9 +540,9 @@ pub fn run_code_generator() -> TrustformersResult<()> {
             "openapi" => Ok(TargetLanguage::OpenApi),
             "javadoc" => Ok(TargetLanguage::Javadoc),
             "typedoc" => Ok(TargetLanguage::TypeDoc),
-            _ => Err(anyhow!("Unknown language: {}", lang)),
+            _ => Err(anyhow!("Unknown language: {}", lang).into()),
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect::<TrustformersResult<Vec<_>>>()?;
 
     // Initialize code generator
     let mut generator = CodeGenerator::new(config)?;

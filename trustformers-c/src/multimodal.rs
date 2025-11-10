@@ -8,7 +8,7 @@
 //! - Advanced fusion techniques
 
 use crate::error::{TrustformersError, TrustformersResult};
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};

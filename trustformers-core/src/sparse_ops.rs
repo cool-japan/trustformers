@@ -31,11 +31,8 @@
 use crate::errors::{Result, TrustformersError};
 use crate::sparse_tensor::{SparseFormat, SparseIndices, SparseTensor};
 use crate::tensor::Tensor;
-use scirs2_core::ndarray::{Array1, Array2, ArrayD, Axis, IxDyn, s};
-use scirs2_core::parallel_ops::*;
-use scirs2_core::random::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 /// Structured sparsity pattern types
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +41,10 @@ pub enum StructuredSparsityPattern {
     NM { n: usize, m: usize },
 
     /// Block sparsity - blocks of size (bh, bw) are either all zero or all non-zero
-    Block { block_height: usize, block_width: usize },
+    Block {
+        block_height: usize,
+        block_width: usize,
+    },
 
     /// Channel pruning - entire channels (columns or rows) are pruned
     Channel { dimension: usize, keep_ratio: f32 },
@@ -269,7 +269,7 @@ pub fn sparse_matmul(sparse: &SparseTensor, dense: &Tensor) -> Result<Tensor> {
     }
 
     let m = sparse.shape[0];
-    let k = sparse.shape[1];
+    let _k = sparse.shape[1];
     let n = dense_shape[1];
 
     let mut result = vec![0.0f32; m * n];
@@ -286,14 +286,14 @@ pub fn sparse_matmul(sparse: &SparseTensor, dense: &Tensor) -> Result<Tensor> {
                     let row_start = row_ptr[row];
                     let row_end = row_ptr[row + 1];
 
+                    #[allow(clippy::needless_range_loop)]
                     for j in row_start..row_end {
                         let col = col_indices[j];
                         let sparse_val = sparse.values[j];
 
                         // Compute dot product contribution
                         for out_col in 0..n {
-                            result[row * n + out_col] +=
-                                sparse_val * dense_data[col * n + out_col];
+                            result[row * n + out_col] += sparse_val * dense_data[col * n + out_col];
                         }
                     }
                 }
@@ -303,17 +303,15 @@ pub fn sparse_matmul(sparse: &SparseTensor, dense: &Tensor) -> Result<Tensor> {
                     "sparse matmul",
                 ));
             }
-        }
+        },
         SparseFormat::COO => {
             if let SparseIndices::COO {
                 row_indices,
                 col_indices,
             } = &sparse.indices
             {
-                for ((&&row, &&col), &val) in row_indices
-                    .iter()
-                    .zip(col_indices.iter())
-                    .zip(sparse.values.iter())
+                for ((&row, &col), &val) in
+                    row_indices.iter().zip(col_indices.iter()).zip(sparse.values.iter())
                 {
                     for out_col in 0..n {
                         result[row * n + out_col] += val * dense_data[col * n + out_col];
@@ -325,13 +323,13 @@ pub fn sparse_matmul(sparse: &SparseTensor, dense: &Tensor) -> Result<Tensor> {
                     "sparse matmul",
                 ));
             }
-        }
+        },
         _ => {
             return Err(TrustformersError::tensor_op_error(
                 "Unsupported sparse format for matmul",
                 "sparse matmul",
             ));
-        }
+        },
     }
 
     Tensor::from_vec(result, &[m, n])
@@ -364,8 +362,6 @@ pub mod sparse_attention {
             let mut col_indices = Vec::new();
             let mut values = Vec::new();
 
-            let mut rng = thread_rng();
-
             for block_i in 0..num_blocks {
                 // Local attention (diagonal blocks)
                 for block_j in block_i.saturating_sub(1)..=(block_i + 1).min(num_blocks - 1) {
@@ -379,9 +375,10 @@ pub mod sparse_attention {
                     );
                 }
 
-                // Random global attention
-                for _ in 0..self.num_random_blocks {
-                    let random_block = rng.gen_range(0..num_blocks);
+                // Random global attention (using simple deterministic pattern for now)
+                // TODO: Use proper RNG when scirs2_core Random API is clearer
+                for j in 0..self.num_random_blocks {
+                    let random_block = (block_i * 7 + j * 13) % num_blocks;
                     self.add_block(
                         block_i,
                         random_block,
@@ -593,11 +590,8 @@ pub mod pruning {
 
         // Keep top-k
         let num_keep = ((data.len() as f32) * keep_ratio) as usize;
-        let keep_indices: HashSet<usize> = indexed_data
-            .iter()
-            .take(num_keep)
-            .map(|&(idx, _)| idx)
-            .collect();
+        let keep_indices: HashSet<usize> =
+            indexed_data.iter().take(num_keep).map(|&(idx, _)| idx).collect();
 
         // Build sparse tensor
         if shape.len() == 2 {
@@ -649,7 +643,8 @@ pub mod pruning {
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
         let num_keep = ((weights.len() as f32) * keep_ratio) as usize;
-        let keep_indices: HashSet<usize> = scores.iter().take(num_keep).map(|&(idx, _)| idx).collect();
+        let keep_indices: HashSet<usize> =
+            scores.iter().take(num_keep).map(|&(idx, _)| idx).collect();
 
         // Build sparse tensor
         if shape.len() == 2 {

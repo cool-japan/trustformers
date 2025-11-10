@@ -121,6 +121,15 @@ impl Clone for RocmTensor {
     }
 }
 
+// SAFETY: RocmTensor can be safely sent between threads as it only holds
+// a device pointer and metadata. The actual device memory is managed by
+// the ROCm runtime, which is thread-safe.
+#[cfg(feature = "rocm")]
+unsafe impl Send for RocmTensor {}
+
+#[cfg(feature = "rocm")]
+unsafe impl Sync for RocmTensor {}
+
 /// Tensor data types supported by ROCm backend
 #[derive(Debug, Clone, Copy)]
 pub enum TensorDataType {

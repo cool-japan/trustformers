@@ -1160,6 +1160,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "rocm", target_os = "linux"))]
     fn test_rocm_matmul() {
         let rocm = RocmImpl::global().unwrap();
         let a = Tensor::ones(&[4, 4]).unwrap();
@@ -1172,6 +1173,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(all(feature = "rocm", target_os = "linux"))]
     fn test_device_properties() {
         let rocm = RocmImpl::global().unwrap();
         let info = rocm.device_info();

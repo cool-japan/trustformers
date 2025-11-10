@@ -371,13 +371,13 @@ impl TypeMapper for PhpGenerator {
     }
 
     fn target_language(&self) -> TargetLanguage {
-        TargetLanguage::Php
+        TargetLanguage::PHP
     }
 }
 
 impl LanguageGenerator for PhpGenerator {
     fn target_language(&self) -> TargetLanguage {
-        TargetLanguage::Php
+        TargetLanguage::PHP
     }
 
     fn file_extension(&self) -> &'static str {

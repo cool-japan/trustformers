@@ -154,6 +154,12 @@ pub mod expo_plugin;
 #[cfg(feature = "unity")]
 pub mod unity_interop;
 
+// WebNN integration for web/hybrid platforms
+pub mod webnn_integration;
+
+// Advanced thermal management with predictive algorithms
+pub mod advanced_thermal;
+
 use serde::{Deserialize, Serialize};
 use trustformers_core::errors::{Result, TrustformersError};
 
@@ -165,6 +171,25 @@ pub use optimization::{
     QuantizationConfig as NASQuantizationConfig, QuantizationScheme as NASQuantizationScheme,
     ReinforcementLearningAgent, SearchStrategy, SkipConnection, UsagePattern, UserContext,
     UserPreferences,
+};
+
+// Re-export GGUF mobile optimization types
+pub use optimization::{
+    MobileGGUFConfig, MobileGGUFQuantizer, MobileGGUFStats, MobileGGUFType, MobileGGUFUtils,
+};
+
+// Re-export WebNN integration types
+pub use webnn_integration::{
+    BrowserInfo, WebNNBackend, WebNNCapabilities, WebNNCompiledGraph, WebNNDataType, WebNNDevice,
+    WebNNExecutionContext, WebNNGraphConfig, WebNNOperation, WebNNPowerPreference,
+    WebNNSupportLevel, WebNNTensorDescriptor, WebNNUtils,
+};
+
+// Re-export advanced thermal management types
+pub use advanced_thermal::{
+    AdaptiveCoolingStrategy, AdvancedThermalManager, CoolingMode, MultiSensorThermalFusion,
+    PlannedWorkload, SensorWeights, ThermalCoefficients, ThermalHotspot, ThermalPredictionModel,
+    WorkloadExecutionPlan, WorkloadPriority, WorkloadThermalPlanner,
 };
 
 // Re-export key device info types
