@@ -181,6 +181,18 @@ impl CudaBackend {
         Ok(cache.len())
     }
 
+    /// Download data from GPU buffer to CPU
+    pub fn download_buffer(&self, buffer_id: &BufferId) -> Result<Vec<f32>> {
+        let buffer = self.get_persistent_buffer(buffer_id)?;
+        let data_vec = self.stream.memcpy_dtov(&*buffer).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to copy data from device: {}", e),
+                "download_buffer",
+            )
+        })?;
+        Ok(data_vec)
+    }
+
     /// Perform matrix multiplication on CUDA GPU
     /// C = A @ B where A is [m, k], B is [k, n], C is [m, n]
     pub fn matmul_f32(

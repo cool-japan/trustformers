@@ -175,6 +175,28 @@ impl Clone for MetalTensorData {
     }
 }
 
+/// CUDA GPU buffer wrapper for GPU-resident tensors
+#[cfg(feature = "cuda")]
+#[derive(Debug)]
+pub struct CudaTensorData {
+    pub buffer_id: crate::gpu_ops::cuda::BufferId,
+    pub shape: Vec<usize>,
+    pub dtype: DType,
+}
+
+#[cfg(feature = "cuda")]
+impl Clone for CudaTensorData {
+    fn clone(&self) -> Self {
+        // Note: This creates a reference to the same GPU buffer
+        // Actual data is not copied - buffer is reference counted
+        Self {
+            buffer_id: self.buffer_id,
+            shape: self.shape.clone(),
+            dtype: self.dtype,
+        }
+    }
+}
+
 pub enum Tensor {
     // Standard ndarray types
     F32(ArrayD<f32>),
@@ -198,6 +220,9 @@ pub enum Tensor {
     // Metal GPU-resident tensor (data lives on GPU)
     #[cfg(feature = "metal")]
     Metal(MetalTensorData),
+    // CUDA GPU-resident tensor (data lives on GPU)
+    #[cfg(feature = "cuda")]
+    CUDA(CudaTensorData),
 }
 
 // Manual Clone implementation because tch::Tensor doesn't implement Clone
@@ -220,6 +245,8 @@ impl Clone for Tensor {
             Tensor::Candle(t) => Tensor::Candle(t.clone()),
             #[cfg(feature = "metal")]
             Tensor::Metal(data) => Tensor::Metal(data.clone()),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => Tensor::CUDA(data.clone()),
         }
     }
 }
@@ -246,6 +273,12 @@ impl std::fmt::Debug for Tensor {
             Tensor::Metal(data) => write!(
                 f,
                 "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
+                data.shape, data.dtype, data.buffer_id
+            ),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => write!(
+                f,
+                "Tensor::CUDA(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
                 data.shape, data.dtype, data.buffer_id
             ),
         }

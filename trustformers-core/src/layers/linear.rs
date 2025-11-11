@@ -54,6 +54,8 @@ pub struct Linear {
     device: Device,
     #[cfg(all(target_os = "macos", feature = "metal"))]
     weight_buffer_id: std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::BufferId>>>,
+    #[cfg(feature = "cuda")]
+    weight_buffer_id_cuda: std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::cuda::BufferId>>>,
 }
 
 impl Linear {
@@ -122,6 +124,8 @@ impl Linear {
             device,
             #[cfg(all(target_os = "macos", feature = "metal"))]
             weight_buffer_id: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            #[cfg(feature = "cuda")]
+            weight_buffer_id_cuda: std::sync::Arc::new(std::sync::RwLock::new(None)),
         }
     }
 
@@ -148,6 +152,12 @@ impl Linear {
                 *buffer_id = None;
             }
         }
+        #[cfg(feature = "cuda")]
+        {
+            if let Ok(mut buffer_id) = self.weight_buffer_id_cuda.write() {
+                *buffer_id = None;
+            }
+        }
         self
     }
 
@@ -170,6 +180,12 @@ impl Linear {
         #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             if let Ok(mut buffer_id) = self.weight_buffer_id.write() {
+                *buffer_id = None;
+            }
+        }
+        #[cfg(feature = "cuda")]
+        {
+            if let Ok(mut buffer_id) = self.weight_buffer_id_cuda.write() {
                 *buffer_id = None;
             }
         }
@@ -309,6 +325,98 @@ impl Linear {
 
         Ok(())
     }
+
+    /// Initialize persistent GPU weight buffer for CUDA device
+    /// This is called automatically on first forward pass with CUDA device
+    #[cfg(feature = "cuda")]
+    fn ensure_weight_buffer_cached_cuda(&self) -> Result<()> {
+        use crate::gpu_ops::cuda::get_cuda_backend;
+
+        // Check if already cached (read lock is cheaper)
+        if let Ok(buffer_id) = self.weight_buffer_id_cuda.read() {
+            if buffer_id.is_some() {
+                return Ok(()); // Already cached
+            }
+        }
+
+        // Only cache if using CUDA
+        if matches!(self.device, Device::CUDA(_)) {
+            // Get write lock to cache the buffer
+            let mut buffer_id_guard = self.weight_buffer_id_cuda.write().map_err(|_| {
+                TrustformersError::hardware_error(
+                    "Failed to acquire write lock on CUDA buffer cache",
+                    "ensure_weight_buffer_cached_cuda",
+                )
+            })?;
+
+            // Double-check after acquiring write lock (another thread might have cached it)
+            if buffer_id_guard.is_some() {
+                return Ok(());
+            }
+
+            // Get weight data as f32 slice
+            // CRITICAL FIX: Cache the TRANSPOSED weight, not the original!
+            // The CUDA kernel expects weight in [in_features, out_features] layout
+            // but self.weight is stored as [out_features, in_features]
+            let weight_t = self.weight.transpose(0, 1)?;
+            match &weight_t {
+                Tensor::F32(arr) => {
+                    if arr.ndim() != 2 {
+                        return Err(TrustformersError::shape_error(
+                            "Weight tensor must be 2D for CUDA caching".to_string(),
+                        ));
+                    }
+
+                    // Convert to contiguous vec for GPU upload
+                    // Using as_standard_layout() ensures proper row-major order
+                    let contiguous_arr = arr.as_standard_layout();
+                    let weight_data: Vec<f32> = contiguous_arr.iter().copied().collect();
+
+                    // Get CUDA backend and cache the buffer
+                    let device_id = if let Device::CUDA(id) = self.device {
+                        id
+                    } else {
+                        0 // Default to device 0
+                    };
+                    let backend = get_cuda_backend(device_id)?;
+                    let new_buffer_id = backend.create_persistent_buffer(&weight_data)?;
+                    *buffer_id_guard = Some(new_buffer_id);
+                },
+                _ => {
+                    return Err(TrustformersError::tensor_op_error(
+                        "Only F32 tensors supported for CUDA caching",
+                        "ensure_weight_buffer_cached_cuda",
+                    ));
+                },
+            }
+        }
+        Ok(())
+    }
+
+    /// Pre-cache layer weights on GPU for zero-transfer pipeline (CUDA)
+    /// This uploads weights to GPU memory in advance to avoid transfers during forward pass
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &crate::device::Device) -> Result<()> {
+        use crate::device::Device;
+
+        if !matches!(device, Device::CUDA(_)) {
+            return Ok(()); // Nothing to do for non-CUDA devices
+        }
+
+        // Update device setting
+        self.device = *device;
+
+        // Pre-cache weight buffer on GPU (keeps weight as F32 CPU tensor)
+        // The caching mechanism handles the GPU upload internally
+        self.ensure_weight_buffer_cached_cuda()?;
+
+        // Upload bias to GPU if present (for GPU bias addition kernel)
+        if let Some(ref bias) = self.bias {
+            self.bias = Some(bias.to_device_enum(device)?);
+        }
+
+        Ok(())
+    }
 }
 
 impl Layer for Linear {
@@ -414,6 +522,116 @@ impl Layer for Linear {
 
                 // Convert back to Metal tensor if needed
                 if matches!(self.device, crate::device::Device::Metal(_)) {
+                    output = output.to_device_enum(&self.device)?;
+                }
+            }
+
+            return Ok(output);
+        }
+
+        // =====================================================================
+        // GPU-TO-GPU PATH: Tensor::CUDA (ZERO CPU TRANSFERS!)
+        // =====================================================================
+        #[cfg(feature = "cuda")]
+        if let Tensor::CUDA(ref input_cuda) = input {
+            use crate::gpu_ops::cuda::get_cuda_backend;
+            use crate::tensor::CudaTensorData;
+
+            // Ensure weight buffer is cached on GPU
+            self.ensure_weight_buffer_cached_cuda()?;
+
+            // Get cached weight buffer ID
+            let weight_buffer_id = {
+                let buffer_id_guard = self.weight_buffer_id_cuda.read().map_err(|_| {
+                    TrustformersError::hardware_error(
+                        "Failed to acquire read lock on CUDA buffer cache",
+                        "Linear::forward",
+                    )
+                })?;
+
+                if let Some(id) = *buffer_id_guard {
+                    id
+                } else {
+                    // Weight not cached - fallback to CPU
+                    let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
+                    return self.forward(cpu_input);
+                }
+            };
+
+            // Get CUDA backend
+            let device_id = if let Device::CUDA(id) = self.device {
+                id
+            } else {
+                0 // Default to device 0
+            };
+            let backend = get_cuda_backend(device_id)?;
+
+            // Extract input shape and calculate matmul dimensions
+            let shape = &input_cuda.shape;
+            let weight_shape = self.weight.shape();
+            let in_features = shape[shape.len() - 1];
+
+            // Check shape compatibility
+            if in_features != weight_shape[1] {
+                return Err(TrustformersError::shape_error(format!(
+                    "Linear layer input features {} doesn't match weight shape {:?}",
+                    in_features, weight_shape
+                )));
+            }
+
+            // Flatten input to [batch, in_features] for matmul
+            // Works for both 2D [seq_len, in_features] and 3D [batch, seq_len, in_features]
+            let batch_dims: usize = shape[..shape.len() - 1].iter().product();
+            let m = batch_dims; // number of rows in output
+            let k = in_features; // shared dimension
+            let n = self.weight.shape()[0]; // out_features
+
+            // Perform GPU-to-GPU matmul (ZERO CPU TRANSFERS!)
+            let output_buffer_id =
+                backend.matmul_gpu_to_gpu(&input_cuda.buffer_id, &weight_buffer_id, m, k, n)?;
+
+            // Calculate output shape (preserve batch dimensions, change last dim)
+            let mut output_shape = shape[..shape.len() - 1].to_vec();
+            output_shape.push(n);
+
+            // Create output CUDA tensor
+            let mut output = Tensor::CUDA(CudaTensorData {
+                buffer_id: output_buffer_id,
+                shape: output_shape.clone(),
+                dtype: input_cuda.dtype,
+            });
+
+            // Handle bias if present
+            if let Some(ref bias) = self.bias {
+                // Try GPU-to-GPU bias addition if bias is on GPU
+                match bias {
+                    #[cfg(feature = "cuda")]
+                    Tensor::CUDA(bias_data) => {
+                        // Both output and bias are CUDA tensors - use GPU kernel!
+                        if let Tensor::CUDA(output_data) = &output {
+                            let output_buffer_id = backend.add_bias_gpu_to_gpu(
+                                &output_data.buffer_id,
+                                &bias_data.buffer_id,
+                                batch_dims,
+                                n,
+                            )?;
+
+                            return Ok(Tensor::CUDA(CudaTensorData {
+                                buffer_id: output_buffer_id,
+                                shape: output_shape.clone(),
+                                dtype: output_data.dtype,
+                            }));
+                        }
+                    },
+                    _ => {},
+                }
+
+                // Fallback: CPU bias addition
+                output = output.to_device_enum(&crate::device::Device::CPU)?;
+                output = output.add(bias)?;
+
+                // Convert back to CUDA tensor if needed
+                if matches!(self.device, crate::device::Device::CUDA(_)) {
                     output = output.to_device_enum(&self.device)?;
                 }
             }

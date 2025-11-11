@@ -415,6 +415,13 @@ impl SmoothQuantizer {
                     "calculate_weight_scales",
                 ));
             },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => {
+                return Err(TrustformersError::tensor_op_error(
+                    "CUDA tensors not yet supported for weight scaling",
+                    "calculate_weight_scales",
+                ));
+            },
         }
 
         Ok(scales)

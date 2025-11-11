@@ -74,6 +74,12 @@ impl Tensor {
                 data.buffer_id.hash(&mut hasher);
                 self.len().hash(&mut hasher);
             },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => {
+                // Use buffer_id as a unique identifier for CUDA tensors
+                data.buffer_id.hash(&mut hasher);
+                self.len().hash(&mut hasher);
+            },
             _ => {
                 // For other tensor types, use a simpler approach
                 self.len().hash(&mut hasher);
@@ -105,6 +111,8 @@ impl Tensor {
             Tensor::Candle(t) => t.shape().dims().to_vec(),
             #[cfg(feature = "metal")]
             Tensor::Metal(data) => data.shape.clone(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => data.shape.clone(),
         }
     }
 
@@ -131,6 +139,8 @@ impl Tensor {
             Tensor::Candle(t) => t.elem_count(),
             #[cfg(feature = "metal")]
             Tensor::Metal(data) => data.shape.iter().product(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => data.shape.iter().product(),
         }
     }
 
@@ -175,6 +185,11 @@ impl Tensor {
             Tensor::Candle(t) => t.elem_count() * std::mem::size_of::<f32>(), // Simplified
             #[cfg(feature = "metal")]
             Tensor::Metal(data) => {
+                let num_elements: usize = data.shape.iter().product();
+                num_elements * data.dtype.size_in_bytes()
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => {
                 let num_elements: usize = data.shape.iter().product();
                 num_elements * data.dtype.size_in_bytes()
             },
@@ -409,9 +424,80 @@ impl Tensor {
                 "to_device_enum",
             )),
 
-            // CUDA transfers (placeholder for future implementation)
+            // F32 → CUDA
+            #[cfg(feature = "cuda")]
+            (Tensor::F32(arr), crate::device::Device::CUDA(device_id)) => {
+                use crate::gpu_ops::cuda::get_cuda_backend;
+                let backend = get_cuda_backend(*device_id)?;
+                let data_vec: Vec<f32> = arr.iter().copied().collect();
+                let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+                Ok(Tensor::CUDA(super::CudaTensorData {
+                    buffer_id,
+                    shape: arr.shape().to_vec(),
+                    dtype: DType::F32,
+                }))
+            },
+
+            // F64 → CUDA (convert to F32 first)
+            #[cfg(feature = "cuda")]
+            (Tensor::F64(arr), crate::device::Device::CUDA(device_id)) => {
+                use crate::gpu_ops::cuda::get_cuda_backend;
+                let backend = get_cuda_backend(*device_id)?;
+                let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
+                let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+                Ok(Tensor::CUDA(super::CudaTensorData {
+                    buffer_id,
+                    shape: arr.shape().to_vec(),
+                    dtype: DType::F32,
+                }))
+            },
+
+            // CUDA → F32
+            #[cfg(feature = "cuda")]
+            (Tensor::CUDA(cuda_data), crate::device::Device::CPU) => {
+                use crate::gpu_ops::cuda::get_cuda_backend;
+                // Use device 0 by default for downloading
+                let backend = get_cuda_backend(0)?;
+
+                // Handle different dtypes
+                match cuda_data.dtype {
+                    DType::F32 => {
+                        // Download from GPU to CPU
+                        let data_vec = backend.download_buffer(&cuda_data.buffer_id)?;
+
+                        // Convert to ArrayD
+                        use scirs2_core::ndarray::ArrayD;
+                        let arr = ArrayD::from_shape_vec(
+                            scirs2_core::ndarray::IxDyn(&cuda_data.shape),
+                            data_vec,
+                        )
+                        .map_err(|e| {
+                            TrustformersError::tensor_op_error(
+                                &format!("Failed to create array from shape: {}", e),
+                                "to_device_enum",
+                            )
+                        })?;
+                        Ok(Tensor::F32(arr))
+                    },
+                    _ => Err(TrustformersError::tensor_op_error(
+                        &format!("Unsupported CUDA tensor dtype: {:?}", cuda_data.dtype),
+                        "to_device_enum",
+                    )),
+                }
+            },
+
+            // CUDA → CUDA (different device, currently just clone)
+            #[cfg(feature = "cuda")]
+            (Tensor::CUDA(cuda_data), crate::device::Device::CUDA(_)) => {
+                // For now, just return a clone (buffer is reference counted)
+                // TODO: Implement actual device-to-device transfer if needed
+                Ok(Tensor::CUDA(cuda_data.clone()))
+            },
+
+            // CUDA not available in this build
+            #[cfg(not(feature = "cuda"))]
             (_, crate::device::Device::CUDA(_)) => Err(TrustformersError::hardware_error(
-                "CUDA transfer not implemented yet",
+                "CUDA not available. Compile with --features cuda",
                 "to_device_enum",
             )),
 
@@ -562,6 +648,12 @@ impl Tensor {
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
                 cpu_tensor.data()
             },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => {
+                // Convert to CPU first, then get data
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.data()
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for data conversion",
                 "data_conversion",
@@ -684,6 +776,8 @@ impl Tensor {
             Tensor::Candle(t) => format!("{:?}", t.device()),
             #[cfg(feature = "metal")]
             Tensor::Metal(_) => "metal".to_string(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => "cuda".to_string(),
         }
     }
 
@@ -719,6 +813,8 @@ impl Tensor {
             Tensor::Candle(t) => t.elem_count() * 4, // Approximate
             #[cfg(feature = "metal")]
             Tensor::Metal(m) => m.shape.iter().product::<usize>() * 4, // Approximate as f32
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(c) => c.shape.iter().product::<usize>() * 4, // Approximate as f32
         }
     }
 
@@ -745,6 +841,8 @@ impl Tensor {
             Tensor::Candle(_) => DType::F32, // Default assumption
             #[cfg(feature = "metal")]
             Tensor::Metal(data) => data.dtype,
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => data.dtype,
         }
     }
 
@@ -792,6 +890,12 @@ impl Tensor {
             },
             #[cfg(feature = "metal")]
             Tensor::Metal(_) => {
+                // Convert to CPU first, then get float
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.get_float(index)
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => {
                 // Convert to CPU first, then get float
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
                 cpu_tensor.get_float(index)
@@ -856,6 +960,12 @@ impl Tensor {
             },
             #[cfg(feature = "metal")]
             Tensor::Metal(_) => {
+                // Convert to CPU first, then get item
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.item::<T>()
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => {
                 // Convert to CPU first, then get item
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
                 cpu_tensor.item::<T>()
