@@ -424,6 +424,44 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 
 ## Future Enhancements
 
+### 🚨 CRITICAL PRIORITY: SciRS2 Policy Compliance (2025-11-11)
+
+**Status**: 🔴 ~30% Compliant - **SYSTEMATIC REMEDIATION REQUIRED**
+
+**Root Cause of Performance Issues**: Policy violations causing 50-200x slower performance vs PyTorch+MPS
+
+#### Parallel Tracks
+
+**Track A: SciRS2-Core MPS Implementation** (rc.3リリース向け、ローカル進行)
+- [ ] Implement Metal Performance Shaders in `~/work/scirs/scirs2-core/src/gpu/backends/metal_mps.rs`
+- [ ] Complete `MPSMatrixMultiplication` integration (stub→実装)
+- [ ] Add `MPSGraph` support for operation fusion
+- [ ] Benchmark MPS vs naive Metal (期待：100-500x高速化)
+- [ ] Contribute back to SciRS2-Core (rc.3リリース)
+
+**Track B: TrustformeRS Policy Violations修正** (並行作業)
+- [ ] Fix trustformers-core direct dependency usage
+  - Replace `use ndarray::*` → `use scirs2_core::ndarray::*`
+  - Replace `use rand::*` → `use scirs2_core::random::*`
+  - Replace `use rayon::*` → `use scirs2_core::parallel_ops::*`
+  - Replace `use metal::*` → delegate to scirs2_core (Track A完成後)
+- [ ] Fix inline qualified paths in modules
+  - `ndarray::Array2::zeros()` → import from scirs2_core
+  - `rand::thread_rng()` → import from scirs2_core
+- [ ] Enable scirs2-core features in workspace Cargo.toml
+  - Add features: `gpu`, `metal`, `blas`, `simd`, `parallel`, `linalg`
+- [ ] Verify BLAS backend (Accelerate on macOS)
+- [ ] Run compliance checks and benchmarks
+
+**Expected Results**:
+- Track A完成時: 100-500x matmul高速化
+- Track B完成時: CPU転送削減、統一API
+- 総合: ~1 tok/sec → **50-200 tok/sec** (PyTorch+MPS同等)
+
+**See**: `SCIRS2_INTEGRATION_POLICY.md` for complete remediation plan
+
+---
+
 ### High Priority
 - ✅ Complete CLIP text/vision encoder weight loading (COMPLETED - see trustformers-models/src/clip/)
 - Enhanced multimodal model support and integration examples
