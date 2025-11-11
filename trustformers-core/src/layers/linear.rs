@@ -302,9 +302,10 @@ impl Linear {
         // The caching mechanism handles the GPU upload internally
         self.ensure_weight_buffer_cached()?;
 
-        // Note: We keep weight and bias as F32 CPU tensors
-        // The forward pass uses the cached GPU buffer for zero-copy computation
-        // Bias is added after matmul, so it stays on CPU for now
+        // Upload bias to GPU if present (for GPU bias addition kernel)
+        if let Some(ref bias) = self.bias {
+            self.bias = Some(bias.to_device_enum(device)?);
+        }
 
         Ok(())
     }
@@ -383,14 +384,35 @@ impl Layer for Linear {
             });
 
             // Handle bias if present
-            // TODO: Implement GPU bias addition kernel for full zero-copy path
             if let Some(ref bias) = self.bias {
-                // For now, transfer to CPU for bias addition, then back to GPU
-                // This is still faster than the previous approach since weight stays on GPU
+                // Try GPU-to-GPU bias addition if bias is on GPU
+                match bias {
+                    #[cfg(feature = "metal")]
+                    Tensor::Metal(bias_data) => {
+                        // Both output and bias are Metal tensors - use GPU kernel!
+                        if let Tensor::Metal(output_data) = &output {
+                            let output_buffer_id = backend.add_bias_gpu_to_gpu(
+                                &output_data.buffer_id,
+                                &bias_data.buffer_id,
+                                batch_dims,
+                                n,
+                            )?;
+
+                            return Ok(Tensor::Metal(MetalTensorData {
+                                buffer_id: output_buffer_id,
+                                shape: output_shape.clone(),
+                                dtype: output_data.dtype,
+                            }));
+                        }
+                    }
+                    _ => {}
+                }
+
+                // Fallback: CPU bias addition
                 output = output.to_device_enum(&crate::device::Device::CPU)?;
                 output = output.add(bias)?;
 
-                // Convert back to Metal tensor
+                // Convert back to Metal tensor if needed
                 if matches!(self.device, crate::device::Device::Metal(_)) {
                     output = output.to_device_enum(&self.device)?;
                 }

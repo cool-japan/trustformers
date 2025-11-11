@@ -83,6 +83,7 @@ pub struct MetalBackend {
     // Cached compiled pipelines (avoid recompilation overhead)
     matmul_pipeline: Arc<metal::ComputePipelineState>,
     gelu_pipeline: Arc<metal::ComputePipelineState>,
+    add_bias_pipeline: Arc<metal::ComputePipelineState>,
     layernorm_pipeline: Arc<metal::ComputePipelineState>,
     rope_pipeline: Arc<metal::ComputePipelineState>,
     softmax_causal_pipeline: Arc<metal::ComputePipelineState>,
@@ -152,6 +153,25 @@ impl MetalBackend {
                 inner = clamp(inner, -20.0f, 20.0f);
 
                 output[gid] = 0.5f * x * (1.0f + tanh(inner));
+            }
+
+            // Bias addition: Add 1D bias vector to 2D matrix (broadcasting)
+            // Input: [m, n], Bias: [n] → Output: [m, n]
+            kernel void add_bias(
+                device const float* input [[buffer(0)]],
+                device const float* bias [[buffer(1)]],
+                device float* output [[buffer(2)]],
+                constant uint& m [[buffer(3)]],
+                constant uint& n [[buffer(4)]],
+                uint2 gid [[thread_position_in_grid]]
+            ) {
+                uint row = gid.y;
+                uint col = gid.x;
+
+                if (row >= m || col >= n) return;
+
+                uint idx = row * n + col;
+                output[idx] = input[idx] + bias[col];
             }
 
             // RoPE (Rotary Position Embedding)
@@ -335,6 +355,22 @@ impl MetalBackend {
                 )
             })?;
 
+        // Compile add_bias kernel
+        let add_bias_kernel = library.get_function("add_bias", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get add_bias kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let add_bias_pipeline =
+            device.new_compute_pipeline_state_with_function(&add_bias_kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create add_bias pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
         // Compile LayerNorm kernel
         let layernorm_kernel = library.get_function("layernorm", None).map_err(|e| {
             TrustformersError::hardware_error(
@@ -391,6 +427,7 @@ impl MetalBackend {
             buffer_cache: Arc::new(std::sync::Mutex::new(BufferCache::new())),
             matmul_pipeline: Arc::new(matmul_pipeline),
             gelu_pipeline: Arc::new(gelu_pipeline),
+            add_bias_pipeline: Arc::new(add_bias_pipeline),
             layernorm_pipeline: Arc::new(layernorm_pipeline),
             rope_pipeline: Arc::new(rope_pipeline),
             softmax_causal_pipeline: Arc::new(softmax_causal_pipeline),
@@ -900,6 +937,79 @@ impl MetalBackend {
         Ok(output_id)
     }
 
+    /// Add bias to matrix GPU-to-GPU (ZERO CPU transfers!)
+    /// Input: [m, n], Bias: [n] → Output: [m, n]
+    pub fn add_bias_gpu_to_gpu(
+        &self,
+        input_buffer_id: &BufferId,
+        bias_buffer_id: &BufferId,
+        m: usize,
+        n: usize,
+    ) -> Result<BufferId> {
+        // Get buffers
+        let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
+        let bias_buffer = self.get_persistent_buffer(bias_buffer_id)?;
+
+        // Create output buffer
+        let total_size = m * n;
+        let output_buffer = self.device.new_buffer(
+            (total_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled add_bias pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.add_bias_pipeline);
+        encoder.set_buffer(0, Some(&*input_buffer), 0);
+        encoder.set_buffer(1, Some(&*bias_buffer), 0);
+        encoder.set_buffer(2, Some(&output_buffer), 0);
+
+        // Set dimensions
+        let m_u32 = m as u32;
+        let n_u32 = n as u32;
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &m_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &n_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch threads - 2D grid
+        let threadgroup_size = metal::MTLSize {
+            width: 16,
+            height: 16,
+            depth: 1,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (n as u64 + 15) / 16,
+            height: (m as u64 + 15) / 16,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer and return ID
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "add_bias_gpu_to_gpu")
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
     /// Execute LayerNorm on GPU
     /// LayerNorm: output = (x - mean) / sqrt(var + eps) * weight + bias
     /// Optimized for transformer models (normalize over hidden dimension)
@@ -1195,6 +1305,7 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 buffer_cache: Arc::clone(&backend.buffer_cache),
                 matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
                 gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
+                add_bias_pipeline: Arc::clone(&backend.add_bias_pipeline),
                 layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
                 rope_pipeline: Arc::clone(&backend.rope_pipeline),
                 softmax_causal_pipeline: Arc::clone(&backend.softmax_causal_pipeline),
