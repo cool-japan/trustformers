@@ -120,17 +120,27 @@ Application Crates (trustformers-models, trustformers-tokenizers, etc.)
 
 ## Critical Development Policies
 
+**🚨 CRITICAL**: TrustformeRS follows **SciRS2 POLICY** for all scientific computing operations. **Current compliance: ~30% - REMEDIATION REQUIRED**.
+
 **READ THIS FIRST**: TrustformeRS follows **two distinct dependency policies**. Understanding the difference is critical for proper development.
+
+**⚠️ CURRENT ISSUE**: TrustformeRS performance (~1 tok/sec) is **50-200x slower than PyTorch+MPS** due to SciRS2 Policy violations:
+- Using naive Metal kernels instead of SciRS2's MPS/Accelerate integration
+- Direct `ndarray`, `rand`, `rayon`, `metal` imports instead of `scirs2_core`
+- Missing SciRS2's BLAS, SIMD, and GPU optimizations
+
+**See [SCIRS2_INTEGRATION_POLICY.md](./SCIRS2_INTEGRATION_POLICY.md) for complete remediation plan.**
 
 ### 📊 Quick Reference: Which Policy Applies?
 
-| Dependency Type | Example Libraries | Policy | Import Via |
-|----------------|-------------------|--------|------------|
-| **ML/DL Frameworks** | `tch`, `candle_core`, `ort` | **TrustformeRS Core Usage** | `trustformers_core::tensor` |
-| **Tokenization** | `tokenizers` | **TrustformeRS Core Usage** | `trustformers_core::Tokenizer` |
-| **Scientific Computing** | `rand`, `ndarray` | **SciRS2 Integration** | `scirs2_core::random`, `scirs2_core::ndarray` |
-| **Parallelization** | `rayon` | **SciRS2 Integration** | `scirs2_core::parallel_ops` |
-| **GPU Libraries** | `cudarc`, `wgpu`, `metal` | **SciRS2 Integration** | `scirs2_core` features |
+| Dependency Type | Example Libraries | Policy | Import Via | Status |
+|----------------|-------------------|--------|------------|--------|
+| **ML/DL Frameworks** | `tch`, `candle_core`, `ort` | **TrustformeRS Core Usage** | `trustformers_core::tensor` | ✅ Compliant |
+| **Tokenization** | `tokenizers` | **TrustformeRS Core Usage** | `trustformers_core::Tokenizer` | ✅ Compliant |
+| **Scientific Computing** | `rand`, `ndarray` | **SciRS2 Integration** | `scirs2_core::random`, `scirs2_core::ndarray` | 🔴 **Violating** |
+| **Parallelization** | `rayon` | **SciRS2 Integration** | `scirs2_core::parallel_ops` | 🔴 **Violating** |
+| **GPU Libraries** | `cudarc`, `wgpu`, `metal` | **SciRS2 Integration** | `scirs2_core` features | 🔴 **Violating** |
+| **BLAS** | `cblas-sys`, `openblas-src` | **SciRS2 Integration** | `scirs2_core` (auto-selects) | 🔴 **Violating** |
 
 ---
 
@@ -298,18 +308,24 @@ let tensor = Tensor::randn(&[512, 768])?;  // From trustformers_core
 let device = Device::cuda_if_available()?; // From trustformers_core
 ```
 
-### ✅ Recent SciRS2 Policy Remediation (2025)
+### 🔴 SciRS2 Policy Compliance Status (2025-11-11)
 
-**Status**: 100% Compliant across all crates
+**Status**: **~30% Compliant - SYSTEMATIC REMEDIATION REQUIRED**
 
-A comprehensive remediation effort was completed to ensure full compliance with the SciRS2 Integration Policy. This involved systematic fixes across the entire codebase.
+**Critical Issues Identified**:
+1. **trustformers-core violates Policy** - Uses direct `metal`, `ndarray`, `rand`, `rayon`
+2. **Missing SciRS2 GPU backends** - Custom Metal instead of `scirs2_core::gpu_ops`
+3. **Missing Performance optimizations** - No Accelerate BLAS, No MPS framework
+4. **Inline violations in modules** - Direct `ndarray::`, `rand::` qualified paths
 
-#### Remediation Statistics
+**Performance Impact**: ~1 tok/sec (rinna-1b) vs **50-200 tok/sec** expected with full SciRS2 integration
 
-- **Total Inline Violations Fixed**: 250+ instances
+#### Previous Partial Remediation (2025) - Module Level Only
+
+- **Inline Violations Fixed**: 250+ instances in modules
 - **Files Modified**: 14 files across 2 crates
 - **Crates Remediated**: `trustformers-models`, `trustformers-training`
-- **Compilation Status**: ✅ All crates compile successfully with no warnings
+- **Status**: ✅ Modules now import from scirs2_core, BUT trustformers-core still violates policy
 
 #### Files Remediated in trustformers-models (13 files)
 
