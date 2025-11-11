@@ -168,9 +168,83 @@ impl Layer for LayerNorm {
                     }
                 }
 
-                // Fallback: convert to CPU and process
-                let cpu_tensor = input.to_device_enum(&crate::device::Device::CPU)?;
-                return self.forward(cpu_tensor);
+                // Fallback: convert to CPU and process (avoid recursion)
+                // This handles 3D Metal tensors that can't use 2D GPU kernel
+                let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
+                let cpu_weight = self.weight.to_device_enum(&crate::device::Device::CPU)?;
+                let cpu_bias = self.bias.to_device_enum(&crate::device::Device::CPU)?;
+
+                // Extract F32 arrays
+                let input_arr = match cpu_input {
+                    Tensor::F32(arr) => arr,
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Failed to convert input to F32",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+                let weight_arr = match cpu_weight {
+                    Tensor::F32(arr) => arr,
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Failed to convert weight to F32",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+                let bias_arr = match cpu_bias {
+                    Tensor::F32(arr) => arr,
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Failed to convert bias to F32",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+
+                // Process on CPU directly (inline to avoid recursion)
+                let ndim = input_arr.ndim();
+                let norm_ndim = self.normalized_shape.len();
+                let axes: Vec<usize> = ((ndim - norm_ndim)..ndim).collect();
+
+                // Compute mean
+                let mut mean = input_arr.clone();
+                for &axis in axes.iter().rev() {
+                    mean = mean.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                }
+
+                // Compute variance
+                let diff = &input_arr - &mean;
+                let mut var = (&diff * &diff).to_owned();
+                for &axis in axes.iter().rev() {
+                    var = var.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                }
+
+                // Normalize
+                let normalized = &diff / (var + self.eps).mapv(f32::sqrt);
+
+                // Broadcast weight and bias
+                let mut broadcast_shape = vec![1; ndim];
+                for (i, &dim) in self.normalized_shape.iter().enumerate() {
+                    broadcast_shape[ndim - norm_ndim + i] = dim;
+                }
+
+                let w_broadcast = weight_arr
+                    .view()
+                    .into_shape_with_order(IxDyn(&broadcast_shape))
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to broadcast weight: {}", e))
+                    })?;
+                let b_broadcast = bias_arr
+                    .view()
+                    .into_shape_with_order(IxDyn(&broadcast_shape))
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to broadcast bias: {}", e))
+                    })?;
+
+                let output = &normalized * &w_broadcast + &b_broadcast;
+                return Ok(Tensor::F32(output));
             },
 
             Tensor::F32(arr) => {
@@ -276,41 +350,74 @@ impl Layer for LayerNorm {
                 // Normalize
                 let normalized = &diff / (var + self.eps).mapv(f32::sqrt);
 
-                match (&self.weight, &self.bias) {
-                    (Tensor::F32(w), Tensor::F32(b)) => {
-                        // Handle broadcasting for weight and bias
-                        let mut broadcast_shape = vec![1; ndim];
-                        for (i, &dim) in self.normalized_shape.iter().enumerate() {
-                            broadcast_shape[ndim - norm_ndim + i] = dim;
+                // Convert weight/bias to F32 if needed
+                let weight_f32 = match &self.weight {
+                    Tensor::F32(w) => w.clone(),
+                    #[cfg(feature = "metal")]
+                    Tensor::Metal(_) => {
+                        let cpu_weight = self.weight.to_device_enum(&crate::device::Device::CPU)?;
+                        match cpu_weight {
+                            Tensor::F32(w) => w,
+                            _ => {
+                                return Err(TrustformersError::tensor_op_error(
+                                    "Failed to convert weight to F32",
+                                    "LayerNorm::forward",
+                                ))
+                            },
                         }
-
-                        let w_broadcast = w
-                            .view()
-                            .into_shape_with_order(IxDyn(&broadcast_shape))
-                            .map_err(|e| {
-                            TrustformersError::shape_error(format!(
-                                "Failed to broadcast weight: {}",
-                                e
-                            ))
-                        })?;
-                        let b_broadcast = b
-                            .view()
-                            .into_shape_with_order(IxDyn(&broadcast_shape))
-                            .map_err(|e| {
-                            TrustformersError::shape_error(format!(
-                                "Failed to broadcast bias: {}",
-                                e
-                            ))
-                        })?;
-
-                        let output = &normalized * &w_broadcast + &b_broadcast;
-                        Ok(Tensor::F32(output))
                     },
-                    _ => Err(TrustformersError::tensor_op_error(
-                        "LayerNorm weight/bias type mismatch",
-                        "LayerNorm::forward",
-                    )),
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Unsupported weight type",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+
+                let bias_f32 = match &self.bias {
+                    Tensor::F32(b) => b.clone(),
+                    #[cfg(feature = "metal")]
+                    Tensor::Metal(_) => {
+                        let cpu_bias = self.bias.to_device_enum(&crate::device::Device::CPU)?;
+                        match cpu_bias {
+                            Tensor::F32(b) => b,
+                            _ => {
+                                return Err(TrustformersError::tensor_op_error(
+                                    "Failed to convert bias to F32",
+                                    "LayerNorm::forward",
+                                ))
+                            },
+                        }
+                    },
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Unsupported bias type",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+
+                // Handle broadcasting for weight and bias
+                let mut broadcast_shape = vec![1; ndim];
+                for (i, &dim) in self.normalized_shape.iter().enumerate() {
+                    broadcast_shape[ndim - norm_ndim + i] = dim;
                 }
+
+                let w_broadcast = weight_f32
+                    .view()
+                    .into_shape_with_order(IxDyn(&broadcast_shape))
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to broadcast weight: {}", e))
+                    })?;
+                let b_broadcast = bias_f32
+                    .view()
+                    .into_shape_with_order(IxDyn(&broadcast_shape))
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to broadcast bias: {}", e))
+                    })?;
+
+                let output = &normalized * &w_broadcast + &b_broadcast;
+                Ok(Tensor::F32(output))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for LayerNorm",

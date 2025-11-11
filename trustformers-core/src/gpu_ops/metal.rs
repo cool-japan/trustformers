@@ -87,6 +87,7 @@ pub struct MetalBackend {
     layernorm_pipeline: Arc<metal::ComputePipelineState>,
     rope_pipeline: Arc<metal::ComputePipelineState>,
     softmax_causal_pipeline: Arc<metal::ComputePipelineState>,
+    copy_with_offset_pipeline: Arc<metal::ComputePipelineState>,
 }
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -313,6 +314,19 @@ impl MetalBackend {
                     output[offset + i] = normalized * weight[i] + bias[i];
                 }
             }
+
+            // Copy tensor data with offset for stacking/concatenation
+            // Copies elements from input buffer to output buffer at specified offset
+            kernel void copy_with_offset(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& output_offset [[buffer(2)]],
+                constant uint& num_elements [[buffer(3)]],
+                uint gid [[thread_position_in_grid]]
+            ) {
+                if (gid >= num_elements) return;
+                output[output_offset + gid] = input[gid];
+            }
         "#;
 
         let library = device
@@ -421,6 +435,24 @@ impl MetalBackend {
                 )
             })?;
 
+        // Compile copy_with_offset kernel
+        let copy_with_offset_kernel =
+            library.get_function("copy_with_offset", None).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to get copy_with_offset kernel function: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        let copy_with_offset_pipeline = device
+            .new_compute_pipeline_state_with_function(&copy_with_offset_kernel)
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create copy_with_offset pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
         Ok(Self {
             device,
             command_queue,
@@ -431,6 +463,7 @@ impl MetalBackend {
             layernorm_pipeline: Arc::new(layernorm_pipeline),
             rope_pipeline: Arc::new(rope_pipeline),
             softmax_causal_pipeline: Arc::new(softmax_causal_pipeline),
+            copy_with_offset_pipeline: Arc::new(copy_with_offset_pipeline),
         })
     }
 
@@ -1010,6 +1043,80 @@ impl MetalBackend {
         Ok(output_id)
     }
 
+    /// Stack multiple GPU buffers along a new batch dimension
+    /// Input: Vec of buffer IDs, each with shape [seq_len, hidden]
+    /// Output: Single buffer with shape [batch_size, seq_len, hidden]
+    pub fn stack_gpu_buffers(
+        &self,
+        input_buffer_ids: &[BufferId],
+        seq_len: usize,
+        hidden_size: usize,
+    ) -> Result<BufferId> {
+        let batch_size = input_buffer_ids.len();
+        let elements_per_tensor = seq_len * hidden_size;
+        let total_elements = batch_size * elements_per_tensor;
+
+        // Create output buffer
+        let output_buffer = self.device.new_buffer(
+            (total_elements * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+        encoder.set_compute_pipeline_state(&*self.copy_with_offset_pipeline);
+
+        // Copy each input buffer to the output at the appropriate offset
+        for (batch_idx, buffer_id) in input_buffer_ids.iter().enumerate() {
+            let input_buffer = self.get_persistent_buffer(buffer_id)?;
+
+            let output_offset = (batch_idx * elements_per_tensor) as u32;
+            let num_elements = elements_per_tensor as u32;
+
+            encoder.set_buffer(0, Some(&*input_buffer), 0);
+            encoder.set_buffer(1, Some(&output_buffer), 0);
+            encoder.set_bytes(
+                2,
+                mem::size_of::<u32>() as u64,
+                &output_offset as *const u32 as *const _,
+            );
+            encoder.set_bytes(
+                3,
+                mem::size_of::<u32>() as u64,
+                &num_elements as *const u32 as *const _,
+            );
+
+            // Dispatch threads for this copy operation
+            let threadgroup_size = metal::MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            };
+            let threadgroups = metal::MTLSize {
+                width: (elements_per_tensor as u64 + 255) / 256,
+                height: 1,
+                depth: 1,
+            };
+
+            encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        }
+
+        encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "stack_gpu_buffers")
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
     /// Execute LayerNorm on GPU
     /// LayerNorm: output = (x - mean) / sqrt(var + eps) * weight + bias
     /// Optimized for transformer models (normalize over hidden dimension)
@@ -1309,6 +1416,7 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
                 rope_pipeline: Arc::clone(&backend.rope_pipeline),
                 softmax_causal_pipeline: Arc::clone(&backend.softmax_causal_pipeline),
+                copy_with_offset_pipeline: Arc::clone(&backend.copy_with_offset_pipeline),
             })
         })
 }

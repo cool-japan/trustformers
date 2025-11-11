@@ -110,8 +110,10 @@ impl Gpt2Model {
 
     /// Load weights from a WeightReader (e.g., SafeTensors)
     pub fn load_weights_from_reader(&mut self, reader: &mut dyn WeightReader) -> Result<()> {
-        // Try to detect if weights have "transformer." prefix (HuggingFace format)
-        let has_transformer_prefix = reader.read_tensor("transformer.wte.weight").is_ok();
+        // Detect if weights have "transformer." prefix (HuggingFace format)
+        let tensor_names = reader.list_tensors();
+        let has_transformer_prefix =
+            tensor_names.iter().any(|name| name.starts_with("transformer."));
         let prefix = if has_transformer_prefix { "transformer." } else { "" };
 
         // Load embeddings
@@ -196,6 +198,18 @@ impl Gpt2Model {
                 if arr.ndim() == 2 {
                     // Single sequence case, add batch dimension
                     hidden_states = Tensor::F32(arr.clone().insert_axis(Axis(0)).to_owned());
+                }
+            },
+            #[cfg(feature = "metal")]
+            Tensor::Metal(metal_data) => {
+                // For Metal tensors, check shape and add batch dimension if needed
+                if metal_data.shape.len() == 2 {
+                    // Convert to CPU, add dimension, convert back
+                    let cpu_tensor = hidden_states.to_device_enum(&Device::CPU)?;
+                    if let Tensor::F32(arr) = cpu_tensor {
+                        let batched = Tensor::F32(arr.insert_axis(Axis(0)).to_owned());
+                        hidden_states = batched.to_device_enum(&Device::Metal(0))?;
+                    }
                 }
             },
             _ => {
@@ -1321,6 +1335,59 @@ fn stack_tensors(tensors: &[Tensor]) -> Result<Tensor> {
             })?;
 
             Ok(Tensor::F32(stacked))
+        },
+        #[cfg(feature = "metal")]
+        Tensor::Metal(first_data) => {
+            use trustformers_core::gpu_ops::metal::get_metal_backend;
+            use trustformers_core::tensor::MetalTensorData;
+
+            // Try to use GPU stacking kernel
+            if let Ok(backend) = get_metal_backend() {
+                // All tensors must have the same shape
+                let first_shape = &first_data.shape;
+                if first_shape.len() == 2 {
+                    let seq_len = first_shape[0];
+                    let hidden_size = first_shape[1];
+
+                    // Collect all buffer IDs
+                    let buffer_ids: Vec<_> = tensors
+                        .iter()
+                        .map(|t| match t {
+                            Tensor::Metal(data) => Ok(data.buffer_id),
+                            _ => Err(TrustformersError::tensor_op_error(
+                                "All tensors must be Metal for GPU stacking",
+                                "stack_tensors",
+                            )),
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    // Stack on GPU
+                    let stacked_buffer_id =
+                        backend.stack_gpu_buffers(&buffer_ids, seq_len, hidden_size)?;
+
+                    // Create output shape: [batch_size, seq_len, hidden_size]
+                    let output_shape = vec![tensors.len(), seq_len, hidden_size];
+
+                    return Ok(Tensor::Metal(MetalTensorData {
+                        buffer_id: stacked_buffer_id,
+                        shape: output_shape,
+                        dtype: first_data.dtype,
+                    }));
+                }
+            }
+
+            // Fallback: convert to CPU, stack, then convert back to Metal
+            let cpu_tensors: Vec<Tensor> = tensors
+                .iter()
+                .map(|t| t.to_device_enum(&Device::CPU))
+                .collect::<Result<Vec<_>>>()?;
+
+            let cpu_stacked = stack_tensors(&cpu_tensors)?;
+
+            let metal_device = Device::Metal(0);
+            let metal_stacked = cpu_stacked.to_device_enum(&metal_device)?;
+
+            Ok(metal_stacked)
         },
         _ => Err(tensor_op_error(
             "tensor_operation",

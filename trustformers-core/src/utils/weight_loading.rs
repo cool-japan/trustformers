@@ -7,6 +7,46 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
+/// Convert IEEE 754 half-precision (F16) to single-precision (F32)
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) & 0x1;
+    let exponent = (bits >> 10) & 0x1f;
+    let fraction = bits & 0x3ff;
+
+    // Handle special cases
+    if exponent == 0 {
+        if fraction == 0 {
+            // Zero
+            return if sign == 1 { -0.0 } else { 0.0 };
+        } else {
+            // Subnormal number
+            let f = (fraction as f32) / 1024.0;
+            let result = f * 2.0f32.powi(-14);
+            return if sign == 1 { -result } else { result };
+        }
+    } else if exponent == 31 {
+        // Infinity or NaN
+        return if fraction == 0 {
+            if sign == 1 {
+                f32::NEG_INFINITY
+            } else {
+                f32::INFINITY
+            }
+        } else {
+            f32::NAN
+        };
+    }
+
+    // Normal number
+    let f = 1.0 + (fraction as f32) / 1024.0;
+    let result = f * 2.0f32.powi((exponent as i32) - 15);
+    if sign == 1 {
+        -result
+    } else {
+        result
+    }
+}
+
 pub struct SafeTensorsReader {
     data: Vec<u8>,
     tensors: HashMap<String, TensorInfo>,
@@ -64,6 +104,21 @@ impl WeightReader for SafeTensorsReader {
                 let values: Vec<f32> = data
                     .chunks_exact(4)
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                    .collect();
+
+                let arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&info.shape), values)
+                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                Ok(Tensor::F32(arr))
+            },
+            "F16" => {
+                // Convert F16 to F32
+                let data = tensor_view.data();
+                let values: Vec<f32> = data
+                    .chunks_exact(2)
+                    .map(|chunk| {
+                        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
+                        f16_to_f32(bits)
+                    })
                     .collect();
 
                 let arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&info.shape), values)
