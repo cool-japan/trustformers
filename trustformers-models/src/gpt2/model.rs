@@ -237,6 +237,14 @@ impl Gpt2Model {
             },
         }
 
+        // Upload hidden states to GPU if weights are on GPU (enables GPU-to-GPU Linear pipeline)
+        #[cfg(feature = "metal")]
+        {
+            if matches!(self.device, Device::Metal(_)) {
+                hidden_states = hidden_states.to_device_enum(&self.device)?;
+            }
+        }
+
         // Create causal mask for attention
         let causal_mask = create_causal_mask(seq_len)?;
 
@@ -991,6 +999,16 @@ impl Gpt2Attention {
 
         // Project to Q, K, V using the combined projection
         let qkv = self.c_attn.forward(hidden_states)?;
+
+        // Convert Metal tensor to CPU for attention computation (slicing/splitting not supported on GPU)
+        #[cfg(feature = "metal")]
+        let qkv = match &qkv {
+            Tensor::Metal(_) => qkv.to_device_enum(&Device::CPU)?,
+            _ => qkv,
+        };
+
+        #[cfg(not(feature = "metal"))]
+        let qkv = qkv;
 
         // Split QKV into separate Q, K, V tensors
         match &qkv {
