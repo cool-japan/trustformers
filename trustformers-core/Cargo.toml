@@ -65,6 +65,7 @@ bytemuck = { workspace = true, optional = true }
 metal = { version = "0.32", optional = true }
 mpsgraph = { version = "0.2", optional = true }
 objc2 = { version = "0.6", optional = true }
+objc2-metal = { version = "0.3", optional = true }
 
 # BLAS for macOS Accelerate framework (used with metal feature)
 cblas-sys = { workspace = true, optional = true }
@@ -97,7 +98,7 @@ intel = []
 llvm = []
 cranelift = []
 vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]
-metal = ["dep:metal", "dep:mpsgraph", "dep:objc2", "dep:cblas-sys", "dep:blas-src"]
+metal = ["dep:metal", "dep:mpsgraph", "dep:objc2", "dep:objc2-metal", "dep:cblas-sys", "dep:blas-src"]
 wgpu_backend = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 opencl = ["dep:opencl3"]
 xla = []
