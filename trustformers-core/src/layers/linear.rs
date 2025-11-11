@@ -339,7 +339,6 @@ impl Layer for Linear {
                     id
                 } else {
                     // Weight not cached - fallback to CPU
-                    eprintln!("[LINEAR METAL] Weight not cached, falling back to CPU");
                     let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
                     return self.forward(cpu_input);
                 }
@@ -350,21 +349,8 @@ impl Layer for Linear {
 
             // Extract input shape and calculate matmul dimensions
             let shape = &input_metal.shape;
-            eprintln!("[LINEAR METAL] Input Metal shape: {:?}", shape);
-            eprintln!("[LINEAR METAL] Weight tensor type: {}",
-                match &self.weight {
-                    Tensor::F32(_) => "F32",
-                    #[cfg(feature = "metal")]
-                    Tensor::Metal(_) => "Metal",
-                    _ => "Other",
-                }
-            );
             let weight_shape = self.weight.shape();
-            eprintln!("[LINEAR METAL] Weight shape: {:?}", weight_shape);
-
             let in_features = shape[shape.len() - 1];
-            eprintln!("[LINEAR METAL] Input in_features: {}, weight in_features: {}",
-                in_features, weight_shape[1]);
 
             // Check shape compatibility
             if in_features != weight_shape[1] {
@@ -405,28 +391,17 @@ impl Layer for Linear {
             // Handle bias if present
             // TODO: Implement GPU bias addition kernel for full zero-copy path
             if let Some(ref bias) = self.bias {
-                eprintln!("[LINEAR METAL] Has bias, converting to CPU for addition");
-                eprintln!("[LINEAR METAL] Output shape before bias: {:?}", output.shape());
-                eprintln!("[LINEAR METAL] Bias shape: {:?}", bias.shape());
-
                 // For now, transfer to CPU for bias addition, then back to GPU
                 // This is still faster than the previous approach since weight stays on GPU
                 output = output.to_device_enum(&crate::device::Device::CPU)?;
-                eprintln!("[LINEAR METAL] Converted to CPU, shape: {:?}", output.shape());
-
                 output = output.add(bias)?;
-                eprintln!("[LINEAR METAL] Bias added successfully");
 
                 // Convert back to Metal tensor
                 if matches!(self.device, crate::device::Device::Metal(_)) {
                     output = output.to_device_enum(&self.device)?;
-                    eprintln!("[LINEAR METAL] Converted back to Metal");
                 }
-            } else {
-                eprintln!("[LINEAR METAL] No bias, returning Metal tensor directly");
             }
 
-            eprintln!("[LINEAR METAL] ✅ SUCCESS, output shape: {:?}", output.shape());
             return Ok(output);
         }
 
@@ -475,6 +450,7 @@ impl Layer for Linear {
                                             k,
                                             n,
                                         ) {
+
                                             let result_arr =
                                                 scirs2_core::ndarray::Array2::from_shape_vec(
                                                     (m, n),

@@ -47,16 +47,12 @@ impl<'de> serde::Deserialize<'de> for SafeTensorsHeader {
         let mut map: HashMap<String, serde_json::Value> = HashMap::deserialize(deserializer)?;
 
         // Extract __metadata__ if present (special key)
-        let metadata = map.remove("__metadata__").and_then(|v| {
-            serde_json::from_value(v).ok()
-        });
+        let metadata = map.remove("__metadata__").and_then(|v| serde_json::from_value(v).ok());
 
         // All remaining keys are tensor names
         let tensors: HashMap<String, TensorInfo> = map
             .into_iter()
-            .filter_map(|(k, v)| {
-                serde_json::from_value(v).ok().map(|info| (k, info))
-            })
+            .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|info| (k, info)))
             .collect();
 
         Ok(SafeTensorsHeader { metadata, tensors })
@@ -512,7 +508,10 @@ impl HuggingFaceLoader {
         // after seek(), so we read stale buffered data instead of fresh file data.
         // Solution: Open a fresh file for each tensor load.
         let file_path = self.model_dir.join(filename);
-        eprintln!("[SAFETENSORS DEBUG] Loading tensor '{}' from file: {:?}", name, file_path);
+        eprintln!(
+            "[SAFETENSORS DEBUG] Loading tensor '{}' from file: {:?}",
+            name, file_path
+        );
         let file = File::open(&file_path)?;
         let mut reader = BufReader::new(file);
 
@@ -534,7 +533,10 @@ impl HuggingFaceLoader {
         })?;
 
         // Debug: print first 500 chars of header
-        eprintln!("[SAFETENSORS DEBUG] Header preview (first 500 chars): {}", &header_str[..header_str.len().min(500)]);
+        eprintln!(
+            "[SAFETENSORS DEBUG] Header preview (first 500 chars): {}",
+            &header_str[..header_str.len().min(500)]
+        );
 
         let header: SafeTensorsHeader = serde_json::from_str(header_str).map_err(|e| {
             eprintln!("[SAFETENSORS DEBUG] Failed to parse header, printing full header:");

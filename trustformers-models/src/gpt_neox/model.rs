@@ -12,8 +12,8 @@ use trustformers_core::{
 
 /// GPT-NeoX MLP layer
 pub struct GPTNeoXMLP {
-    dense_h_to_4h: Linear,
-    dense_4h_to_h: Linear,
+    pub dense_h_to_4h: Linear,
+    pub dense_4h_to_h: Linear,
 }
 
 impl GPTNeoXMLP {
@@ -46,7 +46,10 @@ impl GPTNeoXMLP {
     }
 
     #[cfg(feature = "metal")]
-    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+    pub fn weights_to_gpu(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
         self.dense_h_to_4h.weights_to_gpu(device)?;
         self.dense_4h_to_h.weights_to_gpu(device)?;
         Ok(())
@@ -66,12 +69,12 @@ impl Layer for GPTNeoXMLP {
 
 /// GPT-NeoX Attention layer with Rotary Position Embeddings
 pub struct GPTNeoXAttention {
-    query_key_value: Linear,      // Combined QKV projection
-    dense: Linear,                // Output projection
-    _rotary_emb: RotaryEmbedding, // TODO: Use in full attention implementation
-    _num_heads: usize,
-    _head_dim: usize,
-    _rotary_ndims: usize,
+    pub query_key_value: Linear,      // Combined QKV projection
+    pub dense: Linear,                // Output projection
+    pub _rotary_emb: RotaryEmbedding, // TODO: Use in full attention implementation
+    pub _num_heads: usize,
+    pub _head_dim: usize,
+    pub _rotary_ndims: usize,
 }
 
 impl GPTNeoXAttention {
@@ -121,7 +124,10 @@ impl GPTNeoXAttention {
     }
 
     #[cfg(feature = "metal")]
-    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+    pub fn weights_to_gpu(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
         self.query_key_value.weights_to_gpu(device)?;
         self.dense.weights_to_gpu(device)?;
         Ok(())
@@ -174,9 +180,9 @@ impl Layer for GPTNeoXAttention {
                 let head_dim = self._head_dim;
 
                 // Step 1: Reshape to [seq_len, num_heads, 3*head_dim]
-                let qkv_reshaped = arr.into_shape((seq_len, num_heads, 3 * head_dim)).map_err(|_| {
-                    tensor_op_error("GPTNeoXAttention", "QKV reshape failed")
-                })?;
+                let qkv_reshaped = arr
+                    .into_shape((seq_len, num_heads, 3 * head_dim))
+                    .map_err(|_| tensor_op_error("GPTNeoXAttention", "QKV reshape failed"))?;
 
                 // Step 2: Transpose to [num_heads, seq_len, 3*head_dim]
                 let qkv_transposed = qkv_reshaped.permuted_axes([1, 0, 2]);
@@ -184,8 +190,8 @@ impl Layer for GPTNeoXAttention {
                 // Step 3: Split into Q, K, V along last dimension
                 // Each will be [num_heads, seq_len, head_dim]
                 let q = qkv_transposed.slice(s![.., .., 0..head_dim]).to_owned();
-                let k = qkv_transposed.slice(s![.., .., head_dim..2*head_dim]).to_owned();
-                let v = qkv_transposed.slice(s![.., .., 2*head_dim..3*head_dim]).to_owned();
+                let k = qkv_transposed.slice(s![.., .., head_dim..2 * head_dim]).to_owned();
+                let v = qkv_transposed.slice(s![.., .., 2 * head_dim..3 * head_dim]).to_owned();
 
                 // Q, K, V are now [num_heads, seq_len, head_dim]
                 // We need to transpose to [seq_len, num_heads, head_dim] for RoPE
@@ -210,7 +216,8 @@ impl Layer for GPTNeoXAttention {
                             let j = i + half_rotary_ndims;
 
                             // Calculate rotation angle for this pair
-                            let freq = 1.0 / self._rotary_emb.base.powf(2.0 * i as f32 / rotary_ndims as f32);
+                            let freq = 1.0
+                                / self._rotary_emb.base.powf(2.0 * i as f32 / rotary_ndims as f32);
                             let angle = pos as f32 * freq;
                             let cos_val = angle.cos();
                             let sin_val = angle.sin();
@@ -246,9 +253,10 @@ impl Layer for GPTNeoXAttention {
                 // Helper function: Try Metal attention (returns Some on success, None on failure)
                 #[cfg(feature = "metal")]
                 let try_metal_attention = |q_head: &Array2<f32>,
-                                          k_head: &Array2<f32>,
-                                          v_head: &Array2<f32>,
-                                          _h: usize| -> Option<Array2<f32>> {
+                                           k_head: &Array2<f32>,
+                                           v_head: &Array2<f32>,
+                                           _h: usize|
+                 -> Option<Array2<f32>> {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
 
                     let backend = get_metal_backend().ok()?;
@@ -260,16 +268,20 @@ impl Layer for GPTNeoXAttention {
                     let v_vec: Vec<f32> = v_head.iter().copied().collect();
 
                     // Q@K^T on Metal: [seq_len, head_dim] @ [head_dim, seq_len] = [seq_len, seq_len]
-                    let scores_vec = backend.matmul_f32(&q_vec, &k_t_vec, seq_len, head_dim, seq_len).ok()?;
+                    let scores_vec =
+                        backend.matmul_f32(&q_vec, &k_t_vec, seq_len, head_dim, seq_len).ok()?;
 
                     // Scale scores
                     let scores_scaled: Vec<f32> = scores_vec.iter().map(|&x| x / scale).collect();
 
                     // Softmax with causal mask on Metal
-                    let attn_weights_vec = backend.softmax_causal_f32(&scores_scaled, seq_len).ok()?;
+                    let attn_weights_vec =
+                        backend.softmax_causal_f32(&scores_scaled, seq_len).ok()?;
 
                     // Attn@V on Metal: [seq_len, seq_len] @ [seq_len, head_dim] = [seq_len, head_dim]
-                    let output_vec = backend.matmul_f32(&attn_weights_vec, &v_vec, seq_len, seq_len, head_dim).ok()?;
+                    let output_vec = backend
+                        .matmul_f32(&attn_weights_vec, &v_vec, seq_len, seq_len, head_dim)
+                        .ok()?;
 
                     // Convert back to Array2
                     let result = Array2::from_shape_vec((seq_len, head_dim), output_vec).ok();
@@ -281,8 +293,9 @@ impl Layer for GPTNeoXAttention {
 
                 // Helper function: CPU attention (always succeeds)
                 let cpu_attention = |q_head: Array2<f32>,
-                                    k_head: Array2<f32>,
-                                    v_head: Array2<f32>| -> Array2<f32> {
+                                     k_head: Array2<f32>,
+                                     v_head: Array2<f32>|
+                 -> Array2<f32> {
                     let k_t = k_head.t();
                     let mut scores = q_head.dot(&k_t) / scale;
 
@@ -319,8 +332,9 @@ impl Layer for GPTNeoXAttention {
                     let head_output: Array2<f32> = {
                         #[cfg(feature = "metal")]
                         {
-                            try_metal_attention(&q_head, &k_head, &v_head, h)
-                                .unwrap_or_else(|| cpu_attention(q_head.clone(), k_head.clone(), v_head.clone()))
+                            try_metal_attention(&q_head, &k_head, &v_head, h).unwrap_or_else(|| {
+                                cpu_attention(q_head.clone(), k_head.clone(), v_head.clone())
+                            })
                         }
 
                         #[cfg(not(feature = "metal"))]
@@ -348,11 +362,11 @@ impl Layer for GPTNeoXAttention {
 
 /// GPT-NeoX Layer
 pub struct GPTNeoXLayer {
-    input_layernorm: LayerNorm,
-    post_attention_layernorm: LayerNorm,
-    attention: GPTNeoXAttention,
-    mlp: GPTNeoXMLP,
-    use_parallel_residual: bool,
+    pub input_layernorm: LayerNorm,
+    pub post_attention_layernorm: LayerNorm,
+    pub attention: GPTNeoXAttention,
+    pub mlp: GPTNeoXMLP,
+    pub use_parallel_residual: bool,
 }
 
 impl GPTNeoXLayer {
@@ -387,7 +401,10 @@ impl GPTNeoXLayer {
     }
 
     #[cfg(feature = "metal")]
-    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+    pub fn weights_to_gpu(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
         self.input_layernorm.weights_to_gpu(device)?;
         self.attention.weights_to_gpu(device)?;
         self.post_attention_layernorm.weights_to_gpu(device)?;
@@ -465,15 +482,27 @@ impl GPTNeoXModel {
         }
 
         Ok(Self {
-            embed_in: Embedding::new_with_device(config.vocab_size, config.hidden_size, None, device)?,
+            embed_in: Embedding::new_with_device(
+                config.vocab_size,
+                config.hidden_size,
+                None,
+                device,
+            )?,
             layers,
-            final_layer_norm: LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?,
+            final_layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             config,
         })
     }
 
     #[cfg(feature = "metal")]
-    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+    pub fn weights_to_gpu(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
         // Upload embedding weights to GPU
         self.embed_in.weights_to_gpu(device)?;
 
@@ -511,23 +540,29 @@ impl GPTNeoXModel {
                 if let Tensor::F32(ref arr) = final_ln_weight {
                     use scirs2_core::ndarray::s;
                     let first_10 = arr.slice(s![0..10]);
-                    eprintln!("[DEBUG] final_layer_norm.weight first 10: {:?}", first_10.iter().take(10).collect::<Vec<_>>());
+                    eprintln!(
+                        "[DEBUG] final_layer_norm.weight first 10: {:?}",
+                        first_10.iter().take(10).collect::<Vec<_>>()
+                    );
                     let mean = arr.mean().unwrap_or(0.0);
-                    eprintln!("[DEBUG] final_layer_norm.weight mean: {:.3} (expected: 6.688)", mean);
+                    eprintln!(
+                        "[DEBUG] final_layer_norm.weight mean: {:.3} (expected: 6.688)",
+                        mean
+                    );
                 }
                 self.final_layer_norm.set_weight(final_ln_weight)?;
-            }
+            },
             Err(e) => {
                 eprintln!("[ERROR] Failed to load final_layer_norm.weight: {:?}", e);
-            }
+            },
         }
         match loader.load_tensor("gpt_neox.final_layer_norm.bias") {
             Ok(final_ln_bias) => {
                 self.final_layer_norm.set_bias(final_ln_bias)?;
-            }
+            },
             Err(e) => {
                 eprintln!("[ERROR] Failed to load final_layer_norm.bias: {:?}", e);
-            }
+            },
         }
 
         // Load layer weights
@@ -672,7 +707,10 @@ impl GPTNeoXForCausalLM {
     }
 
     #[cfg(feature = "metal")]
-    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+    pub fn weights_to_gpu(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
         self.gpt_neox.weights_to_gpu(device)?;
         self.embed_out.weights_to_gpu(device)?;
         println!("✓ All model weights uploaded to GPU");
@@ -703,14 +741,17 @@ impl GPTNeoXForCausalLM {
                     use scirs2_core::ndarray::s;
                     eprintln!("[DEBUG] embed_out.weight shape: {:?}", arr.shape());
                     let first_5 = arr.slice(s![0, 0..5]);
-                    eprintln!("[DEBUG] embed_out.weight[0, 0..5]: {:?}", first_5.iter().take(5).collect::<Vec<_>>());
+                    eprintln!(
+                        "[DEBUG] embed_out.weight[0, 0..5]: {:?}",
+                        first_5.iter().take(5).collect::<Vec<_>>()
+                    );
                 }
                 self.embed_out.set_weight(embed_out_weights)?;
-            }
+            },
             Err(e) => {
                 eprintln!("[ERROR] Failed to load embed_out.weight: {:?}", e);
                 eprintln!("[WARNING] LM head will use uninitialized/default weights!");
-            }
+            },
         }
 
         loader.close()?;

@@ -125,6 +125,7 @@ impl MetalBackend {
             }
 
             // GELU activation: GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+            // With NaN guarding for extreme values
             kernel void gelu(
                 device const float* input [[buffer(0)]],
                 device float* output [[buffer(1)]],
@@ -133,9 +134,23 @@ impl MetalBackend {
             ) {
                 if (gid >= size) return;
                 float x = input[gid];
+
+                // Clamp extreme values to prevent NaN
+                if (x > 10.0f) {
+                    output[gid] = x;  // GELU(x) ≈ x for large positive x
+                    return;
+                } else if (x < -10.0f) {
+                    output[gid] = 0.0f;  // GELU(x) ≈ 0 for large negative x
+                    return;
+                }
+
                 float x_cubed = x * x * x;
                 // sqrt(2/π) ≈ 0.7978845608
                 float inner = 0.7978845608f * (x + 0.044715f * x_cubed);
+
+                // Clamp inner to prevent tanh overflow
+                inner = clamp(inner, -20.0f, 20.0f);
+
                 output[gid] = 0.5f * x * (1.0f + tanh(inner));
             }
 

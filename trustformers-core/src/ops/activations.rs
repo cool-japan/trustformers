@@ -16,8 +16,6 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             // Execute GELU GPU-to-GPU (NO CPU transfers!)
             let output_buffer_id = backend.gelu_gpu_to_gpu(&metal_data.buffer_id, size)?;
 
-            eprintln!("[GELU METAL] ✅ GPU-to-GPU processing (ZERO transfers)");
-
             Ok(Tensor::Metal(MetalTensorData {
                 buffer_id: output_buffer_id,
                 shape: metal_data.shape.clone(),
@@ -31,14 +29,11 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             {
                 use crate::gpu_ops::metal::get_metal_backend;
                 if let Ok(backend) = get_metal_backend() {
-                    eprintln!("[GELU METAL] Processing {} elements (from F32)", arr.len());
                     // Convert tensor to slice
                     let input_vec: Vec<f32> = arr.iter().copied().collect();
 
                     // Execute on GPU
                     if let Ok(output_vec) = backend.gelu_f32(&input_vec) {
-                        eprintln!("[GELU METAL] ✅ SUCCESS");
-
                         // Convert back to tensor
                         use scirs2_core::ndarray::ArrayD;
                         let output_arr = ArrayD::from_shape_vec(arr.raw_dim(), output_vec)
@@ -51,9 +46,18 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
                 }
             }
 
-            // Fallback to CPU implementation
+            // Fallback to CPU implementation with NaN guarding
             let result = arr.mapv(|v| {
-                0.5 * v * (1.0 + ((2.0 / PI).sqrt() * (v + 0.044715 * v.powi(3))).tanh())
+                // Clamp extreme values to prevent NaN
+                if v > 10.0 {
+                    return v;  // GELU(x) ≈ x for large positive x
+                } else if v < -10.0 {
+                    return 0.0;  // GELU(x) ≈ 0 for large negative x
+                }
+
+                let inner = (2.0 / PI).sqrt() * (v + 0.044715 * v.powi(3));
+                let inner_clamped = inner.clamp(-20.0, 20.0);
+                0.5 * v * (1.0 + inner_clamped.tanh())
             });
             Ok(Tensor::F32(result))
         },
