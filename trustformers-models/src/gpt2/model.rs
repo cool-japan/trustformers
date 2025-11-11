@@ -148,6 +148,31 @@ impl Gpt2Model {
         Ok(())
     }
 
+    /// Load weights from a WeightLoader (e.g., HuggingFace loader)
+    pub fn load_weights_from_loader(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader) -> Result<()> {
+        // Detect if weights have "transformer." prefix (HuggingFace format)
+        let tensor_names = loader.list_tensors()?;
+        let has_transformer_prefix =
+            tensor_names.iter().any(|name| name.starts_with("transformer."));
+        let prefix = if has_transformer_prefix { "transformer." } else { "" };
+
+        // Load embeddings
+        self.wte.set_weight(loader.load_tensor(&format!("{}wte.weight", prefix))?)?;
+        self.wpe.set_weight(loader.load_tensor(&format!("{}wpe.weight", prefix))?)?;
+
+        // Load transformer blocks
+        for (i, block) in self.h.iter_mut().enumerate() {
+            let block_prefix = format!("{}h.{}", prefix, i);
+            block.load_weights_from_loader(loader, &block_prefix)?;
+        }
+
+        // Load final layer norm
+        self.ln_f.set_weight(loader.load_tensor(&format!("{}ln_f.weight", prefix))?)?;
+        self.ln_f.set_bias(loader.load_tensor(&format!("{}ln_f.bias", prefix))?)?;
+
+        Ok(())
+    }
+
     fn forward_internal(
         &self,
         input_ids: &[Vec<u32>],
@@ -394,8 +419,8 @@ impl Gpt2LMHeadModel {
 
         let mut loader = auto_create_loader(model_path, None)?;
 
-        // Load transformer weights
-        self.transformer.load_weights_from_reader(&mut *loader)?;
+        // Load transformer weights using WeightLoader
+        self.transformer.load_weights_from_loader(&mut *loader)?;
 
         // Load LM head weights
         // Try with "lm_head" first, then fallback to "transformer.wte" (weight tying)
@@ -928,6 +953,23 @@ impl Gpt2Block {
         Ok(())
     }
 
+    fn load_weights_from_loader(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+        // Load layer norm weights
+        self.ln_1.set_weight(loader.load_tensor(&format!("{}.ln_1.weight", prefix))?)?;
+        self.ln_1.set_bias(loader.load_tensor(&format!("{}.ln_1.bias", prefix))?)?;
+
+        self.ln_2.set_weight(loader.load_tensor(&format!("{}.ln_2.weight", prefix))?)?;
+        self.ln_2.set_bias(loader.load_tensor(&format!("{}.ln_2.bias", prefix))?)?;
+
+        // Load attention weights
+        self.attn.load_weights_from_loader(loader, &format!("{}.attn", prefix))?;
+
+        // Load MLP weights
+        self.mlp.load_weights_from_loader(loader, &format!("{}.mlp", prefix))?;
+
+        Ok(())
+    }
+
     fn parameter_count(&self) -> usize {
         self.ln_1.parameter_count()
             + self.attn.parameter_count()
@@ -1045,6 +1087,21 @@ impl Gpt2Attention {
         let c_proj_weight = reader.read_tensor(&format!("{}.c_proj.weight", prefix))?;
         self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(reader.read_tensor(&format!("{}.c_proj.bias", prefix))?)?;
+
+        Ok(())
+    }
+
+    fn load_weights_from_loader(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+        // Load combined QKV weights
+        // PyTorch stores as [out, in], we need [in, out], so transpose
+        let c_attn_weight = loader.load_tensor(&format!("{}.c_attn.weight", prefix))?;
+        self.c_attn.set_weight(transpose_tensor(c_attn_weight)?)?;
+        self.c_attn.set_bias(loader.load_tensor(&format!("{}.c_attn.bias", prefix))?)?;
+
+        // Load output projection weights (also needs transpose)
+        let c_proj_weight = loader.load_tensor(&format!("{}.c_proj.weight", prefix))?;
+        self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
+        self.c_proj.set_bias(loader.load_tensor(&format!("{}.c_proj.bias", prefix))?)?;
 
         Ok(())
     }
@@ -1533,6 +1590,19 @@ impl Gpt2MLP {
         let c_proj_weight = reader.read_tensor(&format!("{}.c_proj.weight", prefix))?;
         self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
         self.c_proj.set_bias(reader.read_tensor(&format!("{}.c_proj.bias", prefix))?)?;
+
+        Ok(())
+    }
+
+    fn load_weights_from_loader(&mut self, loader: &mut dyn crate::weight_loading::WeightLoader, prefix: &str) -> Result<()> {
+        // Transpose MLP weights too
+        let c_fc_weight = loader.load_tensor(&format!("{}.c_fc.weight", prefix))?;
+        self.c_fc.set_weight(transpose_tensor(c_fc_weight)?)?;
+        self.c_fc.set_bias(loader.load_tensor(&format!("{}.c_fc.bias", prefix))?)?;
+
+        let c_proj_weight = loader.load_tensor(&format!("{}.c_proj.weight", prefix))?;
+        self.c_proj.set_weight(transpose_tensor(c_proj_weight)?)?;
+        self.c_proj.set_bias(loader.load_tensor(&format!("{}.c_proj.bias", prefix))?)?;
 
         Ok(())
     }
