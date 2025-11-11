@@ -284,6 +284,30 @@ impl Linear {
         }
         Ok(())
     }
+
+    /// Pre-cache layer weights on GPU for zero-transfer pipeline
+    /// This uploads weights to GPU memory in advance to avoid transfers during forward pass
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &crate::device::Device) -> Result<()> {
+        use crate::device::Device;
+
+        if !matches!(device, Device::Metal(_)) {
+            return Ok(()); // Nothing to do for non-Metal devices
+        }
+
+        // Update device setting
+        self.device = *device;
+
+        // Pre-cache weight buffer on GPU (keeps weight as F32 CPU tensor)
+        // The caching mechanism handles the GPU upload internally
+        self.ensure_weight_buffer_cached()?;
+
+        // Note: We keep weight and bias as F32 CPU tensors
+        // The forward pass uses the cached GPU buffer for zero-copy computation
+        // Bias is added after matmul, so it stays on CPU for now
+
+        Ok(())
+    }
 }
 
 impl Layer for Linear {
@@ -291,6 +315,99 @@ impl Layer for Linear {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        // =====================================================================
+        // GPU-TO-GPU PATH: Tensor::Metal (ZERO CPU TRANSFERS!)
+        // =====================================================================
+        #[cfg(feature = "metal")]
+        if let Tensor::Metal(ref input_metal) = input {
+            use crate::gpu_ops::metal::get_metal_backend;
+            use crate::tensor::MetalTensorData;
+
+            // Ensure weight buffer is cached on GPU
+            self.ensure_weight_buffer_cached()?;
+
+            // Get cached weight buffer ID
+            let weight_buffer_id = {
+                let buffer_id_guard = self.weight_buffer_id.read().map_err(|_| {
+                    TrustformersError::hardware_error(
+                        "Failed to acquire read lock on buffer cache",
+                        "Linear::forward",
+                    )
+                })?;
+
+                if let Some(id) = *buffer_id_guard {
+                    id
+                } else {
+                    // Weight not cached - fallback to CPU
+                    eprintln!("[LINEAR METAL] Weight not cached, falling back to CPU");
+                    let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
+                    return self.forward(cpu_input);
+                }
+            };
+
+            // Get Metal backend
+            let backend = get_metal_backend()?;
+
+            // Extract input shape and calculate matmul dimensions
+            let shape = &input_metal.shape;
+            let in_features = shape[shape.len() - 1];
+
+            // Check shape compatibility
+            if in_features != self.weight.shape()[1] {
+                return Err(TrustformersError::shape_error(format!(
+                    "Linear layer input features {} doesn't match weight shape {:?}",
+                    in_features,
+                    self.weight.shape()
+                )));
+            }
+
+            // Flatten input to [batch, in_features] for matmul
+            // Works for both 2D [seq_len, in_features] and 3D [batch, seq_len, in_features]
+            let batch_dims: usize = shape[..shape.len() - 1].iter().product();
+            let m = batch_dims; // number of rows in output
+            let k = in_features; // shared dimension
+            let n = self.weight.shape()[0]; // out_features
+
+            // Perform GPU-to-GPU matmul (ZERO CPU TRANSFERS!)
+            let output_buffer_id = backend.matmul_gpu_to_gpu(
+                &input_metal.buffer_id,
+                &weight_buffer_id,
+                m,
+                k,
+                n,
+            )?;
+
+            // Calculate output shape (preserve batch dimensions, change last dim)
+            let mut output_shape = shape[..shape.len() - 1].to_vec();
+            output_shape.push(n);
+
+            // Create output Metal tensor
+            let mut output = Tensor::Metal(MetalTensorData {
+                buffer_id: output_buffer_id,
+                shape: output_shape.clone(),
+                dtype: input_metal.dtype,
+            });
+
+            // Handle bias if present
+            // TODO: Implement GPU bias addition kernel for full zero-copy path
+            if let Some(ref bias) = self.bias {
+                // For now, transfer to CPU for bias addition, then back to GPU
+                // This is still faster than the previous approach since weight stays on GPU
+                output = output.to_device_enum(&crate::device::Device::CPU)?;
+                output = output.add(bias)?;
+
+                // Convert back to Metal tensor
+                if matches!(self.device, crate::device::Device::Metal(_)) {
+                    output = output.to_device_enum(&self.device)?;
+                }
+            }
+
+            return Ok(output);
+        }
+
+        // =====================================================================
+        // CPU/F32 PATH (existing implementation)
+        // =====================================================================
         // Handle different input shapes for matmul
         let input_shape = input.shape();
         let weight_t = self.weight.transpose(0, 1)?;

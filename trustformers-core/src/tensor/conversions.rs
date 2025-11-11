@@ -76,6 +76,12 @@ impl Tensor {
                 Ok(Tensor::F64(result))
             },
             (tensor, target_dtype) if tensor.dtype() == target_dtype => Ok(tensor.clone()),
+            #[cfg(feature = "metal")]
+            (Tensor::Metal(_), _) => {
+                // Convert Metal tensor to CPU first, then apply dtype conversion
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.to_dtype(dtype)
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 &format!(
                     "Conversion from {:?} to {:?} not supported",
@@ -99,6 +105,12 @@ impl Tensor {
             Tensor::I64(a) => Ok(a.iter().map(|&x| x as f32).collect()),
             Tensor::C32(a) => Ok(a.iter().map(|x| x.re).collect()),
             Tensor::C64(a) => Ok(a.iter().map(|x| x.re as f32).collect()),
+            #[cfg(feature = "metal")]
+            Tensor::Metal(_) => {
+                // Convert Metal tensor to CPU first, then get vec
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.to_vec_f32()
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Cannot convert this tensor type to Vec<f32>",
                 "Tensor::to_vec_f32",
@@ -116,6 +128,12 @@ impl Tensor {
             Tensor::F32(a) => Ok(a.iter().map(|&x| x as u8).collect()),
             Tensor::F64(a) => Ok(a.iter().map(|&x| x as u8).collect()),
             Tensor::I64(a) => Ok(a.iter().map(|&x| x as u8).collect()),
+            #[cfg(feature = "metal")]
+            Tensor::Metal(_) => {
+                // Convert Metal tensor to CPU first, then get vec
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.to_vec_u8()
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Cannot convert this tensor type to Vec<u8>",
                 "Tensor::to_vec_u8",

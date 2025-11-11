@@ -432,6 +432,8 @@ impl TensorMemoryPool {
             Tensor::Torch(_) => elements * 4, // Default to 32-bit
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => elements * 4, // Default to 32-bit
+            #[cfg(feature = "metal")]
+            Tensor::Metal(_) => elements * 4, // Default to 32-bit
             Tensor::Sparse(sparse) => {
                 // For sparse tensors, estimate based on non-zero elements
                 let nnz = sparse.nnz();

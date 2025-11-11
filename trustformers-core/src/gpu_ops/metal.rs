@@ -19,11 +19,11 @@ use std::mem;
 use std::sync::Arc;
 
 /// Buffer ID for persistent GPU buffers
-#[cfg(all(target_os = "macos", feature = "metal"))]
+#[cfg(feature = "metal")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(u64);
 
-#[cfg(all(target_os = "macos", feature = "metal"))]
+#[cfg(feature = "metal")]
 impl BufferId {
     pub fn new() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
@@ -32,7 +32,7 @@ impl BufferId {
     }
 }
 
-#[cfg(all(target_os = "macos", feature = "metal"))]
+#[cfg(feature = "metal")]
 impl Default for BufferId {
     fn default() -> Self {
         Self::new()
@@ -655,6 +655,230 @@ impl MetalBackend {
         let result = unsafe { std::slice::from_raw_parts(result_ptr, size) }.to_vec();
 
         Ok(result)
+    }
+
+    /// Execute GELU on GPU buffer → GPU buffer (ZERO CPU TRANSFERS!)
+    /// Input and output stay on GPU
+    pub fn gelu_gpu_to_gpu(&self, input_buffer_id: &BufferId, size: usize) -> Result<BufferId> {
+        // Get input buffer
+        let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
+
+        // Create output buffer
+        let output_buffer = self.device.new_buffer(
+            (size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.gelu_pipeline);
+        encoder.set_buffer(0, Some(&*input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+
+        let size_u32 = size as u32;
+        encoder.set_bytes(
+            2,
+            mem::size_of::<u32>() as u64,
+            &size_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch threads
+        let threadgroup_size = metal::MTLSize { width: 256, height: 1, depth: 1 };
+        let threadgroups = metal::MTLSize { width: (size as u64 + 255) / 256, height: 1, depth: 1 };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer and return ID
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "gelu_gpu_to_gpu")
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
+    /// Execute LayerNorm GPU-to-GPU (ZERO CPU transfers!)
+    /// Input, weight, bias, and output all stay on GPU
+    /// LayerNorm: output = (x - mean) / sqrt(var + eps) * weight + bias
+    pub fn layernorm_gpu_to_gpu(
+        &self,
+        input_buffer_id: &BufferId,
+        weight_buffer_id: &BufferId,
+        bias_buffer_id: &BufferId,
+        seq_len: usize,
+        hidden_size: usize,
+        eps: f32,
+    ) -> Result<BufferId> {
+        let total_size = seq_len * hidden_size;
+
+        // Get input buffers
+        let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
+        let weight_buffer = self.get_persistent_buffer(weight_buffer_id)?;
+        let bias_buffer = self.get_persistent_buffer(bias_buffer_id)?;
+
+        // Create output buffer
+        let output_buffer = self.device.new_buffer(
+            (total_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.layernorm_pipeline);
+        encoder.set_buffer(0, Some(&*input_buffer), 0);
+        encoder.set_buffer(1, Some(&*weight_buffer), 0);
+        encoder.set_buffer(2, Some(&*bias_buffer), 0);
+        encoder.set_buffer(3, Some(&output_buffer), 0);
+
+        // Set parameters
+        let seq_len_u32 = seq_len as u32;
+        let hidden_size_u32 = hidden_size as u32;
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &seq_len_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &hidden_size_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            6,
+            mem::size_of::<f32>() as u64,
+            &eps as *const f32 as *const _,
+        );
+
+        // Dispatch threads (one thread per sequence position)
+        let threadgroup_size = metal::MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (seq_len as u64 + 63) / 64,
+            height: 1,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer and return ID
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "layernorm_gpu_to_gpu",
+            )
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
+    /// Execute matrix multiplication GPU-to-GPU (ZERO CPU transfers!)
+    /// Input, weight, and output all stay on GPU
+    /// Performs C = A × B where:
+    /// - A has shape [m, k] (input activations)
+    /// - B has shape [k, n] (weight matrix, already transposed and cached)
+    /// - C has shape [m, n] (output)
+    pub fn matmul_gpu_to_gpu(
+        &self,
+        input_buffer_id: &BufferId,
+        weight_buffer_id: &BufferId,
+        m: usize,
+        k: usize,
+        n: usize,
+    ) -> Result<BufferId> {
+        // Get input buffers
+        let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
+        let weight_buffer = self.get_persistent_buffer(weight_buffer_id)?;
+
+        // Create output buffer
+        let result_size = m * n;
+        let output_buffer = self.device.new_buffer(
+            (result_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled matmul pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.matmul_pipeline);
+        encoder.set_buffer(0, Some(&*input_buffer), 0);
+        encoder.set_buffer(1, Some(&*weight_buffer), 0);
+        encoder.set_buffer(2, Some(&output_buffer), 0);
+
+        // Set dimensions as constants
+        let m_u32 = m as u32;
+        let n_u32 = n as u32;
+        let k_u32 = k as u32;
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &m_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &n_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &k_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch threads - 2D grid for matrix multiplication
+        // Each thread computes one element of output matrix
+        let threadgroup_size = metal::MTLSize {
+            width: 16,
+            height: 16,
+            depth: 1,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (n as u64 + 15) / 16,
+            height: (m as u64 + 15) / 16,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer and return ID
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "matmul_gpu_to_gpu",
+            )
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
     }
 
     /// Execute LayerNorm on GPU

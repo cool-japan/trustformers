@@ -122,6 +122,18 @@ impl Tensor {
                 let result = a + b;
                 Ok(Tensor::C64(result))
             },
+            #[cfg(feature = "metal")]
+            (Tensor::Metal(_), _) => {
+                // Convert Metal tensor to CPU, then perform operation
+                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_self.add(other)
+            },
+            #[cfg(feature = "metal")]
+            (_, Tensor::Metal(_)) => {
+                // Convert Metal tensor to CPU, then perform operation
+                let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
+                self.add(&cpu_other)
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Addition not supported for these tensor types",
                 "add",
@@ -186,6 +198,16 @@ impl Tensor {
                 }
                 let result = a - b;
                 Ok(Tensor::C64(result))
+            },
+            #[cfg(feature = "metal")]
+            (Tensor::Metal(_), _) => {
+                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_self.sub(other)
+            },
+            #[cfg(feature = "metal")]
+            (_, Tensor::Metal(_)) => {
+                let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
+                self.sub(&cpu_other)
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Subtraction not supported for these tensor types",

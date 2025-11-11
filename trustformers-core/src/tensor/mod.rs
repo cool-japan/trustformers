@@ -152,7 +152,29 @@ impl DType {
 /// # Ok(())
 /// # }
 /// ```
+
+/// Metal GPU buffer wrapper for GPU-resident tensors
+#[cfg(feature = "metal")]
 #[derive(Debug)]
+pub struct MetalTensorData {
+    pub buffer_id: crate::gpu_ops::metal::BufferId,
+    pub shape: Vec<usize>,
+    pub dtype: DType,
+}
+
+#[cfg(feature = "metal")]
+impl Clone for MetalTensorData {
+    fn clone(&self) -> Self {
+        // Note: This creates a reference to the same GPU buffer
+        // Actual data is not copied - buffer is reference counted
+        Self {
+            buffer_id: self.buffer_id,
+            shape: self.shape.clone(),
+            dtype: self.dtype,
+        }
+    }
+}
+
 pub enum Tensor {
     // Standard ndarray types
     F32(ArrayD<f32>),
@@ -173,6 +195,9 @@ pub enum Tensor {
     Torch(tch::Tensor),
     #[cfg(feature = "candle")]
     Candle(candle_core::Tensor),
+    // Metal GPU-resident tensor (data lives on GPU)
+    #[cfg(feature = "metal")]
+    Metal(MetalTensorData),
 }
 
 // Manual Clone implementation because tch::Tensor doesn't implement Clone
@@ -193,6 +218,33 @@ impl Clone for Tensor {
             Tensor::Torch(t) => Tensor::Torch(t.shallow_clone()),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => Tensor::Candle(t.clone()),
+            #[cfg(feature = "metal")]
+            Tensor::Metal(data) => Tensor::Metal(data.clone()),
+        }
+    }
+}
+
+// Manual Debug implementation for Tensor
+impl std::fmt::Debug for Tensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Tensor::F32(_) => write!(f, "Tensor::F32(shape: {:?}, dtype: F32)", self.shape()),
+            Tensor::F64(_) => write!(f, "Tensor::F64(shape: {:?}, dtype: F64)", self.shape()),
+            Tensor::F16(_) => write!(f, "Tensor::F16(shape: {:?}, dtype: F16)", self.shape()),
+            Tensor::BF16(_) => write!(f, "Tensor::BF16(shape: {:?}, dtype: BF16)", self.shape()),
+            Tensor::I64(_) => write!(f, "Tensor::I64(shape: {:?}, dtype: I64)", self.shape()),
+            Tensor::C32(_) => write!(f, "Tensor::C32(shape: {:?}, dtype: C32)", self.shape()),
+            Tensor::C64(_) => write!(f, "Tensor::C64(shape: {:?}, dtype: C64)", self.shape()),
+            Tensor::CF16(_) => write!(f, "Tensor::CF16(shape: {:?}, dtype: CF16)", self.shape()),
+            Tensor::CBF16(_) => write!(f, "Tensor::CBF16(shape: {:?}, dtype: CBF16)", self.shape()),
+            Tensor::Sparse(s) => write!(f, "Tensor::Sparse({:?})", s),
+            #[cfg(feature = "torch")]
+            Tensor::Torch(_) => write!(f, "Tensor::Torch(shape: {:?})", self.shape()),
+            #[cfg(feature = "candle")]
+            Tensor::Candle(_) => write!(f, "Tensor::Candle(shape: {:?})", self.shape()),
+            #[cfg(feature = "metal")]
+            Tensor::Metal(data) => write!(f, "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
+                data.shape, data.dtype, data.buffer_id),
         }
     }
 }

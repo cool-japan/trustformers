@@ -240,6 +240,14 @@ impl SmoothQuantizer {
                         "collect_activation_stats",
                     ));
                 },
+                #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
+                #[cfg(feature = "metal")]
+                Tensor::Metal(_) => {
+                    return Err(TrustformersError::tensor_op_error(
+                        "Metal tensors not yet supported for calibration",
+                        "collect_activation_stats",
+                    ));
+                },
             }
         }
 
@@ -397,6 +405,13 @@ impl SmoothQuantizer {
             Tensor::Candle(_) => {
                 return Err(TrustformersError::tensor_op_error(
                     "Candle tensors not yet supported for weight scaling",
+                    "calculate_weight_scales",
+                ));
+            },
+            #[cfg(feature = "metal")]
+            Tensor::Metal(_) => {
+                return Err(TrustformersError::tensor_op_error(
+                    "Metal tensors not yet supported for weight scaling",
                     "calculate_weight_scales",
                 ));
             },
@@ -610,6 +625,12 @@ impl SmoothQuantizer {
                 "Candle tensors not yet supported",
                 "calculate_range",
             )),
+            #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
+            #[cfg(feature = "metal")]
+            Tensor::Metal(_) => Err(TrustformersError::tensor_op_error(
+                "Metal tensors not yet supported",
+                "calculate_range",
+            )),
         }
     }
 
@@ -684,6 +705,12 @@ impl SmoothQuantizer {
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => Err(TrustformersError::tensor_op_error(
                 "Candle tensors not yet supported",
+                "tensor_to_u8",
+            )),
+            #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
+            #[cfg(feature = "metal")]
+            Tensor::Metal(_) => Err(TrustformersError::tensor_op_error(
+                "Metal tensors not yet supported",
                 "tensor_to_u8",
             )),
         }

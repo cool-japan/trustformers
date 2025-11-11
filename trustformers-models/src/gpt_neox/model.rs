@@ -244,7 +244,11 @@ impl Layer for GPTNeoXAttention {
                     let output_vec = backend.matmul_f32(&attn_weights_vec, &v_vec, seq_len, seq_len, head_dim).ok()?;
 
                     // Convert back to Array2
-                    Array2::from_shape_vec((seq_len, head_dim), output_vec).ok()
+                    let result = Array2::from_shape_vec((seq_len, head_dim), output_vec).ok();
+                    if result.is_some() {
+                        eprintln!("[ATTENTION METAL] ✅ SUCCESS for head {}", _h);
+                    }
+                    result
                 };
 
                 // Helper function: CPU attention (always succeeds)

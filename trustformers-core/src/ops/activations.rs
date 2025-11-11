@@ -4,17 +4,41 @@ use std::f32::consts::PI;
 
 pub fn gelu(x: &Tensor) -> Result<Tensor> {
     match x {
+        // GPU-resident Metal tensor - process directly on GPU (ZERO TRANSFERS!)
+        #[cfg(feature = "metal")]
+        Tensor::Metal(metal_data) => {
+            use crate::gpu_ops::metal::get_metal_backend;
+            use crate::tensor::MetalTensorData;
+
+            let backend = get_metal_backend()?;
+            let size: usize = metal_data.shape.iter().product();
+
+            // Execute GELU GPU-to-GPU (NO CPU transfers!)
+            let output_buffer_id = backend.gelu_gpu_to_gpu(&metal_data.buffer_id, size)?;
+
+            eprintln!("[GELU METAL] ✅ GPU-to-GPU processing (ZERO transfers)");
+
+            Ok(Tensor::Metal(MetalTensorData {
+                buffer_id: output_buffer_id,
+                shape: metal_data.shape.clone(),
+                dtype: metal_data.dtype,
+            }))
+        },
+
         Tensor::F32(arr) => {
             // Try Metal GPU acceleration if available
-            #[cfg(all(target_os = "macos", feature = "metal"))]
+            #[cfg(feature = "metal")]
             {
                 use crate::gpu_ops::metal::get_metal_backend;
                 if let Ok(backend) = get_metal_backend() {
+                    eprintln!("[GELU METAL] Processing {} elements (from F32)", arr.len());
                     // Convert tensor to slice
                     let input_vec: Vec<f32> = arr.iter().copied().collect();
 
                     // Execute on GPU
                     if let Ok(output_vec) = backend.gelu_f32(&input_vec) {
+                        eprintln!("[GELU METAL] ✅ SUCCESS");
+
                         // Convert back to tensor
                         use scirs2_core::ndarray::ArrayD;
                         let output_arr = ArrayD::from_shape_vec(arr.raw_dim(), output_vec)
