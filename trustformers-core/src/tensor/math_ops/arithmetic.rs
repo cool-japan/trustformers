@@ -30,28 +30,24 @@ impl Tensor {
                     )));
                 }
 
-                // Check for numerical stability issues
-                let has_unstable_a = a.iter().any(|&x| !is_stable_f32(x));
-                let has_unstable_b = b.iter().any(|&x| !is_stable_f32(x));
+                // Always use ndarray's broadcasting addition (handles all shapes correctly)
+                // Then stabilize the result if needed
+                let result = a + b;
 
-                if has_unstable_a || has_unstable_b {
-                    // Use stabilized element-wise addition
-                    let result = a
+                // Check if stabilization is needed
+                let has_unstable = result.iter().any(|&x| !is_stable_f32(x));
+
+                if has_unstable {
+                    // Stabilize the result
+                    let stabilized: Vec<f32> = result
                         .iter()
-                        .zip(b.iter())
-                        .map(|(&x, &y)| {
-                            let stabilized_x = stabilize_f32(x);
-                            let stabilized_y = stabilize_f32(y);
-                            stabilize_f32(stabilized_x + stabilized_y)
-                        })
-                        .collect::<Vec<_>>();
+                        .map(|&x| stabilize_f32(x))
+                        .collect();
 
-                    let result_array = ArrayD::from_shape_vec(a.raw_dim(), result)
+                    let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                     Ok(Tensor::F32(result_array))
                 } else {
-                    // Use optimized broadcasting addition if inputs are stable
-                    let result = a + b;
                     Ok(Tensor::F32(result))
                 }
             },
@@ -64,28 +60,24 @@ impl Tensor {
                     )));
                 }
 
-                // Check for numerical stability issues
-                let has_unstable_a = a.iter().any(|&x| !is_stable_f64(x));
-                let has_unstable_b = b.iter().any(|&x| !is_stable_f64(x));
+                // Always use ndarray's broadcasting addition (handles all shapes correctly)
+                // Then stabilize the result if needed
+                let result = a + b;
 
-                if has_unstable_a || has_unstable_b {
-                    // Use stabilized element-wise addition
-                    let result = a
+                // Check if stabilization is needed
+                let has_unstable = result.iter().any(|&x| !is_stable_f64(x));
+
+                if has_unstable {
+                    // Stabilize the result
+                    let stabilized: Vec<f64> = result
                         .iter()
-                        .zip(b.iter())
-                        .map(|(&x, &y)| {
-                            let stabilized_x = stabilize_f64(x);
-                            let stabilized_y = stabilize_f64(y);
-                            stabilize_f64(stabilized_x + stabilized_y)
-                        })
-                        .collect::<Vec<_>>();
+                        .map(|&x| stabilize_f64(x))
+                        .collect();
 
-                    let result_array = ArrayD::from_shape_vec(a.raw_dim(), result)
+                    let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                     Ok(Tensor::F64(result_array))
                 } else {
-                    // Use optimized broadcasting addition if inputs are stable
-                    let result = a + b;
                     Ok(Tensor::F64(result))
                 }
             },

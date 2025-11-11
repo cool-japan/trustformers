@@ -191,9 +191,13 @@ impl Layer for LayerNorm {
                             let hidden_size = shape[1];
 
                             if hidden_size == self.normalized_shape[0] {
+                                eprintln!("[LAYERNORM DEBUG] Checking weight/bias types: weight={:?}, bias={:?}",
+                                    std::mem::discriminant(&self.weight),
+                                    std::mem::discriminant(&self.bias));
+
                                 match (&self.weight, &self.bias) {
                                     // Case 1: Weight/bias on GPU - upload input and use GPU-to-GPU
-                                    #[cfg(feature = "metal")]
+                                    #[allow(unreachable_patterns)]
                                     (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
                                         use crate::tensor::MetalTensorData;
 

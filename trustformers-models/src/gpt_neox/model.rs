@@ -135,6 +135,20 @@ impl Layer for GPTNeoXAttention {
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         use scirs2_core::ndarray::{s, Array2};
 
+        // Temporary fallback: Convert Metal tensors to F32
+        // TODO: Implement full Tensor::Metal support in Attention
+        #[cfg(feature = "metal")]
+        let input = match &input {
+            Tensor::Metal(_) => {
+                eprintln!("[ATTENTION] Converting Metal input to F32 (temporary fallback)");
+                input.to_device_enum(&trustformers_core::device::Device::CPU)?
+            },
+            _ => input,
+        };
+
+        #[cfg(not(feature = "metal"))]
+        let input = input;
+
         let shape = input.shape();
         let seq_len = if shape.len() == 2 { shape[0] } else { shape[1] };
 
@@ -397,40 +411,22 @@ impl Layer for GPTNeoXLayer {
             let mlp_out = self.mlp.forward(ln2_out)?;
 
             // Add both outputs to residual: x + attn + mlp
-            match (&input, &attn_out, &mlp_out) {
-                (Tensor::F32(inp), Tensor::F32(attn), Tensor::F32(mlp)) => {
-                    Ok(Tensor::F32(inp + attn + mlp))
-                },
-                _ => Err(tensor_op_error(
-                    "GPTNeoXLayer::forward",
-                    "Unsupported tensor types",
-                )),
-            }
+            // Use Tensor::add() to support mixed types (F32 + Metal)
+            let temp = input.add(&attn_out)?;
+            temp.add(&mlp_out)
         } else {
             // Sequential: attn first, then mlp
             let ln1_out = self.input_layernorm.forward(input.clone())?;
             let attn_out = self.attention.forward(ln1_out)?;
 
-            let residual = match (&input, &attn_out) {
-                (Tensor::F32(inp), Tensor::F32(attn)) => Tensor::F32(inp + attn),
-                _ => {
-                    return Err(tensor_op_error(
-                        "GPTNeoXLayer::forward",
-                        "Unsupported tensor types",
-                    ))
-                },
-            };
+            // Use Tensor::add() to support mixed types
+            let residual = input.add(&attn_out)?;
 
             let ln2_out = self.post_attention_layernorm.forward(residual.clone())?;
             let mlp_out = self.mlp.forward(ln2_out)?;
 
-            match (&residual, &mlp_out) {
-                (Tensor::F32(res), Tensor::F32(mlp)) => Ok(Tensor::F32(res + mlp)),
-                _ => Err(tensor_op_error(
-                    "GPTNeoXLayer::forward",
-                    "Unsupported tensor types",
-                )),
-            }
+            // Use Tensor::add() to support mixed types
+            residual.add(&mlp_out)
         }
     }
 }
@@ -478,7 +474,9 @@ impl GPTNeoXModel {
 
     #[cfg(feature = "metal")]
     pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
-        // Note: embed_in stays on CPU for now (embedding lookup is efficient on CPU)
+        // Upload embedding weights to GPU
+        self.embed_in.weights_to_gpu(device)?;
+
         // Convert all transformer layers
         for layer in &mut self.layers {
             layer.weights_to_gpu(device)?;
