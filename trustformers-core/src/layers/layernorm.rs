@@ -231,19 +231,17 @@ impl Layer for LayerNorm {
                                         ) {
                                             // Convert back to tensor
                                             use scirs2_core::ndarray::ArrayD;
-                                            let output_arr = ArrayD::from_shape_vec(
-                                                arr.raw_dim(),
-                                                output_vec,
-                                            )
-                                            .map_err(|e| {
-                                                TrustformersError::tensor_op_error(
-                                                    &format!(
+                                            let output_arr =
+                                                ArrayD::from_shape_vec(arr.raw_dim(), output_vec)
+                                                    .map_err(|e| {
+                                                    TrustformersError::tensor_op_error(
+                                                        &format!(
                                                         "Failed to reshape LayerNorm result: {}",
                                                         e
                                                     ),
-                                                    "LayerNorm::forward",
-                                                )
-                                            })?;
+                                                        "LayerNorm::forward",
+                                                    )
+                                                })?;
                                             return Ok(Tensor::F32(output_arr));
                                         }
                                     },

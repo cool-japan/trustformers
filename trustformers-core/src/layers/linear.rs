@@ -404,8 +404,8 @@ impl Layer for Linear {
                                 dtype: output_data.dtype,
                             }));
                         }
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
 
                 // Fallback: CPU bias addition

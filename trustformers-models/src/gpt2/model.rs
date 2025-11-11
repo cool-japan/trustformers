@@ -4,6 +4,7 @@ use trustformers_core::{
     device::Device,
     errors::{invalid_config, tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
+    ops::activations::{gelu as gelu_core, relu, silu},
     tensor::Tensor,
     traits::{Config, Layer, Model, TokenizedInput, WeightReader},
 };
@@ -91,21 +92,41 @@ impl Gpt2Model {
         self
     }
 
+    /// Upload model weights to GPU (Metal)
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::Metal(_)) {
+            return Ok(());
+        }
+        self.device = *device;
+        self.wte.weights_to_gpu(device)?;
+        self.wpe.weights_to_gpu(device)?;
+        for block in &mut self.h {
+            block.weights_to_gpu(device)?;
+        }
+        self.ln_f.weights_to_gpu(device)?;
+        Ok(())
+    }
+
     /// Load weights from a WeightReader (e.g., SafeTensors)
     pub fn load_weights_from_reader(&mut self, reader: &mut dyn WeightReader) -> Result<()> {
+        // Try to detect if weights have "transformer." prefix (HuggingFace format)
+        let has_transformer_prefix = reader.read_tensor("transformer.wte.weight").is_ok();
+        let prefix = if has_transformer_prefix { "transformer." } else { "" };
+
         // Load embeddings
-        self.wte.set_weight(reader.read_tensor("wte.weight")?)?;
-        self.wpe.set_weight(reader.read_tensor("wpe.weight")?)?;
+        self.wte.set_weight(reader.read_tensor(&format!("{}wte.weight", prefix))?)?;
+        self.wpe.set_weight(reader.read_tensor(&format!("{}wpe.weight", prefix))?)?;
 
         // Load transformer blocks
         for (i, block) in self.h.iter_mut().enumerate() {
-            let prefix = format!("h.{}", i);
-            block.load_weights(reader, &prefix)?;
+            let block_prefix = format!("{}h.{}", prefix, i);
+            block.load_weights(reader, &block_prefix)?;
         }
 
         // Load final layer norm
-        self.ln_f.set_weight(reader.read_tensor("ln_f.weight")?)?;
-        self.ln_f.set_bias(reader.read_tensor("ln_f.bias")?)?;
+        self.ln_f.set_weight(reader.read_tensor(&format!("{}ln_f.weight", prefix))?)?;
+        self.ln_f.set_bias(reader.read_tensor(&format!("{}ln_f.bias", prefix))?)?;
 
         Ok(())
     }
@@ -281,14 +302,28 @@ impl Gpt2LMHeadModel {
         self
     }
 
+    /// Upload model weights to GPU (Metal)
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::Metal(_)) {
+            return Ok(());
+        }
+        self.transformer.weights_to_gpu(device)?;
+        self.lm_head.weights_to_gpu(device)?;
+        Ok(())
+    }
+
     /// Load weights from a WeightReader (e.g., SafeTensors)
     pub fn load_weights_from_reader(&mut self, reader: &mut dyn WeightReader) -> Result<()> {
-        // Load transformer weights
+        // Load transformer weights (handles prefix detection internally)
         self.transformer.load_weights_from_reader(reader)?;
 
         // Load language modeling head weights
         // Note: In GPT-2, the LM head shares weights with the input embeddings
-        let wte_weight = reader.read_tensor("wte.weight")?;
+        // Try with and without "transformer." prefix
+        let wte_weight = reader
+            .read_tensor("transformer.wte.weight")
+            .or_else(|_| reader.read_tensor("wte.weight"))?;
         self.lm_head.set_weight(wte_weight)?;
 
         // No bias for LM head in GPT-2
@@ -716,6 +751,18 @@ impl Gpt2Block {
         self
     }
 
+    #[cfg(feature = "metal")]
+    fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::Metal(_)) {
+            return Ok(());
+        }
+        self.ln_1.weights_to_gpu(device)?;
+        self.attn.weights_to_gpu(device)?;
+        self.ln_2.weights_to_gpu(device)?;
+        self.mlp.weights_to_gpu(device)?;
+        Ok(())
+    }
+
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
         // Load layer norm weights
         self.ln_1.set_weight(reader.read_tensor(&format!("{}.ln_1.weight", prefix))?)?;
@@ -817,6 +864,16 @@ impl Gpt2Attention {
             attn_dropout: self.attn_dropout,
             resid_dropout: self.resid_dropout,
         }
+    }
+
+    #[cfg(feature = "metal")]
+    fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::Metal(_)) {
+            return Ok(());
+        }
+        self.c_attn.weights_to_gpu(device)?;
+        self.c_proj.weights_to_gpu(device)?;
+        Ok(())
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -1041,6 +1098,16 @@ impl Gpt2MLP {
         }
     }
 
+    #[cfg(feature = "metal")]
+    fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::Metal(_)) {
+            return Ok(());
+        }
+        self.c_fc.weights_to_gpu(device)?;
+        self.c_proj.weights_to_gpu(device)?;
+        Ok(())
+    }
+
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
         // Transpose MLP weights too
         let c_fc_weight = reader.read_tensor(&format!("{}.c_fc.weight", prefix))?;
@@ -1076,7 +1143,7 @@ enum ActivationType {
 impl ActivationType {
     fn from_str(s: &str) -> Result<Self> {
         match s {
-            "gelu" | "gelu_new" => Ok(Self::Gelu),
+            "gelu" | "gelu_new" | "gelu_fast" => Ok(Self::Gelu),
             "relu" => Ok(Self::Relu),
             "swish" | "silu" => Ok(Self::Swish),
             _ => Err(invalid_config(
@@ -1088,60 +1155,10 @@ impl ActivationType {
 
     fn apply(&self, x: Tensor) -> Result<Tensor> {
         match self {
-            Self::Gelu => gelu(x),
-            Self::Relu => relu(x),
-            Self::Swish => swish(x),
+            Self::Gelu => gelu_core(&x), // Use NaN-safe version from trustformers_core
+            Self::Relu => relu(&x),
+            Self::Swish => silu(&x), // SiLU = Swish
         }
-    }
-}
-
-/// GELU activation function
-fn gelu(x: Tensor) -> Result<Tensor> {
-    // GELU(x) = x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
-    // For now, use approximate version
-    match &x {
-        Tensor::F32(arr) => {
-            let result = arr.mapv(|val| {
-                val * 0.5
-                    * (1.0
-                        + ((2.0_f32 / std::f32::consts::PI).sqrt()
-                            * (val + 0.044715 * val.powi(3)))
-                        .tanh())
-            });
-            Ok(Tensor::F32(result))
-        },
-        _ => Err(tensor_op_error(
-            "tensor_operation",
-            "GELU only supports F32 tensors",
-        )),
-    }
-}
-
-/// ReLU activation function
-fn relu(x: Tensor) -> Result<Tensor> {
-    match &x {
-        Tensor::F32(arr) => {
-            let result = arr.mapv(|val| val.max(0.0));
-            Ok(Tensor::F32(result))
-        },
-        _ => Err(tensor_op_error(
-            "tensor_operation",
-            "ReLU only supports F32 tensors",
-        )),
-    }
-}
-
-/// Swish/SiLU activation function
-fn swish(x: Tensor) -> Result<Tensor> {
-    match &x {
-        Tensor::F32(arr) => {
-            let result = arr.mapv(|val| val * (1.0 / (1.0 + (-val).exp())));
-            Ok(Tensor::F32(result))
-        },
-        _ => Err(tensor_op_error(
-            "tensor_operation",
-            "Swish only supports F32 tensors",
-        )),
     }
 }
 

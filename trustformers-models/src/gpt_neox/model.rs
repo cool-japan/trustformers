@@ -145,9 +145,7 @@ impl Layer for GPTNeoXAttention {
         // TODO: Implement full Tensor::Metal support in Attention
         #[cfg(feature = "metal")]
         let input = match &input {
-            Tensor::Metal(_) => {
-                input.to_device_enum(&trustformers_core::device::Device::CPU)?
-            },
+            Tensor::Metal(_) => input.to_device_enum(&trustformers_core::device::Device::CPU)?,
             _ => input,
         };
 
