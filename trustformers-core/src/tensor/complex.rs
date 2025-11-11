@@ -6,8 +6,8 @@
 
 use super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, IxDyn};
-use num_complex::{Complex, Complex32, Complex64};
+use scirs2_core::ndarray::{ArrayD, IxDyn};
+use scirs2_core::{Complex, Complex32, Complex64};
 
 /// Numerical stability constants for complex operations
 const STABILITY_EPSILON_F32: f32 = 1e-7;

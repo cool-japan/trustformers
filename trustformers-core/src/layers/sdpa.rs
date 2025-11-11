@@ -2,7 +2,7 @@
 
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
-use ndarray::{s, Array1, Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{s, Array1, Array2, ArrayD, Axis, IxDyn};
 
 /// Optimized Scaled Dot-Product Attention (SDPA) kernels
 ///

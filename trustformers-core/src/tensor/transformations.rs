@@ -4,7 +4,7 @@
 
 use super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::{s, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{s, ArrayD, Axis, IxDyn};
 
 impl Tensor {
     /// Helper to normalize negative axis indices.

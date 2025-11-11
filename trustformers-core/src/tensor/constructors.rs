@@ -1,15 +1,13 @@
 //! Tensor constructor functions.
 //!
 //! This module contains functions for creating new tensors with various
-
-#![allow(deprecated)] // Using rand legacy API, will migrate to scirs2_core
 //! initialization patterns.
 
 use super::{DType, Tensor};
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, IxDyn};
-use num_complex::{Complex32, Complex64};
-use rand::thread_rng;
+use scirs2_core::ndarray::{ArrayD, IxDyn};  // SciRS2 Policy compliant
+use scirs2_core::{Complex32, Complex64};     // SciRS2 Policy compliant (root level)
+use scirs2_core::random::thread_rng;         // SciRS2 Policy compliant
 
 impl Tensor {
     /// Creates a new 1D tensor from a vector of data.
@@ -893,8 +891,7 @@ impl Tensor {
     ///
     /// A tensor filled with random integers.
     pub fn randint(low: i64, high: i64, shape: &[usize], dtype: DType) -> Result<Self> {
-        use rand::thread_rng;
-        use rand::Rng;
+        use scirs2_core::random::{rng, Rng};  // SciRS2 Policy compliant (updated API)
 
         if low >= high {
             return Err(TrustformersError::tensor_op_error(
@@ -903,26 +900,26 @@ impl Tensor {
             ));
         }
 
-        let mut rng = thread_rng();
+        let mut rng = rng();  // Use updated scirs2-core API
         let size: usize = shape.iter().product();
 
         match dtype {
             DType::I64 => {
-                let data: Vec<i64> = (0..size).map(|_| rng.gen_range(low..high)).collect();
+                let data: Vec<i64> = (0..size).map(|_| rng.random_range(low..high)).collect();  // Updated API
                 Ok(Tensor::I64(
                     ArrayD::from_shape_vec(IxDyn(shape), data)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
                 ))
             },
             DType::F32 => {
-                let data: Vec<f32> = (0..size).map(|_| rng.gen_range(low..high) as f32).collect();
+                let data: Vec<f32> = (0..size).map(|_| rng.random_range(low..high) as f32).collect();  // Updated API
                 Ok(Tensor::F32(
                     ArrayD::from_shape_vec(IxDyn(shape), data)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
                 ))
             },
             DType::F64 => {
-                let data: Vec<f64> = (0..size).map(|_| rng.gen_range(low..high) as f64).collect();
+                let data: Vec<f64> = (0..size).map(|_| rng.random_range(low..high) as f64).collect();  // Updated API
                 Ok(Tensor::F64(
                     ArrayD::from_shape_vec(IxDyn(shape), data)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,

@@ -2,7 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use log;
-use rayon::prelude::*;
+use scirs2_core::parallel_ops::*;  // SciRS2 Policy compliant (replaces rayon)
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;

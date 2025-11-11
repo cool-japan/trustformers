@@ -6,7 +6,7 @@
 
 use super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::Axis;
+use scirs2_core::ndarray::Axis;
 
 impl Tensor {
     /// ReLU activation function.

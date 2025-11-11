@@ -4,7 +4,7 @@ use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use ndarray::{s, Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn};
 use std::collections::HashMap;
 use std::sync::RwLock;
 

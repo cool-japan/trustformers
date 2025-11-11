@@ -7,7 +7,7 @@
 
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
-use rand::Rng;
+use scirs2_core::random::Rng;  // SciRS2 Policy compliant
 use std::collections::{HashMap, HashSet};
 
 /// Pruning configuration

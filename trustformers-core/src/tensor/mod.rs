@@ -52,8 +52,8 @@ mod utils;
 mod property_tests;
 
 use crate::errors::Result;
-use ndarray::ArrayD;
-use num_complex::{Complex32, Complex64};
+use scirs2_core::ndarray::ArrayD;
+use scirs2_core::{Complex32, Complex64};
 use serde::{Deserialize, Serialize};
 
 /// Data types supported by tensors

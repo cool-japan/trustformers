@@ -13,7 +13,7 @@
 use super::super::Tensor;
 use super::utilities::{simd_min_max_f32, simd_min_max_f64};
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{ArrayD, Axis, IxDyn};
 
 impl Tensor {
     /// Standard deviation across all elements.

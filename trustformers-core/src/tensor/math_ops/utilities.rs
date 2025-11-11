@@ -19,7 +19,7 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::{IxDyn, Zip};
+use scirs2_core::ndarray::{IxDyn, Zip};
 use std::sync::OnceLock;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

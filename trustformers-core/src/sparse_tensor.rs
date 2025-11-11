@@ -8,7 +8,7 @@
 
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::{DType, Tensor};
-use ndarray::{ArrayD, IxDyn};
+use scirs2_core::ndarray::{ArrayD, IxDyn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

@@ -4,7 +4,7 @@
 
 use super::{DType, Tensor};
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, IxDyn};
+use scirs2_core::ndarray::{ArrayD, IxDyn};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};

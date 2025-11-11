@@ -5,7 +5,7 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{ArrayD, Axis, IxDyn};
 
 impl Tensor {
     /// Element-wise less-than comparison.

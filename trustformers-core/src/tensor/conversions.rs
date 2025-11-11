@@ -5,7 +5,7 @@
 
 use super::{DType, Tensor};
 use crate::errors::{Result, TrustformersError};
-use num_complex::{Complex32, Complex64};
+use scirs2_core::{Complex32, Complex64};
 
 impl Tensor {
     /// Convert tensor to a different data type.

@@ -37,7 +37,7 @@
 use super::super::Tensor;
 use super::stability::*;
 use crate::errors::{Result, TrustformersError};
-use ndarray::{s, ArrayD, IxDyn};
+use scirs2_core::ndarray::{s, ArrayD, IxDyn};
 
 impl Tensor {
     /// Matrix multiplication with numerical stability enhancements.

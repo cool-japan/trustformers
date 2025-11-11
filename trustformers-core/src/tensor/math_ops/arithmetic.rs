@@ -6,7 +6,7 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::ArrayD;
+use scirs2_core::ndarray::ArrayD;
 
 // Import stability functions from the stability module
 use super::stability::{is_stable_f32, is_stable_f64, stabilize_f32, stabilize_f64};

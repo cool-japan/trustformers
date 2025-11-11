@@ -1,7 +1,7 @@
 use crate::errors::{TrustformersError, Result};
 use crate::tensor::Tensor;
 use crate::layers::attention::MultiHeadAttention;
-use ndarray::{Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{Array2, ArrayD, Axis, IxDyn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
