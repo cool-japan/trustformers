@@ -178,7 +178,9 @@ scirs2-core = { version = "0.1.0-rc.2", features = [
     "linalg",
     "memory_efficient",
     "array_protocol",
-    "random"  # Required for SciRS2 Integration Policy
+    "random",  # Required for SciRS2 Integration Policy
+    "gpu",     # GPU acceleration abstractions
+    "metal"    # Metal Performance Shaders (macOS) - CRITICAL for performance
 ]}
 scirs2-linalg = "0.1.0-rc.2"
 
