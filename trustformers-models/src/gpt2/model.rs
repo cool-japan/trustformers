@@ -327,6 +327,29 @@ impl Gpt2LMHeadModel {
         Ok(())
     }
 
+    /// Forward pass with KV-cache support for efficient generation
+    pub fn forward_with_cache(
+        &self,
+        input: TokenizedInput,
+        past_key_values: &mut Option<KVCache>,
+    ) -> Result<Gpt2LMOutput> {
+        // Get transformer output with KV-cache
+        let batch_input_ids = vec![input.input_ids.clone()];
+        let transformer_output = self.transformer.forward_internal(
+            &batch_input_ids,
+            None,
+            past_key_values.as_mut(),
+        )?;
+
+        // Apply language modeling head
+        let logits = self.lm_head.forward(transformer_output)?;
+
+        Ok(Gpt2LMOutput {
+            logits,
+            past_key_values: past_key_values.clone(),
+        })
+    }
+
     /// Load weights from a WeightReader (e.g., SafeTensors)
     pub fn load_weights_from_reader(&mut self, reader: &mut dyn WeightReader) -> Result<()> {
         // Load transformer weights (handles prefix detection internally)
@@ -357,7 +380,7 @@ impl Gpt2LMHeadModel {
         let mut generated = input_ids.clone();
 
         while generated.len() < max_length {
-            // Prepare input
+            // Prepare input (full sequence - stable version)
             let input = TokenizedInput {
                 input_ids: generated.clone(),
                 attention_mask: vec![1u8; generated.len()],
@@ -953,24 +976,63 @@ impl Gpt2Attention {
 
                 // Extract Q, K, V
                 let q = arr.slice(s![.., .., ..chunk_size]).to_owned();
-                let k = arr.slice(s![.., .., chunk_size..2 * chunk_size]).to_owned();
-                let v = arr.slice(s![.., .., 2 * chunk_size..]).to_owned();
+                let k_new_slice = arr.slice(s![.., .., chunk_size..2 * chunk_size]);
+                let v_new_slice = arr.slice(s![.., .., 2 * chunk_size..]);
+
+                // Convert to ArrayD for uniform handling
+                let k_new = k_new_slice.to_owned().into_dyn();
+                let v_new = v_new_slice.to_owned().into_dyn();
+
+                // Concatenate with past K/V if cache exists
+                let mut k = k_new.clone();
+                let mut v = v_new.clone();
+
+                if let Some(cache) = &layer_cache {
+                    if let (Some(Tensor::F32(past_k)), Some(Tensor::F32(past_v))) = (&cache.key, &cache.value) {
+                        // Concatenate: [past_seq, hidden] + [1, hidden] → [past_seq+1, hidden]
+                        let past_seq = past_k.shape()[1];
+                        let new_seq = k_new.shape()[1];
+                        let total_seq = past_seq + new_seq;
+
+                        let mut k_concat = ArrayD::zeros(IxDyn(&[batch_size, total_seq, hidden_size]));
+                        let mut v_concat = ArrayD::zeros(IxDyn(&[batch_size, total_seq, hidden_size]));
+
+                        // Copy past
+                        k_concat.slice_mut(s![.., 0..past_seq, ..]).assign(past_k);
+                        v_concat.slice_mut(s![.., 0..past_seq, ..]).assign(past_v);
+
+                        // Append new
+                        k_concat.slice_mut(s![.., past_seq..total_seq, ..]).assign(&k_new);
+                        v_concat.slice_mut(s![.., past_seq..total_seq, ..]).assign(&v_new);
+
+                        k = k_concat;
+                        v = v_concat;
+                    }
+                }
+
+                // Save for cache (before reshape) - already ArrayD
+                let k_for_cache = k.clone();
+                let v_for_cache = v.clone();
 
                 // Reshape for multi-head attention
                 // From [batch, seq_len, hidden_size] to [batch, seq_len, n_heads, head_dim]
                 let head_dim = self.d_head;
                 let n_heads = self.n_head;
 
+                // Get actual sequence lengths (Q is current, K/V may be concatenated)
+                let q_seq_len = seq_len;
+                let kv_seq_len = k.shape()[1];
+
                 let q = q
-                    .to_shape(IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
+                    .to_shape(IxDyn(&[batch_size, q_seq_len, n_heads, head_dim]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape Q".into()))?
                     .to_owned();
                 let k = k
-                    .to_shape(IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
+                    .to_shape(IxDyn(&[batch_size, kv_seq_len, n_heads, head_dim]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape K".into()))?
                     .to_owned();
                 let v = v
-                    .to_shape(IxDyn(&[batch_size, seq_len, n_heads, head_dim]))
+                    .to_shape(IxDyn(&[batch_size, kv_seq_len, n_heads, head_dim]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape V".into()))?
                     .to_owned();
 
@@ -985,8 +1047,11 @@ impl Gpt2Attention {
                 let k_t = k.clone().permuted_axes(vec![0, 1, 3, 2]); // Transpose last two dims
 
                 // Compute Q * K^T
+                // Q: [batch, n_heads, q_seq_len, head_dim]
+                // K^T: [batch, n_heads, head_dim, kv_seq_len]
+                // Result: [batch, n_heads, q_seq_len, kv_seq_len]
                 let mut scores =
-                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, seq_len, seq_len]));
+                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, q_seq_len, kv_seq_len]));
                 for b in 0..batch_size {
                     for h in 0..n_heads {
                         let q_head = q.slice(s![b, h, .., ..]);
@@ -1012,11 +1077,11 @@ impl Gpt2Attention {
                     }
                 }
 
-                // Softmax
+                // Softmax over kv_seq_len dimension
                 let mut attention_probs = scores.clone();
                 for b in 0..batch_size {
                     for h in 0..n_heads {
-                        for i in 0..seq_len {
+                        for i in 0..q_seq_len {
                             let mut row = attention_probs.slice_mut(s![b, h, i, ..]);
                             let max_val = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
                             row.mapv_inplace(|x| (x - max_val).exp());
@@ -1029,8 +1094,11 @@ impl Gpt2Attention {
                 // Apply dropout (skip for now during inference)
 
                 // Compute attention output: attention_probs * V
+                // attention_probs: [batch, n_heads, q_seq_len, kv_seq_len]
+                // V: [batch, n_heads, kv_seq_len, head_dim]
+                // Result: [batch, n_heads, q_seq_len, head_dim]
                 let mut output =
-                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, seq_len, head_dim]));
+                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, q_seq_len, head_dim]));
                 for b in 0..batch_size {
                     for h in 0..n_heads {
                         let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
@@ -1043,16 +1111,16 @@ impl Gpt2Attention {
                 // Transpose back to [batch, seq_len, n_heads, head_dim]
                 let output = output.permuted_axes(vec![0, 2, 1, 3]);
 
-                // Reshape to [batch, seq_len, hidden_size]
+                // Reshape to [batch, q_seq_len, hidden_size]
                 let output = output
-                    .to_shape(IxDyn(&[batch_size, seq_len, hidden_size]))
+                    .to_shape(IxDyn(&[batch_size, q_seq_len, hidden_size]))
                     .map_err(|_| TrustformersError::shape_error("Failed to reshape output".into()))?
                     .to_owned();
 
-                // Update cache if provided
+                // Update cache: store full K/V in original shape [batch, kv_seq_len, hidden_size]
                 if let Some(cache) = layer_cache {
-                    cache.key = Some(Tensor::F32(k.clone()));
-                    cache.value = Some(Tensor::F32(v.clone()));
+                    cache.key = Some(Tensor::F32(k_for_cache));
+                    cache.value = Some(Tensor::F32(v_for_cache));
                 }
 
                 // Apply output projection
