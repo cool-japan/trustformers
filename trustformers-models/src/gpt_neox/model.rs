@@ -44,6 +44,13 @@ impl GPTNeoXMLP {
     pub fn parameter_count(&self) -> usize {
         self.dense_h_to_4h.parameter_count() + self.dense_4h_to_h.parameter_count()
     }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+        self.dense_h_to_4h.weights_to_gpu(device)?;
+        self.dense_4h_to_h.weights_to_gpu(device)?;
+        Ok(())
+    }
 }
 
 impl Layer for GPTNeoXMLP {
@@ -111,6 +118,13 @@ impl GPTNeoXAttention {
 
     pub fn parameter_count(&self) -> usize {
         self.query_key_value.parameter_count() + self.dense.parameter_count()
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+        self.query_key_value.weights_to_gpu(device)?;
+        self.dense.weights_to_gpu(device)?;
+        Ok(())
     }
 }
 
@@ -357,6 +371,15 @@ impl GPTNeoXLayer {
     pub fn parameter_count(&self) -> usize {
         self.attention.parameter_count() + self.mlp.parameter_count()
     }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+        self.input_layernorm.weights_to_gpu(device)?;
+        self.attention.weights_to_gpu(device)?;
+        self.post_attention_layernorm.weights_to_gpu(device)?;
+        self.mlp.weights_to_gpu(device)?;
+        Ok(())
+    }
 }
 
 impl Layer for GPTNeoXLayer {
@@ -451,6 +474,17 @@ impl GPTNeoXModel {
             final_layer_norm: LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?,
             config,
         })
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+        // Note: embed_in stays on CPU for now (embedding lookup is efficient on CPU)
+        // Convert all transformer layers
+        for layer in &mut self.layers {
+            layer.weights_to_gpu(device)?;
+        }
+        self.final_layer_norm.weights_to_gpu(device)?;
+        Ok(())
     }
 
     /// Load model weights from HuggingFace format
@@ -637,6 +671,14 @@ impl GPTNeoXForCausalLM {
             gpt_neox,
             embed_out,
         })
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &trustformers_core::device::Device) -> trustformers_core::errors::Result<()> {
+        self.gpt_neox.weights_to_gpu(device)?;
+        self.embed_out.weights_to_gpu(device)?;
+        println!("✓ All model weights uploaded to GPU");
+        Ok(())
     }
 
     /// Load model weights from HuggingFace format

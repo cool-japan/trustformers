@@ -191,11 +191,41 @@ impl Layer for LayerNorm {
                             let hidden_size = shape[1];
 
                             if hidden_size == self.normalized_shape[0] {
-                                // Convert tensors to slices
-                                let input_vec: Vec<f32> = arr.iter().copied().collect();
-
                                 match (&self.weight, &self.bias) {
+                                    // Case 1: Weight/bias on GPU - upload input and use GPU-to-GPU
+                                    #[cfg(feature = "metal")]
+                                    (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
+                                        use crate::tensor::MetalTensorData;
+
+                                        eprintln!("[LAYERNORM METAL] Input F32, weights Metal - uploading input to GPU");
+
+                                        // Upload input to GPU
+                                        let input_vec: Vec<f32> = arr.iter().copied().collect();
+                                        let input_buffer_id = backend.create_persistent_buffer(&input_vec)?;
+
+                                        // Execute GPU-to-GPU
+                                        let output_buffer_id = backend.layernorm_gpu_to_gpu(
+                                            &input_buffer_id,
+                                            &w_data.buffer_id,
+                                            &b_data.buffer_id,
+                                            seq_len,
+                                            hidden_size,
+                                            self.eps,
+                                        )?;
+
+                                        eprintln!("[LAYERNORM METAL] ✅ SUCCESS (input uploaded, processed on GPU)");
+
+                                        // Return Metal tensor
+                                        return Ok(Tensor::Metal(MetalTensorData {
+                                            buffer_id: output_buffer_id,
+                                            shape: arr.shape().to_vec(),
+                                            dtype: crate::tensor::DType::F32,
+                                        }));
+                                    },
+
+                                    // Case 2: Weight/bias on CPU - standard path
                                     (Tensor::F32(w_arr), Tensor::F32(b_arr)) => {
+                                        let input_vec: Vec<f32> = arr.iter().copied().collect();
                                         let weight_vec: Vec<f32> = w_arr.iter().copied().collect();
                                         let bias_vec: Vec<f32> = b_arr.iter().copied().collect();
 
