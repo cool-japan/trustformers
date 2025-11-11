@@ -1128,27 +1128,53 @@ impl Gpt2Attention {
                             }
                         }
                     } else {
-                        // CPU fallback
-                        for b in 0..batch_size {
-                            for h in 0..n_heads {
+                        // CPU fallback with parallel processing
+                        use scirs2_core::parallel_ops::*;
+
+                        let indices: Vec<(usize, usize)> = (0..batch_size)
+                            .flat_map(|b| (0..n_heads).map(move |h| (b, h)))
+                            .collect();
+
+                        // Compute scores in parallel
+                        let score_results: Vec<((usize, usize), ArrayD<f32>)> = indices
+                            .par_iter()
+                            .map(|&(b, h)| {
                                 let q_head = q.slice(s![b, h, .., ..]);
                                 let k_head_t = k_t.slice(s![b, h, .., ..]);
                                 let score = q_head.dot(&k_head_t);
-                                scores.slice_mut(s![b, h, .., ..]).assign(&score);
-                            }
+                                ((b, h), score.into_dyn())
+                            })
+                            .collect();
+
+                        // Assign results sequentially (fast, no contention)
+                        for ((b, h), score_arr) in score_results {
+                            scores.slice_mut(s![b, h, .., ..]).assign(&score_arr);
                         }
                     }
                 }
                 #[cfg(not(feature = "metal"))]
                 {
-                    // CPU fallback when Metal not available
-                    for b in 0..batch_size {
-                        for h in 0..n_heads {
+                    // CPU fallback when Metal not available (with parallel processing)
+                    use scirs2_core::parallel_ops::*;
+
+                    let indices: Vec<(usize, usize)> = (0..batch_size)
+                        .flat_map(|b| (0..n_heads).map(move |h| (b, h)))
+                        .collect();
+
+                    // Compute scores in parallel
+                    let score_results: Vec<((usize, usize), ArrayD<f32>)> = indices
+                        .par_iter()
+                        .map(|&(b, h)| {
                             let q_head = q.slice(s![b, h, .., ..]);
                             let k_head_t = k_t.slice(s![b, h, .., ..]);
                             let score = q_head.dot(&k_head_t);
-                            scores.slice_mut(s![b, h, .., ..]).assign(&score);
-                        }
+                            ((b, h), score.into_dyn())
+                        })
+                        .collect();
+
+                    // Assign results sequentially (fast, no contention)
+                    for ((b, h), score_arr) in score_results {
+                        scores.slice_mut(s![b, h, .., ..]).assign(&score_arr);
                     }
                 }
 
@@ -1221,28 +1247,44 @@ impl Gpt2Attention {
                             }
                         }
                     } else {
-                        // CPU fallback
-                        for b in 0..batch_size {
-                            for h in 0..n_heads {
-                                let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
-                                let v_head = v.slice(s![b, h, .., ..]);
-                                let out = attn_probs_head.dot(&v_head);
-                                output.slice_mut(s![b, h, .., ..]).assign(&out);
-                            }
-                        }
+                        // CPU fallback with parallel processing
+                        use scirs2_core::parallel_ops::*;
+                        use std::sync::Mutex;
+
+                        let output_mutex = Mutex::new(&mut output);
+                        let indices: Vec<(usize, usize)> = (0..batch_size)
+                            .flat_map(|b| (0..n_heads).map(move |h| (b, h)))
+                            .collect();
+
+                        indices.par_iter().for_each(|&(b, h)| {
+                            let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                            let v_head = v.slice(s![b, h, .., ..]);
+                            let out = attn_probs_head.dot(&v_head);
+
+                            let mut output_guard = output_mutex.lock().unwrap();
+                            output_guard.slice_mut(s![b, h, .., ..]).assign(&out);
+                        });
                     }
                 }
                 #[cfg(not(feature = "metal"))]
                 {
-                    // CPU fallback when Metal not available
-                    for b in 0..batch_size {
-                        for h in 0..n_heads {
-                            let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
-                            let v_head = v.slice(s![b, h, .., ..]);
-                            let out = attn_probs_head.dot(&v_head);
-                            output.slice_mut(s![b, h, .., ..]).assign(&out);
-                        }
-                    }
+                    // CPU fallback when Metal not available (with parallel processing)
+                    use scirs2_core::parallel_ops::*;
+                    use std::sync::Mutex;
+
+                    let output_mutex = Mutex::new(&mut output);
+                    let indices: Vec<(usize, usize)> = (0..batch_size)
+                        .flat_map(|b| (0..n_heads).map(move |h| (b, h)))
+                        .collect();
+
+                    indices.par_iter().for_each(|&(b, h)| {
+                        let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                        let v_head = v.slice(s![b, h, .., ..]);
+                        let out = attn_probs_head.dot(&v_head);
+
+                        let mut output_guard = output_mutex.lock().unwrap();
+                        output_guard.slice_mut(s![b, h, .., ..]).assign(&out);
+                    });
                 }
 
                 // Transpose back to [batch, seq_len, n_heads, head_dim]
