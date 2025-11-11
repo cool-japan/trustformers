@@ -121,6 +121,27 @@ impl LayerNorm {
 
         Ok(())
     }
+
+    /// Pre-upload layer parameters to CUDA GPU for zero-transfer pipeline
+    /// This converts weight and bias to CUDA tensors for GPU-resident computation
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &crate::device::Device) -> Result<()> {
+        use crate::device::Device;
+
+        if !matches!(device, Device::CUDA(_)) {
+            return Ok(());
+        }
+
+        // Update device setting
+        self.device = *device;
+
+        // Convert weight and bias to CUDA tensors
+        // LayerNorm has a GPU-to-GPU kernel that needs CUDA weight/bias
+        self.weight = self.weight.to_device_enum(device)?;
+        self.bias = self.bias.to_device_enum(device)?;
+
+        Ok(())
+    }
 }
 
 impl Layer for LayerNorm {
@@ -170,6 +191,129 @@ impl Layer for LayerNorm {
 
                 // Fallback: convert to CPU and process (avoid recursion)
                 // This handles 3D Metal tensors that can't use 2D GPU kernel
+                let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
+                let cpu_weight = self.weight.to_device_enum(&crate::device::Device::CPU)?;
+                let cpu_bias = self.bias.to_device_enum(&crate::device::Device::CPU)?;
+
+                // Extract F32 arrays
+                let input_arr = match cpu_input {
+                    Tensor::F32(arr) => arr,
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Failed to convert input to F32",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+                let weight_arr = match cpu_weight {
+                    Tensor::F32(arr) => arr,
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Failed to convert weight to F32",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+                let bias_arr = match cpu_bias {
+                    Tensor::F32(arr) => arr,
+                    _ => {
+                        return Err(TrustformersError::tensor_op_error(
+                            "Failed to convert bias to F32",
+                            "LayerNorm::forward",
+                        ))
+                    },
+                };
+
+                // Process on CPU directly (inline to avoid recursion)
+                let ndim = input_arr.ndim();
+                let norm_ndim = self.normalized_shape.len();
+                let axes: Vec<usize> = ((ndim - norm_ndim)..ndim).collect();
+
+                // Compute mean
+                let mut mean = input_arr.clone();
+                for &axis in axes.iter().rev() {
+                    mean = mean.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                }
+
+                // Compute variance
+                let diff = &input_arr - &mean;
+                let mut var = (&diff * &diff).to_owned();
+                for &axis in axes.iter().rev() {
+                    var = var.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                }
+
+                // Normalize
+                let normalized = &diff / (var + self.eps).mapv(f32::sqrt);
+
+                // Broadcast weight and bias
+                let mut broadcast_shape = vec![1; ndim];
+                for (i, &dim) in self.normalized_shape.iter().enumerate() {
+                    broadcast_shape[ndim - norm_ndim + i] = dim;
+                }
+
+                let w_broadcast = weight_arr
+                    .view()
+                    .into_shape_with_order(IxDyn(&broadcast_shape))
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to broadcast weight: {}", e))
+                    })?;
+                let b_broadcast = bias_arr
+                    .view()
+                    .into_shape_with_order(IxDyn(&broadcast_shape))
+                    .map_err(|e| {
+                        TrustformersError::shape_error(format!("Failed to broadcast bias: {}", e))
+                    })?;
+
+                let output = &normalized * &w_broadcast + &b_broadcast;
+                return Ok(Tensor::F32(output));
+            },
+
+            // GPU-resident CUDA tensor - process on GPU
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(cuda_data) => {
+                use crate::gpu_ops::cuda::get_cuda_backend;
+                use crate::tensor::CudaTensorData;
+
+                if cuda_data.shape.len() == 2 && self.normalized_shape.len() == 1 {
+                    let device_id = if let Device::CUDA(id) = self.device {
+                        id
+                    } else {
+                        0
+                    };
+                    let backend = get_cuda_backend(device_id)?;
+                    let shape = &cuda_data.shape;
+                    let seq_len = shape[0];
+                    let hidden_size = shape[1];
+
+                    if hidden_size == self.normalized_shape[0] {
+                        // Get weight and bias buffer IDs
+                        match (&self.weight, &self.bias) {
+                            (Tensor::CUDA(w_data), Tensor::CUDA(b_data)) => {
+                                // All on GPU - zero transfers!
+                                let output_buffer_id = backend.layernorm_gpu_to_gpu(
+                                    &cuda_data.buffer_id,
+                                    &w_data.buffer_id,
+                                    &b_data.buffer_id,
+                                    seq_len,
+                                    hidden_size,
+                                    self.eps,
+                                )?;
+
+                                return Ok(Tensor::CUDA(CudaTensorData {
+                                    buffer_id: output_buffer_id,
+                                    shape: cuda_data.shape.clone(),
+                                    dtype: cuda_data.dtype,
+                                }));
+                            },
+                            _ => {
+                                // Weight/bias not on GPU - fallback to CPU
+                            },
+                        }
+                    }
+                }
+
+                // Fallback: convert to CPU and process (avoid recursion)
+                // This handles 3D CUDA tensors that can't use 2D GPU kernel
                 let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
                 let cpu_weight = self.weight.to_device_enum(&crate::device::Device::CPU)?;
                 let cpu_bias = self.bias.to_device_enum(&crate::device::Device::CPU)?;
@@ -366,6 +510,19 @@ impl Layer for LayerNorm {
                             },
                         }
                     },
+                    #[cfg(feature = "cuda")]
+                    Tensor::CUDA(_) => {
+                        let cpu_weight = self.weight.to_device_enum(&crate::device::Device::CPU)?;
+                        match cpu_weight {
+                            Tensor::F32(w) => w,
+                            _ => {
+                                return Err(TrustformersError::tensor_op_error(
+                                    "Failed to convert CUDA weight to F32",
+                                    "LayerNorm::forward",
+                                ))
+                            },
+                        }
+                    },
                     _ => {
                         return Err(TrustformersError::tensor_op_error(
                             "Unsupported weight type",
@@ -384,6 +541,19 @@ impl Layer for LayerNorm {
                             _ => {
                                 return Err(TrustformersError::tensor_op_error(
                                     "Failed to convert bias to F32",
+                                    "LayerNorm::forward",
+                                ))
+                            },
+                        }
+                    },
+                    #[cfg(feature = "cuda")]
+                    Tensor::CUDA(_) => {
+                        let cpu_bias = self.bias.to_device_enum(&crate::device::Device::CPU)?;
+                        match cpu_bias {
+                            Tensor::F32(b) => b,
+                            _ => {
+                                return Err(TrustformersError::tensor_op_error(
+                                    "Failed to convert CUDA bias to F32",
                                     "LayerNorm::forward",
                                 ))
                             },

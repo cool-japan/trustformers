@@ -23,6 +23,28 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             }))
         },
 
+        // GPU-resident CUDA tensor - process directly on GPU (ZERO TRANSFERS!)
+        #[cfg(feature = "cuda")]
+        Tensor::CUDA(cuda_data) => {
+            use crate::device::Device;
+            use crate::gpu_ops::cuda::get_cuda_backend;
+            use crate::tensor::CudaTensorData;
+
+            // Get device ID (default to 0)
+            let device_id = 0; // TODO: Get from tensor metadata
+            let backend = get_cuda_backend(device_id)?;
+            let size: usize = cuda_data.shape.iter().product();
+
+            // Execute GELU GPU-to-GPU (NO CPU transfers!)
+            let output_buffer_id = backend.gelu_gpu_to_gpu(&cuda_data.buffer_id, size)?;
+
+            Ok(Tensor::CUDA(CudaTensorData {
+                buffer_id: output_buffer_id,
+                shape: cuda_data.shape.clone(),
+                dtype: cuda_data.dtype,
+            }))
+        },
+
         Tensor::F32(arr) => {
             // Try Metal GPU acceleration if available
             #[cfg(feature = "metal")]

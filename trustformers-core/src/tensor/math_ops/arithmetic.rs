@@ -120,6 +120,18 @@ impl Tensor {
                 let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
                 self.add(&cpu_other)
             },
+            #[cfg(feature = "cuda")]
+            (Tensor::CUDA(_), _) => {
+                // Convert CUDA tensor to CPU, then perform operation
+                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_self.add(other)
+            },
+            #[cfg(feature = "cuda")]
+            (_, Tensor::CUDA(_)) => {
+                // Convert CUDA tensor to CPU, then perform operation
+                let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
+                self.add(&cpu_other)
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Addition not supported for these tensor types",
                 "add",

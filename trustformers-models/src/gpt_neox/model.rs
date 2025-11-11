@@ -54,6 +54,16 @@ impl GPTNeoXMLP {
         self.dense_4h_to_h.weights_to_gpu(device)?;
         Ok(())
     }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
+        self.dense_h_to_4h.weights_to_gpu_cuda(device)?;
+        self.dense_4h_to_h.weights_to_gpu_cuda(device)?;
+        Ok(())
+    }
 }
 
 impl Layer for GPTNeoXMLP {
@@ -132,6 +142,16 @@ impl GPTNeoXAttention {
         self.dense.weights_to_gpu(device)?;
         Ok(())
     }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
+        self.query_key_value.weights_to_gpu_cuda(device)?;
+        self.dense.weights_to_gpu_cuda(device)?;
+        Ok(())
+    }
 }
 
 impl Layer for GPTNeoXAttention {
@@ -141,15 +161,22 @@ impl Layer for GPTNeoXAttention {
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         use scirs2_core::ndarray::{s, Array2};
 
-        // Temporary fallback: Convert Metal tensors to F32
-        // TODO: Implement full Tensor::Metal support in Attention
+        // Temporary fallback: Convert Metal/CUDA tensors to F32
+        // TODO: Implement full Tensor::Metal/CUDA support in Attention
+        // Complex operations (QKV split, RoPE) are CPU-friendly
         #[cfg(feature = "metal")]
         let input = match &input {
             Tensor::Metal(_) => input.to_device_enum(&trustformers_core::device::Device::CPU)?,
             _ => input,
         };
 
-        #[cfg(not(feature = "metal"))]
+        #[cfg(feature = "cuda")]
+        let input = match &input {
+            Tensor::CUDA(_) => input.to_device_enum(&trustformers_core::device::Device::CPU)?,
+            _ => input,
+        };
+
+        #[cfg(not(any(feature = "metal", feature = "cuda")))]
         let input = input;
 
         let shape = input.shape();
@@ -404,6 +431,18 @@ impl GPTNeoXLayer {
         self.mlp.weights_to_gpu(device)?;
         Ok(())
     }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
+        self.input_layernorm.weights_to_gpu_cuda(device)?;
+        self.attention.weights_to_gpu_cuda(device)?;
+        self.post_attention_layernorm.weights_to_gpu_cuda(device)?;
+        self.mlp.weights_to_gpu_cuda(device)?;
+        Ok(())
+    }
 }
 
 impl Layer for GPTNeoXLayer {
@@ -415,25 +454,50 @@ impl Layer for GPTNeoXLayer {
             // Parallel: attn and mlp computed in parallel with different layer norms
             // Formula: x = x + attn(ln1(x)) + mlp(ln2(x))
             let ln1_out = self.input_layernorm.forward(input.clone())?;
-            let attn_out = self.attention.forward(ln1_out)?;
+            let mut attn_out = self.attention.forward(ln1_out)?;
+
+            // Convert attention output back to GPU if input is on GPU
+            // (attention converts to CPU for complex ops)
+            #[cfg(feature = "cuda")]
+            if matches!(input, Tensor::CUDA(_)) {
+                attn_out = attn_out.to_device_enum(&self.input_layernorm.device())?;
+            }
 
             let ln2_out = self.post_attention_layernorm.forward(input.clone())?;
-            let mlp_out = self.mlp.forward(ln2_out)?;
+            let mut mlp_out = self.mlp.forward(ln2_out)?;
+
+            // Convert MLP output back to GPU if needed
+            #[cfg(feature = "cuda")]
+            if matches!(input, Tensor::CUDA(_)) {
+                mlp_out = mlp_out.to_device_enum(&self.input_layernorm.device())?;
+            }
 
             // Add both outputs to residual: x + attn + mlp
-            // Use Tensor::add() to support mixed types (F32 + Metal)
+            // Use Tensor::add() to support mixed types (F32 + CUDA)
             let temp = input.add(&attn_out)?;
             temp.add(&mlp_out)
         } else {
             // Sequential: attn first, then mlp
             let ln1_out = self.input_layernorm.forward(input.clone())?;
-            let attn_out = self.attention.forward(ln1_out)?;
+            let mut attn_out = self.attention.forward(ln1_out)?;
+
+            // Convert attention output back to GPU if input is on GPU
+            #[cfg(feature = "cuda")]
+            if matches!(input, Tensor::CUDA(_)) {
+                attn_out = attn_out.to_device_enum(&self.input_layernorm.device())?;
+            }
 
             // Use Tensor::add() to support mixed types
             let residual = input.add(&attn_out)?;
 
             let ln2_out = self.post_attention_layernorm.forward(residual.clone())?;
-            let mlp_out = self.mlp.forward(ln2_out)?;
+            let mut mlp_out = self.mlp.forward(ln2_out)?;
+
+            // Convert MLP output back to GPU if needed
+            #[cfg(feature = "cuda")]
+            if matches!(input, Tensor::CUDA(_)) {
+                mlp_out = mlp_out.to_device_enum(&self.input_layernorm.device())?;
+            }
 
             // Use Tensor::add() to support mixed types
             residual.add(&mlp_out)
@@ -504,6 +568,21 @@ impl GPTNeoXModel {
             layer.weights_to_gpu(device)?;
         }
         self.final_layer_norm.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
+        // Convert all transformer layers
+        for layer in &mut self.layers {
+            layer.weights_to_gpu_cuda(device)?;
+        }
+        // Upload final layer norm to GPU
+        self.final_layer_norm.weights_to_gpu_cuda(device)?;
+        println!("✓ GPTNeoXModel: All layer weights cached on CUDA GPU");
         Ok(())
     }
 
@@ -643,6 +722,18 @@ impl Model for GPTNeoXModel {
         // Convert token IDs to embeddings
         let mut hidden_states = self.embed_in.forward(input)?;
 
+        // Convert embeddings to CUDA if layers are using CUDA
+        // This enables GPU-to-GPU pipeline (CRITICAL for performance!)
+        #[cfg(feature = "cuda")]
+        if !self.layers.is_empty() {
+            if let Some(first_layer) = self.layers.first() {
+                if matches!(first_layer.attention.query_key_value.device(), Device::CUDA(_)) {
+                    let device = first_layer.attention.query_key_value.device();
+                    hidden_states = hidden_states.to_device_enum(&device)?;
+                }
+            }
+        }
+
         // Pass through all layers
         for layer in &self.layers {
             hidden_states = layer.forward(hidden_states)?;
@@ -707,6 +798,17 @@ impl GPTNeoXForCausalLM {
         self.gpt_neox.weights_to_gpu(device)?;
         self.embed_out.weights_to_gpu(device)?;
         println!("✓ All model weights uploaded to GPU");
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(
+        &mut self,
+        device: &trustformers_core::device::Device,
+    ) -> trustformers_core::errors::Result<()> {
+        self.gpt_neox.weights_to_gpu_cuda(device)?;
+        self.embed_out.weights_to_gpu_cuda(device)?;
+        println!("✓ All model weights uploaded to CUDA GPU");
         Ok(())
     }
 

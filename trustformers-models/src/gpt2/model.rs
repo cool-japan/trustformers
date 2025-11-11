@@ -108,6 +108,21 @@ impl Gpt2Model {
         Ok(())
     }
 
+    /// Upload model weights to GPU (CUDA)
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::CUDA(_)) {
+            return Ok(());
+        }
+        self.device = *device;
+        for block in &mut self.h {
+            block.weights_to_gpu_cuda(device)?;
+        }
+        self.ln_f.weights_to_gpu_cuda(device)?;
+        println!("✓ Gpt2Model: All layer weights cached on CUDA GPU ({} blocks)", self.h.len());
+        Ok(())
+    }
+
     /// Load weights from a WeightReader (e.g., SafeTensors)
     pub fn load_weights_from_reader(&mut self, reader: &mut dyn WeightReader) -> Result<()> {
         // Detect if weights have "transformer." prefix (HuggingFace format)
@@ -245,6 +260,13 @@ impl Gpt2Model {
             }
         }
 
+        #[cfg(feature = "cuda")]
+        {
+            if matches!(self.device, Device::CUDA(_)) {
+                hidden_states = hidden_states.to_device_enum(&self.device)?;
+            }
+        }
+
         // Create causal mask for attention
         let causal_mask = create_causal_mask(seq_len)?;
 
@@ -349,6 +371,49 @@ impl Gpt2LMHeadModel {
         }
         self.transformer.weights_to_gpu(device)?;
         self.lm_head.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    /// Upload model weights to GPU (CUDA)
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::CUDA(_)) {
+            return Ok(());
+        }
+        self.transformer.weights_to_gpu_cuda(device)?;
+        self.lm_head.weights_to_gpu_cuda(device)?;
+        println!("✓ Gpt2LMHeadModel: All weights uploaded to CUDA GPU");
+        Ok(())
+    }
+
+    /// Load model weights from HuggingFace format
+    pub fn load_from_path(&mut self, model_path: impl AsRef<std::path::Path>) -> Result<()> {
+        use crate::weight_loading::auto_create_loader;
+
+        let model_path = model_path.as_ref();
+
+        let mut loader = auto_create_loader(model_path, None)?;
+
+        // Load transformer weights
+        self.transformer.load_weights_from_reader(&mut *loader)?;
+
+        // Load LM head weights
+        // Try with "lm_head" first, then fallback to "transformer.wte" (weight tying)
+        match loader.load_tensor("lm_head.weight") {
+            Ok(lm_head_weight) => {
+                self.lm_head.set_weight(lm_head_weight)?;
+            },
+            Err(_) => {
+                // Weight tying: LM head shares weights with token embeddings
+                if let Ok(wte_weight) = loader.load_tensor("transformer.wte.weight") {
+                    self.lm_head.set_weight(wte_weight)?;
+                } else if let Ok(wte_weight) = loader.load_tensor("wte.weight") {
+                    self.lm_head.set_weight(wte_weight)?;
+                }
+            },
+        }
+
+        loader.close()?;
         Ok(())
     }
 
@@ -834,6 +899,18 @@ impl Gpt2Block {
         Ok(())
     }
 
+    #[cfg(feature = "cuda")]
+    fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::CUDA(_)) {
+            return Ok(());
+        }
+        self.ln_1.weights_to_gpu_cuda(device)?;
+        self.attn.weights_to_gpu_cuda(device)?;
+        self.ln_2.weights_to_gpu_cuda(device)?;
+        self.mlp.weights_to_gpu_cuda(device)?;
+        Ok(())
+    }
+
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
         // Load layer norm weights
         self.ln_1.set_weight(reader.read_tensor(&format!("{}.ln_1.weight", prefix))?)?;
@@ -944,6 +1021,16 @@ impl Gpt2Attention {
         }
         self.c_attn.weights_to_gpu(device)?;
         self.c_proj.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::CUDA(_)) {
+            return Ok(());
+        }
+        self.c_attn.weights_to_gpu_cuda(device)?;
+        self.c_proj.weights_to_gpu_cuda(device)?;
         Ok(())
     }
 
@@ -1424,6 +1511,16 @@ impl Gpt2MLP {
         }
         self.c_fc.weights_to_gpu(device)?;
         self.c_proj.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::CUDA(_)) {
+            return Ok(());
+        }
+        self.c_fc.weights_to_gpu_cuda(device)?;
+        self.c_proj.weights_to_gpu_cuda(device)?;
         Ok(())
     }
 
