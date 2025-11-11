@@ -1082,8 +1082,10 @@ impl Gpt2Attention {
                 #[cfg(feature = "metal")]
                 {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
-                    // Try GPU acceleration if available
-                    let use_gpu = get_metal_backend().is_ok();
+                    // Only use GPU for small models (overhead from transfers dominates for large models)
+                    // Threshold: <= 12 heads is acceptable (GPT-2 124M)
+                    // rinna-1b has 16 heads with too much transfer overhead
+                    let use_gpu = get_metal_backend().is_ok() && n_heads <= 12;
                     if use_gpu {
                         if let Ok(backend) = get_metal_backend() {
                             for b in 0..batch_size {
@@ -1175,8 +1177,8 @@ impl Gpt2Attention {
                 #[cfg(feature = "metal")]
                 {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
-                    // Try GPU acceleration if available
-                    let use_gpu = get_metal_backend().is_ok();
+                    // Only use GPU for small models (same threshold as Q*K^T)
+                    let use_gpu = get_metal_backend().is_ok() && n_heads <= 12;
                     if use_gpu {
                         if let Ok(backend) = get_metal_backend() {
                             for b in 0..batch_size {
