@@ -11,15 +11,22 @@ use crate::tensor::Tensor;
 use std::sync::{Arc, OnceLock};
 
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-use cudarc::driver::{CudaDevice, CudaSlice, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaContext, CudaSlice, CudaStream, LaunchConfig};
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+use std::collections::HashMap;
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+use std::sync::Mutex;
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 use cudarc::nvrtc::compile_ptx;
 
 /// Real CUDA implementation with hardware bindings
 pub struct CudaImpl {
-    /// CUDA device handle
+    /// CUDA context
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-    device: Arc<CudaDevice>,
+    context: Arc<CudaContext>,
+    /// CUDA stream
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    stream: Arc<CudaStream>,
     /// Compiled kernel cache
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     kernel_cache: Arc<Mutex<HashMap<String, CudaKernel>>>,
@@ -80,15 +87,18 @@ static CUDA_INSTANCE: OnceLock<Arc<CudaImpl>> = OnceLock::new();
 impl CudaImpl {
     /// Initialize CUDA with the first available device
     pub fn new() -> Result<Self> {
-        let device = CudaDevice::new(0).map_err(|e| {
+        let context = CudaContext::new(0).map_err(|e| {
             TrustformersError::hardware_error(
-                &format!("Failed to initialize CUDA device: {}", e),
+                &format!("Failed to initialize CUDA context: {}", e),
                 "cuda_init",
             )
         })?;
 
+        let stream = context.default_stream();
+
         Ok(Self {
-            device,
+            context,
+            stream,
             kernel_cache: Arc::new(Mutex::new(HashMap::new())),
             memory_pool: Arc::new(Mutex::new(MemoryPool::new())),
         })

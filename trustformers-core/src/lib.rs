@@ -22,9 +22,13 @@ pub mod export;
 pub mod generation;
 pub mod gpu;
 #[cfg(feature = "cuda")]
+// Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
+#[cfg(not(feature = "cuda"))]
 pub mod gpu_accelerated;
 pub mod gpu_ops;
 pub mod hardware;
+// Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
+#[cfg(not(feature = "cuda"))]
 pub mod hardware_acceleration;
 pub mod kernel_fusion;
 pub mod kernel_tuning;
@@ -157,7 +161,7 @@ pub use generation::{
     KVCache,
     // SpeculativeDecoder, TextGenerator,  // Temporarily disabled due to missing modules
 };
-#[cfg(feature = "cuda")]
+#[cfg(not(feature = "cuda"))]
 pub use gpu_accelerated::{GpuAcceleratedOps, GpuOpsConfig, GpuPrecision};
 pub use hardware::{
     AsicBackend, AsicDevice, AsicOperationSet, DataType, HardwareBackend, HardwareCapabilities,
@@ -214,6 +218,7 @@ pub use hardware::asic::{
     AsicDeviceConfig, AsicDriver, AsicDriverFactory, AsicMemoryConfig, AsicPerformanceMonitor,
     AsicSpec, AsicType, AsicVendor, CacheConfig as AsicCacheConfig,
 };
+#[cfg(not(feature = "cuda"))]
 pub use hardware_acceleration::{
     api as hardware_acceleration_api, AccelerationBackend, AccelerationConfig, AccelerationStats,
     HardwareAccelerator,

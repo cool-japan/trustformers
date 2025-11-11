@@ -66,6 +66,13 @@ metal = { version = "0.32", optional = true }
 mpsgraph = { version = "0.2", optional = true }
 objc2 = { version = "0.6", optional = true }
 
+# WebGPU backend (cross-platform)
+wgpu = { version = "27.0", optional = true }
+pollster = { version = "0.4", optional = true }
+
+# OpenCL backend (universal GPU support)
+opencl3 = { version = "0.10", optional = true }
+
 [dev-dependencies]
 rstest.workspace = true
 approx.workspace = true
@@ -87,7 +94,8 @@ llvm = []
 cranelift = []
 vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]
 metal = ["dep:metal", "dep:mpsgraph", "dep:objc2"]
-opencl = []
+wgpu_backend = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+opencl = ["dep:opencl3"]
 xla = []
 tpu = []
 oneapi = []
@@ -110,4 +118,4 @@ path = "src/bin/naming_checker.rs"
 # Platform-specific dependencies
 # CUDA is only supported on Linux and Windows (not macOS)
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-cudarc = { version = "0.17", optional = true, features = ["nvrtc", "cuda-12060"] }
+cudarc = { version = "0.17", optional = true, features = ["nvrtc", "cuda-12000"] }

@@ -17,7 +17,7 @@ use crate::errors::{Result, TrustformersError};
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 pub mod fused_layernorm_linear {
     use super::*;
-    use cudarc::driver::{CudaDevice, LaunchAsync, LaunchConfig};
+    use cudarc::driver::{CudaContext, LaunchConfig};
 
     const PTX_KERNEL: &str = r#"
         .version 7.0
@@ -265,7 +265,7 @@ pub mod fused_layernorm_linear {
 
     /// Execute fused LayerNorm + Linear operation on CUDA
     pub fn execute(
-        device: &CudaDevice,
+        device: &CudaContext,
         input: &[f32],
         gamma: &[f32],
         beta: &[f32],
@@ -393,7 +393,7 @@ pub mod fused_layernorm_linear {
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 pub mod fused_attention_softmax {
     use super::*;
-    use cudarc::driver::{CudaDevice, LaunchAsync, LaunchConfig};
+    use cudarc::driver::{CudaContext, LaunchConfig};
 
     const PTX_KERNEL: &str = r#"
         .version 7.0
@@ -570,7 +570,7 @@ pub mod fused_attention_softmax {
 
     /// Execute fused attention softmax on CUDA
     pub fn execute(
-        device: &CudaDevice,
+        device: &CudaContext,
         input: &[f32],
         mask: Option<&[f32]>,
         batch_size: usize,
@@ -676,10 +676,10 @@ mod tests {
     #[test]
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     fn test_fused_layernorm_linear() {
-        use cudarc::driver::CudaDevice;
+        use cudarc::driver::CudaContext;
 
         // Skip if no CUDA device
-        let device = match CudaDevice::new(0) {
+        let device = match CudaContext::new(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("Skipping test: no CUDA device");

@@ -9,11 +9,13 @@ pub mod rope;
 pub mod simd;
 pub mod simd_ops;
 
-#[cfg(feature = "cuda")]
-pub mod cuda_kernels;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub mod cuda_kernels;
 
-#[cfg(feature = "cuda")]
-pub mod cuda_impl;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub mod cuda_impl;
 
 #[cfg(feature = "rocm")]
 pub mod rocm_kernels;
@@ -54,11 +56,13 @@ pub use simd::CpuFeatures as SIMDCpuFeatures;
 pub use simd::{SIMDLayerNorm, SIMDMatrixOps, SIMDSoftmax};
 pub use simd_ops::CpuFeatures;
 
-#[cfg(feature = "cuda")]
-pub use cuda_kernels::*;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub use cuda_kernels::*;
 
-#[cfg(feature = "cuda")]
-pub use cuda_impl::*;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub use cuda_impl::*;
 
 #[cfg(feature = "rocm")]
 pub use rocm_kernels::*;
