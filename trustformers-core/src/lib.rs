@@ -21,7 +21,6 @@ pub mod evaluation;
 pub mod export;
 pub mod generation;
 pub mod gpu;
-#[cfg(feature = "cuda")]
 // Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
 #[cfg(not(feature = "cuda"))]
 pub mod gpu_accelerated;
