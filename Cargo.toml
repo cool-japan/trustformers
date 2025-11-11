@@ -168,10 +168,10 @@ vulkano = "0.35.2"
 vulkano-shaders = "0.35.0"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 
-# SciRS2 dependencies - using rc.2 from crates.io
+# SciRS2 dependencies - using local path for development
 # Note: "metal" feature removed from default features as it's Apple-specific
 # Individual crates should enable it conditionally using target-specific dependencies
-scirs2-core = { version = "0.1.0-rc.2", features = [
+scirs2-core = { path = "../scirs/scirs2-core", features = [
     "array",
     "simd",
     "parallel",
@@ -182,7 +182,7 @@ scirs2-core = { version = "0.1.0-rc.2", features = [
     "gpu",     # GPU acceleration abstractions
     "metal"    # Metal Performance Shaders (macOS) - CRITICAL for performance
 ]}
-scirs2-linalg = "0.1.0-rc.2"
+scirs2-linalg = { path = "../scirs/scirs2-linalg" }
 
 [profile.release]
 lto = true
