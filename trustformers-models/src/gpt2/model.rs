@@ -160,6 +160,22 @@ impl Gpt2Model {
             }
         }
 
+        // Determine starting position based on cache state
+        let position_offset = if let Some(ref cache) = past_key_values {
+            // If cache exists and has keys, start from past sequence length
+            if let Some(ref first_layer_cache) = cache.layers.first() {
+                if let Some(Tensor::F32(ref past_k)) = first_layer_cache.key {
+                    past_k.shape()[1] as u32  // past_seq_len
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
         // Process embeddings for entire batch
         let mut batch_word_embeds = Vec::new();
         let mut batch_position_embeds = Vec::new();
@@ -172,7 +188,8 @@ impl Gpt2Model {
             let pos_ids: Vec<u32> = if let Some(pos_batch) = position_ids {
                 pos_batch[batch_idx].clone()
             } else {
-                (0..seq_len as u32).collect()
+                // Start from position_offset (for KV-cache continuation)
+                (position_offset..(position_offset + seq_len as u32)).collect()
             };
 
             // Get position embeddings for this sequence
@@ -530,10 +547,17 @@ impl Gpt2LMHeadModel {
     ) -> Result<Vec<u32>> {
         let mut generated = input_ids.clone();
         let mut cache = KVCache::new(self.transformer.config.n_layer);
+        let mut is_first_iteration = true;
 
         while generated.len() < max_length {
-            // Prepare input - only process new tokens after first iteration
-            let input_batch = vec![generated.clone()];
+            // Prepare input - only process new token after first iteration
+            let input_batch = if is_first_iteration {
+                // First iteration: process full prompt
+                vec![generated.clone()]
+            } else {
+                // Subsequent iterations: process only last generated token
+                vec![vec![*generated.last().unwrap()]]
+            };
 
             // Forward pass with cache
             let hidden_states =
@@ -541,6 +565,8 @@ impl Gpt2LMHeadModel {
 
             // Apply LM head
             let logits = self.lm_head.forward(hidden_states)?;
+
+            is_first_iteration = false;
 
             // Get logits for the last token
             let next_token = match &logits {
@@ -1052,14 +1078,60 @@ impl Gpt2Attention {
                 // Result: [batch, n_heads, q_seq_len, kv_seq_len]
                 let mut scores =
                     ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, q_seq_len, kv_seq_len]));
-                for b in 0..batch_size {
-                    for h in 0..n_heads {
-                        let q_head = q.slice(s![b, h, .., ..]);
-                        let k_head_t = k_t.slice(s![b, h, .., ..]);
-                        let score = q_head.dot(&k_head_t);
-                        scores.slice_mut(s![b, h, .., ..]).assign(&score);
+
+                #[cfg(feature = "metal")]
+                {
+                    use trustformers_core::gpu_ops::metal::get_metal_backend;
+                    // Try GPU acceleration if available
+                    let use_gpu = get_metal_backend().is_ok();
+                    if use_gpu {
+                        if let Ok(backend) = get_metal_backend() {
+                            for b in 0..batch_size {
+                                for h in 0..n_heads {
+                                    let q_head = q.slice(s![b, h, .., ..]);
+                                    let k_head_t = k_t.slice(s![b, h, .., ..]);
+
+                                    // Convert to contiguous arrays for GPU
+                                    let q_data: Vec<f32> = q_head.iter().cloned().collect();
+                                    let k_data: Vec<f32> = k_head_t.iter().cloned().collect();
+
+                                    // GPU matmul: Q(q_seq_len × head_dim) * K^T(head_dim × kv_seq_len)
+                                    let score_vec = backend.matmul_f32(&q_data, &k_data, q_seq_len, head_dim, kv_seq_len)?;
+
+                                    let score_array = ArrayD::from_shape_vec(
+                                        IxDyn(&[q_seq_len, kv_seq_len]),
+                                        score_vec
+                                    ).map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+
+                                    scores.slice_mut(s![b, h, .., ..]).assign(&score_array);
+                                }
+                            }
+                        }
+                    } else {
+                        // CPU fallback
+                        for b in 0..batch_size {
+                            for h in 0..n_heads {
+                                let q_head = q.slice(s![b, h, .., ..]);
+                                let k_head_t = k_t.slice(s![b, h, .., ..]);
+                                let score = q_head.dot(&k_head_t);
+                                scores.slice_mut(s![b, h, .., ..]).assign(&score);
+                            }
+                        }
                     }
                 }
+                #[cfg(not(feature = "metal"))]
+                {
+                    // CPU fallback when Metal not available
+                    for b in 0..batch_size {
+                        for h in 0..n_heads {
+                            let q_head = q.slice(s![b, h, .., ..]);
+                            let k_head_t = k_t.slice(s![b, h, .., ..]);
+                            let score = q_head.dot(&k_head_t);
+                            scores.slice_mut(s![b, h, .., ..]).assign(&score);
+                        }
+                    }
+                }
+
                 scores *= scale;
 
                 // Apply attention mask if provided
@@ -1099,12 +1171,57 @@ impl Gpt2Attention {
                 // Result: [batch, n_heads, q_seq_len, head_dim]
                 let mut output =
                     ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, q_seq_len, head_dim]));
-                for b in 0..batch_size {
-                    for h in 0..n_heads {
-                        let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
-                        let v_head = v.slice(s![b, h, .., ..]);
-                        let out = attn_probs_head.dot(&v_head);
-                        output.slice_mut(s![b, h, .., ..]).assign(&out);
+
+                #[cfg(feature = "metal")]
+                {
+                    use trustformers_core::gpu_ops::metal::get_metal_backend;
+                    // Try GPU acceleration if available
+                    let use_gpu = get_metal_backend().is_ok();
+                    if use_gpu {
+                        if let Ok(backend) = get_metal_backend() {
+                            for b in 0..batch_size {
+                                for h in 0..n_heads {
+                                    let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                                    let v_head = v.slice(s![b, h, .., ..]);
+
+                                    // Convert to contiguous arrays for GPU
+                                    let attn_data: Vec<f32> = attn_probs_head.iter().cloned().collect();
+                                    let v_data: Vec<f32> = v_head.iter().cloned().collect();
+
+                                    // GPU matmul: attn_probs(q_seq_len × kv_seq_len) * V(kv_seq_len × head_dim)
+                                    let out_vec = backend.matmul_f32(&attn_data, &v_data, q_seq_len, kv_seq_len, head_dim)?;
+
+                                    let out_array = ArrayD::from_shape_vec(
+                                        IxDyn(&[q_seq_len, head_dim]),
+                                        out_vec
+                                    ).map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+
+                                    output.slice_mut(s![b, h, .., ..]).assign(&out_array);
+                                }
+                            }
+                        }
+                    } else {
+                        // CPU fallback
+                        for b in 0..batch_size {
+                            for h in 0..n_heads {
+                                let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                                let v_head = v.slice(s![b, h, .., ..]);
+                                let out = attn_probs_head.dot(&v_head);
+                                output.slice_mut(s![b, h, .., ..]).assign(&out);
+                            }
+                        }
+                    }
+                }
+                #[cfg(not(feature = "metal"))]
+                {
+                    // CPU fallback when Metal not available
+                    for b in 0..batch_size {
+                        for h in 0..n_heads {
+                            let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                            let v_head = v.slice(s![b, h, .., ..]);
+                            let out = attn_probs_head.dot(&v_head);
+                            output.slice_mut(s![b, h, .., ..]).assign(&out);
+                        }
                     }
                 }
 
