@@ -159,6 +159,22 @@ impl MetalImpl {
                 output[index] = max(0.0f, input[index]);
             }
 
+            // GELU activation function
+            // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+            kernel void gelu_f32(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& size [[buffer(2)]],
+                uint index [[thread_position_in_grid]]
+            ) {
+                if (index >= size) return;
+                float x = input[index];
+                float x_cubed = x * x * x;
+                // sqrt(2/π) ≈ 0.7978845608
+                float inner = 0.7978845608f * (x + 0.044715f * x_cubed);
+                output[index] = 0.5f * x * (1.0f + tanh(inner));
+            }
+
             // Optimized softmax for attention mechanisms
             kernel void softmax_f32(
                 device const float* input [[buffer(0)]],
@@ -449,6 +465,65 @@ impl MetalImpl {
 
         // Convert result back to Tensor
         Tensor::from_metal_buffer(&result_buffer, &result_shape)
+    }
+
+    /// Execute GELU activation function using Metal kernel
+    ///
+    /// GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    ///
+    /// This is a GPU-accelerated elementwise operation optimized for Apple Silicon.
+    pub fn gelu(&self, input: &Tensor) -> Result<Tensor> {
+        let size = input.len();
+        let result_shape = input.shape().to_vec();
+
+        // Create Metal buffers
+        let input_buffer = input.to_metal_buffer(&self.device)?;
+        let output_buffer = self.device.new_buffer(
+            (size * std::mem::size_of::<f32>()) as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+
+        // Get compute function
+        let function = self.library.get_function("gelu_f32", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get gelu kernel: {}", e),
+                "MetalImpl::gelu",
+            )
+        })?;
+
+        let pipeline =
+            self.device.new_compute_pipeline_state_with_function(&function).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create compute pipeline: {}", e),
+                    "MetalImpl::gelu",
+                )
+            })?;
+
+        // Execute kernel
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(0, Some(&input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+        let size_u32 = size as u32;
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<u32>() as u64,
+            &size_u32 as *const u32 as *const std::ffi::c_void,
+        );
+
+        let thread_group_size = metal::MTLSize::new(256, 1, 1);
+        let thread_groups = metal::MTLSize::new(((size + 255) / 256) as u64, 1, 1);
+
+        encoder.dispatch_thread_groups(thread_groups, thread_group_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Convert result back to Tensor
+        Tensor::from_metal_buffer(&output_buffer, &result_shape)
     }
 
     /// Execute Flash Attention using custom Metal kernel

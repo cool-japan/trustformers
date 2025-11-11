@@ -109,6 +109,57 @@ impl Layer for LayerNorm {
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         match &input {
             Tensor::F32(arr) => {
+                // Try Metal GPU acceleration for 2D tensors (seq_len, hidden_size)
+                #[cfg(all(target_os = "macos", feature = "metal"))]
+                {
+                    use crate::gpu_ops::metal::get_metal_backend;
+                    if arr.ndim() == 2 && self.normalized_shape.len() == 1 {
+                        if let Ok(backend) = get_metal_backend() {
+                            let shape = arr.shape();
+                            let seq_len = shape[0];
+                            let hidden_size = shape[1];
+
+                            if hidden_size == self.normalized_shape[0] {
+                                // Convert tensors to slices
+                                let input_vec: Vec<f32> = arr.iter().copied().collect();
+
+                                match (&self.weight, &self.bias) {
+                                    (Tensor::F32(w_arr), Tensor::F32(b_arr)) => {
+                                        let weight_vec: Vec<f32> = w_arr.iter().copied().collect();
+                                        let bias_vec: Vec<f32> = b_arr.iter().copied().collect();
+
+                                        // Execute on GPU
+                                        if let Ok(output_vec) = backend.layernorm_f32(
+                                            &input_vec,
+                                            &weight_vec,
+                                            &bias_vec,
+                                            seq_len,
+                                            hidden_size,
+                                            self.eps,
+                                        ) {
+                                            // Convert back to tensor
+                                            use scirs2_core::ndarray::ArrayD;
+                                            let output_arr = ArrayD::from_shape_vec(
+                                                arr.raw_dim(),
+                                                output_vec,
+                                            )
+                                            .map_err(|e| {
+                                                TrustformersError::tensor_op_error(
+                                                    &format!("Failed to reshape LayerNorm result: {}", e),
+                                                    "LayerNorm::forward",
+                                                )
+                                            })?;
+                                            return Ok(Tensor::F32(output_arr));
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to CPU implementation
                 let ndim = arr.ndim();
                 let norm_ndim = self.normalized_shape.len();
 

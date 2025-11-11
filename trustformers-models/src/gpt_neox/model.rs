@@ -119,7 +119,7 @@ impl Layer for GPTNeoXAttention {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        use scirs2_core::ndarray::{s, Array2, Ix2};
+        use scirs2_core::ndarray::{s, Array2};
 
         let shape = input.shape();
         let seq_len = if shape.len() == 2 { shape[0] } else { shape[1] };
@@ -221,31 +221,86 @@ impl Layer for GPTNeoXAttention {
                     let k_head = k_reshaped.slice(s![.., h, ..]).to_owned();
                     let v_head = v_reshaped.slice(s![.., h, ..]).to_owned();
 
-                    // scores = Q @ K^T / sqrt(d_k)
-                    let k_t = k_head.t();
-                    let mut scores = q_head.dot(&k_t) / scale;
+                    let head_output: Array2<f32>;
 
-                    // Apply causal mask: position i can only attend to positions <= i
-                    for i in 0..seq_len {
-                        for j in (i + 1)..seq_len {
-                            scores[[i, j]] = f32::NEG_INFINITY;
+                    // Try Metal GPU acceleration for attention computation
+                    // DISABLED temporarily due to NaN issue - debugging needed
+                    #[cfg(all(target_os = "macos", feature = "metal", feature = "DISABLED"))]
+                    {
+                        use crate::gpu_ops::metal::get_metal_backend;
+                        let mut metal_success = false;
+
+                        if let Ok(backend) = get_metal_backend() {
+                            // Convert to vecs
+                            let q_vec: Vec<f32> = q_head.iter().copied().collect();
+                            let k_t = k_head.t();
+                            let k_t_vec: Vec<f32> = k_t.iter().copied().collect();
+                            let v_vec: Vec<f32> = v_head.iter().copied().collect();
+
+                            // Q@K^T on Metal: [seq_len, head_dim] @ [head_dim, seq_len] = [seq_len, seq_len]
+                            if let Ok(scores_vec) = backend.matmul_f32(&q_vec, &k_t_vec, seq_len, head_dim, seq_len) {
+                                // Scale scores
+                                let scores_scaled: Vec<f32> = scores_vec.iter().map(|&x| x / scale).collect();
+
+                                // Softmax with causal mask on Metal
+                                if let Ok(attn_weights_vec) = backend.softmax_causal_f32(&scores_scaled, seq_len) {
+                                    // Attn@V on Metal: [seq_len, seq_len] @ [seq_len, head_dim] = [seq_len, head_dim]
+                                    if let Ok(output_vec) = backend.matmul_f32(&attn_weights_vec, &v_vec, seq_len, seq_len, head_dim) {
+                                        // Convert back to Array2
+                                        if let Ok(output_arr) = Array2::from_shape_vec((seq_len, head_dim), output_vec) {
+                                            head_output = output_arr;
+                                            metal_success = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if !metal_success {
+                            // Fallback to CPU
+                            let k_t = k_head.t();
+                            let mut scores = q_head.dot(&k_t) / scale;
+                            for i in 0..seq_len {
+                                for j in (i + 1)..seq_len {
+                                    scores[[i, j]] = f32::NEG_INFINITY;
+                                }
+                            }
+                            let mut attn_weights = Array2::<f32>::zeros(scores.dim());
+                            for i in 0..seq_len {
+                                let row = scores.row(i);
+                                let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                                let exp_row: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
+                                let sum: f32 = exp_row.iter().sum();
+                                for (j, &val) in exp_row.iter().enumerate() {
+                                    attn_weights[[i, j]] = val / sum;
+                                }
+                            }
+                            head_output = attn_weights.dot(&v_head);
                         }
                     }
 
-                    // Softmax over last dimension
-                    let mut attn_weights = Array2::<f32>::zeros(scores.dim());
-                    for i in 0..seq_len {
-                        let row = scores.row(i);
-                        let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                        let exp_row: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
-                        let sum: f32 = exp_row.iter().sum();
-                        for (j, &val) in exp_row.iter().enumerate() {
-                            attn_weights[[i, j]] = val / sum;
+                    #[cfg(not(all(target_os = "macos", feature = "metal")))]
+                    {
+                        // CPU implementation
+                        let k_t = k_head.t();
+                        let mut scores = q_head.dot(&k_t) / scale;
+                        for i in 0..seq_len {
+                            for j in (i + 1)..seq_len {
+                                scores[[i, j]] = f32::NEG_INFINITY;
+                            }
                         }
+                        let mut attn_weights = Array2::<f32>::zeros(scores.dim());
+                        for i in 0..seq_len {
+                            let row = scores.row(i);
+                            let max_val = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+                            let exp_row: Vec<f32> = row.iter().map(|&x| (x - max_val).exp()).collect();
+                            let sum: f32 = exp_row.iter().sum();
+                            for (j, &val) in exp_row.iter().enumerate() {
+                                attn_weights[[i, j]] = val / sum;
+                            }
+                        }
+                        head_output = attn_weights.dot(&v_head);
                     }
-
-                    // Apply attention to values: attn_weights @ V
-                    let head_output = attn_weights.dot(&v_head);
 
                     // Place head output in the correct position
                     let start_idx = h * head_dim;

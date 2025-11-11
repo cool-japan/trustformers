@@ -74,14 +74,18 @@ impl BufferCache {
     }
 }
 
-/// Metal GPU backend for matrix multiplication
+/// Metal GPU backend for matrix multiplication and element-wise operations
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub struct MetalBackend {
     device: MetalDevice,
     command_queue: CommandQueue,
     buffer_cache: Arc<std::sync::Mutex<BufferCache>>,
-    // Cached compiled pipeline for matmul (avoid recompilation overhead)
+    // Cached compiled pipelines (avoid recompilation overhead)
     matmul_pipeline: Arc<metal::ComputePipelineState>,
+    gelu_pipeline: Arc<metal::ComputePipelineState>,
+    layernorm_pipeline: Arc<metal::ComputePipelineState>,
+    rope_pipeline: Arc<metal::ComputePipelineState>,
+    softmax_causal_pipeline: Arc<metal::ComputePipelineState>,
 }
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -94,7 +98,7 @@ impl MetalBackend {
 
         let command_queue = device.new_command_queue();
 
-        // Compile matmul shader ONCE during initialization (critical optimization!)
+        // Compile shaders ONCE during initialization (critical optimization!)
         let shader_source = r#"
             #include <metal_stdlib>
             using namespace metal;
@@ -119,6 +123,161 @@ impl MetalBackend {
                 }
                 c[row * N + col] = sum;
             }
+
+            // GELU activation: GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+            kernel void gelu(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& size [[buffer(2)]],
+                uint gid [[thread_position_in_grid]]
+            ) {
+                if (gid >= size) return;
+                float x = input[gid];
+                float x_cubed = x * x * x;
+                // sqrt(2/π) ≈ 0.7978845608
+                float inner = 0.7978845608f * (x + 0.044715f * x_cubed);
+                output[gid] = 0.5f * x * (1.0f + tanh(inner));
+            }
+
+            // RoPE (Rotary Position Embedding)
+            // Rotates pairs (i, i+D/2) for i in 0..D/2 where D is rotary_ndims
+            // Input/output: [seq_len, num_heads, head_dim]
+            kernel void rope(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& seq_len [[buffer(2)]],
+                constant uint& num_heads [[buffer(3)]],
+                constant uint& head_dim [[buffer(4)]],
+                constant uint& rotary_ndims [[buffer(5)]],
+                constant float& base [[buffer(6)]],
+                uint3 gid [[thread_position_in_grid]]
+            ) {
+                uint pos = gid.z;
+                uint h = gid.y;
+                uint i = gid.x;
+
+                if (pos >= seq_len || h >= num_heads || i >= (rotary_ndims / 2)) return;
+
+                uint j = i + (rotary_ndims / 2);
+
+                // Calculate rotation angle
+                float freq = 1.0f / pow(base, 2.0f * float(i) / float(rotary_ndims));
+                float angle = float(pos) * freq;
+                float cos_val = cos(angle);
+                float sin_val = sin(angle);
+
+                // Get input indices
+                uint idx_i = pos * (num_heads * head_dim) + h * head_dim + i;
+                uint idx_j = pos * (num_heads * head_dim) + h * head_dim + j;
+
+                // Apply rotation: (x_i, x_j) → (x_i*cos - x_j*sin, x_i*sin + x_j*cos)
+                float x_i = input[idx_i];
+                float x_j = input[idx_j];
+
+                output[idx_i] = x_i * cos_val - x_j * sin_val;
+                output[idx_j] = x_i * sin_val + x_j * cos_val;
+
+                // Copy non-rotated dimensions
+                if (i == 0) {
+                    for (uint k = rotary_ndims; k < head_dim; ++k) {
+                        uint idx_k = pos * (num_heads * head_dim) + h * head_dim + k;
+                        output[idx_k] = input[idx_k];
+                    }
+                }
+            }
+
+            // Softmax with causal mask for attention
+            // Input: [seq_len, seq_len] attention scores
+            // Output: [seq_len, seq_len] attention weights
+            // Applies causal mask: position i can only attend to j <= i
+            kernel void softmax_causal(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& seq_len [[buffer(2)]],
+                uint gid [[thread_position_in_grid]]
+            ) {
+                if (gid >= seq_len) return;
+
+                uint row = gid;
+                uint offset = row * seq_len;
+
+                // Find max for numerical stability (only consider j <= row for causal mask)
+                float max_val = -3.402823466e+38f;  // -FLT_MAX
+                for (uint j = 0; j <= row; ++j) {
+                    max_val = max(max_val, input[offset + j]);
+                }
+
+                // Handle edge case: if all values are -inf (shouldn't happen but be safe)
+                if (max_val < -1e38f) {
+                    for (uint j = 0; j < seq_len; ++j) {
+                        output[offset + j] = (j == 0) ? 1.0f : 0.0f;
+                    }
+                    return;
+                }
+
+                // Compute exp and sum
+                float sum = 0.0f;
+                for (uint j = 0; j <= row; ++j) {
+                    sum += exp(input[offset + j] - max_val);
+                }
+
+                // Handle degenerate case
+                if (sum < 1e-10f) {
+                    for (uint j = 0; j < seq_len; ++j) {
+                        output[offset + j] = (j == 0) ? 1.0f : 0.0f;
+                    }
+                    return;
+                }
+
+                // Normalize and apply causal mask
+                for (uint j = 0; j < seq_len; ++j) {
+                    if (j <= row) {
+                        output[offset + j] = exp(input[offset + j] - max_val) / sum;
+                    } else {
+                        output[offset + j] = 0.0f;  // Causal mask
+                    }
+                }
+            }
+
+            // LayerNorm: output = (x - mean) / sqrt(var + eps) * weight + bias
+            // Optimized for transformer layers: normalize over last dimension (hidden_size)
+            kernel void layernorm(
+                device const float* input [[buffer(0)]],
+                device const float* weight [[buffer(1)]],
+                device const float* bias [[buffer(2)]],
+                device float* output [[buffer(3)]],
+                constant uint& seq_len [[buffer(4)]],
+                constant uint& hidden_size [[buffer(5)]],
+                constant float& eps [[buffer(6)]],
+                uint gid [[thread_position_in_grid]]
+            ) {
+                if (gid >= seq_len) return;
+
+                // Each thread processes one sequence position
+                uint offset = gid * hidden_size;
+
+                // Compute mean
+                float sum = 0.0f;
+                for (uint i = 0; i < hidden_size; ++i) {
+                    sum += input[offset + i];
+                }
+                float mean = sum / float(hidden_size);
+
+                // Compute variance
+                float var_sum = 0.0f;
+                for (uint i = 0; i < hidden_size; ++i) {
+                    float diff = input[offset + i] - mean;
+                    var_sum += diff * diff;
+                }
+                float variance = var_sum / float(hidden_size);
+                float std_dev = sqrt(variance + eps);
+
+                // Normalize and apply affine transform
+                for (uint i = 0; i < hidden_size; ++i) {
+                    float normalized = (input[offset + i] - mean) / std_dev;
+                    output[offset + i] = normalized * weight[i] + bias[i];
+                }
+            }
         "#;
 
         let library = device
@@ -140,7 +299,71 @@ impl MetalBackend {
         let matmul_pipeline =
             device.new_compute_pipeline_state_with_function(&kernel).map_err(|e| {
                 TrustformersError::hardware_error(
-                    &format!("Failed to create pipeline: {}", e),
+                    &format!("Failed to create matmul pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        // Compile GELU kernel
+        let gelu_kernel = library.get_function("gelu", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get gelu kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let gelu_pipeline =
+            device.new_compute_pipeline_state_with_function(&gelu_kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create gelu pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        // Compile LayerNorm kernel
+        let layernorm_kernel = library.get_function("layernorm", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get layernorm kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let layernorm_pipeline =
+            device.new_compute_pipeline_state_with_function(&layernorm_kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create layernorm pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        // Compile RoPE kernel
+        let rope_kernel = library.get_function("rope", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get rope kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let rope_pipeline =
+            device.new_compute_pipeline_state_with_function(&rope_kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create rope pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        // Compile Softmax (causal) kernel
+        let softmax_causal_kernel = library.get_function("softmax_causal", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get softmax_causal kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let softmax_causal_pipeline =
+            device.new_compute_pipeline_state_with_function(&softmax_causal_kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create softmax_causal pipeline: {}", e),
                     "MetalBackend::new",
                 )
             })?;
@@ -150,6 +373,10 @@ impl MetalBackend {
             command_queue,
             buffer_cache: Arc::new(std::sync::Mutex::new(BufferCache::new())),
             matmul_pipeline: Arc::new(matmul_pipeline),
+            gelu_pipeline: Arc::new(gelu_pipeline),
+            layernorm_pipeline: Arc::new(layernorm_pipeline),
+            rope_pipeline: Arc::new(rope_pipeline),
+            softmax_causal_pipeline: Arc::new(softmax_causal_pipeline),
         })
     }
 
@@ -375,6 +602,292 @@ impl MetalBackend {
         Ok(result)
     }
 
+    /// Execute GELU activation on GPU
+    /// GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    pub fn gelu_f32(&self, input: &[f32]) -> Result<Vec<f32>> {
+        let size = input.len();
+
+        // Create Metal buffers
+        let input_buffer = self.create_buffer(input)?;
+        let output_buffer = self.device.new_buffer(
+            (size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.gelu_pipeline);
+        encoder.set_buffer(0, Some(&input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+
+        // Set size parameter
+        let size_u32 = size as u32;
+        encoder.set_bytes(
+            2,
+            mem::size_of::<u32>() as u64,
+            &size_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch threads (1D grid for element-wise operation)
+        let threadgroup_size = metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+
+        let threadgroups = metal::MTLSize {
+            width: (size as u64 + 255) / 256,
+            height: 1,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        // Execute
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Copy result back to CPU
+        let result_ptr = output_buffer.contents() as *const f32;
+        let result = unsafe { std::slice::from_raw_parts(result_ptr, size) }.to_vec();
+
+        Ok(result)
+    }
+
+    /// Execute LayerNorm on GPU
+    /// LayerNorm: output = (x - mean) / sqrt(var + eps) * weight + bias
+    /// Optimized for transformer models (normalize over hidden dimension)
+    pub fn layernorm_f32(
+        &self,
+        input: &[f32],
+        weight: &[f32],
+        bias: &[f32],
+        seq_len: usize,
+        hidden_size: usize,
+        eps: f32,
+    ) -> Result<Vec<f32>> {
+        let total_size = seq_len * hidden_size;
+
+        if input.len() != total_size {
+            return Err(TrustformersError::shape_error(format!(
+                "Input size {} doesn't match seq_len {} * hidden_size {}",
+                input.len(),
+                seq_len,
+                hidden_size
+            )));
+        }
+
+        if weight.len() != hidden_size || bias.len() != hidden_size {
+            return Err(TrustformersError::shape_error(
+                "Weight/bias size must match hidden_size".to_string(),
+            ));
+        }
+
+        // Create Metal buffers
+        let input_buffer = self.create_buffer(input)?;
+        let weight_buffer = self.create_buffer(weight)?;
+        let bias_buffer = self.create_buffer(bias)?;
+        let output_buffer = self.device.new_buffer(
+            (total_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.layernorm_pipeline);
+        encoder.set_buffer(0, Some(&input_buffer), 0);
+        encoder.set_buffer(1, Some(&weight_buffer), 0);
+        encoder.set_buffer(2, Some(&bias_buffer), 0);
+        encoder.set_buffer(3, Some(&output_buffer), 0);
+
+        // Set parameters
+        let seq_len_u32 = seq_len as u32;
+        let hidden_size_u32 = hidden_size as u32;
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &seq_len_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &hidden_size_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            6,
+            mem::size_of::<f32>() as u64,
+            &eps as *const f32 as *const _,
+        );
+
+        // Dispatch threads (one thread per sequence position)
+        let threadgroup_size = metal::MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        };
+
+        let threadgroups = metal::MTLSize {
+            width: (seq_len as u64 + 63) / 64,
+            height: 1,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        // Execute
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Copy result back to CPU
+        let result_ptr = output_buffer.contents() as *const f32;
+        let result = unsafe { std::slice::from_raw_parts(result_ptr, total_size) }.to_vec();
+
+        Ok(result)
+    }
+
+    /// Execute RoPE (Rotary Position Embedding) on GPU
+    /// Rotates Q and K tensors for position encoding
+    /// Input/output shape: [seq_len, num_heads, head_dim]
+    pub fn rope_f32(
+        &self,
+        input: &[f32],
+        seq_len: usize,
+        num_heads: usize,
+        head_dim: usize,
+        rotary_ndims: usize,
+        base: f32,
+    ) -> Result<Vec<f32>> {
+        let total_size = seq_len * num_heads * head_dim;
+
+        if input.len() != total_size {
+            return Err(TrustformersError::shape_error(format!(
+                "Input size {} doesn't match seq_len {} * num_heads {} * head_dim {}",
+                input.len(),
+                seq_len,
+                num_heads,
+                head_dim
+            )));
+        }
+
+        // Create Metal buffers
+        let input_buffer = self.create_buffer(input)?;
+        let output_buffer = self.device.new_buffer(
+            (total_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.rope_pipeline);
+        encoder.set_buffer(0, Some(&input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+
+        // Set parameters
+        let seq_len_u32 = seq_len as u32;
+        let num_heads_u32 = num_heads as u32;
+        let head_dim_u32 = head_dim as u32;
+        let rotary_ndims_u32 = rotary_ndims as u32;
+
+        encoder.set_bytes(2, mem::size_of::<u32>() as u64, &seq_len_u32 as *const u32 as *const _);
+        encoder.set_bytes(3, mem::size_of::<u32>() as u64, &num_heads_u32 as *const u32 as *const _);
+        encoder.set_bytes(4, mem::size_of::<u32>() as u64, &head_dim_u32 as *const u32 as *const _);
+        encoder.set_bytes(5, mem::size_of::<u32>() as u64, &rotary_ndims_u32 as *const u32 as *const _);
+        encoder.set_bytes(6, mem::size_of::<f32>() as u64, &base as *const f32 as *const _);
+
+        // Dispatch 3D grid: (rotary_ndims/2, num_heads, seq_len)
+        let threadgroup_size = metal::MTLSize {
+            width: 8,   // rotary_ndims/2 dimension
+            height: 4,  // num_heads dimension
+            depth: 4,   // seq_len dimension
+        };
+
+        let threadgroups = metal::MTLSize {
+            width: ((rotary_ndims / 2) as u64 + 7) / 8,
+            height: (num_heads as u64 + 3) / 4,
+            depth: (seq_len as u64 + 3) / 4,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        // Execute
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Copy result back to CPU
+        let result_ptr = output_buffer.contents() as *const f32;
+        let result = unsafe { std::slice::from_raw_parts(result_ptr, total_size) }.to_vec();
+
+        Ok(result)
+    }
+
+    /// Execute Softmax with causal mask on GPU
+    /// Applies causal mask: position i can only attend to j <= i
+    /// Input/output shape: [seq_len, seq_len]
+    pub fn softmax_causal_f32(&self, input: &[f32], seq_len: usize) -> Result<Vec<f32>> {
+        let total_size = seq_len * seq_len;
+
+        if input.len() != total_size {
+            return Err(TrustformersError::shape_error(format!(
+                "Input size {} doesn't match seq_len^2 {}",
+                input.len(),
+                total_size
+            )));
+        }
+
+        // Create Metal buffers
+        let input_buffer = self.create_buffer(input)?;
+        let output_buffer = self.device.new_buffer(
+            (total_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use pre-compiled pipeline
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.softmax_causal_pipeline);
+        encoder.set_buffer(0, Some(&input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+
+        let seq_len_u32 = seq_len as u32;
+        encoder.set_bytes(2, mem::size_of::<u32>() as u64, &seq_len_u32 as *const u32 as *const _);
+
+        // Dispatch threads (one thread per row)
+        let threadgroup_size = metal::MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        };
+
+        let threadgroups = metal::MTLSize {
+            width: (seq_len as u64 + 63) / 64,
+            height: 1,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        // Execute
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Copy result back to CPU
+        let result_ptr = output_buffer.contents() as *const f32;
+        let result = unsafe { std::slice::from_raw_parts(result_ptr, total_size) }.to_vec();
+
+        Ok(result)
+    }
+
     fn create_buffer(&self, data: &[f32]) -> Result<Buffer> {
         let byte_size = std::mem::size_of_val(data) as u64;
         let buffer = self.device.new_buffer_with_data(
@@ -408,12 +921,16 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
         .ok_or_else(|| {
             TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend")
         })
-        .map(|backend| MetalBackend {
+        .and_then(|backend| Ok(MetalBackend {
             device: backend.device.clone(),
             command_queue: backend.command_queue.clone(),
             buffer_cache: Arc::clone(&backend.buffer_cache),
             matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
-        })
+            gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
+            layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
+            rope_pipeline: Arc::clone(&backend.rope_pipeline),
+            softmax_causal_pipeline: Arc::clone(&backend.softmax_causal_pipeline),
+        }))
 }
 
 /// Dispatch matrix multiplication to appropriate backend based on device
