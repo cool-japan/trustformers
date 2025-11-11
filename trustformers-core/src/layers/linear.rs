@@ -356,8 +356,7 @@ impl Layer for Linear {
             if in_features != weight_shape[1] {
                 return Err(TrustformersError::shape_error(format!(
                     "Linear layer input features {} doesn't match weight shape {:?}",
-                    in_features,
-                    weight_shape
+                    in_features, weight_shape
                 )));
             }
 
@@ -369,13 +368,8 @@ impl Layer for Linear {
             let n = self.weight.shape()[0]; // out_features
 
             // Perform GPU-to-GPU matmul (ZERO CPU TRANSFERS!)
-            let output_buffer_id = backend.matmul_gpu_to_gpu(
-                &input_metal.buffer_id,
-                &weight_buffer_id,
-                m,
-                k,
-                n,
-            )?;
+            let output_buffer_id =
+                backend.matmul_gpu_to_gpu(&input_metal.buffer_id, &weight_buffer_id, m, k, n)?;
 
             // Calculate output shape (preserve batch dimensions, change last dim)
             let mut output_shape = shape[..shape.len() - 1].to_vec();
@@ -450,7 +444,6 @@ impl Layer for Linear {
                                             k,
                                             n,
                                         ) {
-
                                             let result_arr =
                                                 scirs2_core::ndarray::Array2::from_shape_vec(
                                                     (m, n),

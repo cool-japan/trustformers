@@ -155,20 +155,15 @@ impl Layer for LayerNorm {
                                     self.eps,
                                 )?;
 
-                                eprintln!("[LAYERNORM METAL] ✅ GPU-to-GPU (ZERO transfers)");
-
                                 return Ok(Tensor::Metal(MetalTensorData {
                                     buffer_id: output_buffer_id,
                                     shape: metal_data.shape.clone(),
                                     dtype: metal_data.dtype,
                                 }));
-                            }
+                            },
                             _ => {
                                 // Weight/bias not on GPU - fallback to CPU
-                                eprintln!(
-                                    "[LAYERNORM METAL] Weight/bias not on GPU, falling back to CPU"
-                                );
-                            }
+                            },
                         }
                     }
                 }
@@ -176,7 +171,7 @@ impl Layer for LayerNorm {
                 // Fallback: convert to CPU and process
                 let cpu_tensor = input.to_device_enum(&crate::device::Device::CPU)?;
                 return self.forward(cpu_tensor);
-            }
+            },
 
             Tensor::F32(arr) => {
                 // Try Metal GPU acceleration for 2D tensors (seq_len, hidden_size)
@@ -185,27 +180,21 @@ impl Layer for LayerNorm {
                     use crate::gpu_ops::metal::get_metal_backend;
                     if arr.ndim() == 2 && self.normalized_shape.len() == 1 {
                         if let Ok(backend) = get_metal_backend() {
-                            eprintln!("[LAYERNORM METAL] Processing shape {:?}", arr.shape());
                             let shape = arr.shape();
                             let seq_len = shape[0];
                             let hidden_size = shape[1];
 
                             if hidden_size == self.normalized_shape[0] {
-                                eprintln!("[LAYERNORM DEBUG] Checking weight/bias types: weight={:?}, bias={:?}",
-                                    std::mem::discriminant(&self.weight),
-                                    std::mem::discriminant(&self.bias));
-
                                 match (&self.weight, &self.bias) {
                                     // Case 1: Weight/bias on GPU - upload input and use GPU-to-GPU
                                     #[allow(unreachable_patterns)]
                                     (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
                                         use crate::tensor::MetalTensorData;
 
-                                        eprintln!("[LAYERNORM METAL] Input F32, weights Metal - uploading input to GPU");
-
                                         // Upload input to GPU
                                         let input_vec: Vec<f32> = arr.iter().copied().collect();
-                                        let input_buffer_id = backend.create_persistent_buffer(&input_vec)?;
+                                        let input_buffer_id =
+                                            backend.create_persistent_buffer(&input_vec)?;
 
                                         // Execute GPU-to-GPU
                                         let output_buffer_id = backend.layernorm_gpu_to_gpu(
@@ -216,8 +205,6 @@ impl Layer for LayerNorm {
                                             hidden_size,
                                             self.eps,
                                         )?;
-
-                                        eprintln!("[LAYERNORM METAL] ✅ SUCCESS (input uploaded, processed on GPU)");
 
                                         // Return Metal tensor
                                         return Ok(Tensor::Metal(MetalTensorData {
@@ -250,15 +237,17 @@ impl Layer for LayerNorm {
                                             )
                                             .map_err(|e| {
                                                 TrustformersError::tensor_op_error(
-                                                    &format!("Failed to reshape LayerNorm result: {}", e),
+                                                    &format!(
+                                                        "Failed to reshape LayerNorm result: {}",
+                                                        e
+                                                    ),
                                                     "LayerNorm::forward",
                                                 )
                                             })?;
-                                            eprintln!("[LAYERNORM METAL] ✅ SUCCESS");
                                             return Ok(Tensor::F32(output_arr));
                                         }
-                                    }
-                                    _ => {}
+                                    },
+                                    _ => {},
                                 }
                             }
                         }

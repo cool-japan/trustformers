@@ -343,8 +343,9 @@ impl MetalBackend {
             )
         })?;
 
-        let layernorm_pipeline =
-            device.new_compute_pipeline_state_with_function(&layernorm_kernel).map_err(|e| {
+        let layernorm_pipeline = device
+            .new_compute_pipeline_state_with_function(&layernorm_kernel)
+            .map_err(|e| {
                 TrustformersError::hardware_error(
                     &format!("Failed to create layernorm pipeline: {}", e),
                     "MetalBackend::new",
@@ -375,8 +376,9 @@ impl MetalBackend {
             )
         })?;
 
-        let softmax_causal_pipeline =
-            device.new_compute_pipeline_state_with_function(&softmax_causal_kernel).map_err(|e| {
+        let softmax_causal_pipeline = device
+            .new_compute_pipeline_state_with_function(&softmax_causal_kernel)
+            .map_err(|e| {
                 TrustformersError::hardware_error(
                     &format!("Failed to create softmax_causal pipeline: {}", e),
                     "MetalBackend::new",
@@ -700,8 +702,16 @@ impl MetalBackend {
         );
 
         // Dispatch threads
-        let threadgroup_size = metal::MTLSize { width: 256, height: 1, depth: 1 };
-        let threadgroups = metal::MTLSize { width: (size as u64 + 255) / 256, height: 1, depth: 1 };
+        let threadgroup_size = metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (size as u64 + 255) / 256,
+            height: 1,
+            depth: 1,
+        };
 
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
@@ -798,10 +808,7 @@ impl MetalBackend {
         let output_id = BufferId::new();
 
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error(
-                "Failed to lock buffer cache",
-                "layernorm_gpu_to_gpu",
-            )
+            TrustformersError::hardware_error("Failed to lock buffer cache", "layernorm_gpu_to_gpu")
         })?;
         cache.insert(output_id, output_buffer_arc);
 
@@ -886,10 +893,7 @@ impl MetalBackend {
         let output_id = BufferId::new();
 
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error(
-                "Failed to lock buffer cache",
-                "matmul_gpu_to_gpu",
-            )
+            TrustformersError::hardware_error("Failed to lock buffer cache", "matmul_gpu_to_gpu")
         })?;
         cache.insert(output_id, output_buffer_arc);
 
@@ -1035,17 +1039,37 @@ impl MetalBackend {
         let head_dim_u32 = head_dim as u32;
         let rotary_ndims_u32 = rotary_ndims as u32;
 
-        encoder.set_bytes(2, mem::size_of::<u32>() as u64, &seq_len_u32 as *const u32 as *const _);
-        encoder.set_bytes(3, mem::size_of::<u32>() as u64, &num_heads_u32 as *const u32 as *const _);
-        encoder.set_bytes(4, mem::size_of::<u32>() as u64, &head_dim_u32 as *const u32 as *const _);
-        encoder.set_bytes(5, mem::size_of::<u32>() as u64, &rotary_ndims_u32 as *const u32 as *const _);
-        encoder.set_bytes(6, mem::size_of::<f32>() as u64, &base as *const f32 as *const _);
+        encoder.set_bytes(
+            2,
+            mem::size_of::<u32>() as u64,
+            &seq_len_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &num_heads_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &head_dim_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &rotary_ndims_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            6,
+            mem::size_of::<f32>() as u64,
+            &base as *const f32 as *const _,
+        );
 
         // Dispatch 3D grid: (rotary_ndims/2, num_heads, seq_len)
         let threadgroup_size = metal::MTLSize {
-            width: 8,   // rotary_ndims/2 dimension
-            height: 4,  // num_heads dimension
-            depth: 4,   // seq_len dimension
+            width: 8,  // rotary_ndims/2 dimension
+            height: 4, // num_heads dimension
+            depth: 4,  // seq_len dimension
         };
 
         let threadgroups = metal::MTLSize {
@@ -1098,7 +1122,11 @@ impl MetalBackend {
         encoder.set_buffer(1, Some(&output_buffer), 0);
 
         let seq_len_u32 = seq_len as u32;
-        encoder.set_bytes(2, mem::size_of::<u32>() as u64, &seq_len_u32 as *const u32 as *const _);
+        encoder.set_bytes(
+            2,
+            mem::size_of::<u32>() as u64,
+            &seq_len_u32 as *const u32 as *const _,
+        );
 
         // Dispatch threads (one thread per row)
         let threadgroup_size = metal::MTLSize {
@@ -1160,16 +1188,18 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
         .ok_or_else(|| {
             TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend")
         })
-        .and_then(|backend| Ok(MetalBackend {
-            device: backend.device.clone(),
-            command_queue: backend.command_queue.clone(),
-            buffer_cache: Arc::clone(&backend.buffer_cache),
-            matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
-            gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
-            layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
-            rope_pipeline: Arc::clone(&backend.rope_pipeline),
-            softmax_causal_pipeline: Arc::clone(&backend.softmax_causal_pipeline),
-        }))
+        .and_then(|backend| {
+            Ok(MetalBackend {
+                device: backend.device.clone(),
+                command_queue: backend.command_queue.clone(),
+                buffer_cache: Arc::clone(&backend.buffer_cache),
+                matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
+                gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
+                layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
+                rope_pipeline: Arc::clone(&backend.rope_pipeline),
+                softmax_causal_pipeline: Arc::clone(&backend.softmax_causal_pipeline),
+            })
+        })
 }
 
 /// Dispatch matrix multiplication to appropriate backend based on device

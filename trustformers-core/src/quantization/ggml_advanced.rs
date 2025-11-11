@@ -193,7 +193,9 @@ pub fn quantize_q5_0(tensor: &Tensor) -> Result<Vec<BlockQ5_0>> {
         #[cfg(feature = "candle")]
         Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(feature = "metal")]
-        Tensor::Metal(_) => return Err(anyhow!("Metal tensors not yet supported for quantization").into()),
+        Tensor::Metal(_) => {
+            return Err(anyhow!("Metal tensors not yet supported for quantization").into())
+        },
     };
 
     let n = values.len();
@@ -318,7 +320,9 @@ pub fn quantize_q5_1(tensor: &Tensor) -> Result<Vec<BlockQ5_1>> {
         #[cfg(feature = "candle")]
         Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(feature = "metal")]
-        Tensor::Metal(_) => return Err(anyhow!("Metal tensors not yet supported for quantization").into()),
+        Tensor::Metal(_) => {
+            return Err(anyhow!("Metal tensors not yet supported for quantization").into())
+        },
     };
 
     let n = values.len();
@@ -422,7 +426,9 @@ pub fn quantize_q6_k(tensor: &Tensor) -> Result<Vec<BlockQ6K>> {
         #[cfg(feature = "candle")]
         Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
         #[cfg(feature = "metal")]
-        Tensor::Metal(_) => return Err(anyhow!("Metal tensors not yet supported for quantization").into()),
+        Tensor::Metal(_) => {
+            return Err(anyhow!("Metal tensors not yet supported for quantization").into())
+        },
     };
 
     let n = values.len();

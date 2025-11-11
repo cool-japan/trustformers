@@ -112,22 +112,8 @@ impl Embedding {
         if !matches!(device, Device::Metal(_)) {
             return Ok(());
         }
-        eprintln!("[EMBEDDING] Uploading {} embeddings to GPU", self.num_embeddings);
         self.device = *device;
-        let before_type = match &self.weight {
-            Tensor::F32(_) => "F32",
-            #[cfg(feature = "metal")]
-            Tensor::Metal(_) => "Metal",
-            _ => "Other",
-        };
         self.weight = self.weight.to_device_enum(device)?;
-        let after_type = match &self.weight {
-            Tensor::F32(_) => "F32",
-            #[cfg(feature = "metal")]
-            Tensor::Metal(_) => "Metal",
-            _ => "Other",
-        };
-        eprintln!("[EMBEDDING] Weight type: {} → {}", before_type, after_type);
         Ok(())
     }
 }
@@ -140,12 +126,8 @@ impl Layer for Embedding {
         // Handle Metal weights: convert to CPU for lookup, return Metal tensor
         #[cfg(feature = "metal")]
         if let Tensor::Metal(_) = &self.weight {
-            eprintln!("[EMBEDDING] Forward with Metal weights, input tokens: {:?}", input);
-
             // Convert Metal weights to CPU for lookup
-            eprintln!("[EMBEDDING] Downloading weights from GPU for lookup...");
             let cpu_weight = self.weight.to_device_enum(&Device::CPU)?;
-            eprintln!("[EMBEDDING] Downloaded, weight shape: {:?}", cpu_weight.shape());
 
             if let Tensor::F32(weight_arr) = cpu_weight {
                 let batch_size = input.len();
@@ -163,18 +145,12 @@ impl Layer for Embedding {
                     }
                     let embedding = weight_arr.index_axis(Axis(0), idx as usize);
                     output.row_mut(i).assign(&embedding);
-                    if i == 0 {
-                        eprintln!("[EMBEDDING] Token {} → embedding[0..5]: {:?}",
-                            idx, &embedding.as_slice().unwrap()[..5]);
-                    }
                 }
 
                 // Return as Metal tensor if device is Metal
                 let result = Tensor::F32(output.into_dyn());
-                eprintln!("[EMBEDDING] Lookup complete, uploading result to GPU...");
                 if matches!(self.device, Device::Metal(_)) {
                     let metal_result = result.to_device_enum(&self.device)?;
-                    eprintln!("[EMBEDDING] ✅ Returned Metal tensor");
                     return Ok(metal_result);
                 }
                 return Ok(result);
@@ -199,10 +175,6 @@ impl Layer for Embedding {
                     }
                     let embedding = weight_arr.index_axis(Axis(0), idx as usize);
                     output.row_mut(i).assign(&embedding);
-                    if i == 0 && batch_size == 5 {
-                        eprintln!("[EMBEDDING CPU] Token {} → embedding[0..5]: {:?}",
-                            idx, &embedding.as_slice().unwrap()[..5]);
-                    }
                 }
 
                 Ok(Tensor::F32(output.into_dyn()))

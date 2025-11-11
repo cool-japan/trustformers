@@ -243,8 +243,11 @@ impl std::fmt::Debug for Tensor {
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => write!(f, "Tensor::Candle(shape: {:?})", self.shape()),
             #[cfg(feature = "metal")]
-            Tensor::Metal(data) => write!(f, "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
-                data.shape, data.dtype, data.buffer_id),
+            Tensor::Metal(data) => write!(
+                f,
+                "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
+                data.shape, data.dtype, data.buffer_id
+            ),
         }
     }
 }

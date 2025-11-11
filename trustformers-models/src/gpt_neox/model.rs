@@ -146,7 +146,6 @@ impl Layer for GPTNeoXAttention {
         #[cfg(feature = "metal")]
         let input = match &input {
             Tensor::Metal(_) => {
-                eprintln!("[ATTENTION] Converting Metal input to F32 (temporary fallback)");
                 input.to_device_enum(&trustformers_core::device::Device::CPU)?
             },
             _ => input,
@@ -284,11 +283,7 @@ impl Layer for GPTNeoXAttention {
                         .ok()?;
 
                     // Convert back to Array2
-                    let result = Array2::from_shape_vec((seq_len, head_dim), output_vec).ok();
-                    if result.is_some() {
-                        eprintln!("[ATTENTION METAL] ✅ SUCCESS for head {}", _h);
-                    }
-                    result
+                    Array2::from_shape_vec((seq_len, head_dim), output_vec).ok()
                 };
 
                 // Helper function: CPU attention (always succeeds)

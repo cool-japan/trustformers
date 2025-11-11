@@ -37,10 +37,12 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
                         // Convert back to tensor
                         use scirs2_core::ndarray::ArrayD;
                         let output_arr = ArrayD::from_shape_vec(arr.raw_dim(), output_vec)
-                            .map_err(|e| TrustformersError::tensor_op_error(
-                                &format!("Failed to reshape GELU result: {}", e),
-                                "gelu",
-                            ))?;
+                            .map_err(|e| {
+                                TrustformersError::tensor_op_error(
+                                    &format!("Failed to reshape GELU result: {}", e),
+                                    "gelu",
+                                )
+                            })?;
                         return Ok(Tensor::F32(output_arr));
                     }
                 }
@@ -50,9 +52,9 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             let result = arr.mapv(|v| {
                 // Clamp extreme values to prevent NaN
                 if v > 10.0 {
-                    return v;  // GELU(x) ≈ x for large positive x
+                    return v; // GELU(x) ≈ x for large positive x
                 } else if v < -10.0 {
-                    return 0.0;  // GELU(x) ≈ 0 for large negative x
+                    return 0.0; // GELU(x) ≈ 0 for large negative x
                 }
 
                 let inner = (2.0 / PI).sqrt() * (v + 0.044715 * v.powi(3));

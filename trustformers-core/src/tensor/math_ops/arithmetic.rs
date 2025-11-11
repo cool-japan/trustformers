@@ -39,10 +39,7 @@ impl Tensor {
 
                 if has_unstable {
                     // Stabilize the result
-                    let stabilized: Vec<f32> = result
-                        .iter()
-                        .map(|&x| stabilize_f32(x))
-                        .collect();
+                    let stabilized: Vec<f32> = result.iter().map(|&x| stabilize_f32(x)).collect();
 
                     let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
@@ -69,10 +66,7 @@ impl Tensor {
 
                 if has_unstable {
                     // Stabilize the result
-                    let stabilized: Vec<f64> = result
-                        .iter()
-                        .map(|&x| stabilize_f64(x))
-                        .collect();
+                    let stabilized: Vec<f64> = result.iter().map(|&x| stabilize_f64(x)).collect();
 
                     let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;

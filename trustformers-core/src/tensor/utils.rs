@@ -365,16 +365,19 @@ impl Tensor {
                         use scirs2_core::ndarray::ArrayD;
                         let arr = ArrayD::from_shape_vec(
                             scirs2_core::ndarray::IxDyn(&metal_data.shape),
-                            data_vec
-                        ).map_err(|e| TrustformersError::tensor_op_error(
-                            &format!("Failed to create array from shape: {}", e),
-                            "to_device_enum"
-                        ))?;
+                            data_vec,
+                        )
+                        .map_err(|e| {
+                            TrustformersError::tensor_op_error(
+                                &format!("Failed to create array from shape: {}", e),
+                                "to_device_enum",
+                            )
+                        })?;
                         Ok(Tensor::F32(arr))
                     },
                     _ => Err(TrustformersError::tensor_op_error(
                         &format!("Unsupported Metal tensor dtype: {:?}", metal_data.dtype),
-                        "to_device_enum"
+                        "to_device_enum",
                     )),
                 }
             },
@@ -403,25 +406,25 @@ impl Tensor {
             #[cfg(not(feature = "metal"))]
             (_, crate::device::Device::Metal(_)) => Err(TrustformersError::hardware_error(
                 "Metal not available. Compile with --features metal",
-                "to_device_enum"
+                "to_device_enum",
             )),
 
             // CUDA transfers (placeholder for future implementation)
             (_, crate::device::Device::CUDA(_)) => Err(TrustformersError::hardware_error(
                 "CUDA transfer not implemented yet",
-                "to_device_enum"
+                "to_device_enum",
             )),
 
             // ROCm transfers (placeholder for future implementation)
             (_, crate::device::Device::ROCm(_)) => Err(TrustformersError::hardware_error(
                 "ROCm transfer not implemented yet",
-                "to_device_enum"
+                "to_device_enum",
             )),
 
             // WebGPU transfers (placeholder for future implementation)
             (_, crate::device::Device::WebGPU) => Err(TrustformersError::hardware_error(
                 "WebGPU transfer not implemented yet",
-                "to_device_enum"
+                "to_device_enum",
             )),
 
             // Fallback for unsupported combinations
