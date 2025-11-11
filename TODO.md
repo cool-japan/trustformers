@@ -432,14 +432,14 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 
 #### Parallel Tracks
 
-**Track A: SciRS2-Core MPS Implementation** (rc.3リリース向け、ローカル進行)
+**Track A: SciRS2-Core MPS Implementation** (for rc.3 release, local development)
 - [ ] Implement Metal Performance Shaders in `~/work/scirs/scirs2-core/src/gpu/backends/metal_mps.rs`
-- [ ] Complete `MPSMatrixMultiplication` integration (stub→実装)
+- [ ] Complete `MPSMatrixMultiplication` integration (stub → full implementation)
 - [ ] Add `MPSGraph` support for operation fusion
-- [ ] Benchmark MPS vs naive Metal (期待：100-500x高速化)
-- [ ] Contribute back to SciRS2-Core (rc.3リリース)
+- [ ] Benchmark MPS vs naive Metal (expected: 100-500x speedup)
+- [ ] Contribute back to SciRS2-Core (rc.3 release)
 
-**Track B: TrustformeRS Policy Violations修正** (並行作業)
+**Track B: TrustformeRS Policy Violations Remediation** (parallel work)
 - [ ] Fix trustformers-core direct dependency usage
   - Replace `use ndarray::*` → `use scirs2_core::ndarray::*`
   - Replace `use rand::*` → `use scirs2_core::random::*`
@@ -454,9 +454,9 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 - [ ] Run compliance checks and benchmarks
 
 **Expected Results**:
-- Track A完成時: 100-500x matmul高速化
-- Track B完成時: CPU転送削減、統一API
-- 総合: ~1 tok/sec → **50-200 tok/sec** (PyTorch+MPS同等)
+- Track A complete: 100-500x matmul speedup
+- Track B complete: CPU transfer elimination, unified API
+- Combined: ~1 tok/sec → **50-200 tok/sec** (PyTorch+MPS parity)
 
 **See**: `SCIRS2_INTEGRATION_POLICY.md` for complete remediation plan
 
