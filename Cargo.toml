@@ -60,9 +60,9 @@ hex = "0.4.3"
 dirs = "6.0.0"
 
 # ML/Math dependencies
-ndarray = { version = "0.16.1", features = ["serde"] }
+ndarray = { version = "0.16.1", features = ["serde", "blas"] }
 ndarray-rand = "0.15.0"
-ndarray-linalg = "0.17.0"
+ndarray-linalg = { version = "0.17.0", features = [] }  # BLAS backend configured via blas-src
 nalgebra = "0.33.2"
 num-traits = "0.2.19"
 num-complex = { version = "0.4.6", features = ["serde"] }
@@ -119,6 +119,10 @@ flate2 = "1.1"
 lz4 = "1.28"
 tar = "0.4"
 libc = "0.2"
+
+# BLAS dependencies (for Accelerate framework on macOS)
+cblas-sys = "0.3"
+blas-src = { version = "0.14", features = ["accelerate"] }
 
 # Server and networking dependencies
 tokio-util = "0.7"
