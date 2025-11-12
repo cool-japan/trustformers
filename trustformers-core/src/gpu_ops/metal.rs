@@ -91,6 +91,7 @@ pub struct MetalBackend {
     // Cached compiled pipelines (avoid recompilation overhead)
     matmul_pipeline: Arc<metal::ComputePipelineState>,
     gelu_pipeline: Arc<metal::ComputePipelineState>,
+    scale_pipeline: Arc<metal::ComputePipelineState>,
     add_bias_pipeline: Arc<metal::ComputePipelineState>,
     layernorm_pipeline: Arc<metal::ComputePipelineState>,
     rope_pipeline: Arc<metal::ComputePipelineState>,
@@ -99,6 +100,8 @@ pub struct MetalBackend {
     elementwise_add_pipeline: Arc<metal::ComputePipelineState>,
     split_qkv_pipeline: Arc<metal::ComputePipelineState>,
     transpose_pipeline: Arc<metal::ComputePipelineState>,
+    reshape_to_heads_pipeline: Arc<metal::ComputePipelineState>,
+    reshape_from_heads_pipeline: Arc<metal::ComputePipelineState>,
     // MPS operations for optimized GPU-to-GPU matmul (100-500x faster)
     mps_ops: Arc<Option<MPSOperations>>,
 }
@@ -169,6 +172,19 @@ impl MetalBackend {
                 output[gid] = 0.5f * x * (1.0f + tanh(inner));
             }
 
+            // Scalar multiplication: output[i] = input[i] * scale
+            // Used for attention score scaling: scores *= 1/sqrt(head_dim)
+            kernel void scale(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant float& scale [[buffer(2)]],
+                constant uint& size [[buffer(3)]],
+                uint gid [[thread_position_in_grid]]
+            ) {
+                if (gid >= size) return;
+                output[gid] = input[gid] * scale;
+            }
+
             // Bias addition: Add 1D bias vector to 2D matrix (broadcasting)
             // Input: [m, n], Bias: [n] → Output: [m, n]
             kernel void add_bias(
@@ -233,6 +249,62 @@ impl MetalBackend {
                         output[idx_k] = input[idx_k];
                     }
                 }
+            }
+
+            // Reshape for multi-head attention
+            // Input: [seq_len, hidden_size] where hidden_size = num_heads * head_dim
+            // Output: [num_heads, seq_len, head_dim]
+            kernel void reshape_to_heads(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& seq_len [[buffer(2)]],
+                constant uint& num_heads [[buffer(3)]],
+                constant uint& head_dim [[buffer(4)]],
+                uint3 gid [[thread_position_in_grid]]
+            ) {
+                uint h = gid.x;  // head index
+                uint s = gid.y;  // sequence position
+                uint d = gid.z;  // dimension within head
+
+                if (h >= num_heads || s >= seq_len || d >= head_dim) return;
+
+                // Input layout: [seq_len, hidden_size] = [seq_len, num_heads * head_dim]
+                // input[s, h * head_dim + d]
+                uint input_idx = s * (num_heads * head_dim) + h * head_dim + d;
+
+                // Output layout: [num_heads, seq_len, head_dim]
+                // output[h, s, d]
+                uint output_idx = h * (seq_len * head_dim) + s * head_dim + d;
+
+                output[output_idx] = input[input_idx];
+            }
+
+            // Reshape from multi-head back to flat
+            // Input: [num_heads, seq_len, head_dim]
+            // Output: [seq_len, hidden_size] where hidden_size = num_heads * head_dim
+            kernel void reshape_from_heads(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& seq_len [[buffer(2)]],
+                constant uint& num_heads [[buffer(3)]],
+                constant uint& head_dim [[buffer(4)]],
+                uint3 gid [[thread_position_in_grid]]
+            ) {
+                uint h = gid.x;  // head index
+                uint s = gid.y;  // sequence position
+                uint d = gid.z;  // dimension within head
+
+                if (h >= num_heads || s >= seq_len || d >= head_dim) return;
+
+                // Input layout: [num_heads, seq_len, head_dim]
+                // input[h, s, d]
+                uint input_idx = h * (seq_len * head_dim) + s * head_dim + d;
+
+                // Output layout: [seq_len, hidden_size] = [seq_len, num_heads * head_dim]
+                // output[s, h * head_dim + d]
+                uint output_idx = s * (num_heads * head_dim) + h * head_dim + d;
+
+                output[output_idx] = input[input_idx];
             }
 
             // Softmax with causal mask for attention
@@ -444,6 +516,22 @@ impl MetalBackend {
                 )
             })?;
 
+        // Compile scale kernel
+        let scale_kernel = library.get_function("scale", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get scale kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let scale_pipeline =
+            device.new_compute_pipeline_state_with_function(&scale_kernel).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create scale pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
         // Compile add_bias kernel
         let add_bias_kernel = library.get_function("add_bias", None).map_err(|e| {
             TrustformersError::hardware_error(
@@ -580,6 +668,40 @@ impl MetalBackend {
                 )
             })?;
 
+        // Compile reshape_to_heads kernel for multi-head attention
+        let reshape_to_heads_kernel = library.get_function("reshape_to_heads", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get reshape_to_heads kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let reshape_to_heads_pipeline = device
+            .new_compute_pipeline_state_with_function(&reshape_to_heads_kernel)
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create reshape_to_heads pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        // Compile reshape_from_heads kernel for multi-head attention
+        let reshape_from_heads_kernel = library.get_function("reshape_from_heads", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get reshape_from_heads kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let reshape_from_heads_pipeline = device
+            .new_compute_pipeline_state_with_function(&reshape_from_heads_kernel)
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create reshape_from_heads pipeline: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
+
         // Initialize MPS operations for GPU-to-GPU matmul (100-500x speedup)
         let mps_ops = Arc::new(Self::initialize_mps(&device, &command_queue));
 
@@ -589,6 +711,7 @@ impl MetalBackend {
             buffer_cache: Arc::new(std::sync::Mutex::new(BufferCache::new())),
             matmul_pipeline: Arc::new(matmul_pipeline),
             gelu_pipeline: Arc::new(gelu_pipeline),
+            scale_pipeline: Arc::new(scale_pipeline),
             add_bias_pipeline: Arc::new(add_bias_pipeline),
             layernorm_pipeline: Arc::new(layernorm_pipeline),
             rope_pipeline: Arc::new(rope_pipeline),
@@ -597,6 +720,8 @@ impl MetalBackend {
             elementwise_add_pipeline: Arc::new(elementwise_add_pipeline),
             split_qkv_pipeline: Arc::new(split_qkv_pipeline),
             transpose_pipeline: Arc::new(transpose_pipeline),
+            reshape_to_heads_pipeline: Arc::new(reshape_to_heads_pipeline),
+            reshape_from_heads_pipeline: Arc::new(reshape_from_heads_pipeline),
             mps_ops,
         })
     }
@@ -1417,6 +1542,9 @@ impl MetalBackend {
         let elements_per_tensor = seq_len * hidden_size;
         let total_elements = batch_size * elements_per_tensor;
 
+        eprintln!("🔧 stack_gpu_buffers: batch_size={}, seq_len={}, hidden_size={}, total_elements={}",
+            batch_size, seq_len, hidden_size, total_elements);
+
         // Create output buffer
         let output_buffer = self.device.new_buffer(
             (total_elements * mem::size_of::<f32>()) as u64,
@@ -1473,7 +1601,16 @@ impl MetalBackend {
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error("Failed to lock buffer cache", "stack_gpu_buffers")
         })?;
-        cache.insert(output_id, output_buffer_arc);
+        cache.insert(output_id, output_buffer_arc.clone());
+
+        // Debug: Check output after stacking
+        let ptr = output_buffer_arc.contents() as *const f32;
+        let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_elements) };
+        eprintln!("✅ stack_gpu_buffers complete - first 10 values: {:?}", &output_slice[..10.min(total_elements)]);
+        eprintln!("   Stats: min={:.4}, max={:.4}, mean={:.4}",
+            output_slice.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            output_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+            output_slice.iter().sum::<f32>() / total_elements as f32);
 
         Ok(output_id)
     }
@@ -1633,6 +1770,40 @@ impl MetalBackend {
         command_buffer.commit();
         command_buffer.wait_until_completed();
 
+        // Debug: Download and print softmax output (first iteration only)
+        {
+            let ptr = output_buffer.contents() as *const f32;
+            let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_size) };
+
+            // Print first row (shows how first position attends)
+            if seq_len <= 15 {
+                // Only for short sequences
+                eprintln!(
+                    "🔍 Softmax output (first row): {:?}",
+                    &output_slice[0..seq_len]
+                );
+
+                // Check for causal mask: first position should attend only to itself
+                eprintln!(
+                    "   First row sum: {:.6} (should be ~1.0)",
+                    output_slice[0..seq_len].iter().sum::<f32>()
+                );
+
+                // Print last row (shows how last position attends to all)
+                let last_row_start = (seq_len - 1) * seq_len;
+                eprintln!(
+                    "   Last row: {:?}",
+                    &output_slice[last_row_start..last_row_start + seq_len]
+                );
+                eprintln!(
+                    "   Last row sum: {:.6} (should be ~1.0)",
+                    output_slice[last_row_start..last_row_start + seq_len]
+                        .iter()
+                        .sum::<f32>()
+                );
+            }
+        }
+
         // Store output buffer and return ID
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
@@ -1646,6 +1817,331 @@ impl MetalBackend {
         cache.insert(output_id, output_buffer_arc);
 
         Ok(output_id)
+    }
+
+    /// Scale buffer elements by a scalar: output[i] = input[i] * scale
+    /// Used for attention score scaling: scores *= 1/sqrt(head_dim)
+    pub fn scale_buffer_gpu_to_gpu(
+        &self,
+        input_buffer_id: &BufferId,
+        scale: f32,
+        size: usize,
+    ) -> Result<BufferId> {
+        // Get input buffer
+        let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
+
+        // Create output buffer
+        let output_buffer = self.device.new_buffer(
+            (size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Execute element-wise scaling on GPU
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.scale_pipeline);
+        encoder.set_buffer(0, Some(&*input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+
+        encoder.set_bytes(
+            2,
+            mem::size_of::<f32>() as u64,
+            &scale as *const f32 as *const _,
+        );
+
+        let size_u32 = size as u32;
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &size_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch threads
+        let threadgroup_size = metal::MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (size as u64 + 255) / 256,
+            height: 1,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer and return ID
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "scale_buffer_gpu_to_gpu",
+            )
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
+    /// Reshape for multi-head attention: [seq_len, hidden_size] → [num_heads, seq_len, head_dim]
+    /// Used to split Q, K, V into separate heads for multi-head attention
+    pub fn reshape_to_heads_gpu(
+        &self,
+        input_buffer_id: &BufferId,
+        seq_len: usize,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Result<BufferId> {
+        let hidden_size = num_heads * head_dim;
+        let total_size = seq_len * hidden_size;
+
+        // Get input buffer
+        let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
+
+        // Create output buffer
+        let output_buffer = self.device.new_buffer(
+            (total_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Execute kernel
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.reshape_to_heads_pipeline);
+        encoder.set_buffer(0, Some(&*input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+
+        let seq_len_u32 = seq_len as u32;
+        let num_heads_u32 = num_heads as u32;
+        let head_dim_u32 = head_dim as u32;
+
+        encoder.set_bytes(
+            2,
+            mem::size_of::<u32>() as u64,
+            &seq_len_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &num_heads_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &head_dim_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch 3D grid
+        let threadgroup_size = metal::MTLSize {
+            width: 8,
+            height: 8,
+            depth: 8,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (num_heads as u64 + 7) / 8,
+            height: (seq_len as u64 + 7) / 8,
+            depth: (head_dim as u64 + 7) / 8,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer and return ID
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "reshape_to_heads_gpu",
+            )
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
+    /// Reshape from multi-head attention: [num_heads, seq_len, head_dim] → [seq_len, hidden_size]
+    /// Used to concatenate head outputs back to flat representation
+    pub fn reshape_from_heads_gpu(
+        &self,
+        input_buffer_id: &BufferId,
+        seq_len: usize,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Result<BufferId> {
+        let hidden_size = num_heads * head_dim;
+        let total_size = seq_len * hidden_size;
+
+        // Get input buffer
+        let input_buffer = self.get_persistent_buffer(input_buffer_id)?;
+
+        // Create output buffer
+        let output_buffer = self.device.new_buffer(
+            (total_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Execute kernel
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.reshape_from_heads_pipeline);
+        encoder.set_buffer(0, Some(&*input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+
+        let seq_len_u32 = seq_len as u32;
+        let num_heads_u32 = num_heads as u32;
+        let head_dim_u32 = head_dim as u32;
+
+        encoder.set_bytes(
+            2,
+            mem::size_of::<u32>() as u64,
+            &seq_len_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &num_heads_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &head_dim_u32 as *const u32 as *const _,
+        );
+
+        // Dispatch 3D grid
+        let threadgroup_size = metal::MTLSize {
+            width: 8,
+            height: 8,
+            depth: 8,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (num_heads as u64 + 7) / 8,
+            height: (seq_len as u64 + 7) / 8,
+            depth: (head_dim as u64 + 7) / 8,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Store output buffer and return ID
+        let output_buffer_arc = Arc::new(output_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "reshape_from_heads_gpu",
+            )
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
+    /// Extract a single head from reshaped buffer: [num_heads, seq_len, head_dim] → [seq_len, head_dim]
+    /// Input is at [head_idx, :, :], output is [:, :]
+    pub fn extract_head_gpu(
+        &self,
+        heads_buffer_id: &BufferId,
+        head_idx: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<BufferId> {
+        let head_size = seq_len * head_dim;
+        let offset_elements = head_idx * head_size;
+        let offset_bytes = offset_elements * mem::size_of::<f32>();
+
+        // Get source buffer
+        let src_buffer = self.get_persistent_buffer(heads_buffer_id)?;
+
+        // Create destination buffer
+        let dst_buffer = self.device.new_buffer(
+            (head_size * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
+
+        // Use blit encoder for efficient copy
+        let command_buffer = self.command_queue.new_command_buffer();
+        let blit_encoder = command_buffer.new_blit_command_encoder();
+
+        blit_encoder.copy_from_buffer(
+            &*src_buffer,
+            offset_bytes as u64,
+            &dst_buffer,
+            0,
+            (head_size * mem::size_of::<f32>()) as u64,
+        );
+
+        blit_encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Register buffer and return ID
+        let output_buffer_arc = Arc::new(dst_buffer);
+        let output_id = BufferId::new();
+
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "extract_head_gpu",
+            )
+        })?;
+        cache.insert(output_id, output_buffer_arc);
+
+        Ok(output_id)
+    }
+
+    /// Insert a single head into reshaped buffer: [seq_len, head_dim] → [num_heads, seq_len, head_dim]
+    /// Input is [:, :], inserted at [head_idx, :, :]
+    pub fn insert_head_gpu(
+        &self,
+        heads_buffer_id: &BufferId,
+        head_buffer_id: &BufferId,
+        head_idx: usize,
+        seq_len: usize,
+        head_dim: usize,
+    ) -> Result<()> {
+        let head_size = seq_len * head_dim;
+        let offset_elements = head_idx * head_size;
+        let offset_bytes = offset_elements * mem::size_of::<f32>();
+
+        // Get buffers
+        let dst_buffer = self.get_persistent_buffer(heads_buffer_id)?;
+        let src_buffer = self.get_persistent_buffer(head_buffer_id)?;
+
+        // Use blit encoder for efficient copy
+        let command_buffer = self.command_queue.new_command_buffer();
+        let blit_encoder = command_buffer.new_blit_command_encoder();
+
+        blit_encoder.copy_from_buffer(
+            &*src_buffer,
+            0,
+            &*dst_buffer,
+            offset_bytes as u64,
+            (head_size * mem::size_of::<f32>()) as u64,
+        );
+
+        blit_encoder.end_encoding();
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        Ok(())
     }
 
     /// Transpose 2D matrix on GPU: output[j, i] = input[i, j]
@@ -1715,7 +2211,7 @@ impl MetalBackend {
     /// Execute full multi-head attention on GPU (ZERO CPU transfers!)
     /// Inputs: Q, K, V buffers [batch, seq_len, hidden_size]
     /// Output: attention output [batch, seq_len, hidden_size]
-    /// Performs: softmax(Q @ K^T / sqrt(d_k)) @ V
+    /// Performs: For each head: softmax(Q_h @ K_h^T / sqrt(d_k)) @ V_h, then concatenate
     pub fn attention_gpu_to_gpu(
         &self,
         q_buffer_id: &BufferId,
@@ -1729,7 +2225,7 @@ impl MetalBackend {
         let hidden_size = num_heads * head_dim;
 
         eprintln!(
-            "🚀 GPU Attention: batch={}, seq={}, heads={}, head_dim={}",
+            "🚀 GPU Multi-Head Attention: batch={}, seq={}, heads={}, head_dim={}",
             batch_size, seq_len, num_heads, head_dim
         );
 
@@ -1742,56 +2238,67 @@ impl MetalBackend {
             ));
         }
 
-        // Flatten batch dimension: [1, seq_len, hidden] → [seq_len, hidden]
-        // Q, K, V are already [seq_len, hidden_size] for batch=1
+        // Step 1: Reshape Q, K, V from [seq_len, hidden_size] to [num_heads, seq_len, head_dim]
+        eprintln!("   Step 1: Reshaping Q, K, V to separate heads");
+        let q_heads = self.reshape_to_heads_gpu(q_buffer_id, seq_len, num_heads, head_dim)?;
+        let k_heads = self.reshape_to_heads_gpu(k_buffer_id, seq_len, num_heads, head_dim)?;
+        let v_heads = self.reshape_to_heads_gpu(v_buffer_id, seq_len, num_heads, head_dim)?;
 
-        // Step 1: Transpose K, then Q @ K^T using MPS
-        // K: [seq_len, hidden_size] → K^T: [hidden_size, seq_len]
-        // Q: [seq_len, hidden_size], K^T: [hidden_size, seq_len] → scores: [seq_len, seq_len]
-        eprintln!("   Step 1a: Transpose K");
-        let k_t_buffer_id = self.transpose_gpu_to_gpu(k_buffer_id, seq_len, hidden_size)?;
+        // Allocate output buffer for all heads: [num_heads, seq_len, head_dim]
+        let output_heads = self.device.new_buffer(
+            (num_heads * seq_len * head_dim * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModeShared,
+        );
 
-        eprintln!("   Step 1b: Q @ K^T (MPS matmul)");
-        let scores_buffer_id = if let Some(mps_ops) = self.mps_ops.as_ref().as_ref() {
-            // Use MPS for Q @ K^T
-            self.matmul_gpu_to_gpu_mps(q_buffer_id, &k_t_buffer_id, seq_len, hidden_size, seq_len)?
-        } else {
-            // Fallback to naive Metal kernel
-            self.matmul_gpu_to_gpu(q_buffer_id, &k_t_buffer_id, seq_len, hidden_size, seq_len)?
-        };
+        // Register buffer
+        let output_buffer_arc = Arc::new(output_heads);
+        let output_heads_id = BufferId::new();
 
-        // Step 2: Scale by 1/sqrt(head_dim) and apply softmax with causal mask
-        eprintln!("   Step 2: Softmax with causal mask");
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "attention_gpu_to_gpu",
+            )
+        })?;
+        cache.insert(output_heads_id, output_buffer_arc);
+        drop(cache); // Release lock before entering loop
 
-        // TODO: Add scale_gpu_to_gpu helper for 1/sqrt(d_k) scaling
-        // For now, assume scaling is done in softmax or skipped
-        let attn_weights_buffer_id = self.softmax_causal_gpu_to_gpu(&scores_buffer_id, seq_len)?;
+        // Step 2: For each head, compute attention
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        eprintln!("   Step 2: Computing attention for each head (scale={})", scale);
 
-        // Step 3: attention_weights @ V using MPS
-        // weights: [seq_len, seq_len], V: [seq_len, hidden_size] → output: [seq_len, hidden_size]
-        eprintln!("   Step 3: Scores @ V (MPS matmul)");
+        for h in 0..num_heads {
+            eprintln!("      Head {}/{}", h + 1, num_heads);
 
-        let output_buffer_id = if let Some(_mps_ops) = self.mps_ops.as_ref().as_ref() {
-            self.matmul_gpu_to_gpu_mps(
-                &attn_weights_buffer_id,
-                v_buffer_id,
-                seq_len,
-                seq_len,
-                hidden_size,
-            )?
-        } else {
-            self.matmul_gpu_to_gpu(
-                &attn_weights_buffer_id,
-                v_buffer_id,
-                seq_len,
-                seq_len,
-                hidden_size,
-            )?
-        };
+            // Extract head h from Q, K, V: [seq_len, head_dim]
+            let q_h = self.extract_head_gpu(&q_heads, h, seq_len, head_dim)?;
+            let k_h = self.extract_head_gpu(&k_heads, h, seq_len, head_dim)?;
+            let v_h = self.extract_head_gpu(&v_heads, h, seq_len, head_dim)?;
 
-        eprintln!("✅ GPU Attention complete (all on GPU!)");
+            // Q_h @ K_h^T: [seq_len, head_dim] @ [head_dim, seq_len] → [seq_len, seq_len]
+            let k_h_t = self.transpose_gpu_to_gpu(&k_h, seq_len, head_dim)?;
+            let scores = self.matmul_gpu_to_gpu_mps(&q_h, &k_h_t, seq_len, head_dim, seq_len)?;
 
-        Ok(output_buffer_id)
+            // Scale by 1/sqrt(head_dim)
+            let scaled_scores = self.scale_buffer_gpu_to_gpu(&scores, scale, seq_len * seq_len)?;
+
+            // Softmax with causal mask
+            let attn_weights = self.softmax_causal_gpu_to_gpu(&scaled_scores, seq_len)?;
+
+            // Attention @ V_h: [seq_len, seq_len] @ [seq_len, head_dim] → [seq_len, head_dim]
+            let attn_output = self.matmul_gpu_to_gpu_mps(&attn_weights, &v_h, seq_len, seq_len, head_dim)?;
+
+            // Insert result back into output_heads buffer
+            self.insert_head_gpu(&output_heads_id, &attn_output, h, seq_len, head_dim)?;
+        }
+
+        // Step 3: Reshape back from [num_heads, seq_len, head_dim] to [seq_len, hidden_size]
+        eprintln!("   Step 3: Concatenating heads back to [seq_len, {}]", hidden_size);
+        let final_output = self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
+
+        eprintln!("✅ GPU Multi-Head Attention complete!");
+
+        Ok(final_output)
     }
 
     /// Execute LayerNorm on GPU
@@ -2111,6 +2618,7 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 buffer_cache: Arc::clone(&backend.buffer_cache),
                 matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
                 gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
+                scale_pipeline: Arc::clone(&backend.scale_pipeline),
                 add_bias_pipeline: Arc::clone(&backend.add_bias_pipeline),
                 layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
                 rope_pipeline: Arc::clone(&backend.rope_pipeline),
@@ -2119,6 +2627,8 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 elementwise_add_pipeline: Arc::clone(&backend.elementwise_add_pipeline),
                 split_qkv_pipeline: Arc::clone(&backend.split_qkv_pipeline),
                 transpose_pipeline: Arc::clone(&backend.transpose_pipeline),
+                reshape_to_heads_pipeline: Arc::clone(&backend.reshape_to_heads_pipeline),
+                reshape_from_heads_pipeline: Arc::clone(&backend.reshape_from_heads_pipeline),
                 mps_ops: Arc::clone(&backend.mps_ops),
             })
         })

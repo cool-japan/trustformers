@@ -13,6 +13,11 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             let backend = get_metal_backend()?;
             let size: usize = metal_data.shape.iter().product();
 
+            eprintln!(
+                "✅ GELU: GPU-to-GPU path (Metal→Metal, shape: {:?}, size: {})",
+                metal_data.shape, size
+            );
+
             // Execute GELU GPU-to-GPU (NO CPU transfers!)
             let output_buffer_id = backend.gelu_gpu_to_gpu(&metal_data.buffer_id, size)?;
 
@@ -71,6 +76,7 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             }
 
             // Fallback to CPU implementation with NaN guarding
+            eprintln!("⚠️  GELU: CPU fallback (F32 tensor, shape: {:?})", arr.shape());
             let result = arr.mapv(|v| {
                 // Clamp extreme values to prevent NaN
                 if v > 10.0 {
