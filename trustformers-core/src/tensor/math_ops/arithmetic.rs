@@ -126,11 +126,8 @@ impl Tensor {
                 let backend = get_metal_backend()?;
                 let size = a_data.shape.iter().product();
 
-                let output_buffer_id = backend.add_gpu_to_gpu(
-                    &a_data.buffer_id,
-                    &b_data.buffer_id,
-                    size,
-                )?;
+                let output_buffer_id =
+                    backend.add_gpu_to_gpu(&a_data.buffer_id, &b_data.buffer_id, size)?;
 
                 Ok(Tensor::Metal(MetalTensorData {
                     buffer_id: output_buffer_id,

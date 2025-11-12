@@ -338,7 +338,37 @@ impl Tensor {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
                 let data_vec: Vec<f32> = arr.iter().copied().collect();
+
+                // Debug: Verify data_vec before GPU upload
+                eprintln!(
+                    "🔍 to_device_enum(F32→Metal): data_vec.len()={}",
+                    data_vec.len()
+                );
+                if !data_vec.is_empty() {
+                    eprintln!(
+                        "🔍 to_device_enum: first 10 values: {:?}",
+                        &data_vec[..10.min(data_vec.len())]
+                    );
+                    eprintln!(
+                        "🔍 to_device_enum: stats - min={:.4}, max={:.4}, mean={:.4}",
+                        data_vec.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                        data_vec.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+                        data_vec.iter().sum::<f32>() / data_vec.len() as f32
+                    );
+                }
+
                 let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+
+                eprintln!("🔍 to_device_enum: Created buffer_id={:?}", buffer_id);
+
+                // Verify by immediately downloading
+                let verify_data = backend.download_buffer_to_vec(&buffer_id)?;
+                eprintln!(
+                    "🔍 to_device_enum: Verification download - len={}, first 10: {:?}",
+                    verify_data.len(),
+                    &verify_data[..10.min(verify_data.len())]
+                );
+
                 Ok(Tensor::Metal(super::MetalTensorData {
                     buffer_id,
                     shape: arr.shape().to_vec(),

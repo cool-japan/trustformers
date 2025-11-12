@@ -214,7 +214,10 @@ extern "C" __global__ void matmul_kernel(
 
     /// Get device information
     pub fn device_info(&self) -> String {
-        format!("ROCm Device {} (placeholder - HIP bindings required)", self.device_id)
+        format!(
+            "ROCm Device {} (placeholder - HIP bindings required)",
+            self.device_id
+        )
     }
 }
 
@@ -284,15 +287,15 @@ pub fn dispatch_rocm_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Result<
 
                 let result_2d = scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
                     .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
-                    })?;
+                    TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
+                })?;
 
                 let result_dyn = result_2d.into_dyn();
                 return Ok(Tensor::F32(result_dyn));
-            }
+            },
             _ => {
                 return a.matmul(b);
-            }
+            },
         }
     }
 
@@ -321,11 +324,11 @@ mod tests {
             Ok(backend) => {
                 println!("ROCm backend: {}", backend.device_info());
                 Ok(())
-            }
+            },
             Err(_) => {
                 eprintln!("Skipping ROCm test: not available");
                 Ok(())
-            }
+            },
         }
     }
 
@@ -337,7 +340,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping ROCm test: not available");
                 return Ok(());
-            }
+            },
         };
 
         // Test CPU fallback

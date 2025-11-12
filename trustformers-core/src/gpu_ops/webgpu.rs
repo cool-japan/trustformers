@@ -147,14 +147,13 @@ impl WebGpuBackend {
     /// Create a persistent GPU buffer and return its ID
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
         let buffer = Arc::new(
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Persistent Buffer"),
-                    contents: bytemuck::cast_slice(data),
-                    usage: wgpu::BufferUsages::STORAGE
-                        | wgpu::BufferUsages::COPY_SRC
-                        | wgpu::BufferUsages::COPY_DST,
-                }),
+            self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Persistent Buffer"),
+                contents: bytemuck::cast_slice(data),
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_SRC
+                    | wgpu::BufferUsages::COPY_DST,
+            }),
         );
 
         let buffer_id = BufferId::new();
@@ -263,21 +262,17 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         });
 
         // Create buffers
-        let a_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("A Buffer"),
-                contents: bytemuck::cast_slice(a),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let a_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("A Buffer"),
+            contents: bytemuck::cast_slice(a),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
-        let b_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("B Buffer"),
-                contents: bytemuck::cast_slice(b),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let b_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("B Buffer"),
+            contents: bytemuck::cast_slice(b),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
         let result_size = m * n;
         let c_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -289,13 +284,11 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Create uniform buffer for dimensions
         let dims_data = [m as u32, n as u32, k as u32, 0u32]; // Padding for alignment
-        let dims_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Dimensions Buffer"),
-                contents: bytemuck::cast_slice(&dims_data),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+        let dims_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Dimensions Buffer"),
+            contents: bytemuck::cast_slice(&dims_data),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
         // Create staging buffer for reading results
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -307,52 +300,51 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Create bind group layout
         let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("Matmul Bind Group Layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Matmul Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                    ],
-                });
+                        count: None,
+                    },
+                ],
+            });
 
         // Create bind group
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -379,32 +371,26 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         });
 
         // Create pipeline layout
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Matmul Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Matmul Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
         // Create compute pipeline
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("Matmul Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("matmul_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("Matmul Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("matmul_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         // Create command encoder and dispatch
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Matmul Encoder"),
-            });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Matmul Encoder"),
+        });
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -504,13 +490,11 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         });
 
         // Create buffers
-        let input_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Input Buffer"),
-                contents: bytemuck::cast_slice(input),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let input_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Input Buffer"),
+            contents: bytemuck::cast_slice(input),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
@@ -519,13 +503,11 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             mapped_at_creation: false,
         });
 
-        let size_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Size Buffer"),
-                contents: bytemuck::cast_slice(&[size as u32]),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+        let size_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Size Buffer"),
+            contents: bytemuck::cast_slice(&[size as u32]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Buffer"),
@@ -536,42 +518,41 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Create bind group layout and bind group
         let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("GELU Bind Group Layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("GELU Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                    ],
-                });
+                        count: None,
+                    },
+                ],
+            });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("GELU Bind Group"),
@@ -593,31 +574,25 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         });
 
         // Create pipeline
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("GELU Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("GELU Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("GELU Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("gelu_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("GELU Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("gelu_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         // Create command encoder and dispatch
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("GELU Encoder"),
-            });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("GELU Encoder"),
+        });
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -652,10 +627,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         self.device.poll(wgpu::Maintain::Wait);
         receiver.recv().unwrap().map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("Failed to map buffer: {:?}", e),
-                "gelu_f32",
-            )
+            TrustformersError::hardware_error(&format!("Failed to map buffer: {:?}", e), "gelu_f32")
         })?;
 
         let data = buffer_slice.get_mapped_range();
@@ -747,29 +719,23 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         });
 
         // Create buffers
-        let input_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Input Buffer"),
-                contents: bytemuck::cast_slice(input),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let input_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Input Buffer"),
+            contents: bytemuck::cast_slice(input),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
-        let weight_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Weight Buffer"),
-                contents: bytemuck::cast_slice(weight),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let weight_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Weight Buffer"),
+            contents: bytemuck::cast_slice(weight),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
-        let bias_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Bias Buffer"),
-                contents: bytemuck::cast_slice(bias),
-                usage: wgpu::BufferUsages::STORAGE,
-            });
+        let bias_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Bias Buffer"),
+            contents: bytemuck::cast_slice(bias),
+            usage: wgpu::BufferUsages::STORAGE,
+        });
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
@@ -781,13 +747,11 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Create params buffer (eps needs to be passed as bits for uniform buffer)
         let eps_bits = eps.to_bits();
         let params_data = [seq_len as u32, hidden_size as u32, eps_bits, 0u32];
-        let params_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Params Buffer"),
-                contents: bytemuck::cast_slice(&params_data),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
+        let params_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Params Buffer"),
+            contents: bytemuck::cast_slice(&params_data),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Buffer"),
@@ -798,62 +762,61 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         // Create bind group layout
         let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("LayerNorm Bind Group Layout"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("LayerNorm Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 4,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                    ],
-                });
+                        count: None,
+                    },
+                ],
+            });
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("LayerNorm Bind Group"),
@@ -883,31 +846,25 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         });
 
         // Create pipeline
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("LayerNorm Pipeline Layout"),
-                bind_group_layouts: &[&bind_group_layout],
-                push_constant_ranges: &[],
-            });
+        let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("LayerNorm Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
 
-        let pipeline = self
-            .device
-            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("LayerNorm Pipeline"),
-                layout: Some(&pipeline_layout),
-                module: &shader,
-                entry_point: Some("layernorm_main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("LayerNorm Pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("layernorm_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         // Execute
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("LayerNorm Encoder"),
-            });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("LayerNorm Encoder"),
+        });
 
         {
             let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -967,11 +924,9 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             mapped_at_creation: false,
         });
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Copy Encoder"),
-            });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Copy Encoder"),
+        });
 
         encoder.copy_buffer_to_buffer(
             &buffer,
@@ -1031,11 +986,9 @@ pub fn get_webgpu_backend() -> Result<Arc<WebGpuBackend>> {
         *cache = Some(Arc::new(WebGpuBackend::new()?));
     }
 
-    cache
-        .clone()
-        .ok_or_else(|| {
-            TrustformersError::hardware_error("WebGPU backend not initialized", "get_webgpu_backend")
-        })
+    cache.clone().ok_or_else(|| {
+        TrustformersError::hardware_error("WebGPU backend not initialized", "get_webgpu_backend")
+    })
 }
 
 /// Dispatch matrix multiplication to WebGPU backend
@@ -1088,16 +1041,16 @@ pub fn dispatch_webgpu_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
                 // Convert back to tensor
                 let result_2d = scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
                     .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
-                    })?;
+                    TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
+                })?;
 
                 let result_dyn = result_2d.into_dyn();
                 return Ok(Tensor::F32(result_dyn));
-            }
+            },
             _ => {
                 // Fallback to CPU matmul for non-F32 tensors
                 return a.matmul(b);
-            }
+            },
         }
     }
 
@@ -1119,11 +1072,11 @@ mod tests {
             Ok(backend) => {
                 println!("WebGPU backend created: {}", backend.device_info());
                 Ok(())
-            }
+            },
             Err(e) => {
                 eprintln!("Skipping WebGPU test: {}", e);
                 Ok(())
-            }
+            },
         }
     }
 
@@ -1135,7 +1088,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping WebGPU test: no adapter available");
                 return Ok(());
-            }
+            },
         };
 
         // Simple 2x2 matrix multiplication
@@ -1168,7 +1121,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping WebGPU test: no adapter available");
                 return Ok(());
-            }
+            },
         };
 
         let input = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
@@ -1193,7 +1146,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping WebGPU test: no adapter available");
                 return Ok(());
-            }
+            },
         };
 
         // Simple test: 2 sequences, 4 features each

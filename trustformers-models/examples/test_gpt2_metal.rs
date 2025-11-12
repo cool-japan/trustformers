@@ -1,7 +1,7 @@
+use std::time::Instant;
+use trustformers_core::device::Device;
 use trustformers_models::gpt2::config::Gpt2Config;
 use trustformers_models::gpt2::model::Gpt2LMHeadModel;
-use trustformers_core::device::Device;
-use std::time::Instant;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("🚀 Testing GPT-2 with Metal GPU Attention");
@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("🔥 Starting generation (first forward pass should use GPU attention)...\n");
     let start = Instant::now();
 
-    let max_length = 20;  // Generate 16 more tokens (total 20)
+    let max_length = 20; // Generate 16 more tokens (total 20)
     let result = model.generate_greedy_with_cache(input_ids.clone(), max_length)?;
 
     let elapsed = start.elapsed();
@@ -41,7 +41,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("\n✅ Generation complete!");
     eprintln!("⏱️  Total time: {:.2}s", elapsed.as_secs_f64());
     eprintln!("📊 Tokens generated: {}", result.len() - input_ids.len());
-    eprintln!("⚡ Tokens/sec: {:.2}", (result.len() - input_ids.len()) as f64 / elapsed.as_secs_f64());
+    eprintln!(
+        "⚡ Tokens/sec: {:.2}",
+        (result.len() - input_ids.len()) as f64 / elapsed.as_secs_f64()
+    );
     eprintln!("\n🔢 Output token IDs: {:?}", result);
 
     Ok(())

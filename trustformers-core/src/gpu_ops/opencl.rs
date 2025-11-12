@@ -142,17 +142,14 @@ impl OpenClBackend {
         })?;
 
         // Create command queue
-        let queue = CommandQueue::create_default_with_properties(
-            &context,
-            CL_QUEUE_PROFILING_ENABLE,
-            0,
-        )
-        .map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("Failed to create OpenCL command queue: {:?}", e),
-                "OpenClBackend::new",
-            )
-        })?;
+        let queue =
+            CommandQueue::create_default_with_properties(&context, CL_QUEUE_PROFILING_ENABLE, 0)
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to create OpenCL command queue: {:?}", e),
+                        "OpenClBackend::new",
+                    )
+                })?;
 
         let device_name = device.name().map_err(|e| {
             TrustformersError::hardware_error(
@@ -174,13 +171,14 @@ impl OpenClBackend {
 
     /// Create a persistent GPU buffer and return its ID
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
-        let buffer = ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, data.len(), None)
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to create buffer: {:?}", e),
-                    "create_persistent_buffer",
-                )
-            })?;
+        let buffer =
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, data.len(), None)
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to create buffer: {:?}", e),
+                        "create_persistent_buffer",
+                    )
+                })?;
 
         // Write data to buffer
         self.queue
@@ -796,15 +794,15 @@ pub fn dispatch_opencl_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Resul
 
                 let result_2d = scirs2_core::ndarray::Array2::from_shape_vec((m, n), result_data)
                     .map_err(|e| {
-                        TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
-                    })?;
+                    TrustformersError::shape_error(format!("Failed to reshape result: {}", e))
+                })?;
 
                 let result_dyn = result_2d.into_dyn();
                 return Ok(Tensor::F32(result_dyn));
-            }
+            },
             _ => {
                 return a.matmul(b);
-            }
+            },
         }
     }
 
@@ -826,11 +824,11 @@ mod tests {
             Ok(backend) => {
                 println!("OpenCL backend created: {:?}", backend.device_info()?);
                 Ok(())
-            }
+            },
             Err(e) => {
                 eprintln!("Skipping OpenCL test: {}", e);
                 Ok(())
-            }
+            },
         }
     }
 
@@ -842,7 +840,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping OpenCL test: no device available");
                 return Ok(());
-            }
+            },
         };
 
         // Simple 2x2 matrix multiplication
@@ -875,7 +873,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping OpenCL test: no device available");
                 return Ok(());
-            }
+            },
         };
 
         let input = vec![-2.0, -1.0, 0.0, 1.0, 2.0];

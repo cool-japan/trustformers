@@ -1444,9 +1444,8 @@ extern "C" __global__ void softmax_causal_kernel(
 
 /// Global CUDA backend cache (one per device)
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-static CUDA_BACKENDS: once_cell::sync::Lazy<
-    std::sync::Mutex<HashMap<usize, Arc<CudaBackend>>>,
-> = once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+static CUDA_BACKENDS: once_cell::sync::Lazy<std::sync::Mutex<HashMap<usize, Arc<CudaBackend>>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
 
 /// Get or create CUDA backend instance for a specific device
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
@@ -1460,12 +1459,9 @@ pub fn get_cuda_backend(device_id: usize) -> Result<Arc<CudaBackend>> {
         cache.insert(device_id, Arc::new(backend));
     }
 
-    cache
-        .get(&device_id)
-        .cloned()
-        .ok_or_else(|| {
-            TrustformersError::hardware_error("CUDA backend not found", "get_cuda_backend")
-        })
+    cache.get(&device_id).cloned().ok_or_else(|| {
+        TrustformersError::hardware_error("CUDA backend not found", "get_cuda_backend")
+    })
 }
 
 /// Dispatch matrix multiplication to CUDA backend
@@ -1523,11 +1519,11 @@ pub fn dispatch_cuda_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Result<
 
                 let result_dyn = result_2d.into_dyn();
                 return Ok(Tensor::F32(result_dyn));
-            }
+            },
             _ => {
                 // Fallback to CPU matmul for non-F32 tensors
                 return a.matmul(b);
-            }
+            },
         }
     }
 
@@ -1596,7 +1592,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         // Simple 2x2 matrix multiplication
@@ -1629,7 +1625,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         let input = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
@@ -1654,7 +1650,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         // Simple test: 2 sequences, 4 features each
@@ -1684,7 +1680,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         // Create a persistent buffer
@@ -1713,7 +1709,7 @@ mod tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         // Test GPU-to-GPU GELU
@@ -2200,7 +2196,7 @@ mod advanced_tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         // Test with larger matrices where tiling shows benefits
@@ -2226,7 +2222,7 @@ mod advanced_tests {
             Err(_) => {
                 eprintln!("Skipping CUDA test: no CUDA device available");
                 return Ok(());
-            }
+            },
         };
 
         let a = vec![1.0, 2.0, 3.0, 4.0];
@@ -2244,4 +2240,3 @@ mod advanced_tests {
         Ok(())
     }
 }
-

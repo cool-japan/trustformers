@@ -727,7 +727,10 @@ impl Model for GPTNeoXModel {
         #[cfg(feature = "cuda")]
         if !self.layers.is_empty() {
             if let Some(first_layer) = self.layers.first() {
-                if matches!(first_layer.attention.query_key_value.device(), Device::CUDA(_)) {
+                if matches!(
+                    first_layer.attention.query_key_value.device(),
+                    Device::CUDA(_)
+                ) {
                     let device = first_layer.attention.query_key_value.device();
                     hidden_states = hidden_states.to_device_enum(&device)?;
                 }

@@ -55,7 +55,8 @@ pub struct Linear {
     #[cfg(all(target_os = "macos", feature = "metal"))]
     weight_buffer_id: std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::BufferId>>>,
     #[cfg(feature = "cuda")]
-    weight_buffer_id_cuda: std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::cuda::BufferId>>>,
+    weight_buffer_id_cuda:
+        std::sync::Arc<std::sync::RwLock<Option<crate::gpu_ops::cuda::BufferId>>>,
 }
 
 impl Linear {
@@ -483,7 +484,10 @@ impl Layer for Linear {
             let output_buffer_id = backend
                 .matmul_gpu_to_gpu_mps(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
                 .or_else(|e| {
-                    eprintln!("⚠️  MPS matmul failed: {:?}, falling back to naive Metal kernel", e);
+                    eprintln!(
+                        "⚠️  MPS matmul failed: {:?}, falling back to naive Metal kernel",
+                        e
+                    );
                     // Fallback to naive Metal kernel if MPS fails
                     backend.matmul_gpu_to_gpu(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
                 })?;
@@ -501,18 +505,24 @@ impl Layer for Linear {
 
             // Handle bias if present
             if let Some(ref bias) = self.bias {
+                eprintln!("🔍 Linear: Has bias, checking type...");
                 // Try GPU-to-GPU bias addition if bias is on GPU
                 match bias {
                     #[cfg(feature = "metal")]
                     Tensor::Metal(bias_data) => {
+                        eprintln!("🔍 Linear: Bias is Metal, using GPU-to-GPU bias addition");
                         // Both output and bias are Metal tensors - use GPU kernel!
                         if let Tensor::Metal(output_data) = &output {
+                            eprintln!("🔍 Linear: Output is Metal, calling add_bias_gpu_to_gpu");
                             let output_buffer_id = backend.add_bias_gpu_to_gpu(
                                 &output_data.buffer_id,
                                 &bias_data.buffer_id,
                                 batch_dims,
                                 n,
                             )?;
+                            eprintln!(
+                                "🔍 Linear: add_bias_gpu_to_gpu succeeded, returning Metal tensor"
+                            );
 
                             return Ok(Tensor::Metal(MetalTensorData {
                                 buffer_id: output_buffer_id,
@@ -520,20 +530,40 @@ impl Layer for Linear {
                                 dtype: output_data.dtype,
                             }));
                         }
+                        eprintln!("🔍 Linear: Output is NOT Metal, falling back to CPU");
                     },
-                    _ => {},
+                    _ => {
+                        eprintln!(
+                            "🔍 Linear: Bias is NOT Metal (type={:?}), falling back to CPU",
+                            std::mem::discriminant(bias)
+                        );
+                    },
                 }
 
                 // Fallback: CPU bias addition
+                eprintln!("🔍 Linear: Using CPU bias fallback");
                 output = output.to_device_enum(&crate::device::Device::CPU)?;
+                eprintln!("🔍 Linear: Converted output to CPU");
                 output = output.add(bias)?;
+                eprintln!("🔍 Linear: Added bias on CPU");
 
                 // Convert back to Metal tensor if needed
                 if matches!(self.device, crate::device::Device::Metal(_)) {
+                    eprintln!("🔍 Linear: Converting back to Metal device");
                     output = output.to_device_enum(&self.device)?;
+                    eprintln!(
+                        "🔍 Linear: Converted back to Metal, type={:?}",
+                        std::mem::discriminant(&output)
+                    );
                 }
+            } else {
+                eprintln!("🔍 Linear: No bias");
             }
 
+            eprintln!(
+                "🔍 Linear: Returning output, type={:?}",
+                std::mem::discriminant(&output)
+            );
             return Ok(output);
         }
 

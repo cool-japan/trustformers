@@ -168,7 +168,10 @@ impl Layer for LayerNorm {
                     // Get weight and bias buffer IDs
                     match (&self.weight, &self.bias) {
                         (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
-                            eprintln!("✅ LayerNorm: GPU-to-GPU path (Metal→Metal, shape: {:?})", metal_data.shape);
+                            eprintln!(
+                                "✅ LayerNorm: GPU-to-GPU path (Metal→Metal, shape: {:?})",
+                                metal_data.shape
+                            );
 
                             if metal_data.shape.len() == 2 {
                                 // 2D case: (seq_len, hidden_size)
@@ -195,8 +198,10 @@ impl Layer for LayerNorm {
                                 let seq_len = metal_data.shape[1];
                                 let flattened_seq_len = batch * seq_len;
 
-                                eprintln!("   Reshaping 3D→2D: {:?} → [{}, {}]",
-                                    metal_data.shape, flattened_seq_len, hidden_size);
+                                eprintln!(
+                                    "   Reshaping 3D→2D: {:?} → [{}, {}]",
+                                    metal_data.shape, flattened_seq_len, hidden_size
+                                );
 
                                 // Run GPU kernel on flattened 2D tensor
                                 let output_buffer_id = backend.layernorm_gpu_to_gpu(
@@ -208,8 +213,10 @@ impl Layer for LayerNorm {
                                     self.eps,
                                 )?;
 
-                                eprintln!("   Reshaping 2D→3D: [{}, {}] → {:?}",
-                                    flattened_seq_len, hidden_size, metal_data.shape);
+                                eprintln!(
+                                    "   Reshaping 2D→3D: [{}, {}] → {:?}",
+                                    flattened_seq_len, hidden_size, metal_data.shape
+                                );
 
                                 // Return with original 3D shape
                                 return Ok(Tensor::Metal(MetalTensorData {
@@ -224,7 +231,10 @@ impl Layer for LayerNorm {
                         },
                     }
                 } else {
-                    eprintln!("⚠️  LayerNorm: Unsupported shape {:?}, falling back to CPU", metal_data.shape);
+                    eprintln!(
+                        "⚠️  LayerNorm: Unsupported shape {:?}, falling back to CPU",
+                        metal_data.shape
+                    );
                 }
 
                 // Fallback: convert to CPU and process (avoid recursion)
@@ -312,11 +322,7 @@ impl Layer for LayerNorm {
                 use crate::tensor::CudaTensorData;
 
                 if cuda_data.shape.len() == 2 && self.normalized_shape.len() == 1 {
-                    let device_id = if let Device::CUDA(id) = self.device {
-                        id
-                    } else {
-                        0
-                    };
+                    let device_id = if let Device::CUDA(id) = self.device { id } else { 0 };
                     let backend = get_cuda_backend(device_id)?;
                     let shape = &cuda_data.shape;
                     let seq_len = shape[0];

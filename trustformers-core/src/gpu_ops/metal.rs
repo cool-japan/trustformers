@@ -546,12 +546,13 @@ impl MetalBackend {
             })?;
 
         // Compile elementwise_add kernel (critical for residual connections)
-        let elementwise_add_kernel = library.get_function("elementwise_add", None).map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("Failed to get elementwise_add kernel function: {}", e),
-                "MetalBackend::new",
-            )
-        })?;
+        let elementwise_add_kernel =
+            library.get_function("elementwise_add", None).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to get elementwise_add kernel function: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
 
         let elementwise_add_pipeline = device
             .new_compute_pipeline_state_with_function(&elementwise_add_kernel)
@@ -613,18 +614,18 @@ impl MetalBackend {
         // Convert to objc2 types
         // Both metal-rs and objc2-metal wrap the same underlying MTLDevice/MTLCommandQueue objects
         // SAFETY: The raw pointers point to valid MTL objects with correct retain counts
-        let device_id: Retained<ProtocolObject<dyn ObjC2Device>> = unsafe {
-            Retained::retain(device_ptr as *mut ProtocolObject<dyn ObjC2Device>)?
-        };
+        let device_id: Retained<ProtocolObject<dyn ObjC2Device>> =
+            unsafe { Retained::retain(device_ptr as *mut ProtocolObject<dyn ObjC2Device>)? };
 
-        let queue_id: Retained<ProtocolObject<dyn ObjC2CommandQueue>> = unsafe {
-            Retained::retain(queue_ptr as *mut ProtocolObject<dyn ObjC2CommandQueue>)?
-        };
+        let queue_id: Retained<ProtocolObject<dyn ObjC2CommandQueue>> =
+            unsafe { Retained::retain(queue_ptr as *mut ProtocolObject<dyn ObjC2CommandQueue>)? };
 
         // Create MPS operations with converted types
         let mps_ops = MPSOperations::new(device_id, queue_id);
 
-        println!("✅ MPS (Metal Performance Shaders) initialized - 100-500x matmul speedup enabled");
+        println!(
+            "✅ MPS (Metal Performance Shaders) initialized - 100-500x matmul speedup enabled"
+        );
 
         Some(mps_ops)
     }
@@ -711,27 +712,27 @@ impl MetalBackend {
 
         #[cfg(feature = "metal")]
         unsafe {
-            use cblas_sys::{CblasNoTrans, CblasRowMajor, cblas_sgemm};
+            use cblas_sys::{cblas_sgemm, CblasNoTrans, CblasRowMajor};
 
             let mut result = vec![0.0f32; m * n];
 
             // Call Accelerate framework BLAS
             // SGEMM: C := alpha*A*B + beta*C
             cblas_sgemm(
-                CblasRowMajor,      // Row-major layout
-                CblasNoTrans,       // Don't transpose A
-                CblasNoTrans,       // Don't transpose B
-                m as i32,           // M: rows of A and C
-                n as i32,           // N: columns of B and C
-                k as i32,           // K: columns of A, rows of B
-                1.0,                // alpha
-                a.as_ptr(),         // A matrix
-                k as i32,           // lda: leading dimension of A
-                b.as_ptr(),         // B matrix
-                n as i32,           // ldb: leading dimension of B
-                0.0,                // beta
+                CblasRowMajor,       // Row-major layout
+                CblasNoTrans,        // Don't transpose A
+                CblasNoTrans,        // Don't transpose B
+                m as i32,            // M: rows of A and C
+                n as i32,            // N: columns of B and C
+                k as i32,            // K: columns of A, rows of B
+                1.0,                 // alpha
+                a.as_ptr(),          // A matrix
+                k as i32,            // lda: leading dimension of A
+                b.as_ptr(),          // B matrix
+                n as i32,            // ldb: leading dimension of B
+                0.0,                 // beta
                 result.as_mut_ptr(), // C matrix (output)
-                n as i32,           // ldc: leading dimension of C
+                n as i32,            // ldc: leading dimension of C
             );
 
             Ok(result)
@@ -777,7 +778,11 @@ impl MetalBackend {
                 &k_u32 as *const u32 as *const _,
             );
 
-            let threadgroup_size = metal::MTLSize { width: 16, height: 16, depth: 1 };
+            let threadgroup_size = metal::MTLSize {
+                width: 16,
+                height: 16,
+                depth: 1,
+            };
             let threadgroups = metal::MTLSize {
                 width: (n as u64 + 15) / 16,
                 height: (m as u64 + 15) / 16,
@@ -901,14 +906,19 @@ impl MetalBackend {
     ) -> Result<BufferId> {
         // Check if MPS is available
         let mps_ops = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
-            eprintln!("⚠️  MPS matmul requested but MPS not initialized - falling back to naive kernel");
+            eprintln!(
+                "⚠️  MPS matmul requested but MPS not initialized - falling back to naive kernel"
+            );
             TrustformersError::hardware_error(
                 "MPS not initialized - GPU-to-GPU matmul unavailable",
                 "matmul_gpu_to_gpu_mps",
             )
         })?;
 
-        eprintln!("🚀 Using MPS matmul: {}x{}x{} (expected 100-500x speedup)", m, k, n);
+        eprintln!(
+            "🚀 Using MPS matmul: {}x{}x{} (expected 100-500x speedup)",
+            m, k, n
+        );
 
         // Get persistent buffers
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
@@ -950,7 +960,8 @@ impl MetalBackend {
     /// Convert metal-rs Buffer to objc2-metal ProtocolObject
     fn buffer_to_objc2(
         buffer: &Arc<Buffer>,
-    ) -> Result<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>> {
+    ) -> Result<objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLBuffer>>>
+    {
         use objc2::rc::Retained;
         use objc2::runtime::ProtocolObject;
         use objc2_metal::MTLBuffer as ObjC2Buffer;
@@ -961,12 +972,14 @@ impl MetalBackend {
         // Convert to objc2 type
         // SAFETY: Both metal-rs and objc2-metal wrap the same MTLBuffer object
         let buffer_objc2: Retained<ProtocolObject<dyn ObjC2Buffer>> = unsafe {
-            Retained::retain(buffer_ptr as *mut ProtocolObject<dyn ObjC2Buffer>).ok_or_else(|| {
-                TrustformersError::hardware_error(
-                    "Failed to convert metal-rs Buffer to objc2-metal",
-                    "buffer_to_objc2",
-                )
-            })?
+            Retained::retain(buffer_ptr as *mut ProtocolObject<dyn ObjC2Buffer>).ok_or_else(
+                || {
+                    TrustformersError::hardware_error(
+                        "Failed to convert metal-rs Buffer to objc2-metal",
+                        "buffer_to_objc2",
+                    )
+                },
+            )?
         };
 
         Ok(buffer_objc2)
@@ -1070,7 +1083,7 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         // Store output buffer and return ID
         let output_buffer_arc = Arc::new(output_buffer);
@@ -1135,8 +1148,7 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
-        // Next GPU operation using this buffer will auto-wait via resource tracking
+        command_buffer.wait_until_completed(); // CRITICAL: Wait for GPU to finish the addition!
 
         // Store output buffer and return ID
         let output_buffer_arc = Arc::new(output_buffer);
@@ -1220,7 +1232,7 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         // Store output buffer and return ID
         let output_buffer_arc = Arc::new(output_buffer);
@@ -1305,7 +1317,7 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         // Store output buffer and return ID
         let output_buffer_arc = Arc::new(output_buffer);
@@ -1378,7 +1390,7 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         // Store output buffer and return ID
         let output_buffer_arc = Arc::new(output_buffer);
@@ -1452,7 +1464,7 @@ impl MetalBackend {
 
         encoder.end_encoding();
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         // Store output buffer
         let output_buffer_arc = Arc::new(output_buffer);
@@ -1497,9 +1509,12 @@ impl MetalBackend {
         let elements_per_output = batch_size * seq_len * hidden_size;
         let bytes_per_output = (elements_per_output * mem::size_of::<f32>()) as u64;
 
-        let q_buffer = self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
-        let k_buffer = self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
-        let v_buffer = self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
+        let q_buffer =
+            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
+        let k_buffer =
+            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
+        let v_buffer =
+            self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModeShared);
 
         // Execute split kernel
         let command_buffer = self.command_queue.new_command_buffer();
@@ -1515,12 +1530,28 @@ impl MetalBackend {
         let seq_u32 = seq_len as u32;
         let hidden_u32 = hidden_size as u32;
 
-        encoder.set_bytes(4, mem::size_of::<u32>() as u64, &batch_u32 as *const u32 as *const _);
-        encoder.set_bytes(5, mem::size_of::<u32>() as u64, &seq_u32 as *const u32 as *const _);
-        encoder.set_bytes(6, mem::size_of::<u32>() as u64, &hidden_u32 as *const u32 as *const _);
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &batch_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &seq_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            6,
+            mem::size_of::<u32>() as u64,
+            &hidden_u32 as *const u32 as *const _,
+        );
 
         // Dispatch 3D grid: [batch_size, seq_len, hidden_size]
-        let threadgroup_size = metal::MTLSize { width: 8, height: 8, depth: 8 };
+        let threadgroup_size = metal::MTLSize {
+            width: 8,
+            height: 8,
+            depth: 8,
+        };
         let threadgroups = metal::MTLSize {
             width: (batch_size as u64 + 7) / 8,
             height: (seq_len as u64 + 7) / 8,
@@ -1531,7 +1562,7 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         // Store output buffers and return IDs
         let q_id = BufferId::new();
@@ -1600,14 +1631,17 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         // Store output buffer and return ID
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
 
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error("Failed to lock buffer cache", "softmax_causal_gpu_to_gpu")
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "softmax_causal_gpu_to_gpu",
+            )
         })?;
         cache.insert(output_id, output_buffer_arc);
 
@@ -1640,11 +1674,23 @@ impl MetalBackend {
 
         let rows_u32 = rows as u32;
         let cols_u32 = cols as u32;
-        encoder.set_bytes(2, mem::size_of::<u32>() as u64, &rows_u32 as *const u32 as *const _);
-        encoder.set_bytes(3, mem::size_of::<u32>() as u64, &cols_u32 as *const u32 as *const _);
+        encoder.set_bytes(
+            2,
+            mem::size_of::<u32>() as u64,
+            &rows_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &cols_u32 as *const u32 as *const _,
+        );
 
         // Dispatch 2D threads (one thread per element)
-        let threadgroup_size = metal::MTLSize { width: 16, height: 16, depth: 1 };
+        let threadgroup_size = metal::MTLSize {
+            width: 16,
+            height: 16,
+            depth: 1,
+        };
         let threadgroups = metal::MTLSize {
             width: (cols as u64 + 15) / 16,
             height: (rows as u64 + 15) / 16,
@@ -1655,7 +1701,7 @@ impl MetalBackend {
         encoder.end_encoding();
 
         command_buffer.commit();
-        // ASYNC: Don't wait - Metal handles dependencies automatically
+        command_buffer.wait_until_completed();
 
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -1682,8 +1728,10 @@ impl MetalBackend {
     ) -> Result<BufferId> {
         let hidden_size = num_heads * head_dim;
 
-        eprintln!("🚀 GPU Attention: batch={}, seq={}, heads={}, head_dim={}",
-            batch_size, seq_len, num_heads, head_dim);
+        eprintln!(
+            "🚀 GPU Attention: batch={}, seq={}, heads={}, head_dim={}",
+            batch_size, seq_len, num_heads, head_dim
+        );
 
         // For simplicity, handle batch=1 case for now
         // TODO: Extend to arbitrary batch sizes
@@ -1724,9 +1772,21 @@ impl MetalBackend {
         eprintln!("   Step 3: Scores @ V (MPS matmul)");
 
         let output_buffer_id = if let Some(_mps_ops) = self.mps_ops.as_ref().as_ref() {
-            self.matmul_gpu_to_gpu_mps(&attn_weights_buffer_id, v_buffer_id, seq_len, seq_len, hidden_size)?
+            self.matmul_gpu_to_gpu_mps(
+                &attn_weights_buffer_id,
+                v_buffer_id,
+                seq_len,
+                seq_len,
+                hidden_size,
+            )?
         } else {
-            self.matmul_gpu_to_gpu(&attn_weights_buffer_id, v_buffer_id, seq_len, seq_len, hidden_size)?
+            self.matmul_gpu_to_gpu(
+                &attn_weights_buffer_id,
+                v_buffer_id,
+                seq_len,
+                seq_len,
+                hidden_size,
+            )?
         };
 
         eprintln!("✅ GPU Attention complete (all on GPU!)");
@@ -1991,11 +2051,33 @@ impl MetalBackend {
 
     fn create_buffer(&self, data: &[f32]) -> Result<Buffer> {
         let byte_size = std::mem::size_of_val(data) as u64;
+
+        eprintln!(
+            "🔍 create_buffer: data.len()={}, byte_size={}",
+            data.len(),
+            byte_size
+        );
+        if !data.is_empty() {
+            eprintln!(
+                "🔍 create_buffer: first 5 values: {:?}",
+                &data[..5.min(data.len())]
+            );
+        }
+
         let buffer = self.device.new_buffer_with_data(
             data.as_ptr() as *const _,
             byte_size,
             MTLResourceOptions::StorageModeShared,
         );
+
+        // Verify buffer contents
+        let ptr = buffer.contents() as *const f32;
+        let verify_data = unsafe { std::slice::from_raw_parts(ptr, data.len().min(5)) };
+        eprintln!(
+            "🔍 create_buffer: After creation, first 5 in buffer: {:?}",
+            verify_data
+        );
+
         Ok(buffer)
     }
 }

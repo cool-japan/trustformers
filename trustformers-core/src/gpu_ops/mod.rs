@@ -26,12 +26,12 @@
 #[cfg(feature = "cuda")]
 pub mod cuda;
 pub mod metal;
-#[cfg(feature = "wgpu_backend")]
-pub mod webgpu;
-#[cfg(feature = "rocm")]
-pub mod rocm;
 #[cfg(feature = "opencl")]
 pub mod opencl;
+#[cfg(feature = "rocm")]
+pub mod rocm;
+#[cfg(feature = "wgpu_backend")]
+pub mod webgpu;
 
 // Default dispatch (Metal on macOS, others on respective platforms)
 pub use metal::dispatch_matmul;

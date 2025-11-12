@@ -4,7 +4,7 @@
 
 use crate::neuromorphic::SpikeEvent;
 use anyhow::Result;
-use scirs2_core::random::Rng;  // SciRS2 Policy compliant
+use scirs2_core::random::Rng; // SciRS2 Policy compliant
 
 /// Spiking neural network
 #[derive(Debug, Clone)]

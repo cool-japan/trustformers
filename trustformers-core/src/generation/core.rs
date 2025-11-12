@@ -1,6 +1,6 @@
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
-use scirs2_core::random::Rng;  // SciRS2 Policy compliant
+use scirs2_core::random::Rng; // SciRS2 Policy compliant
 
 use super::cache::KVCache;
 use super::config::{GenerationConfig, GenerationStrategy};
@@ -212,10 +212,10 @@ impl TextGenerator {
 
     /// Sample from probability distribution
     pub fn sample_from_probs(&self, probs: &[f32]) -> Result<usize> {
-        use scirs2_core::random::rng;  // Use updated API
+        use scirs2_core::random::rng; // Use updated API
 
         let mut rng = rng();
-        let sample: f32 = rng.random();  // Updated API (gen → random)
+        let sample: f32 = rng.random(); // Updated API (gen → random)
         let mut cumsum = 0.0;
 
         for (i, &prob) in probs.iter().enumerate() {

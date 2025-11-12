@@ -148,12 +148,28 @@ impl Layer for Embedding {
                 }
 
                 // Return as Metal tensor if device is Metal
-                let result = Tensor::F32(output.into_dyn());
+                let result_tensor = Tensor::F32(output.into_dyn());
+
+                // Debug: Check CPU values before GPU upload
                 if matches!(self.device, Device::Metal(_)) {
-                    let metal_result = result.to_device_enum(&self.device)?;
+                    if let Tensor::F32(ref arr) = result_tensor {
+                        let data: Vec<f32> = arr.iter().cloned().collect();
+                        eprintln!(
+                            "🔍 Embedding lookup (CPU) first 10: {:?}",
+                            &data[..10.min(data.len())]
+                        );
+                        eprintln!(
+                            "🔍 Embedding stats: min={:.4}, max={:.4}, mean={:.4}",
+                            data.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                            data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+                            data.iter().sum::<f32>() / data.len() as f32
+                        );
+                    }
+
+                    let metal_result = result_tensor.to_device_enum(&self.device)?;
                     return Ok(metal_result);
                 }
-                return Ok(result);
+                return Ok(result_tensor);
             }
         }
 
