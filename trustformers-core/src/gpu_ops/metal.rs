@@ -669,12 +669,13 @@ impl MetalBackend {
             })?;
 
         // Compile reshape_to_heads kernel for multi-head attention
-        let reshape_to_heads_kernel = library.get_function("reshape_to_heads", None).map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("Failed to get reshape_to_heads kernel function: {}", e),
-                "MetalBackend::new",
-            )
-        })?;
+        let reshape_to_heads_kernel =
+            library.get_function("reshape_to_heads", None).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to get reshape_to_heads kernel function: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
 
         let reshape_to_heads_pipeline = device
             .new_compute_pipeline_state_with_function(&reshape_to_heads_kernel)
@@ -686,12 +687,13 @@ impl MetalBackend {
             })?;
 
         // Compile reshape_from_heads kernel for multi-head attention
-        let reshape_from_heads_kernel = library.get_function("reshape_from_heads", None).map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("Failed to get reshape_from_heads kernel function: {}", e),
-                "MetalBackend::new",
-            )
-        })?;
+        let reshape_from_heads_kernel =
+            library.get_function("reshape_from_heads", None).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to get reshape_from_heads kernel function: {}", e),
+                    "MetalBackend::new",
+                )
+            })?;
 
         let reshape_from_heads_pipeline = device
             .new_compute_pipeline_state_with_function(&reshape_from_heads_kernel)
@@ -1542,8 +1544,10 @@ impl MetalBackend {
         let elements_per_tensor = seq_len * hidden_size;
         let total_elements = batch_size * elements_per_tensor;
 
-        eprintln!("🔧 stack_gpu_buffers: batch_size={}, seq_len={}, hidden_size={}, total_elements={}",
-            batch_size, seq_len, hidden_size, total_elements);
+        eprintln!(
+            "🔧 stack_gpu_buffers: batch_size={}, seq_len={}, hidden_size={}, total_elements={}",
+            batch_size, seq_len, hidden_size, total_elements
+        );
 
         // Create output buffer
         let output_buffer = self.device.new_buffer(
@@ -1606,11 +1610,16 @@ impl MetalBackend {
         // Debug: Check output after stacking
         let ptr = output_buffer_arc.contents() as *const f32;
         let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_elements) };
-        eprintln!("✅ stack_gpu_buffers complete - first 10 values: {:?}", &output_slice[..10.min(total_elements)]);
-        eprintln!("   Stats: min={:.4}, max={:.4}, mean={:.4}",
+        eprintln!(
+            "✅ stack_gpu_buffers complete - first 10 values: {:?}",
+            &output_slice[..10.min(total_elements)]
+        );
+        eprintln!(
+            "   Stats: min={:.4}, max={:.4}, mean={:.4}",
             output_slice.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
             output_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-            output_slice.iter().sum::<f32>() / total_elements as f32);
+            output_slice.iter().sum::<f32>() / total_elements as f32
+        );
 
         Ok(output_id)
     }
@@ -1797,9 +1806,7 @@ impl MetalBackend {
                 );
                 eprintln!(
                     "   Last row sum: {:.6} (should be ~1.0)",
-                    output_slice[last_row_start..last_row_start + seq_len]
-                        .iter()
-                        .sum::<f32>()
+                    output_slice[last_row_start..last_row_start + seq_len].iter().sum::<f32>()
                 );
             }
         }
@@ -1962,10 +1969,7 @@ impl MetalBackend {
         let output_id = BufferId::new();
 
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error(
-                "Failed to lock buffer cache",
-                "reshape_to_heads_gpu",
-            )
+            TrustformersError::hardware_error("Failed to lock buffer cache", "reshape_to_heads_gpu")
         })?;
         cache.insert(output_id, output_buffer_arc);
 
@@ -2097,10 +2101,7 @@ impl MetalBackend {
         let output_id = BufferId::new();
 
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error(
-                "Failed to lock buffer cache",
-                "extract_head_gpu",
-            )
+            TrustformersError::hardware_error("Failed to lock buffer cache", "extract_head_gpu")
         })?;
         cache.insert(output_id, output_buffer_arc);
 
@@ -2255,17 +2256,17 @@ impl MetalBackend {
         let output_heads_id = BufferId::new();
 
         let mut cache = self.buffer_cache.lock().map_err(|_| {
-            TrustformersError::hardware_error(
-                "Failed to lock buffer cache",
-                "attention_gpu_to_gpu",
-            )
+            TrustformersError::hardware_error("Failed to lock buffer cache", "attention_gpu_to_gpu")
         })?;
         cache.insert(output_heads_id, output_buffer_arc);
         drop(cache); // Release lock before entering loop
 
         // Step 2: For each head, compute attention
         let scale = 1.0 / (head_dim as f32).sqrt();
-        eprintln!("   Step 2: Computing attention for each head (scale={})", scale);
+        eprintln!(
+            "   Step 2: Computing attention for each head (scale={})",
+            scale
+        );
 
         for h in 0..num_heads {
             eprintln!("      Head {}/{}", h + 1, num_heads);
@@ -2286,15 +2287,20 @@ impl MetalBackend {
             let attn_weights = self.softmax_causal_gpu_to_gpu(&scaled_scores, seq_len)?;
 
             // Attention @ V_h: [seq_len, seq_len] @ [seq_len, head_dim] → [seq_len, head_dim]
-            let attn_output = self.matmul_gpu_to_gpu_mps(&attn_weights, &v_h, seq_len, seq_len, head_dim)?;
+            let attn_output =
+                self.matmul_gpu_to_gpu_mps(&attn_weights, &v_h, seq_len, seq_len, head_dim)?;
 
             // Insert result back into output_heads buffer
             self.insert_head_gpu(&output_heads_id, &attn_output, h, seq_len, head_dim)?;
         }
 
         // Step 3: Reshape back from [num_heads, seq_len, head_dim] to [seq_len, hidden_size]
-        eprintln!("   Step 3: Concatenating heads back to [seq_len, {}]", hidden_size);
-        let final_output = self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
+        eprintln!(
+            "   Step 3: Concatenating heads back to [seq_len, {}]",
+            hidden_size
+        );
+        let final_output =
+            self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
 
         eprintln!("✅ GPU Multi-Head Attention complete!");
 

@@ -41,8 +41,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n✅ GPU Generation Complete!");
     println!("⏱️  GPU Time: {:.2}s", gpu_elapsed.as_secs_f64());
-    println!("📊 Tokens generated: {}", gpu_result.len() - input_ids.len());
-    println!("⚡ GPU Tokens/sec: {:.2}", (gpu_result.len() - input_ids.len()) as f64 / gpu_elapsed.as_secs_f64());
+    println!(
+        "📊 Tokens generated: {}",
+        gpu_result.len() - input_ids.len()
+    );
+    println!(
+        "⚡ GPU Tokens/sec: {:.2}",
+        (gpu_result.len() - input_ids.len()) as f64 / gpu_elapsed.as_secs_f64()
+    );
     println!("\n🔢 GPU Output token IDs:");
     println!("   {:?}", gpu_result);
 
@@ -66,7 +72,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut unique_tokens = gpu_result.clone();
     unique_tokens.sort();
     unique_tokens.dedup();
-    println!("   Unique tokens: {} / {}", unique_tokens.len(), gpu_result.len());
+    println!(
+        "   Unique tokens: {} / {}",
+        unique_tokens.len(),
+        gpu_result.len()
+    );
 
     println!("\n===============================================");
     Ok(())

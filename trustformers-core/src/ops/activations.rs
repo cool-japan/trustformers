@@ -76,7 +76,10 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             }
 
             // Fallback to CPU implementation with NaN guarding
-            eprintln!("⚠️  GELU: CPU fallback (F32 tensor, shape: {:?})", arr.shape());
+            eprintln!(
+                "⚠️  GELU: CPU fallback (F32 tensor, shape: {:?})",
+                arr.shape()
+            );
             let result = arr.mapv(|v| {
                 // Clamp extreme values to prevent NaN
                 if v > 10.0 {

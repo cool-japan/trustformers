@@ -74,13 +74,19 @@ fn main() -> Result<()> {
             if j > i {
                 // Future positions should be zero
                 if val > 1e-6 {
-                    println!("   ❌ Position ({}, {}) should be 0.0 but is {:.6}", i, j, val);
+                    println!(
+                        "   ❌ Position ({}, {}) should be 0.0 but is {:.6}",
+                        i, j, val
+                    );
                     all_correct = false;
                 }
             } else {
                 // Valid positions should be positive
                 if val < 1e-6 {
-                    println!("   ⚠️  Position ({}, {}) is {:.6} (seems too small)", i, j, val);
+                    println!(
+                        "   ⚠️  Position ({}, {}) is {:.6} (seems too small)",
+                        i, j, val
+                    );
                 }
             }
         }
