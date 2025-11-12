@@ -256,6 +256,25 @@ impl Tensor {
     /// A tensor with GELU applied element-wise.
     pub fn gelu(&self) -> Result<Tensor> {
         match self {
+            // Metal GPU path - stays on GPU!
+            #[cfg(feature = "metal")]
+            Tensor::Metal(metal_data) => {
+                use crate::gpu_ops::metal::get_metal_backend;
+                use crate::tensor::MetalTensorData;
+
+                eprintln!("✅ GELU: GPU-to-GPU path (Metal→Metal)");
+
+                let backend = get_metal_backend()?;
+                let size = metal_data.shape.iter().product();
+
+                let output_buffer_id = backend.gelu_gpu_to_gpu(&metal_data.buffer_id, size)?;
+
+                Ok(Tensor::Metal(MetalTensorData {
+                    buffer_id: output_buffer_id,
+                    shape: metal_data.shape.clone(),
+                    dtype: metal_data.dtype,
+                }))
+            },
             Tensor::F32(a) => {
                 let result = a
                     .mapv(|x| 0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x.powi(3))).tanh()));

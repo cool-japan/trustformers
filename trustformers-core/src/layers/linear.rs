@@ -432,6 +432,8 @@ impl Layer for Linear {
             use crate::gpu_ops::metal::get_metal_backend;
             use crate::tensor::MetalTensorData;
 
+            eprintln!("🎯 Linear::forward - GPU-to-GPU path triggered (Tensor::Metal input)");
+
             // Ensure weight buffer is cached on GPU
             self.ensure_weight_buffer_cached()?;
 
@@ -480,7 +482,8 @@ impl Layer for Linear {
             // Try MPS first, fallback to naive kernel if MPS unavailable
             let output_buffer_id = backend
                 .matmul_gpu_to_gpu_mps(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
-                .or_else(|_| {
+                .or_else(|e| {
+                    eprintln!("⚠️  MPS matmul failed: {:?}, falling back to naive Metal kernel", e);
                     // Fallback to naive Metal kernel if MPS fails
                     backend.matmul_gpu_to_gpu(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
                 })?;

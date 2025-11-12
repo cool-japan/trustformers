@@ -281,7 +281,11 @@ impl Gpt2Model {
         #[cfg(feature = "metal")]
         {
             if matches!(self.device, Device::Metal(_)) {
+                eprintln!("🔄 Converting hidden_states from {:?} to Metal device",
+                    std::mem::discriminant(&hidden_states));
                 hidden_states = hidden_states.to_device_enum(&self.device)?;
+                eprintln!("✅ hidden_states converted to: {:?}",
+                    std::mem::discriminant(&hidden_states));
             }
         }
 
@@ -626,10 +630,12 @@ impl Gpt2LMHeadModel {
                 },
             };
 
+            eprintln!("🎲 Generated token: {} (total: {})", next_token, generated.len() + 1);
             generated.push(next_token);
 
-            // Check for EOS token
-            if next_token == 50256 {
+            // Check for EOS token (GPT-2 default, should use config.eos_token_id)
+            if next_token == 50256 || next_token == self.transformer.config.eos_token_id {
+                eprintln!("🛑 EOS token detected, stopping generation");
                 break;
             }
         }
@@ -662,7 +668,25 @@ impl Gpt2LMHeadModel {
                 self.transformer.forward_internal(&input_batch, None, Some(&mut cache))?;
 
             // Apply LM head
+            eprintln!("🔍 Hidden states before lm_head: shape={:?}, type={:?}",
+                match &hidden_states {
+                    Tensor::F32(arr) => format!("{:?}", arr.shape()),
+                    #[cfg(feature = "metal")]
+                    Tensor::Metal(m) => format!("{:?}", m.shape),
+                    _ => "unknown".to_string(),
+                },
+                std::mem::discriminant(&hidden_states)
+            );
             let logits = self.lm_head.forward(hidden_states)?;
+            eprintln!("🔍 Logits after lm_head: shape={:?}, type={:?}",
+                match &logits {
+                    Tensor::F32(arr) => format!("{:?}", arr.shape()),
+                    #[cfg(feature = "metal")]
+                    Tensor::Metal(m) => format!("{:?}", m.shape),
+                    _ => "unknown".to_string(),
+                },
+                std::mem::discriminant(&logits)
+            );
 
             is_first_iteration = false;
 
@@ -690,6 +714,50 @@ impl Gpt2LMHeadModel {
                     }
                     max_idx as u32
                 },
+                #[cfg(feature = "metal")]
+                Tensor::Metal(metal_data) => {
+                    use trustformers_core::gpu_ops::metal::get_metal_backend;
+
+                    // Download logits from GPU to CPU
+                    let backend = get_metal_backend()?;
+                    let data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
+
+                    // Shape should be [batch, seq_len, vocab_size]
+                    if metal_data.shape.len() != 3 {
+                        return Err(tensor_op_error(
+                            "tensor_operation",
+                            format!("Expected 3D logits, got shape: {:?}", metal_data.shape),
+                        ));
+                    }
+
+                    let batch_size = metal_data.shape[0];
+                    let seq_len = metal_data.shape[1];
+                    let vocab_size = metal_data.shape[2];
+
+                    // Get logits for last token: offset = (batch=0, seq_len-1, vocab=0)
+                    let offset = (seq_len - 1) * vocab_size;
+                    let last_logits = &data[offset..offset + vocab_size];
+
+                    // Debug: Print first 10 logits values
+                    eprintln!("🔍 First 10 logits: {:?}", &last_logits[..10.min(last_logits.len())]);
+                    eprintln!("🔍 Logits stats: min={:.4}, max={:.4}, mean={:.4}",
+                        last_logits.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                        last_logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+                        last_logits.iter().sum::<f32>() / last_logits.len() as f32
+                    );
+
+                    // Find argmax
+                    let mut max_idx = 0;
+                    let mut max_val = f32::NEG_INFINITY;
+                    for (idx, &val) in last_logits.iter().enumerate() {
+                        if val > max_val {
+                            max_val = val;
+                            max_idx = idx;
+                        }
+                    }
+                    eprintln!("🔍 Argmax: idx={}, val={:.4}", max_idx, max_val);
+                    max_idx as u32
+                },
                 _ => {
                     return Err(tensor_op_error(
                         "tensor_operation",
@@ -698,10 +766,12 @@ impl Gpt2LMHeadModel {
                 },
             };
 
+            eprintln!("🎲 Generated token: {} (total: {})", next_token, generated.len() + 1);
             generated.push(next_token);
 
-            // Check for EOS token
-            if next_token == 50256 {
+            // Check for EOS token (GPT-2 default, should use config.eos_token_id)
+            if next_token == 50256 || next_token == self.transformer.config.eos_token_id {
+                eprintln!("🛑 EOS token detected, stopping generation");
                 break;
             }
         }
@@ -1144,10 +1214,111 @@ impl Gpt2Attention {
         // Project to Q, K, V using the combined projection
         let qkv = self.c_attn.forward(hidden_states)?;
 
-        // Convert Metal tensor to CPU for attention computation (slicing/splitting not supported on GPU)
+        // GPU attention path (avoids ALL CPU transfers!)
+        #[cfg(feature = "metal")]
+        if let Tensor::Metal(qkv_data) = &qkv {
+            use trustformers_core::gpu_ops::metal::get_metal_backend;
+            use trustformers_core::tensor::MetalTensorData;
+
+            // Use GPU attention when cache is empty or doesn't exist
+            // (for prompt processing with no cached K/V)
+            if layer_cache.as_ref().map_or(true, |cache| cache.key.is_none()) {
+                eprintln!("🚀 Full GPU Attention path (no CPU transfers!)");
+
+                let backend = get_metal_backend()?;
+
+                // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
+                let (q_id, k_id, v_id) = backend.split_qkv_gpu(
+                    &qkv_data.buffer_id,
+                    batch_size,
+                    seq_len,
+                    hidden_size,
+                )?;
+
+                // Execute full attention on GPU (Q@K^T, softmax, scores@V)
+                let attn_output_id = backend.attention_gpu_to_gpu(
+                    &q_id,
+                    &k_id,
+                    &v_id,
+                    batch_size,
+                    seq_len,
+                    self.n_head,
+                    self.d_head,
+                )?;
+
+                // Wrap in Metal tensor and apply output projection
+                let attn_output = Tensor::Metal(MetalTensorData {
+                    buffer_id: attn_output_id,
+                    shape: vec![batch_size, seq_len, hidden_size],
+                    dtype: qkv_data.dtype,
+                });
+
+                // Apply output projection (stays on GPU)
+                let output = self.c_proj.forward(attn_output)?;
+
+                // Remove batch dimension if it was added
+                return if was_2d {
+                    match output {
+                        Tensor::Metal(metal_data) if metal_data.shape[0] == 1 => {
+                            // Reshape [1, seq, hidden] → [seq, hidden]
+                            let new_shape = vec![metal_data.shape[1], metal_data.shape[2]];
+                            Ok(Tensor::Metal(MetalTensorData {
+                                buffer_id: metal_data.buffer_id,
+                                shape: new_shape,
+                                dtype: metal_data.dtype,
+                            }))
+                        },
+                        _ => Ok(output),
+                    }
+                } else {
+                    Ok(output)
+                };
+            }
+        }
+
+        // Fallback: CPU attention path (with cache support)
         #[cfg(feature = "metal")]
         let qkv = match &qkv {
-            Tensor::Metal(_) => qkv.to_device_enum(&Device::CPU)?,
+            Tensor::Metal(qkv_data) => {
+                use trustformers_core::gpu_ops::metal::get_metal_backend;
+
+                eprintln!("⚠️  Attention: CPU path (has cache), downloading Q/K/V");
+
+                let backend = get_metal_backend()?;
+
+                // Split QKV on GPU then download
+                let (q_id, k_id, v_id) = backend.split_qkv_gpu(
+                    &qkv_data.buffer_id,
+                    batch_size,
+                    seq_len,
+                    hidden_size,
+                )?;
+
+                let q_data = backend.download_buffer_to_vec(&q_id)?;
+                let k_data = backend.download_buffer_to_vec(&k_id)?;
+                let v_data = backend.download_buffer_to_vec(&v_id)?;
+
+                // Reconstruct QKV array for CPU processing
+                use scirs2_core::ndarray::ArrayD;
+                let mut qkv_vec = Vec::with_capacity(batch_size * seq_len * 3 * hidden_size);
+                for i in 0..(batch_size * seq_len) {
+                    let offset = i * hidden_size;
+                    qkv_vec.extend_from_slice(&q_data[offset..offset + hidden_size]);
+                    qkv_vec.extend_from_slice(&k_data[offset..offset + hidden_size]);
+                    qkv_vec.extend_from_slice(&v_data[offset..offset + hidden_size]);
+                }
+
+                let qkv_arr = ArrayD::from_shape_vec(
+                    scirs2_core::ndarray::IxDyn(&[batch_size, seq_len, 3 * hidden_size]),
+                    qkv_vec,
+                )
+                .map_err(|e| TrustformersError::tensor_op_error(
+                    &format!("Failed to create QKV array: {}", e),
+                    "forward_with_cache",
+                ))?;
+
+                Tensor::F32(qkv_arr)
+            },
             _ => qkv,
         };
 

@@ -109,16 +109,42 @@ impl Tensor {
                 Ok(Tensor::C64(result))
             },
             #[cfg(feature = "metal")]
-            (Tensor::Metal(_), _) => {
-                // Convert Metal tensor to CPU, then perform operation
-                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
-                cpu_self.add(other)
+            (Tensor::Metal(a_data), Tensor::Metal(b_data)) => {
+                use crate::gpu_ops::metal::get_metal_backend;
+                use crate::tensor::MetalTensorData;
+
+                // GPU-to-GPU addition - stays on Metal!
+                eprintln!("✅ Tensor::add - GPU-to-GPU path (Metal + Metal → Metal)");
+
+                if a_data.shape != b_data.shape {
+                    return Err(TrustformersError::shape_error(format!(
+                        "Cannot add Metal tensors with different shapes: {:?} and {:?}",
+                        a_data.shape, b_data.shape
+                    )));
+                }
+
+                let backend = get_metal_backend()?;
+                let size = a_data.shape.iter().product();
+
+                let output_buffer_id = backend.add_gpu_to_gpu(
+                    &a_data.buffer_id,
+                    &b_data.buffer_id,
+                    size,
+                )?;
+
+                Ok(Tensor::Metal(MetalTensorData {
+                    buffer_id: output_buffer_id,
+                    shape: a_data.shape.clone(),
+                    dtype: a_data.dtype,
+                }))
             },
             #[cfg(feature = "metal")]
-            (_, Tensor::Metal(_)) => {
-                // Convert Metal tensor to CPU, then perform operation
+            (Tensor::Metal(_), _) | (_, Tensor::Metal(_)) => {
+                // Mixed Metal/CPU - convert to CPU for now
+                // TODO: Could upload CPU tensor to GPU instead
+                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
                 let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
-                self.add(&cpu_other)
+                cpu_self.add(&cpu_other)
             },
             #[cfg(feature = "cuda")]
             (Tensor::CUDA(_), _) => {

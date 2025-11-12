@@ -156,17 +156,24 @@ impl Layer for LayerNorm {
                 use crate::gpu_ops::metal::get_metal_backend;
                 use crate::tensor::MetalTensorData;
 
-                if metal_data.shape.len() == 2 && self.normalized_shape.len() == 1 {
-                    let backend = get_metal_backend()?;
-                    let shape = &metal_data.shape;
-                    let seq_len = shape[0];
-                    let hidden_size = shape[1];
+                // Check if we can use GPU kernel (2D or 3D with matching last dimension)
+                let can_use_gpu = (metal_data.shape.len() == 2 || metal_data.shape.len() == 3)
+                    && self.normalized_shape.len() == 1
+                    && metal_data.shape[metal_data.shape.len() - 1] == self.normalized_shape[0];
 
-                    if hidden_size == self.normalized_shape[0] {
-                        // Get weight and bias buffer IDs
-                        match (&self.weight, &self.bias) {
-                            (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
-                                // All on GPU - zero transfers!
+                if can_use_gpu {
+                    let backend = get_metal_backend()?;
+                    let hidden_size = self.normalized_shape[0];
+
+                    // Get weight and bias buffer IDs
+                    match (&self.weight, &self.bias) {
+                        (Tensor::Metal(w_data), Tensor::Metal(b_data)) => {
+                            eprintln!("✅ LayerNorm: GPU-to-GPU path (Metal→Metal, shape: {:?})", metal_data.shape);
+
+                            if metal_data.shape.len() == 2 {
+                                // 2D case: (seq_len, hidden_size)
+                                let seq_len = metal_data.shape[0];
+
                                 let output_buffer_id = backend.layernorm_gpu_to_gpu(
                                     &metal_data.buffer_id,
                                     &w_data.buffer_id,
@@ -181,16 +188,46 @@ impl Layer for LayerNorm {
                                     shape: metal_data.shape.clone(),
                                     dtype: metal_data.dtype,
                                 }));
-                            },
-                            _ => {
-                                // Weight/bias not on GPU - fallback to CPU
-                            },
-                        }
+                            } else if metal_data.shape.len() == 3 {
+                                // 3D case: (batch, seq_len, hidden_size)
+                                // Flatten to 2D: (batch * seq_len, hidden_size)
+                                let batch = metal_data.shape[0];
+                                let seq_len = metal_data.shape[1];
+                                let flattened_seq_len = batch * seq_len;
+
+                                eprintln!("   Reshaping 3D→2D: {:?} → [{}, {}]",
+                                    metal_data.shape, flattened_seq_len, hidden_size);
+
+                                // Run GPU kernel on flattened 2D tensor
+                                let output_buffer_id = backend.layernorm_gpu_to_gpu(
+                                    &metal_data.buffer_id,
+                                    &w_data.buffer_id,
+                                    &b_data.buffer_id,
+                                    flattened_seq_len,
+                                    hidden_size,
+                                    self.eps,
+                                )?;
+
+                                eprintln!("   Reshaping 2D→3D: [{}, {}] → {:?}",
+                                    flattened_seq_len, hidden_size, metal_data.shape);
+
+                                // Return with original 3D shape
+                                return Ok(Tensor::Metal(MetalTensorData {
+                                    buffer_id: output_buffer_id,
+                                    shape: metal_data.shape.clone(),
+                                    dtype: metal_data.dtype,
+                                }));
+                            }
+                        },
+                        _ => {
+                            eprintln!("⚠️  LayerNorm: Weight/bias not on GPU, falling back to CPU");
+                        },
                     }
+                } else {
+                    eprintln!("⚠️  LayerNorm: Unsupported shape {:?}, falling back to CPU", metal_data.shape);
                 }
 
                 // Fallback: convert to CPU and process (avoid recursion)
-                // This handles 3D Metal tensors that can't use 2D GPU kernel
                 let cpu_input = input.to_device_enum(&crate::device::Device::CPU)?;
                 let cpu_weight = self.weight.to_device_enum(&crate::device::Device::CPU)?;
                 let cpu_bias = self.bias.to_device_enum(&crate::device::Device::CPU)?;
