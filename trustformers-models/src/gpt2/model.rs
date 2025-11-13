@@ -1473,15 +1473,19 @@ impl Gpt2Attention {
             let (cached_k_id, cached_v_id, cached_seq_len) = if let Some(cache) = &layer_cache {
                 match (&cache.key, &cache.value) {
                     (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
-                        let cached_shape = &k_metal.shape;  // [batch, num_heads, cached_seq, head_dim]
+                        let cached_shape = &k_metal.shape; // [batch, num_heads, cached_seq, head_dim]
                         let cached_seq = cached_shape[2];
                         eprintln!("🔗 GPU cache found: cached_seq={}", cached_seq);
-                        (Some(&k_metal.buffer_id), Some(&v_metal.buffer_id), cached_seq)
+                        (
+                            Some(&k_metal.buffer_id),
+                            Some(&v_metal.buffer_id),
+                            cached_seq,
+                        )
                     },
                     _ => {
                         eprintln!("🚀 GPU attention (first token, no cache)");
                         (None, None, 0)
-                    }
+                    },
                 }
             } else {
                 eprintln!("🚀 GPU attention (no cache layer)");
@@ -1490,9 +1494,12 @@ impl Gpt2Attention {
 
             // Reshape Q, K_new, V_new to multi-head format
             // [batch, seq, hidden] → [batch, num_heads, seq, head_dim]
-            let q_heads_id = backend.reshape_to_heads_gpu(&q_id, seq_len, self.n_head, self.d_head)?;
-            let k_new_heads_id = backend.reshape_to_heads_gpu(&k_new_id, seq_len, self.n_head, self.d_head)?;
-            let v_new_heads_id = backend.reshape_to_heads_gpu(&v_new_id, seq_len, self.n_head, self.d_head)?;
+            let q_heads_id =
+                backend.reshape_to_heads_gpu(&q_id, seq_len, self.n_head, self.d_head)?;
+            let k_new_heads_id =
+                backend.reshape_to_heads_gpu(&k_new_id, seq_len, self.n_head, self.d_head)?;
+            let v_new_heads_id =
+                backend.reshape_to_heads_gpu(&v_new_id, seq_len, self.n_head, self.d_head)?;
 
             // Concatenate with cached K/V on GPU (stays on GPU!)
             let k_heads_id = backend.concat_kv_cache(
@@ -1501,7 +1508,7 @@ impl Gpt2Attention {
                 batch_size,
                 self.n_head,
                 cached_seq_len,
-                seq_len,  // new_seq_len
+                seq_len, // new_seq_len
                 self.d_head,
             )?;
 
@@ -1533,7 +1540,12 @@ impl Gpt2Attention {
             )?;
 
             // Reshape from [batch, num_heads, seq_len, head_dim] back to [batch, seq_len, hidden_size]
-            let attn_output_id = backend.reshape_from_heads_gpu(&attn_heads_output_id, seq_len, self.n_head, self.d_head)?;
+            let attn_output_id = backend.reshape_from_heads_gpu(
+                &attn_heads_output_id,
+                seq_len,
+                self.n_head,
+                self.d_head,
+            )?;
 
             // Update cache with full K/V (keep on GPU!)
             if let Some(cache) = layer_cache {
