@@ -108,6 +108,8 @@ pub struct MetalBackend {
     batched_matmul_pipeline: Arc<metal::ComputePipelineState>,
     batched_matmul_scaled_pipeline: Arc<metal::ComputePipelineState>,
     batched_scaled_matmul_softmax_causal_pipeline: Arc<metal::ComputePipelineState>,
+    // Concatenation for KV-cache (GPU-aware caching)
+    concat_seq_dim_pipeline: Arc<metal::ComputePipelineState>,
     // MPS operations for optimized GPU-to-GPU matmul (100-500x faster)
     mps_ops: Arc<Option<MPSOperations>>,
 }
@@ -690,6 +692,53 @@ impl MetalBackend {
                     }
                 }
             }
+
+            // Concatenate two tensors along sequence dimension for KV-cache
+            // Input 1: [batch, num_heads, seq_len1, head_dim] (cached K or V)
+            // Input 2: [batch, num_heads, seq_len2, head_dim] (new K or V)
+            // Output: [batch, num_heads, seq_len1+seq_len2, head_dim]
+            // Critical for GPU-aware KV-cache: avoids CPU transfer
+            kernel void concat_seq_dim(
+                device const float* input1 [[buffer(0)]],
+                device const float* input2 [[buffer(1)]],
+                device float* output [[buffer(2)]],
+                constant uint& batch [[buffer(3)]],
+                constant uint& num_heads [[buffer(4)]],
+                constant uint& seq_len1 [[buffer(5)]],
+                constant uint& seq_len2 [[buffer(6)]],
+                constant uint& head_dim [[buffer(7)]],
+                uint3 gid [[thread_position_in_grid]]
+            ) {
+                uint b = gid.z;      // batch index
+                uint h = gid.y;      // head index
+                uint d = gid.x;      // head_dim index
+
+                if (b >= batch || h >= num_heads || d >= head_dim) return;
+
+                uint total_seq_len = seq_len1 + seq_len2;
+
+                // Calculate base offsets for this batch and head
+                uint input1_head_offset = b * (num_heads * seq_len1 * head_dim) +
+                                         h * (seq_len1 * head_dim);
+                uint input2_head_offset = b * (num_heads * seq_len2 * head_dim) +
+                                         h * (seq_len2 * head_dim);
+                uint output_head_offset = b * (num_heads * total_seq_len * head_dim) +
+                                         h * (total_seq_len * head_dim);
+
+                // Copy seq_len1 elements from input1
+                for (uint s = 0; s < seq_len1; ++s) {
+                    uint input_idx = input1_head_offset + s * head_dim + d;
+                    uint output_idx = output_head_offset + s * head_dim + d;
+                    output[output_idx] = input1[input_idx];
+                }
+
+                // Copy seq_len2 elements from input2 (append after input1)
+                for (uint s = 0; s < seq_len2; ++s) {
+                    uint input_idx = input2_head_offset + s * head_dim + d;
+                    uint output_idx = output_head_offset + (seq_len1 + s) * head_dim + d;
+                    output[output_idx] = input2[input_idx];
+                }
+            }
         "#;
 
         let library = device
@@ -942,7 +991,10 @@ impl MetalBackend {
         let batched_softmax_causal_kernel =
             library.get_function("batched_softmax_causal", None).map_err(|e| {
                 TrustformersError::hardware_error(
-                    &format!("Failed to get batched_softmax_causal kernel function: {}", e),
+                    &format!(
+                        "Failed to get batched_softmax_causal kernel function: {}",
+                        e
+                    ),
                     "MetalBackend::new",
                 )
             })?;
@@ -956,13 +1008,12 @@ impl MetalBackend {
                 )
             })?;
 
-        let batched_matmul_kernel =
-            library.get_function("batched_matmul", None).map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to get batched_matmul kernel function: {}", e),
-                    "MetalBackend::new",
-                )
-            })?;
+        let batched_matmul_kernel = library.get_function("batched_matmul", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get batched_matmul kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
 
         let batched_matmul_pipeline = device
             .new_compute_pipeline_state_with_function(&batched_matmul_kernel)
@@ -990,10 +1041,14 @@ impl MetalBackend {
                 )
             })?;
 
-        let batched_scaled_matmul_softmax_causal_kernel =
-            library.get_function("batched_scaled_matmul_softmax_causal", None).map_err(|e| {
+        let batched_scaled_matmul_softmax_causal_kernel = library
+            .get_function("batched_scaled_matmul_softmax_causal", None)
+            .map_err(|e| {
                 TrustformersError::hardware_error(
-                    &format!("Failed to get batched_scaled_matmul_softmax_causal kernel function: {}", e),
+                    &format!(
+                        "Failed to get batched_scaled_matmul_softmax_causal kernel function: {}",
+                        e
+                    ),
                     "MetalBackend::new",
                 )
             })?;
@@ -1002,7 +1057,27 @@ impl MetalBackend {
             .new_compute_pipeline_state_with_function(&batched_scaled_matmul_softmax_causal_kernel)
             .map_err(|e| {
                 TrustformersError::hardware_error(
-                    &format!("Failed to create batched_scaled_matmul_softmax_causal pipeline: {}", e),
+                    &format!(
+                        "Failed to create batched_scaled_matmul_softmax_causal pipeline: {}",
+                        e
+                    ),
+                    "MetalBackend::new",
+                )
+            })?;
+
+        // Compile concat_seq_dim kernel for KV-cache
+        let concat_seq_dim_kernel = library.get_function("concat_seq_dim", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get concat_seq_dim kernel function: {}", e),
+                "MetalBackend::new",
+            )
+        })?;
+
+        let concat_seq_dim_pipeline = device
+            .new_compute_pipeline_state_with_function(&concat_seq_dim_kernel)
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create concat_seq_dim pipeline: {}", e),
                     "MetalBackend::new",
                 )
             })?;
@@ -1031,7 +1106,10 @@ impl MetalBackend {
             batched_softmax_causal_pipeline: Arc::new(batched_softmax_causal_pipeline),
             batched_matmul_pipeline: Arc::new(batched_matmul_pipeline),
             batched_matmul_scaled_pipeline: Arc::new(batched_matmul_scaled_pipeline),
-            batched_scaled_matmul_softmax_causal_pipeline: Arc::new(batched_scaled_matmul_softmax_causal_pipeline),
+            batched_scaled_matmul_softmax_causal_pipeline: Arc::new(
+                batched_scaled_matmul_softmax_causal_pipeline,
+            ),
+            concat_seq_dim_pipeline: Arc::new(concat_seq_dim_pipeline),
             mps_ops,
         })
     }
@@ -1418,9 +1496,7 @@ impl MetalBackend {
     ) -> Result<BufferId> {
         // Check if MPS is available
         let mps_ops = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
-            eprintln!(
-                "⚠️  MPS scaled matmul requested but MPS not initialized"
-            );
+            eprintln!("⚠️  MPS scaled matmul requested but MPS not initialized");
             TrustformersError::hardware_error(
                 "MPS not initialized - GPU-to-GPU scaled matmul unavailable",
                 "matmul_gpu_to_gpu_mps_scaled",
@@ -1449,12 +1525,14 @@ impl MetalBackend {
         let c_objc2 = Self::buffer_to_objc2(&c_buffer)?;
 
         // Execute MPS scaled matmul (fuses scale into matmul for 1.5-2x speedup!)
-        mps_ops.matmul_f32_scaled(&a_objc2, &b_objc2, &c_objc2, m, k, n, alpha).map_err(|e| {
-            TrustformersError::hardware_error(
-                &format!("MPS scaled matmul failed: {:?}", e),
-                "matmul_gpu_to_gpu_mps_scaled",
-            )
-        })?;
+        mps_ops
+            .matmul_f32_scaled(&a_objc2, &b_objc2, &c_objc2, m, k, n, alpha)
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("MPS scaled matmul failed: {:?}", e),
+                    "matmul_gpu_to_gpu_mps_scaled",
+                )
+            })?;
 
         // Cache result buffer and return ID
         let result_id = BufferId::new();
@@ -2720,8 +2798,8 @@ impl MetalBackend {
         // Dispatch 2D threads: (seq_len, num_heads)
         // Each thread processes one row (sequence position) for one head
         let threadgroup_size = metal::MTLSize {
-            width: 64,  // seq_len dimension
-            height: 1,  // num_heads dimension
+            width: 64, // seq_len dimension
+            height: 1, // num_heads dimension
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
@@ -2992,8 +3070,8 @@ impl MetalBackend {
         // Dispatch 2D threads: (seq_len, num_heads)
         // Each thread processes one row (sequence position) for one head
         let threadgroup_size = metal::MTLSize {
-            width: 64,  // seq_len dimension
-            height: 1,  // num_heads dimension
+            width: 64, // seq_len dimension
+            height: 1, // num_heads dimension
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
@@ -3015,6 +3093,130 @@ impl MetalBackend {
                 "batched_scaled_matmul_softmax_causal_gpu_to_gpu",
             )
         })?;
+        cache.insert(output_id, output_buffer);
+
+        Ok(output_id)
+    }
+
+    /// Concatenate cached K/V with new K/V for KV-cache (GPU-aware, ZERO CPU transfers!)
+    ///
+    /// # Arguments
+    ///
+    /// * `cached_buffer_id` - Optional cached tensor [batch, num_heads, cached_seq_len, head_dim]
+    /// * `new_buffer_id` - New tensor [batch, num_heads, new_seq_len, head_dim]
+    /// * `batch_size` - Batch size
+    /// * `num_heads` - Number of attention heads
+    /// * `cached_seq_len` - Sequence length of cached tensor (0 if no cache)
+    /// * `new_seq_len` - Sequence length of new tensor
+    /// * `head_dim` - Head dimension
+    ///
+    /// # Returns
+    ///
+    /// Buffer ID containing concatenated tensor [batch, num_heads, cached_seq_len+new_seq_len, head_dim]
+    pub fn concat_kv_cache(
+        &self,
+        cached_buffer_id: Option<&BufferId>,
+        new_buffer_id: &BufferId,
+        batch_size: usize,
+        num_heads: usize,
+        cached_seq_len: usize,
+        new_seq_len: usize,
+        head_dim: usize,
+    ) -> Result<BufferId> {
+        // If no cache, just return new buffer
+        if cached_buffer_id.is_none() || cached_seq_len == 0 {
+            return Ok(*new_buffer_id);
+        }
+
+        let cached_buffer_id = cached_buffer_id.unwrap();
+        let total_seq_len = cached_seq_len + new_seq_len;
+
+        eprintln!(
+            "🔗 GPU KV-cache concat: cached_seq={}, new_seq={}, total={}",
+            cached_seq_len, new_seq_len, total_seq_len
+        );
+
+        // Get cached and new buffers
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "concat_kv_cache")
+        })?;
+
+        let cached_buffer = cache.get(cached_buffer_id).ok_or_else(|| {
+            TrustformersError::hardware_error("Cached buffer not found", "concat_kv_cache")
+        })?;
+
+        let new_buffer = cache.get(new_buffer_id).ok_or_else(|| {
+            TrustformersError::hardware_error("New buffer not found", "concat_kv_cache")
+        })?;
+
+        // Create output buffer
+        let output_size = batch_size * num_heads * total_seq_len * head_dim;
+        let output_buffer = Arc::new(self.device.new_buffer(
+            (output_size * std::mem::size_of::<f32>()) as u64,
+            metal::MTLResourceOptions::StorageModePrivate,
+        ));
+
+        // Create command buffer and encoder
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        // Set pipeline and buffers
+        encoder.set_compute_pipeline_state(&self.concat_seq_dim_pipeline);
+        encoder.set_buffer(0, Some(&**cached_buffer), 0);
+        encoder.set_buffer(1, Some(&**new_buffer), 0);
+        encoder.set_buffer(2, Some(&*output_buffer), 0);
+
+        // Set parameters
+        encoder.set_bytes(
+            3,
+            std::mem::size_of::<u32>() as u64,
+            &(batch_size as u32) as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            std::mem::size_of::<u32>() as u64,
+            &(num_heads as u32) as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            std::mem::size_of::<u32>() as u64,
+            &(cached_seq_len as u32) as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            6,
+            std::mem::size_of::<u32>() as u64,
+            &(new_seq_len as u32) as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            7,
+            std::mem::size_of::<u32>() as u64,
+            &(head_dim as u32) as *const u32 as *const _,
+        );
+
+        // Dispatch threads: (head_dim, num_heads, batch)
+        let threads_per_threadgroup = metal::MTLSize::new(
+            (head_dim as u64).min(256),
+            (num_heads as u64).min(4),
+            1,
+        );
+
+        let threadgroups = metal::MTLSize::new(
+            ((head_dim + threads_per_threadgroup.width as usize - 1)
+                / threads_per_threadgroup.width as usize) as u64,
+            ((num_heads + threads_per_threadgroup.height as usize - 1)
+                / threads_per_threadgroup.height as usize) as u64,
+            batch_size as u64,
+        );
+
+        encoder.dispatch_thread_groups(threadgroups, threads_per_threadgroup);
+        encoder.end_encoding();
+
+        // Execute and wait
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Register output buffer
+        let output_id = BufferId::new();
         cache.insert(output_id, output_buffer);
 
         Ok(output_id)
@@ -3081,12 +3283,7 @@ impl MetalBackend {
             num_heads
         );
         let attn_weights = self.batched_scaled_matmul_softmax_causal_gpu_to_gpu(
-            &q_heads,
-            &k_heads_t,
-            num_heads,
-            seq_len,
-            head_dim,
-            scale,  // 1/sqrt(head_dim)
+            &q_heads, &k_heads_t, num_heads, seq_len, head_dim, scale, // 1/sqrt(head_dim)
         )?;
 
         // 2c. Batched matmul attn_weights @ V: [num_heads, seq_len, seq_len] @ [num_heads, seq_len, head_dim]
@@ -3097,9 +3294,9 @@ impl MetalBackend {
             &attn_weights,
             &v_heads,
             num_heads,
-            seq_len,   // M
-            seq_len,   // K
-            head_dim,  // N
+            seq_len,  // M
+            seq_len,  // K
+            head_dim, // N
         )?;
 
         eprintln!(
@@ -3116,6 +3313,290 @@ impl MetalBackend {
             self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
 
         eprintln!("✅ GPU Multi-Head Attention complete!");
+
+        Ok(final_output)
+    }
+
+    /// Execute multi-head attention with KV-cache on GPU (supports different Q vs K/V seq lengths)
+    ///
+    /// This version takes pre-reshaped tensors in multi-head format and supports
+    /// different sequence lengths for Q (current tokens) vs K/V (cached + current).
+    ///
+    /// # Arguments
+    ///
+    /// * `q_heads_id` - Query tensor: [batch, num_heads, q_seq_len, head_dim]
+    /// * `k_heads_id` - Key tensor: [batch, num_heads, kv_seq_len, head_dim]
+    /// * `v_heads_id` - Value tensor: [batch, num_heads, kv_seq_len, head_dim]
+    /// * `batch_size` - Batch size
+    /// * `q_seq_len` - Query sequence length (typically 1 during generation)
+    /// * `kv_seq_len` - Key/Value sequence length (cached + new tokens)
+    /// * `num_heads` - Number of attention heads
+    /// * `head_dim` - Dimension per head
+    ///
+    /// # Returns
+    ///
+    /// Buffer ID containing output: [batch, num_heads, q_seq_len, head_dim]
+    pub fn attention_with_cache_gpu_to_gpu(
+        &self,
+        q_heads_id: &BufferId,
+        k_heads_id: &BufferId,
+        v_heads_id: &BufferId,
+        batch_size: usize,
+        q_seq_len: usize,
+        kv_seq_len: usize,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Result<BufferId> {
+        eprintln!(
+            "🚀 GPU Multi-Head Attention (with cache): batch={}, q_seq={}, kv_seq={}, heads={}, head_dim={}",
+            batch_size, q_seq_len, kv_seq_len, num_heads, head_dim
+        );
+
+        // For simplicity, handle batch=1 case for now
+        if batch_size != 1 {
+            return Err(TrustformersError::tensor_op_error(
+                "GPU cached attention currently only supports batch_size=1",
+                "attention_with_cache_gpu_to_gpu",
+            ));
+        }
+
+        let scale = 1.0 / (head_dim as f32).sqrt();
+
+        // Step 1: Transpose K
+        // [num_heads, kv_seq_len, head_dim] → [num_heads, head_dim, kv_seq_len]
+        eprintln!("   Step 1: Batched transpose K ({} heads, kv_seq={})", num_heads, kv_seq_len);
+        let k_heads_t = self.batched_transpose_gpu_to_gpu(k_heads_id, num_heads, kv_seq_len, head_dim)?;
+
+        // Step 2: Scaled matmul Q @ K^T + softmax
+        // [num_heads, q_seq_len, head_dim] @ [num_heads, head_dim, kv_seq_len]
+        // → [num_heads, q_seq_len, kv_seq_len]
+        eprintln!(
+            "   Step 2: 🔥 Batched scaled matmul + softmax (q_seq={}, kv_seq={})",
+            q_seq_len, kv_seq_len
+        );
+
+        // NOTE: For cached attention during generation (q_seq_len=1), we don't need causal masking
+        // The single query token attends to ALL cached key tokens
+        // Causal masking was already applied during initial prompt processing
+
+        // Use fused scaled matmul + softmax for first token (q_seq == kv_seq)
+        // Use separate matmul + softmax for cached tokens (q_seq != kv_seq)
+        let attn_weights = if q_seq_len == kv_seq_len {
+            // First token: use fused operation with causal masking
+            self.batched_scaled_matmul_softmax_causal_gpu_to_gpu(
+                q_heads_id,
+                &k_heads_t,
+                num_heads,
+                q_seq_len,
+                head_dim,
+                scale,
+            )?
+        } else {
+            // Cached tokens: separate scaled matmul + softmax (no causal mask needed)
+            // Q is typically [batch, num_heads, 1, head_dim] during generation
+            // K^T is [batch, num_heads, head_dim, N] where N grows
+            // Result: [batch, num_heads, 1, N] which can attend to all N keys
+
+            // 2a. Batched scaled matmul: Q @ K^T * scale
+            let scores = self.batched_matmul_scaled_gpu_to_gpu(
+                q_heads_id,
+                &k_heads_t,
+                num_heads,
+                q_seq_len,  // M (typically 1)
+                head_dim,   // K
+                kv_seq_len, // N (cached + new)
+                scale,
+            )?;
+
+            // 2b. For q_seq=1, we can use regular softmax on the single row
+            // The causal softmax will work fine since there's only one row attending to all columns
+            self.batched_softmax_causal_gpu_to_gpu(&scores, num_heads, q_seq_len)?
+        };
+
+        // Step 3: Matmul attn_weights @ V
+        // [num_heads, q_seq_len, kv_seq_len] @ [num_heads, kv_seq_len, head_dim]
+        // → [num_heads, q_seq_len, head_dim]
+        eprintln!("   Step 3: Batched matmul @ V ({} heads)", num_heads);
+        let output_heads_id = self.batched_matmul_gpu_to_gpu(
+            &attn_weights,
+            v_heads_id,
+            num_heads,
+            q_seq_len,  // M
+            kv_seq_len, // K
+            head_dim,   // N
+        )?;
+
+        eprintln!("✅ GPU cached attention complete!");
+
+        Ok(output_heads_id)
+    }
+
+    /// Execute full multi-head attention on GPU with OPTIMIZED SYNCHRONIZATION (Phase 3)
+    /// Uses single command buffer for all batched operations to eliminate intermediate waits
+    /// Expected 2-3x speedup from reduced CPU-GPU synchronization overhead
+    pub fn attention_gpu_to_gpu_optimized(
+        &self,
+        q_buffer_id: &BufferId,
+        k_buffer_id: &BufferId,
+        v_buffer_id: &BufferId,
+        batch_size: usize,
+        seq_len: usize,
+        num_heads: usize,
+        head_dim: usize,
+    ) -> Result<BufferId> {
+        let hidden_size = num_heads * head_dim;
+
+        eprintln!(
+            "🚀 GPU Multi-Head Attention (OPTIMIZED SYNC): batch={}, seq={}, heads={}, head_dim={}",
+            batch_size, seq_len, num_heads, head_dim
+        );
+
+        if batch_size != 1 {
+            return Err(TrustformersError::tensor_op_error(
+                "GPU attention currently only supports batch_size=1",
+                "attention_gpu_to_gpu_optimized",
+            ));
+        }
+
+        // Step 1: Reshape Q, K, V (these still need individual waits for correctness)
+        eprintln!("   Step 1: Reshaping Q, K, V to separate heads");
+        let q_heads = self.reshape_to_heads_gpu(q_buffer_id, seq_len, num_heads, head_dim)?;
+        let k_heads = self.reshape_to_heads_gpu(k_buffer_id, seq_len, num_heads, head_dim)?;
+        let v_heads = self.reshape_to_heads_gpu(v_buffer_id, seq_len, num_heads, head_dim)?;
+
+        // OPTIMIZATION: Create ONE command buffer for all 3 batched operations
+        // This eliminates 2 intermediate CPU-GPU synchronization points
+        let command_buffer = self.command_queue.new_command_buffer();
+
+        let scale = 1.0 / (head_dim as f32).sqrt();
+        eprintln!(
+            "   Step 2: 🔥 OPTIMIZED batched attention (scale={}, {} heads, SINGLE command buffer)",
+            scale, num_heads
+        );
+
+        // Get input buffers for batched operations
+        let q_heads_buffer = self.get_persistent_buffer(&q_heads)?;
+        let k_heads_buffer = self.get_persistent_buffer(&k_heads)?;
+        let v_heads_buffer = self.get_persistent_buffer(&v_heads)?;
+
+        // Allocate all output buffers upfront
+        let k_heads_t_buffer = Arc::new(self.device.new_buffer(
+            (num_heads * seq_len * head_dim * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        ));
+
+        let attn_weights_buffer = Arc::new(self.device.new_buffer(
+            (num_heads * seq_len * seq_len * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        ));
+
+        let output_heads_buffer = Arc::new(self.device.new_buffer(
+            (num_heads * seq_len * head_dim * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        ));
+
+        // 2a. Encode batched transpose K into shared command buffer
+        eprintln!("      2a. Batched transpose K ({} heads) [no wait]", num_heads);
+        {
+            let encoder = command_buffer.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(&*self.batched_transpose_pipeline);
+            encoder.set_buffer(0, Some(&*k_heads_buffer), 0);
+            encoder.set_buffer(1, Some(&*k_heads_t_buffer), 0);
+
+            let num_heads_u32 = num_heads as u32;
+            let rows_u32 = seq_len as u32;
+            let cols_u32 = head_dim as u32;
+            encoder.set_bytes(2, mem::size_of::<u32>() as u64, &num_heads_u32 as *const u32 as *const _);
+            encoder.set_bytes(3, mem::size_of::<u32>() as u64, &rows_u32 as *const u32 as *const _);
+            encoder.set_bytes(4, mem::size_of::<u32>() as u64, &cols_u32 as *const u32 as *const _);
+
+            let threadgroup_size = metal::MTLSize { width: 16, height: 16, depth: 1 };
+            let threadgroups = metal::MTLSize {
+                width: (head_dim as u64 + 15) / 16,
+                height: (seq_len as u64 + 15) / 16,
+                depth: num_heads as u64,
+            };
+            encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+            encoder.end_encoding();
+        }
+
+        // 2b. Encode fused batched scaled matmul + softmax into shared command buffer
+        eprintln!("      2b. 🔥 FUSED batched scaled matmul + softmax ({} heads) [no wait]", num_heads);
+        {
+            let encoder = command_buffer.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(&*self.batched_scaled_matmul_softmax_causal_pipeline);
+            encoder.set_buffer(0, Some(&*q_heads_buffer), 0);
+            encoder.set_buffer(1, Some(&*k_heads_t_buffer), 0);
+            encoder.set_buffer(2, Some(&*attn_weights_buffer), 0);
+
+            let num_heads_u32 = num_heads as u32;
+            let seq_len_u32 = seq_len as u32;
+            let head_dim_u32 = head_dim as u32;
+            encoder.set_bytes(3, mem::size_of::<u32>() as u64, &num_heads_u32 as *const u32 as *const _);
+            encoder.set_bytes(4, mem::size_of::<u32>() as u64, &seq_len_u32 as *const u32 as *const _);
+            encoder.set_bytes(5, mem::size_of::<u32>() as u64, &head_dim_u32 as *const u32 as *const _);
+            encoder.set_bytes(6, mem::size_of::<u32>() as u64, &scale as *const f32 as *const _);
+
+            let threadgroup_size = metal::MTLSize { width: 64, height: 1, depth: 1 };
+            let threadgroups = metal::MTLSize {
+                width: (seq_len as u64 + 63) / 64,
+                height: num_heads as u64,
+                depth: 1,
+            };
+            encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+            encoder.end_encoding();
+        }
+
+        // 2c. Encode batched matmul @ V into shared command buffer
+        eprintln!("      2c. Batched matmul @ V ({} heads) [no wait]", num_heads);
+        {
+            let encoder = command_buffer.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(&*self.batched_matmul_pipeline);
+            encoder.set_buffer(0, Some(&*attn_weights_buffer), 0);
+            encoder.set_buffer(1, Some(&*v_heads_buffer), 0);
+            encoder.set_buffer(2, Some(&*output_heads_buffer), 0);
+
+            let num_heads_u32 = num_heads as u32;
+            let m_u32 = seq_len as u32;
+            let k_u32 = seq_len as u32;
+            let n_u32 = head_dim as u32;
+            encoder.set_bytes(3, mem::size_of::<u32>() as u64, &num_heads_u32 as *const u32 as *const _);
+            encoder.set_bytes(4, mem::size_of::<u32>() as u64, &m_u32 as *const u32 as *const _);
+            encoder.set_bytes(5, mem::size_of::<u32>() as u64, &k_u32 as *const u32 as *const _);
+            encoder.set_bytes(6, mem::size_of::<u32>() as u64, &n_u32 as *const u32 as *const _);
+
+            let threadgroup_size = metal::MTLSize { width: 16, height: 16, depth: 1 };
+            let threadgroups = metal::MTLSize {
+                width: (head_dim as u64 + 15) / 16,
+                height: (seq_len as u64 + 15) / 16,
+                depth: num_heads as u64,
+            };
+            encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+            encoder.end_encoding();
+        }
+
+        // OPTIMIZATION: Commit and wait ONCE for all 3 operations
+        eprintln!("      → Committing and waiting ONCE for all 3 batched operations");
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Register output buffer
+        let output_heads_id = BufferId::new();
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error("Failed to lock buffer cache", "attention_gpu_to_gpu_optimized")
+        })?;
+        cache.insert(output_heads_id, output_heads_buffer);
+
+        eprintln!(
+            "   ✅ Optimized batched attention: {} heads in 3 operations, 1 wait (vs 3 waits before)",
+            num_heads
+        );
+
+        // Step 3: Reshape back from [num_heads, seq_len, head_dim] to [seq_len, hidden_size]
+        eprintln!("   Step 3: Concatenating heads back to [seq_len, {}]", hidden_size);
+        let final_output = self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
+
+        eprintln!("✅ GPU Multi-Head Attention (OPTIMIZED) complete!");
 
         Ok(final_output)
     }
@@ -3449,10 +3930,15 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 reshape_to_heads_pipeline: Arc::clone(&backend.reshape_to_heads_pipeline),
                 reshape_from_heads_pipeline: Arc::clone(&backend.reshape_from_heads_pipeline),
                 batched_transpose_pipeline: Arc::clone(&backend.batched_transpose_pipeline),
-                batched_softmax_causal_pipeline: Arc::clone(&backend.batched_softmax_causal_pipeline),
+                batched_softmax_causal_pipeline: Arc::clone(
+                    &backend.batched_softmax_causal_pipeline,
+                ),
                 batched_matmul_pipeline: Arc::clone(&backend.batched_matmul_pipeline),
                 batched_matmul_scaled_pipeline: Arc::clone(&backend.batched_matmul_scaled_pipeline),
-                batched_scaled_matmul_softmax_causal_pipeline: Arc::clone(&backend.batched_scaled_matmul_softmax_causal_pipeline),
+                batched_scaled_matmul_softmax_causal_pipeline: Arc::clone(
+                    &backend.batched_scaled_matmul_softmax_causal_pipeline,
+                ),
+                concat_seq_dim_pipeline: Arc::clone(&backend.concat_seq_dim_pipeline),
                 mps_ops: Arc::clone(&backend.mps_ops),
             })
         })

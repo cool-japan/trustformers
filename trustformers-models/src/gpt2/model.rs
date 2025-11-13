@@ -1457,62 +1457,126 @@ impl Gpt2Attention {
         // Project to Q, K, V using the combined projection
         let qkv = self.c_attn.forward(hidden_states)?;
 
-        // GPU attention path (avoids ALL CPU transfers!)
+        // GPU attention path with GPU-aware KV-cache (ZERO CPU transfers!)
         #[cfg(feature = "metal")]
         if let Tensor::Metal(qkv_data) = &qkv {
             use trustformers_core::gpu_ops::metal::get_metal_backend;
             use trustformers_core::tensor::MetalTensorData;
 
-            // Use GPU attention when cache is empty or doesn't exist
-            // (for prompt processing with no cached K/V)
-            if layer_cache.as_ref().map_or(true, |cache| cache.key.is_none()) {
-                eprintln!("🚀 Full GPU Attention path (no CPU transfers!)");
+            let backend = get_metal_backend()?;
 
-                let backend = get_metal_backend()?;
+            // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
+            let (q_id, k_new_id, v_new_id) =
+                backend.split_qkv_gpu(&qkv_data.buffer_id, batch_size, seq_len, hidden_size)?;
 
-                // Split QKV on GPU: [batch, seq, 3*hidden] → 3x [batch, seq, hidden]
-                let (q_id, k_id, v_id) =
-                    backend.split_qkv_gpu(&qkv_data.buffer_id, batch_size, seq_len, hidden_size)?;
-
-                // Execute full attention on GPU (Q@K^T, softmax, scores@V)
-                let attn_output_id = backend.attention_gpu_to_gpu(
-                    &q_id,
-                    &k_id,
-                    &v_id,
-                    batch_size,
-                    seq_len,
-                    self.n_head,
-                    self.d_head,
-                )?;
-
-                // Wrap in Metal tensor and apply output projection
-                let attn_output = Tensor::Metal(MetalTensorData {
-                    buffer_id: attn_output_id,
-                    shape: vec![batch_size, seq_len, hidden_size],
-                    dtype: qkv_data.dtype,
-                });
-
-                // Apply output projection (stays on GPU)
-                let output = self.c_proj.forward(attn_output)?;
-
-                // Remove batch dimension if it was added
-                return if was_2d {
-                    match output {
-                        Tensor::Metal(metal_data) if metal_data.shape[0] == 1 => {
-                            // Reshape [1, seq, hidden] → [seq, hidden]
-                            let new_shape = vec![metal_data.shape[1], metal_data.shape[2]];
-                            Ok(Tensor::Metal(MetalTensorData {
-                                buffer_id: metal_data.buffer_id,
-                                shape: new_shape,
-                                dtype: metal_data.dtype,
-                            }))
-                        },
-                        _ => Ok(output),
+            // Get cached K/V buffer IDs and sequence length (if cache exists)
+            let (cached_k_id, cached_v_id, cached_seq_len) = if let Some(cache) = &layer_cache {
+                match (&cache.key, &cache.value) {
+                    (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
+                        let cached_shape = &k_metal.shape;  // [batch, num_heads, cached_seq, head_dim]
+                        let cached_seq = cached_shape[2];
+                        eprintln!("🔗 GPU cache found: cached_seq={}", cached_seq);
+                        (Some(&k_metal.buffer_id), Some(&v_metal.buffer_id), cached_seq)
+                    },
+                    _ => {
+                        eprintln!("🚀 GPU attention (first token, no cache)");
+                        (None, None, 0)
                     }
-                } else {
-                    Ok(output)
-                };
+                }
+            } else {
+                eprintln!("🚀 GPU attention (no cache layer)");
+                (None, None, 0)
+            };
+
+            // Reshape Q, K_new, V_new to multi-head format
+            // [batch, seq, hidden] → [batch, num_heads, seq, head_dim]
+            let q_heads_id = backend.reshape_to_heads_gpu(&q_id, seq_len, self.n_head, self.d_head)?;
+            let k_new_heads_id = backend.reshape_to_heads_gpu(&k_new_id, seq_len, self.n_head, self.d_head)?;
+            let v_new_heads_id = backend.reshape_to_heads_gpu(&v_new_id, seq_len, self.n_head, self.d_head)?;
+
+            // Concatenate with cached K/V on GPU (stays on GPU!)
+            let k_heads_id = backend.concat_kv_cache(
+                cached_k_id,
+                &k_new_heads_id,
+                batch_size,
+                self.n_head,
+                cached_seq_len,
+                seq_len,  // new_seq_len
+                self.d_head,
+            )?;
+
+            let v_heads_id = backend.concat_kv_cache(
+                cached_v_id,
+                &v_new_heads_id,
+                batch_size,
+                self.n_head,
+                cached_seq_len,
+                seq_len,
+                self.d_head,
+            )?;
+
+            let total_seq_len = cached_seq_len + seq_len;
+
+            // Execute full attention on GPU with cached K/V
+            // Q: [batch, num_heads, seq_len, head_dim] (current tokens)
+            // K: [batch, num_heads, total_seq_len, head_dim] (cached + new)
+            // V: [batch, num_heads, total_seq_len, head_dim] (cached + new)
+            let attn_heads_output_id = backend.attention_with_cache_gpu_to_gpu(
+                &q_heads_id,
+                &k_heads_id,
+                &v_heads_id,
+                batch_size,
+                seq_len,       // q_seq_len
+                total_seq_len, // kv_seq_len
+                self.n_head,
+                self.d_head,
+            )?;
+
+            // Reshape from [batch, num_heads, seq_len, head_dim] back to [batch, seq_len, hidden_size]
+            let attn_output_id = backend.reshape_from_heads_gpu(&attn_heads_output_id, seq_len, self.n_head, self.d_head)?;
+
+            // Update cache with full K/V (keep on GPU!)
+            if let Some(cache) = layer_cache {
+                cache.key = Some(Tensor::Metal(MetalTensorData {
+                    buffer_id: k_heads_id,
+                    shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                    dtype: qkv_data.dtype,
+                }));
+                cache.value = Some(Tensor::Metal(MetalTensorData {
+                    buffer_id: v_heads_id,
+                    shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
+                    dtype: qkv_data.dtype,
+                }));
+                eprintln!("✅ GPU cache updated: total_seq={}", total_seq_len);
             }
+
+            // Wrap in Metal tensor and apply output projection
+            let attn_output = Tensor::Metal(MetalTensorData {
+                buffer_id: attn_output_id,
+                shape: vec![batch_size, seq_len, hidden_size],
+                dtype: qkv_data.dtype,
+            });
+
+            // Apply output projection (stays on GPU)
+            let output = self.c_proj.forward(attn_output)?;
+
+            // Remove batch dimension if it was added
+            return if was_2d {
+                match output {
+                    Tensor::Metal(metal_data) if metal_data.shape[0] == 1 => {
+                        // Reshape [1, seq, hidden] → [seq, hidden]
+                        let new_shape = vec![metal_data.shape[1], metal_data.shape[2]];
+                        Ok(Tensor::Metal(MetalTensorData {
+                            buffer_id: metal_data.buffer_id,
+                            shape: new_shape,
+                            dtype: metal_data.dtype,
+                        }))
+                    },
+                    _ => Ok(output),
+                }
+            } else {
+                Ok(output)
+            };
         }
 
         // Fallback: CPU attention path (with cache support)

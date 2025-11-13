@@ -157,7 +157,7 @@ pub use generation::{
     GenerationConfig,
     GenerationStrategy,
     GenerationStream,
-    KVCache,
+    // KVCache, // Now exported from cache module
     // SpeculativeDecoder, TextGenerator,  // Temporarily disabled due to missing modules
 };
 #[cfg(not(feature = "cuda"))]
