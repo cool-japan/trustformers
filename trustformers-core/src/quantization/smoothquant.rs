@@ -921,6 +921,8 @@ mod tests {
             Tensor::CF16(_) => panic!("CF16 tensor type not expected in smoothing test"),
             Tensor::CBF16(_) => panic!("CBF16 tensor type not expected in smoothing test"),
             Tensor::Sparse(_) => panic!("Sparse tensor type not expected in smoothing test"),
+            #[cfg(feature = "metal")]
+            Tensor::Metal(_) => panic!("Metal tensor type not expected in smoothing test"),
             #[cfg(feature = "torch")]
             Tensor::Torch(_) => panic!("Unexpected Torch tensor type"),
             #[cfg(feature = "candle")]

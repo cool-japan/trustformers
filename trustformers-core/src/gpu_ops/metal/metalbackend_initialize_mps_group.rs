@@ -65,18 +65,18 @@ impl MetalBackend {
         n: usize,
     ) -> Result<BufferId> {
         let mps_ops = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
-            eprintln!(
-                "⚠️  MPS matmul requested but MPS not initialized - falling back to naive kernel"
-            );
+            // eprintln!(
+            //     "⚠️  MPS matmul requested but MPS not initialized - falling back to naive kernel"
+            // );
             TrustformersError::hardware_error(
                 "MPS not initialized - GPU-to-GPU matmul unavailable",
                 "matmul_gpu_to_gpu_mps",
             )
         })?;
-        eprintln!(
-            "🚀 Using MPS matmul: {}x{}x{} (expected 100-500x speedup)",
-            m, k, n
-        );
+        // eprintln!(
+        //     "🚀 Using MPS matmul: {}x{}x{} (expected 100-500x speedup)",
+        //     m, k, n
+        // );
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
         let result_size = m * n;
@@ -128,16 +128,16 @@ impl MetalBackend {
         alpha: f32,
     ) -> Result<BufferId> {
         let mps_ops = self.mps_ops.as_ref().as_ref().ok_or_else(|| {
-            eprintln!("⚠️  MPS scaled matmul requested but MPS not initialized");
+            // eprintln!("⚠️  MPS scaled matmul requested but MPS not initialized");
             TrustformersError::hardware_error(
                 "MPS not initialized - GPU-to-GPU scaled matmul unavailable",
                 "matmul_gpu_to_gpu_mps_scaled",
             )
         })?;
-        eprintln!(
-            "🚀 Using MPS FUSED scaled matmul: {}x{}x{} with alpha={} (1.5-2x faster)",
-            m, k, n, alpha
-        );
+        // eprintln!(
+        //     "🚀 Using MPS FUSED scaled matmul: {}x{}x{} with alpha={} (1.5-2x faster)",
+        //     m, k, n, alpha
+        // );
         let a_buffer = self.get_persistent_buffer(a_buffer_id)?;
         let b_buffer = self.get_persistent_buffer(b_buffer_id)?;
         let result_size = m * n;
@@ -198,7 +198,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -247,7 +247,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -313,7 +313,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -380,7 +380,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -436,7 +436,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -457,10 +457,10 @@ impl MetalBackend {
         let batch_size = input_buffer_ids.len();
         let elements_per_tensor = seq_len * hidden_size;
         let total_elements = batch_size * elements_per_tensor;
-        eprintln!(
-            "🔧 stack_gpu_buffers: batch_size={}, seq_len={}, hidden_size={}, total_elements={}",
-            batch_size, seq_len, hidden_size, total_elements
-        );
+        // eprintln!(
+        //     "🔧 stack_gpu_buffers: batch_size={}, seq_len={}, hidden_size={}, total_elements={}",
+        //     batch_size, seq_len, hidden_size, total_elements
+        // );
         let output_buffer = self.device.new_buffer(
             (total_elements * mem::size_of::<f32>()) as u64,
             MTLResourceOptions::StorageModeShared,
@@ -498,25 +498,25 @@ impl MetalBackend {
         }
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error("Failed to lock buffer cache", "stack_gpu_buffers")
         })?;
         cache.insert(output_id, output_buffer_arc.clone());
-        let ptr = output_buffer_arc.contents() as *const f32;
-        let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_elements) };
-        eprintln!(
-            "✅ stack_gpu_buffers complete - first 10 values: {:?}",
-            &output_slice[..10.min(total_elements)]
-        );
-        eprintln!(
-            "   Stats: min={:.4}, max={:.4}, mean={:.4}",
-            output_slice.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            output_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
-            output_slice.iter().sum::<f32>() / total_elements as f32
-        );
+        // let ptr = output_buffer_arc.contents() as *const f32;
+        // let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_elements) };
+        // eprintln!(
+        //     "✅ stack_gpu_buffers complete - first 10 values: {:?}",
+        //     &output_slice[..10.min(total_elements)]
+        // );
+        // eprintln!(
+        //     "   Stats: min={:.4}, max={:.4}, mean={:.4}",
+        //     output_slice.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+        //     output_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+        //     output_slice.iter().sum::<f32>() / total_elements as f32
+        // );
         Ok(output_id)
     }
     /// Split QKV tensor on GPU (eliminates CPU transfer for attention)
@@ -576,7 +576,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let q_id = BufferId::new();
         let k_id = BufferId::new();
         let v_id = BufferId::new();
@@ -627,30 +627,30 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
-        {
-            let ptr = output_buffer.contents() as *const f32;
-            let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_size) };
-            if seq_len <= 15 {
-                eprintln!(
-                    "🔍 Softmax output (first row): {:?}",
-                    &output_slice[0..seq_len]
-                );
-                eprintln!(
-                    "   First row sum: {:.6} (should be ~1.0)",
-                    output_slice[0..seq_len].iter().sum::<f32>()
-                );
-                let last_row_start = (seq_len - 1) * seq_len;
-                eprintln!(
-                    "   Last row: {:?}",
-                    &output_slice[last_row_start..last_row_start + seq_len]
-                );
-                eprintln!(
-                    "   Last row sum: {:.6} (should be ~1.0)",
-                    output_slice[last_row_start..last_row_start + seq_len].iter().sum::<f32>()
-                );
-            }
-        }
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        // {
+        //     let ptr = output_buffer.contents() as *const f32;
+        //     let output_slice = unsafe { std::slice::from_raw_parts(ptr, total_size) };
+        //     if seq_len <= 15 {
+        //         eprintln!(
+        //             "🔍 Softmax output (first row): {:?}",
+        //             &output_slice[0..seq_len]
+        //         );
+        //         eprintln!(
+        //             "   First row sum: {:.6} (should be ~1.0)",
+        //             output_slice[0..seq_len].iter().sum::<f32>()
+        //         );
+        //         let last_row_start = (seq_len - 1) * seq_len;
+        //         eprintln!(
+        //             "   Last row: {:?}",
+        //             &output_slice[last_row_start..last_row_start + seq_len]
+        //         );
+        //         eprintln!(
+        //             "   Last row sum: {:.6} (should be ~1.0)",
+        //             output_slice[last_row_start..last_row_start + seq_len].iter().sum::<f32>()
+        //         );
+        //     }
+        // }
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -704,7 +704,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -768,7 +768,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -829,7 +829,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -869,7 +869,7 @@ impl MetalBackend {
         );
         blit_encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(dst_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -922,7 +922,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error("Failed to lock buffer cache", "transpose_gpu_to_gpu")
@@ -982,7 +982,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1040,7 +1040,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_buffer_arc = Arc::new(output_buffer);
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
@@ -1114,7 +1114,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1194,7 +1194,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1267,7 +1267,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1278,6 +1278,116 @@ impl MetalBackend {
         cache.insert(output_id, output_buffer);
         Ok(output_id)
     }
+
+    /// Fused scaled matmul + softmax for generation (q_seq != kv_seq)
+    ///
+    /// Optimized for autoregressive generation where q_seq=1, kv_seq=cached_length.
+    /// Fuses Q @ K^T, scaling, and softmax into a single GPU kernel dispatch.
+    ///
+    /// # Performance
+    ///
+    /// Eliminates separate softmax kernel dispatch and reduces memory bandwidth by ~1.5-2x
+    /// compared to separate matmul+scale and softmax operations. Critical for generation performance.
+    ///
+    /// # Arguments
+    ///
+    /// * `q_buffer_id` - Query tensor: [num_heads, q_seq_len, head_dim]
+    /// * `k_t_buffer_id` - Transposed key tensor: [num_heads, head_dim, kv_seq_len]
+    /// * `num_heads` - Number of attention heads
+    /// * `q_seq_len` - Query sequence length (typically 1 during generation)
+    /// * `kv_seq_len` - Key/Value sequence length (all cached tokens)
+    /// * `head_dim` - Dimension per head
+    /// * `alpha` - Scaling factor (1/sqrt(head_dim))
+    ///
+    /// # Returns
+    ///
+    /// Buffer ID containing attention weights: [num_heads, q_seq_len, kv_seq_len]
+    pub fn batched_scaled_matmul_softmax_gen_gpu_to_gpu(
+        &self,
+        q_buffer_id: &BufferId,
+        k_t_buffer_id: &BufferId,
+        num_heads: usize,
+        q_seq_len: usize,
+        kv_seq_len: usize,
+        head_dim: usize,
+        alpha: f32,
+    ) -> Result<BufferId> {
+        let q_buffer = self.get_persistent_buffer(q_buffer_id)?;
+        let k_t_buffer = self.get_persistent_buffer(k_t_buffer_id)?;
+
+        let output_buffer = Arc::new(self.device.new_buffer(
+            (num_heads * q_seq_len * kv_seq_len * mem::size_of::<f32>()) as u64,
+            MTLResourceOptions::StorageModePrivate,
+        ));
+
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&*self.batched_scaled_matmul_softmax_gen_pipeline);
+        encoder.set_buffer(0, Some(&*q_buffer), 0);
+        encoder.set_buffer(1, Some(&*k_t_buffer), 0);
+        encoder.set_buffer(2, Some(&*output_buffer), 0);
+
+        let num_heads_u32 = num_heads as u32;
+        let q_seq_len_u32 = q_seq_len as u32;
+        let kv_seq_len_u32 = kv_seq_len as u32;
+        let head_dim_u32 = head_dim as u32;
+
+        encoder.set_bytes(
+            3,
+            mem::size_of::<u32>() as u64,
+            &num_heads_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            4,
+            mem::size_of::<u32>() as u64,
+            &q_seq_len_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            5,
+            mem::size_of::<u32>() as u64,
+            &kv_seq_len_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            6,
+            mem::size_of::<u32>() as u64,
+            &head_dim_u32 as *const u32 as *const _,
+        );
+        encoder.set_bytes(
+            7,
+            mem::size_of::<u32>() as u64,
+            &alpha as *const f32 as *const _,
+        );
+
+        // Dispatch: one thread per (q_row, head) pair
+        let threadgroup_size = metal::MTLSize {
+            width: 64,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = metal::MTLSize {
+            width: (q_seq_len as u64 + 63) / 64,
+            height: num_heads as u64,
+            depth: 1,
+        };
+
+        encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
+        encoder.end_encoding();
+        command_buffer.commit();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+
+        let output_id = BufferId::new();
+        let mut cache = self.buffer_cache.lock().map_err(|_| {
+            TrustformersError::hardware_error(
+                "Failed to lock buffer cache",
+                "batched_scaled_matmul_softmax_gen_gpu_to_gpu",
+            )
+        })?;
+        cache.insert(output_id, output_buffer);
+
+        Ok(output_id)
+    }
+
     /// Concatenate cached K/V with new K/V for KV-cache (GPU-aware, ZERO CPU transfers!)
     ///
     /// # Arguments
@@ -1308,10 +1418,10 @@ impl MetalBackend {
         }
         let cached_buffer_id = cached_buffer_id.unwrap();
         let total_seq_len = cached_seq_len + new_seq_len;
-        eprintln!(
-            "🔗 GPU KV-cache concat: cached_seq={}, new_seq={}, total={}",
-            cached_seq_len, new_seq_len, total_seq_len
-        );
+        // eprintln!(
+        //     "🔗 GPU KV-cache concat: cached_seq={}, new_seq={}, total={}",
+        //     cached_seq_len, new_seq_len, total_seq_len
+        // );
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error("Failed to lock buffer cache", "concat_kv_cache")
         })?;
@@ -1369,7 +1479,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threads_per_threadgroup);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_id = BufferId::new();
         cache.insert(output_id, output_buffer);
         Ok(output_id)
@@ -1388,26 +1498,26 @@ impl MetalBackend {
         head_dim: usize,
     ) -> Result<BufferId> {
         let hidden_size = num_heads * head_dim;
-        eprintln!(
-            "🚀 GPU Multi-Head Attention (OPTIMIZED SYNC): batch={}, seq={}, heads={}, head_dim={}",
-            batch_size, seq_len, num_heads, head_dim
-        );
+        // eprintln!(
+        //     "🚀 GPU Multi-Head Attention (OPTIMIZED SYNC): batch={}, seq={}, heads={}, head_dim={}",
+        //     batch_size, seq_len, num_heads, head_dim
+        // );
         if batch_size != 1 {
             return Err(TrustformersError::tensor_op_error(
                 "GPU attention currently only supports batch_size=1",
                 "attention_gpu_to_gpu_optimized",
             ));
         }
-        eprintln!("   Step 1: Reshaping Q, K, V to separate heads");
+        // eprintln!("   Step 1: Reshaping Q, K, V to separate heads");
         let q_heads = self.reshape_to_heads_gpu(q_buffer_id, seq_len, num_heads, head_dim)?;
         let k_heads = self.reshape_to_heads_gpu(k_buffer_id, seq_len, num_heads, head_dim)?;
         let v_heads = self.reshape_to_heads_gpu(v_buffer_id, seq_len, num_heads, head_dim)?;
         let command_buffer = self.command_queue.new_command_buffer();
         let scale = 1.0 / (head_dim as f32).sqrt();
-        eprintln!(
-            "   Step 2: 🔥 OPTIMIZED batched attention (scale={}, {} heads, SINGLE command buffer)",
-            scale, num_heads
-        );
+        // eprintln!(
+        //     "   Step 2: 🔥 OPTIMIZED batched attention (scale={}, {} heads, SINGLE command buffer)",
+        //     scale, num_heads
+        // );
         let q_heads_buffer = self.get_persistent_buffer(&q_heads)?;
         let k_heads_buffer = self.get_persistent_buffer(&k_heads)?;
         let v_heads_buffer = self.get_persistent_buffer(&v_heads)?;
@@ -1423,10 +1533,10 @@ impl MetalBackend {
             (num_heads * seq_len * head_dim * mem::size_of::<f32>()) as u64,
             MTLResourceOptions::StorageModePrivate,
         ));
-        eprintln!(
-            "      2a. Batched transpose K ({} heads) [no wait]",
-            num_heads
-        );
+        // eprintln!(
+        //     "      2a. Batched transpose K ({} heads) [no wait]",
+        //     num_heads
+        // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&*self.batched_transpose_pipeline);
@@ -1463,10 +1573,10 @@ impl MetalBackend {
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
             encoder.end_encoding();
         }
-        eprintln!(
-            "      2b. 🔥 FUSED batched scaled matmul + softmax ({} heads) [no wait]",
-            num_heads
-        );
+        // eprintln!(
+        //     "      2b. 🔥 FUSED batched scaled matmul + softmax ({} heads) [no wait]",
+        //     num_heads
+        // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
             encoder
@@ -1510,10 +1620,10 @@ impl MetalBackend {
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
             encoder.end_encoding();
         }
-        eprintln!(
-            "      2c. Batched matmul @ V ({} heads) [no wait]",
-            num_heads
-        );
+        // eprintln!(
+        //     "      2c. Batched matmul @ V ({} heads) [no wait]",
+        //     num_heads
+        // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&*self.batched_matmul_pipeline);
@@ -1557,9 +1667,9 @@ impl MetalBackend {
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
             encoder.end_encoding();
         }
-        eprintln!("      → Committing and waiting ONCE for all 3 batched operations");
+        // eprintln!("      → Committing and waiting ONCE for all 3 batched operations");
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let output_heads_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(
@@ -1568,17 +1678,17 @@ impl MetalBackend {
             )
         })?;
         cache.insert(output_heads_id, output_heads_buffer);
-        eprintln!(
-            "   ✅ Optimized batched attention: {} heads in 3 operations, 1 wait (vs 3 waits before)",
-            num_heads
-        );
-        eprintln!(
-            "   Step 3: Concatenating heads back to [seq_len, {}]",
-            hidden_size
-        );
+        // eprintln!(
+        //     "   ✅ Optimized batched attention: {} heads in 3 operations, 1 wait (vs 3 waits before)",
+        //     num_heads
+        // );
+        // eprintln!(
+        //     "   Step 3: Concatenating heads back to [seq_len, {}]",
+        //     hidden_size
+        // );
         let final_output =
             self.reshape_from_heads_gpu(&output_heads_id, seq_len, num_heads, head_dim)?;
-        eprintln!("✅ GPU Multi-Head Attention (OPTIMIZED) complete!");
+        // eprintln!("✅ GPU Multi-Head Attention (OPTIMIZED) complete!");
         Ok(final_output)
     }
 }

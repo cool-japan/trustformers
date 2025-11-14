@@ -13,6 +13,8 @@ pub struct MetalBackend {
     pub(super) buffer_cache: Arc<std::sync::Mutex<BufferCache>>,
     pub(super) matmul_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) gelu_pipeline: Arc<metal::ComputePipelineState>,
+    pub(super) matmul_gelu_pipeline: Arc<metal::ComputePipelineState>,
+    pub(super) matmul_bias_gelu_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) scale_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) add_bias_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) layernorm_pipeline: Arc<metal::ComputePipelineState>,
@@ -29,6 +31,8 @@ pub struct MetalBackend {
     pub(super) batched_matmul_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) batched_matmul_scaled_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) batched_scaled_matmul_softmax_causal_pipeline: Arc<metal::ComputePipelineState>,
+    pub(super) batched_scaled_matmul_softmax_gen_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) concat_seq_dim_pipeline: Arc<metal::ComputePipelineState>,
+    pub(super) flash_attention_pipeline: Arc<metal::ComputePipelineState>,
     pub(super) mps_ops: Arc<Option<MPSOperations>>,
 }

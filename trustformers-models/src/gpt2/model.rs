@@ -1475,6 +1475,7 @@ impl Gpt2Attention {
                     (Some(Tensor::Metal(k_metal)), Some(Tensor::Metal(v_metal))) => {
                         let cached_shape = &k_metal.shape; // [batch, num_heads, cached_seq, head_dim]
                         let cached_seq = cached_shape[2];
+                        #[cfg(debug_assertions)]
                         eprintln!("🔗 GPU cache found: cached_seq={}", cached_seq);
                         (
                             Some(&k_metal.buffer_id),
@@ -1483,12 +1484,12 @@ impl Gpt2Attention {
                         )
                     },
                     _ => {
-                        eprintln!("🚀 GPU attention (first token, no cache)");
+                        // eprintln!("🚀 GPU attention (first token, no cache)");
                         (None, None, 0)
                     },
                 }
             } else {
-                eprintln!("🚀 GPU attention (no cache layer)");
+                // eprintln!("🚀 GPU attention (no cache layer)");
                 (None, None, 0)
             };
 
@@ -1524,7 +1525,7 @@ impl Gpt2Attention {
 
             let total_seq_len = cached_seq_len + seq_len;
 
-            // Execute full attention on GPU with cached K/V
+            // Execute GPU attention with cached K/V
             // Q: [batch, num_heads, seq_len, head_dim] (current tokens)
             // K: [batch, num_heads, total_seq_len, head_dim] (cached + new)
             // V: [batch, num_heads, total_seq_len, head_dim] (cached + new)
@@ -1559,6 +1560,7 @@ impl Gpt2Attention {
                     shape: vec![batch_size, self.n_head, total_seq_len, self.d_head],
                     dtype: qkv_data.dtype,
                 }));
+                #[cfg(debug_assertions)]
                 eprintln!("✅ GPU cache updated: total_seq={}", total_seq_len);
             }
 
@@ -2111,6 +2113,10 @@ impl Gpt2MLP {
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
+        // TODO: Fused matmul+bias+GELU kernel for Metal GPU
+        // The kernel is implemented and tested (trustformers-core/src/gpu_ops/metal/metalbackend_matmul_gelu_f32_group.rs)
+        // Full integration requires GPU-resident buffer operations in Linear layer
+        // Current implementation uses MPS/Accelerate which is already highly optimized
         let hidden_states = self.c_fc.forward(hidden_states)?;
         let hidden_states = self.act_fn.apply(hidden_states)?;
         self.c_proj.forward(hidden_states)

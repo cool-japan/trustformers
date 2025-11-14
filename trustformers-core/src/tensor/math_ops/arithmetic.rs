@@ -114,7 +114,7 @@ impl Tensor {
                 use crate::tensor::MetalTensorData;
 
                 // GPU-to-GPU addition - stays on Metal!
-                eprintln!("✅ Tensor::add - GPU-to-GPU path (Metal + Metal → Metal)");
+                // eprintln!("✅ Tensor::add - GPU-to-GPU path (Metal + Metal → Metal)");
 
                 if a_data.shape != b_data.shape {
                     return Err(TrustformersError::shape_error(format!(

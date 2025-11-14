@@ -93,28 +93,38 @@ impl MetalBackend {
     }
     pub(crate) fn create_buffer(&self, data: &[f32]) -> Result<Buffer> {
         let byte_size = std::mem::size_of_val(data) as u64;
-        eprintln!(
-            "🔍 create_buffer: data.len()={}, byte_size={}",
-            data.len(),
-            byte_size
-        );
-        if !data.is_empty() {
+
+        #[cfg(debug_assertions)]
+        {
             eprintln!(
-                "🔍 create_buffer: first 5 values: {:?}",
-                &data[..5.min(data.len())]
+                "🔍 create_buffer: data.len()={}, byte_size={}",
+                data.len(),
+                byte_size
             );
+            if !data.is_empty() {
+                eprintln!(
+                    "🔍 create_buffer: first 5 values: {:?}",
+                    &data[..5.min(data.len())]
+                );
+            }
         }
+
         let buffer = self.device.new_buffer_with_data(
             data.as_ptr() as *const _,
             byte_size,
             MTLResourceOptions::StorageModeShared,
         );
-        let ptr = buffer.contents() as *const f32;
-        let verify_data = unsafe { std::slice::from_raw_parts(ptr, data.len().min(5)) };
-        eprintln!(
-            "🔍 create_buffer: After creation, first 5 in buffer: {:?}",
-            verify_data
-        );
+
+        #[cfg(debug_assertions)]
+        {
+            let ptr = buffer.contents() as *const f32;
+            let verify_data = unsafe { std::slice::from_raw_parts(ptr, data.len().min(5)) };
+            eprintln!(
+                "🔍 create_buffer: After creation, first 5 in buffer: {:?}",
+                verify_data
+            );
+        }
+
         Ok(buffer)
     }
 }

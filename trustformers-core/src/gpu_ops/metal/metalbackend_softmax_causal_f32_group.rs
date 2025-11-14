@@ -49,7 +49,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        command_buffer.wait_until_completed();
+        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
         let result_ptr = output_buffer.contents() as *const f32;
         let result = unsafe { std::slice::from_raw_parts(result_ptr, total_size) }.to_vec();
         Ok(result)

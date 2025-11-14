@@ -433,7 +433,7 @@ impl Layer for Linear {
             use crate::gpu_ops::metal::get_metal_backend;
             use crate::tensor::MetalTensorData;
 
-            eprintln!("🎯 Linear::forward - GPU-to-GPU path triggered (Tensor::Metal input)");
+            // eprintln!("🎯 Linear::forward - GPU-to-GPU path triggered (Tensor::Metal input)");
 
             // Ensure weight buffer is cached on GPU
             self.ensure_weight_buffer_cached()?;
@@ -484,10 +484,10 @@ impl Layer for Linear {
             let output_buffer_id = backend
                 .matmul_gpu_to_gpu_mps(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
                 .or_else(|e| {
-                    eprintln!(
-                        "⚠️  MPS matmul failed: {:?}, falling back to naive Metal kernel",
-                        e
-                    );
+                    // eprintln!(
+                    //     "⚠️  MPS matmul failed: {:?}, falling back to naive Metal kernel",
+                    //     e
+                    // );
                     // Fallback to naive Metal kernel if MPS fails
                     backend.matmul_gpu_to_gpu(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
                 })?;
@@ -505,24 +505,24 @@ impl Layer for Linear {
 
             // Handle bias if present
             if let Some(ref bias) = self.bias {
-                eprintln!("🔍 Linear: Has bias, checking type...");
+                // eprintln!("🔍 Linear: Has bias, checking type...");
                 // Try GPU-to-GPU bias addition if bias is on GPU
                 match bias {
                     #[cfg(feature = "metal")]
                     Tensor::Metal(bias_data) => {
-                        eprintln!("🔍 Linear: Bias is Metal, using GPU-to-GPU bias addition");
+                        // eprintln!("🔍 Linear: Bias is Metal, using GPU-to-GPU bias addition");
                         // Both output and bias are Metal tensors - use GPU kernel!
                         if let Tensor::Metal(output_data) = &output {
-                            eprintln!("🔍 Linear: Output is Metal, calling add_bias_gpu_to_gpu");
+                            // eprintln!("🔍 Linear: Output is Metal, calling add_bias_gpu_to_gpu");
                             let output_buffer_id = backend.add_bias_gpu_to_gpu(
                                 &output_data.buffer_id,
                                 &bias_data.buffer_id,
                                 batch_dims,
                                 n,
                             )?;
-                            eprintln!(
-                                "🔍 Linear: add_bias_gpu_to_gpu succeeded, returning Metal tensor"
-                            );
+                            // eprintln!(
+                            //     "🔍 Linear: add_bias_gpu_to_gpu succeeded, returning Metal tensor"
+                            // );
 
                             return Ok(Tensor::Metal(MetalTensorData {
                                 buffer_id: output_buffer_id,
@@ -530,40 +530,40 @@ impl Layer for Linear {
                                 dtype: output_data.dtype,
                             }));
                         }
-                        eprintln!("🔍 Linear: Output is NOT Metal, falling back to CPU");
+                        // eprintln!("🔍 Linear: Output is NOT Metal, falling back to CPU");
                     },
                     _ => {
-                        eprintln!(
-                            "🔍 Linear: Bias is NOT Metal (type={:?}), falling back to CPU",
-                            std::mem::discriminant(bias)
-                        );
+                        // eprintln!(
+                        //     "🔍 Linear: Bias is NOT Metal (type={:?}), falling back to CPU",
+                        //     std::mem::discriminant(bias)
+                        // );
                     },
                 }
 
                 // Fallback: CPU bias addition
-                eprintln!("🔍 Linear: Using CPU bias fallback");
+                // eprintln!("🔍 Linear: Using CPU bias fallback");
                 output = output.to_device_enum(&crate::device::Device::CPU)?;
-                eprintln!("🔍 Linear: Converted output to CPU");
+                // eprintln!("🔍 Linear: Converted output to CPU");
                 output = output.add(bias)?;
-                eprintln!("🔍 Linear: Added bias on CPU");
+                // eprintln!("🔍 Linear: Added bias on CPU");
 
                 // Convert back to Metal tensor if needed
                 if matches!(self.device, crate::device::Device::Metal(_)) {
-                    eprintln!("🔍 Linear: Converting back to Metal device");
+                    // eprintln!("🔍 Linear: Converting back to Metal device");
                     output = output.to_device_enum(&self.device)?;
-                    eprintln!(
-                        "🔍 Linear: Converted back to Metal, type={:?}",
-                        std::mem::discriminant(&output)
-                    );
+                    // eprintln!(
+                    //     "🔍 Linear: Converted back to Metal, type={:?}",
+                    //     std::mem::discriminant(&output)
+                    // );
                 }
             } else {
-                eprintln!("🔍 Linear: No bias");
+                // eprintln!("🔍 Linear: No bias");
             }
 
-            eprintln!(
-                "🔍 Linear: Returning output, type={:?}",
-                std::mem::discriminant(&output)
-            );
+            // eprintln!(
+            //     "🔍 Linear: Returning output, type={:?}",
+            //     std::mem::discriminant(&output)
+            // );
             return Ok(output);
         }
 

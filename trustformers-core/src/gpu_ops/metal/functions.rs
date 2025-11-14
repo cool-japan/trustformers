@@ -30,6 +30,8 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 buffer_cache: Arc::clone(&backend.buffer_cache),
                 matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
                 gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
+                matmul_gelu_pipeline: Arc::clone(&backend.matmul_gelu_pipeline),
+                matmul_bias_gelu_pipeline: Arc::clone(&backend.matmul_bias_gelu_pipeline),
                 scale_pipeline: Arc::clone(&backend.scale_pipeline),
                 add_bias_pipeline: Arc::clone(&backend.add_bias_pipeline),
                 layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
@@ -50,7 +52,11 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 batched_scaled_matmul_softmax_causal_pipeline: Arc::clone(
                     &backend.batched_scaled_matmul_softmax_causal_pipeline,
                 ),
+                batched_scaled_matmul_softmax_gen_pipeline: Arc::clone(
+                    &backend.batched_scaled_matmul_softmax_gen_pipeline,
+                ),
                 concat_seq_dim_pipeline: Arc::clone(&backend.concat_seq_dim_pipeline),
+                flash_attention_pipeline: Arc::clone(&backend.flash_attention_pipeline),
                 mps_ops: Arc::clone(&backend.mps_ops),
             })
         })

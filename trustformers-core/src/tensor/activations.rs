@@ -262,7 +262,7 @@ impl Tensor {
                 use crate::gpu_ops::metal::get_metal_backend;
                 use crate::tensor::MetalTensorData;
 
-                eprintln!("✅ GELU: GPU-to-GPU path (Metal→Metal)");
+                // eprintln!("✅ GELU: GPU-to-GPU path (Metal→Metal)");
 
                 let backend = get_metal_backend()?;
                 let size = metal_data.shape.iter().product();

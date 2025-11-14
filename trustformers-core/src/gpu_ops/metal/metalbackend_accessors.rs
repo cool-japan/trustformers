@@ -24,6 +24,7 @@ impl MetalBackend {
             )
         })
     }
+
     /// Perform matrix multiplication with cached weight buffer
     /// This avoids transferring weight data on each forward pass
     pub fn matmul_with_cached_weight(
