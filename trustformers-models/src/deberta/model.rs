@@ -1,5 +1,6 @@
 use crate::deberta::config::DebertaConfig;
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
+use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{
     embedding::Embedding, feedforward::FeedForward, layernorm::LayerNorm, linear::Linear,
@@ -13,19 +14,34 @@ pub struct DebertaEmbeddings {
     pub word_embeddings: Embedding,
     pub layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaEmbeddings {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            word_embeddings: Embedding::new(
+            word_embeddings: Embedding::new_with_device(
                 config.vocab_size,
                 config.hidden_size,
                 Some(config.pad_token_id as usize),
+                device,
             )?,
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, input_ids: &Array1<u32>) -> Result<Array2<f32>> {
@@ -78,40 +94,56 @@ pub struct DebertaDisentangledSelfAttention {
     pub max_relative_positions: i32,
     pub pos_att_type: Vec<String>,
     pub share_att_key: bool,
+    device: Device,
 }
 
 impl DebertaDisentangledSelfAttention {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         let attention_head_size = config.hidden_size / config.num_attention_heads;
         let all_head_size = config.num_attention_heads * attention_head_size;
 
         let pos_query_proj = if config.pos_att_type.contains(&"c2p".to_string()) {
-            Some(Linear::new(config.hidden_size, all_head_size, true))
+            Some(Linear::new_with_device(
+                config.hidden_size,
+                all_head_size,
+                true,
+                device,
+            ))
         } else {
             None
         };
 
         let pos_key_proj =
             if config.pos_att_type.contains(&"p2c".to_string()) && !config.share_att_key {
-                Some(Linear::new(config.hidden_size, all_head_size, true))
+                Some(Linear::new_with_device(
+                    config.hidden_size,
+                    all_head_size,
+                    true,
+                    device,
+                ))
             } else {
                 None
             };
 
         let pos_proj = if config.max_relative_positions > 0 {
-            Some(Linear::new(
+            Some(Linear::new_with_device(
                 config.max_relative_positions as usize * 2,
                 all_head_size,
                 false,
+                device,
             ))
         } else {
             None
         };
 
         Ok(Self {
-            query_proj: Linear::new(config.hidden_size, all_head_size, true),
-            key_proj: Linear::new(config.hidden_size, all_head_size, true),
-            value_proj: Linear::new(config.hidden_size, all_head_size, true),
+            query_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
+            key_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
+            value_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
             pos_query_proj,
             pos_key_proj,
             pos_proj,
@@ -122,7 +154,12 @@ impl DebertaDisentangledSelfAttention {
             max_relative_positions: config.max_relative_positions,
             pos_att_type: config.pos_att_type.clone(),
             share_att_key: config.share_att_key,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn transpose_for_scores(&self, x: &Array3<f32>) -> Array4<f32> {
@@ -383,15 +420,29 @@ pub struct DebertaSelfOutput {
     pub dense: Linear,
     pub layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaSelfOutput {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -435,14 +486,24 @@ impl DebertaSelfOutput {
 pub struct DebertaAttention {
     pub self_attention: DebertaDisentangledSelfAttention,
     pub output: DebertaSelfOutput,
+    device: Device,
 }
 
 impl DebertaAttention {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            self_attention: DebertaDisentangledSelfAttention::new(config)?,
-            output: DebertaSelfOutput::new(config)?,
+            self_attention: DebertaDisentangledSelfAttention::new_with_device(config, device)?,
+            output: DebertaSelfOutput::new_with_device(config, device)?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -462,20 +523,35 @@ pub struct DebertaLayer {
     pub feed_forward: FeedForward,
     pub output_layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaLayer {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            attention: DebertaAttention::new(config)?,
-            feed_forward: FeedForward::new(
+            attention: DebertaAttention::new_with_device(config, device)?,
+            feed_forward: FeedForward::new_with_device(
                 config.hidden_size,
                 config.intermediate_size,
                 config.hidden_dropout_prob,
+                device,
             )?,
-            output_layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            output_layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -523,16 +599,25 @@ impl DebertaLayer {
 #[derive(Debug, Clone)]
 pub struct DebertaEncoder {
     pub layers: Vec<DebertaLayer>,
+    device: Device,
 }
 
 impl DebertaEncoder {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(DebertaLayer::new(config)?);
+            layers.push(DebertaLayer::new_with_device(config, device)?);
         }
 
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -553,15 +638,25 @@ pub struct DebertaModel {
     pub embeddings: DebertaEmbeddings,
     pub encoder: DebertaEncoder,
     pub config: DebertaConfig,
+    device: Device,
 }
 
 impl DebertaModel {
     pub fn new(config: DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            embeddings: DebertaEmbeddings::new(&config)?,
-            encoder: DebertaEncoder::new(&config)?,
+            embeddings: DebertaEmbeddings::new_with_device(&config, device)?,
+            encoder: DebertaEncoder::new_with_device(&config, device)?,
             config,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
@@ -594,19 +689,33 @@ pub struct DebertaForSequenceClassification {
     pub classifier: Linear,
     pub dropout: f32,
     pub num_labels: usize,
+    device: Device,
 }
 
 impl DebertaForSequenceClassification {
     pub fn new(config: DebertaConfig, num_labels: usize) -> Result<Self> {
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DebertaConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            deberta: DebertaModel::new(config.clone())?,
-            pooler: Linear::new(config.hidden_size, config.hidden_size, true),
-            classifier: Linear::new(config.hidden_size, num_labels, true),
+            deberta: DebertaModel::new_with_device(config.clone(), device)?,
+            pooler: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            classifier: Linear::new_with_device(config.hidden_size, num_labels, true, device),
             dropout,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str, num_labels: usize) -> Result<Self> {
@@ -678,14 +787,24 @@ impl DebertaForSequenceClassification {
 pub struct DebertaForMaskedLM {
     pub deberta: DebertaModel,
     pub cls: Linear,
+    device: Device,
 }
 
 impl DebertaForMaskedLM {
     pub fn new(config: DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            deberta: DebertaModel::new(config.clone())?,
-            cls: Linear::new(config.hidden_size, config.vocab_size, true),
+            deberta: DebertaModel::new_with_device(config.clone(), device)?,
+            cls: Linear::new_with_device(config.hidden_size, config.vocab_size, true, device),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {

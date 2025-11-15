@@ -1,6 +1,7 @@
 use crate::stablelm::config::StableLMConfig;
 use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy (Array2 in tests)
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, Linear},
     ops::activations::{silu, swiglu},
@@ -12,12 +13,25 @@ use trustformers_core::{
 pub struct RMSNorm {
     weight: Tensor,
     eps: f32,
+    device: Device,
 }
 
 impl RMSNorm {
     pub fn new(hidden_size: usize, eps: f32) -> Self {
-        let weight = Tensor::ones(&[hidden_size]).unwrap();
-        Self { weight, eps }
+        Self::new_with_device(hidden_size, eps, Device::CPU)
+    }
+
+    pub fn new_with_device(hidden_size: usize, eps: f32, device: Device) -> Self {
+        let weight = Tensor::ones(&[hidden_size]).unwrap().to_device_enum(&device).unwrap();
+        Self {
+            weight,
+            eps,
+            device,
+        }
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -57,17 +71,34 @@ impl Layer for RMSNorm {
 
 /// Rotary Position Embeddings with partial rotary factor
 pub struct RotaryEmbedding {
-    sin_cached: Array2<f32>,
-    cos_cached: Array2<f32>,
+    sin_cached: Tensor,
+    cos_cached: Tensor,
     max_seq_len: usize,
     head_dim: usize,
     #[allow(dead_code)]
     base: f32,
     partial_rotary_factor: f32,
+    device: Device,
 }
 
 impl RotaryEmbedding {
     pub fn new(head_dim: usize, max_seq_len: usize, base: f32, partial_rotary_factor: f32) -> Self {
+        Self::new_with_device(
+            head_dim,
+            max_seq_len,
+            base,
+            partial_rotary_factor,
+            Device::CPU,
+        )
+    }
+
+    pub fn new_with_device(
+        head_dim: usize,
+        max_seq_len: usize,
+        base: f32,
+        partial_rotary_factor: f32,
+        device: Device,
+    ) -> Self {
         let rotary_dim = ((head_dim as f32) * partial_rotary_factor) as usize;
 
         // Pre-compute sin and cos values
@@ -77,10 +108,13 @@ impl RotaryEmbedding {
         let t = Array1::range(0.0, max_seq_len as f32, 1.0);
         let freqs = t.view().insert_axis(Axis(1)).dot(&inv_freq.view().insert_axis(Axis(0)));
 
-        let sin_cached =
+        let sin_arr =
             Array2::from_shape_fn((max_seq_len, rotary_dim / 2), |(i, j)| freqs[[i, j]].sin());
-        let cos_cached =
+        let cos_arr =
             Array2::from_shape_fn((max_seq_len, rotary_dim / 2), |(i, j)| freqs[[i, j]].cos());
+
+        let sin_cached = Tensor::F32(sin_arr.into_dyn()).to_device_enum(&device).unwrap();
+        let cos_cached = Tensor::F32(cos_arr.into_dyn()).to_device_enum(&device).unwrap();
 
         Self {
             sin_cached,
@@ -89,14 +123,24 @@ impl RotaryEmbedding {
             head_dim,
             base,
             partial_rotary_factor,
+            device,
         }
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn forward(&self, q: &Tensor, k: &Tensor, seq_len: usize) -> Result<(Tensor, Tensor)> {
         let rotary_dim = ((self.head_dim as f32) * self.partial_rotary_factor) as usize;
 
-        match (q, k) {
-            (Tensor::F32(q_arr), Tensor::F32(k_arr)) => {
+        match (q, k, &self.sin_cached, &self.cos_cached) {
+            (
+                Tensor::F32(q_arr),
+                Tensor::F32(k_arr),
+                Tensor::F32(sin_arr),
+                Tensor::F32(cos_arr),
+            ) => {
                 // Apply partial rotary embeddings
                 let mut q_rot = q_arr.clone();
                 let mut k_rot = k_arr.clone();
@@ -110,8 +154,8 @@ impl RotaryEmbedding {
                     // Apply RoPE to query and key tensors
                     for seq_idx in 0..seq_len {
                         for dim_idx in 0..(rotary_dim / 2) {
-                            let cos_val = self.cos_cached[[seq_idx, dim_idx]];
-                            let sin_val = self.sin_cached[[seq_idx, dim_idx]];
+                            let cos_val = cos_arr[[seq_idx, dim_idx]];
+                            let sin_val = sin_arr[[seq_idx, dim_idx]];
 
                             // Apply rotation: [x1, x2] -> [x1*cos - x2*sin, x1*sin + x2*cos]
                             // This is a simplified implementation for the core rotation logic
@@ -165,25 +209,51 @@ pub struct StableLMAttention {
     head_dim: usize,
     num_heads: usize,
     num_kv_heads: usize,
+    device: Device,
 }
 
 impl StableLMAttention {
     pub fn new(config: &StableLMConfig) -> Self {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Self {
         let hidden_size = config.hidden_size;
         let num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads.unwrap_or(num_heads);
         let head_dim = hidden_size / num_heads;
 
-        let q_proj = Linear::new(hidden_size, hidden_size, config.attention_bias);
-        let k_proj = Linear::new(hidden_size, num_kv_heads * head_dim, config.attention_bias);
-        let v_proj = Linear::new(hidden_size, num_kv_heads * head_dim, config.attention_bias);
-        let o_proj = Linear::new(hidden_size, hidden_size, config.attention_bias);
+        let q_proj = Linear::new_with_device(
+            hidden_size,
+            hidden_size,
+            config.attention_bias,
+            device.clone(),
+        );
+        let k_proj = Linear::new_with_device(
+            hidden_size,
+            num_kv_heads * head_dim,
+            config.attention_bias,
+            device.clone(),
+        );
+        let v_proj = Linear::new_with_device(
+            hidden_size,
+            num_kv_heads * head_dim,
+            config.attention_bias,
+            device.clone(),
+        );
+        let o_proj = Linear::new_with_device(
+            hidden_size,
+            hidden_size,
+            config.attention_bias,
+            device.clone(),
+        );
 
-        let rotary_emb = RotaryEmbedding::new(
+        let rotary_emb = RotaryEmbedding::new_with_device(
             head_dim,
             config.max_position_embeddings,
             config.rope_theta,
             config.partial_rotary_factor,
+            device.clone(),
         );
 
         Self {
@@ -196,7 +266,12 @@ impl StableLMAttention {
             head_dim,
             num_heads,
             num_kv_heads,
+            device,
         }
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     fn repeat_kv(&self, hidden_states: &Tensor, n_rep: usize) -> Result<Tensor> {
@@ -280,19 +355,44 @@ pub struct StableLMMLP {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    device: Device,
 }
 
 impl StableLMMLP {
     pub fn new(config: &StableLMConfig) -> Self {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Self {
         let hidden_size = config.hidden_size;
         let intermediate_size = config.intermediate_size;
 
         Self {
             config: config.clone(),
-            gate_proj: Linear::new(hidden_size, intermediate_size, config.mlp_bias),
-            up_proj: Linear::new(hidden_size, intermediate_size, config.mlp_bias),
-            down_proj: Linear::new(intermediate_size, hidden_size, config.mlp_bias),
+            gate_proj: Linear::new_with_device(
+                hidden_size,
+                intermediate_size,
+                config.mlp_bias,
+                device.clone(),
+            ),
+            up_proj: Linear::new_with_device(
+                hidden_size,
+                intermediate_size,
+                config.mlp_bias,
+                device.clone(),
+            ),
+            down_proj: Linear::new_with_device(
+                intermediate_size,
+                hidden_size,
+                config.mlp_bias,
+                device.clone(),
+            ),
+            device,
         }
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -340,17 +440,35 @@ pub struct StableLMDecoderLayer {
     mlp: StableLMMLP,
     input_layernorm: RMSNorm,
     post_attention_layernorm: RMSNorm,
+    device: Device,
 }
 
 impl StableLMDecoderLayer {
     pub fn new(config: &StableLMConfig) -> Self {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Self {
         Self {
             config: config.clone(),
-            self_attn: StableLMAttention::new(config),
-            mlp: StableLMMLP::new(config),
-            input_layernorm: RMSNorm::new(config.hidden_size, config.rms_norm_eps),
-            post_attention_layernorm: RMSNorm::new(config.hidden_size, config.rms_norm_eps),
+            self_attn: StableLMAttention::new_with_device(config, device.clone()),
+            mlp: StableLMMLP::new_with_device(config, device.clone()),
+            input_layernorm: RMSNorm::new_with_device(
+                config.hidden_size,
+                config.rms_norm_eps,
+                device.clone(),
+            ),
+            post_attention_layernorm: RMSNorm::new_with_device(
+                config.hidden_size,
+                config.rms_norm_eps,
+                device.clone(),
+            ),
+            device,
         }
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -401,17 +519,28 @@ impl Layer for StableLMDecoderLayer {
 /// StableLM Embeddings
 pub struct StableLMEmbeddings {
     word_embeddings: Embedding,
+    device: Device,
 }
 
 impl StableLMEmbeddings {
     pub fn new(config: &StableLMConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            word_embeddings: Embedding::new(
+            word_embeddings: Embedding::new_with_device(
                 config.vocab_size,
                 config.hidden_size,
                 config.pad_token_id.map(|x| x as usize),
+                device.clone(),
             )?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -440,25 +569,39 @@ pub struct StableLMModel {
     pub embeddings: StableLMEmbeddings,
     pub layers: Vec<StableLMDecoderLayer>,
     pub norm: RMSNorm,
+    device: Device,
 }
 
 impl StableLMModel {
     pub fn new(config: StableLMConfig) -> Result<Self> {
-        let embeddings = StableLMEmbeddings::new(&config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: StableLMConfig, device: Device) -> Result<Self> {
+        let embeddings = StableLMEmbeddings::new_with_device(&config, device.clone())?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(StableLMDecoderLayer::new(&config));
+            layers.push(StableLMDecoderLayer::new_with_device(
+                &config,
+                device.clone(),
+            ));
         }
 
-        let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps);
+        let norm =
+            RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device.clone());
 
         Ok(Self {
             config,
             embeddings,
             layers,
             norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn forward_with_outputs(&self, input_ids: &Tensor) -> Result<StableLMOutputs> {
@@ -528,14 +671,28 @@ pub struct StableLMCausalLMOutputs {
 pub struct StableLMForCausalLM {
     pub model: StableLMModel,
     pub lm_head: Linear,
+    device: Device,
 }
 
 impl StableLMForCausalLM {
     pub fn new(config: StableLMConfig) -> Result<Self> {
-        let model = StableLMModel::new(config.clone())?;
-        let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { model, lm_head })
+    pub fn new_with_device(config: StableLMConfig, device: Device) -> Result<Self> {
+        let model = StableLMModel::new_with_device(config.clone(), device.clone())?;
+        let lm_head =
+            Linear::new_with_device(config.hidden_size, config.vocab_size, false, device.clone());
+
+        Ok(Self {
+            model,
+            lm_head,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     pub fn forward_with_outputs(&self, input_ids: &Tensor) -> Result<StableLMCausalLMOutputs> {
@@ -817,5 +974,42 @@ mod tests {
         assert_eq!(attn.num_kv_heads, 4);
 
         // Grouped query attention created successfully - projection dimensions are internal
+    }
+
+    #[test]
+    fn test_device_support() {
+        let config = StableLMConfig::stablelm_3b();
+
+        // Test CPU device (default)
+        let model_cpu = StableLMModel::new(config.clone()).unwrap();
+        assert_eq!(*model_cpu.device(), Device::CPU);
+
+        // Test explicit CPU device
+        let model_cpu_explicit =
+            StableLMModel::new_with_device(config.clone(), Device::CPU).unwrap();
+        assert_eq!(*model_cpu_explicit.device(), Device::CPU);
+
+        // Test that all components have the correct device
+        assert_eq!(*model_cpu.embeddings.device(), Device::CPU);
+        assert_eq!(*model_cpu.norm.device(), Device::CPU);
+        for layer in &model_cpu.layers {
+            assert_eq!(*layer.device(), Device::CPU);
+            assert_eq!(*layer.self_attn.device(), Device::CPU);
+            assert_eq!(*layer.mlp.device(), Device::CPU);
+        }
+    }
+
+    #[test]
+    fn test_causal_lm_device_support() {
+        let config = StableLMConfig::stablelm_3b();
+
+        // Test CPU device
+        let model = StableLMForCausalLM::new(config.clone()).unwrap();
+        assert_eq!(*model.device(), Device::CPU);
+        assert_eq!(*model.model.device(), Device::CPU);
+
+        // Test explicit device
+        let model_explicit = StableLMForCausalLM::new_with_device(config, Device::CPU).unwrap();
+        assert_eq!(*model_explicit.device(), Device::CPU);
     }
 }

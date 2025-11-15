@@ -1,6 +1,7 @@
 use crate::mamba::config::MambaConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, Linear},
     ops::activations::silu,
@@ -15,12 +16,25 @@ use scirs2_core::ndarray::s; // SciRS2 Integration Policy
 pub struct RMSNorm {
     weight: Tensor,
     eps: f32,
+    device: Device,
 }
 
 impl RMSNorm {
     pub fn new(normalized_shape: usize, eps: f32) -> Result<Self> {
+        Self::new_with_device(normalized_shape, eps, Device::CPU)
+    }
+
+    pub fn new_with_device(normalized_shape: usize, eps: f32, device: Device) -> Result<Self> {
         let weight = Tensor::ones(&[normalized_shape])?;
-        Ok(Self { weight, eps })
+        Ok(Self {
+            weight,
+            eps,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -68,6 +82,7 @@ pub struct CausalConv1d {
     kernel_size: usize,
     #[allow(dead_code)]
     padding: usize,
+    device: Device,
 }
 
 impl CausalConv1d {
@@ -76,6 +91,22 @@ impl CausalConv1d {
         out_channels: usize,
         kernel_size: usize,
         use_bias: bool,
+    ) -> Result<Self> {
+        Self::new_with_device(
+            in_channels,
+            out_channels,
+            kernel_size,
+            use_bias,
+            Device::CPU,
+        )
+    }
+
+    pub fn new_with_device(
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        use_bias: bool,
+        device: Device,
     ) -> Result<Self> {
         let weight = Tensor::randn(&[out_channels, in_channels, kernel_size])?;
         let bias = if use_bias { Some(Tensor::zeros(&[out_channels])?) } else { None };
@@ -86,7 +117,12 @@ impl CausalConv1d {
             bias,
             kernel_size,
             padding,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -133,32 +169,43 @@ pub struct MambaBlock {
     d: Tensor,
     out_proj: Linear,
     norm: RMSNorm,
+    device: Device,
 }
 
 impl MambaBlock {
     pub fn new(config: &MambaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &MambaConfig, device: Device) -> Result<Self> {
         let d_inner = config.get_d_inner();
         let dt_rank = config.get_dt_rank();
 
         // Input projection: maps d_model to 2 * d_inner
-        let in_proj = Linear::new(config.d_model, 2 * d_inner, config.use_bias);
+        let in_proj = Linear::new_with_device(config.d_model, 2 * d_inner, config.use_bias, device);
 
         // 1D convolution for local dependencies
-        let conv1d = CausalConv1d::new(d_inner, d_inner, config.d_conv, config.use_conv_bias)?;
+        let conv1d = CausalConv1d::new_with_device(
+            d_inner,
+            d_inner,
+            config.d_conv,
+            config.use_conv_bias,
+            device,
+        )?;
 
         // State space projections
-        let x_proj = Linear::new(d_inner, dt_rank + config.d_state * 2, false);
-        let dt_proj = Linear::new(dt_rank, d_inner, true);
+        let x_proj = Linear::new_with_device(d_inner, dt_rank + config.d_state * 2, false, device);
+        let dt_proj = Linear::new_with_device(dt_rank, d_inner, true, device);
 
         // State space matrices
         let a_log = Tensor::randn(&[d_inner, config.d_state])?;
         let d = Tensor::ones(&[d_inner])?;
 
         // Output projection
-        let out_proj = Linear::new(d_inner, config.d_model, config.use_bias);
+        let out_proj = Linear::new_with_device(d_inner, config.d_model, config.use_bias, device);
 
         // Normalization
-        let norm = RMSNorm::new(config.d_model, config.rms_norm_eps)?;
+        let norm = RMSNorm::new_with_device(config.d_model, config.rms_norm_eps, device)?;
 
         Ok(Self {
             config: config.clone(),
@@ -170,7 +217,12 @@ impl MambaBlock {
             d,
             out_proj,
             norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn selective_ssm(
@@ -345,27 +397,38 @@ pub struct MambaModel {
     layers: Vec<MambaBlock>,
     norm_f: RMSNorm,
     lm_head: Option<Linear>,
+    device: Device,
 }
 
 impl MambaModel {
     pub fn new(config: MambaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: MambaConfig, device: Device) -> Result<Self> {
         // Word embeddings
-        let embeddings = Embedding::new(config.vocab_size, config.d_model, None)?;
+        let embeddings =
+            Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
 
         // Mamba layers
         let mut layers = Vec::with_capacity(config.n_layer);
         for _ in 0..config.n_layer {
-            layers.push(MambaBlock::new(&config)?);
+            layers.push(MambaBlock::new_with_device(&config, device)?);
         }
 
         // Final normalization
-        let norm_f = RMSNorm::new(config.d_model, config.rms_norm_eps)?;
+        let norm_f = RMSNorm::new_with_device(config.d_model, config.rms_norm_eps, device)?;
 
         // Language modeling head (optional, can be tied with embeddings)
         let lm_head = if config.tie_word_embeddings {
             None
         } else {
-            Some(Linear::new(config.d_model, config.vocab_size, false))
+            Some(Linear::new_with_device(
+                config.d_model,
+                config.vocab_size,
+                false,
+                device,
+            ))
         };
 
         Ok(Self {
@@ -374,7 +437,12 @@ impl MambaModel {
             layers,
             norm_f,
             lm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass for causal language modeling
@@ -462,20 +530,40 @@ impl MambaModel {
         Self::new(MambaConfig::mamba_130m())
     }
 
+    pub fn mamba_130m_with_device(device: Device) -> Result<Self> {
+        Self::new_with_device(MambaConfig::mamba_130m(), device)
+    }
+
     pub fn mamba_370m() -> Result<Self> {
         Self::new(MambaConfig::mamba_370m())
+    }
+
+    pub fn mamba_370m_with_device(device: Device) -> Result<Self> {
+        Self::new_with_device(MambaConfig::mamba_370m(), device)
     }
 
     pub fn mamba_790m() -> Result<Self> {
         Self::new(MambaConfig::mamba_790m())
     }
 
+    pub fn mamba_790m_with_device(device: Device) -> Result<Self> {
+        Self::new_with_device(MambaConfig::mamba_790m(), device)
+    }
+
     pub fn mamba_1_4b() -> Result<Self> {
         Self::new(MambaConfig::mamba_1_4b())
     }
 
+    pub fn mamba_1_4b_with_device(device: Device) -> Result<Self> {
+        Self::new_with_device(MambaConfig::mamba_1_4b(), device)
+    }
+
     pub fn mamba_2_8b() -> Result<Self> {
         Self::new(MambaConfig::mamba_2_8b())
+    }
+
+    pub fn mamba_2_8b_with_device(device: Device) -> Result<Self> {
+        Self::new_with_device(MambaConfig::mamba_2_8b(), device)
     }
 }
 
@@ -529,5 +617,47 @@ mod tests {
         let input_ids = Tensor::I64(Array1::from(input_data).into_dyn());
         let output = model.forward(input_ids);
         assert!(output.is_ok());
+    }
+
+    #[test]
+    fn test_device_support() {
+        // Test CPU device
+        let config = MambaConfig::default();
+        let model_cpu = MambaModel::new_with_device(config.clone(), Device::CPU).unwrap();
+        assert_eq!(model_cpu.device(), Device::CPU);
+
+        // Test predefined models with device
+        let model_130m = MambaModel::mamba_130m_with_device(Device::CPU).unwrap();
+        assert_eq!(model_130m.device(), Device::CPU);
+
+        // Test all components have device support
+        let block = MambaBlock::new_with_device(&config, Device::CPU).unwrap();
+        assert_eq!(block.device(), Device::CPU);
+
+        let norm = RMSNorm::new_with_device(768, 1e-5, Device::CPU).unwrap();
+        assert_eq!(norm.device(), Device::CPU);
+
+        let conv = CausalConv1d::new_with_device(768, 768, 4, true, Device::CPU).unwrap();
+        assert_eq!(conv.device(), Device::CPU);
+    }
+
+    #[test]
+    fn test_metal_device_creation() {
+        // Test Metal device creation (will use Metal or fall back to CPU)
+        let device = Device::Metal(0);
+        let config = MambaConfig::default();
+        let model = MambaModel::new_with_device(config, device).unwrap();
+        // Device should be set (either Metal or CPU depending on availability)
+        assert!(model.device() == Device::Metal(0) || model.device() == Device::CPU);
+    }
+
+    #[test]
+    fn test_all_predefined_models_with_device() {
+        let device = Device::CPU;
+        assert!(MambaModel::mamba_130m_with_device(device).is_ok());
+        assert!(MambaModel::mamba_370m_with_device(device).is_ok());
+        assert!(MambaModel::mamba_790m_with_device(device).is_ok());
+        assert!(MambaModel::mamba_1_4b_with_device(device).is_ok());
+        assert!(MambaModel::mamba_2_8b_with_device(device).is_ok());
     }
 }

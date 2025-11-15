@@ -1,5 +1,6 @@
 use crate::blip2::config::{Blip2Config, Blip2QFormerConfig, Blip2TextConfig, Blip2VisionConfig};
 use trustformers_core::{
+    device::Device,
     kernels::fused_ops::ActivationType,
     layers::{
         attention::{AttentionConfig, MultiHeadAttention},
@@ -28,13 +29,19 @@ pub struct Blip2Model {
     pub query_tokens: Tensor,
     /// Layer norm for queries
     pub query_layer_norm: LayerNorm,
+    /// Device
+    device: Device,
 }
 
 impl Blip2Model {
-    /// Create a new BLIP-2 model
-    pub fn new(config: Blip2Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let vision_model = Blip2VisionModel::new(config.vision_config.clone())?;
-        let qformer_model = Blip2QFormerModel::new(config.qformer_config.clone())?;
+    /// Create a new BLIP-2 model with device
+    pub fn new_with_device(
+        config: Blip2Config,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let vision_model = Blip2VisionModel::new_with_device(config.vision_config.clone(), device)?;
+        let qformer_model =
+            Blip2QFormerModel::new_with_device(config.qformer_config.clone(), device)?;
 
         // Project Q-Former output (768) to vision space (1408)
         let vision_projection = Linear::new(
@@ -66,7 +73,18 @@ impl Blip2Model {
             text_projection,
             query_tokens,
             query_layer_norm,
+            device,
         })
+    }
+
+    /// Create a new BLIP-2 model (defaults to CPU)
+    pub fn new(config: Blip2Config) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass through the model
@@ -182,17 +200,28 @@ pub struct Blip2ForConditionalGeneration {
     pub language_model: Box<dyn LanguageModel>,
     /// Language projection
     pub language_projection: Linear,
+    /// Device
+    device: Device,
 }
 
 impl Blip2ForConditionalGeneration {
-    /// Create a new BLIP-2 for conditional generation
-    pub fn new(config: Blip2Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let blip2_model = Blip2Model::new(config.clone())?;
+    /// Create a new BLIP-2 for conditional generation with device
+    pub fn new_with_device(
+        config: Blip2Config,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let blip2_model = Blip2Model::new_with_device(config.clone(), device)?;
 
         let language_model: Box<dyn LanguageModel> = if config.use_decoder_only_language_model {
-            Box::new(Blip2OptLanguageModel::new(config.text_config.clone())?)
+            Box::new(Blip2OptLanguageModel::new_with_device(
+                config.text_config.clone(),
+                device,
+            )?)
         } else {
-            Box::new(Blip2T5LanguageModel::new(config.text_config.clone())?)
+            Box::new(Blip2T5LanguageModel::new_with_device(
+                config.text_config.clone(),
+                device,
+            )?)
         };
 
         let language_projection = Linear::new(
@@ -205,7 +234,18 @@ impl Blip2ForConditionalGeneration {
             blip2_model,
             language_model,
             language_projection,
+            device,
         })
+    }
+
+    /// Create a new BLIP-2 for conditional generation (defaults to CPU)
+    pub fn new(config: Blip2Config) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass for conditional generation
@@ -357,19 +397,26 @@ pub struct Blip2VisionModel {
     pub layer_norm: LayerNorm,
     /// Pooler
     pub pooler: Option<Linear>,
+    /// Device
+    device: Device,
 }
 
 impl Blip2VisionModel {
-    /// Create a new vision model
-    pub fn new(config: Blip2VisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let patch_embedding = Blip2PatchEmbedding::new(&config)?;
+    /// Create a new vision model with device
+    pub fn new_with_device(
+        config: Blip2VisionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let patch_embedding = Blip2PatchEmbedding::new_with_device(&config, device)?;
 
         let class_embedding = Tensor::randn(&[config.hidden_size])?;
         let position_embedding = Tensor::randn(&[config.seq_len(), config.hidden_size])?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(Blip2VisionTransformerLayer::new(&config)?);
+            layers.push(Blip2VisionTransformerLayer::new_with_device(
+                &config, device,
+            )?);
         }
 
         let layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
@@ -384,7 +431,18 @@ impl Blip2VisionModel {
             layers,
             layer_norm,
             pooler,
+            device,
         })
+    }
+
+    /// Create a new vision model (defaults to CPU)
+    pub fn new(config: Blip2VisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass through vision model
@@ -446,11 +504,16 @@ pub struct Blip2PatchEmbedding {
     pub patch_size: usize,
     /// Hidden size
     pub hidden_size: usize,
+    /// Device
+    device: Device,
 }
 
 impl Blip2PatchEmbedding {
-    /// Create patch embedding
-    pub fn new(config: &Blip2VisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create patch embedding with device
+    pub fn new_with_device(
+        config: &Blip2VisionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let projection = Linear::new(
             config.patch_size * config.patch_size * config.num_channels,
             config.hidden_size,
@@ -461,7 +524,18 @@ impl Blip2PatchEmbedding {
             projection,
             patch_size: config.patch_size,
             hidden_size: config.hidden_size,
+            device,
         })
+    }
+
+    /// Create patch embedding (defaults to CPU)
+    pub fn new(config: &Blip2VisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass
@@ -516,11 +590,16 @@ pub struct Blip2VisionTransformerLayer {
     pub mlp: Blip2MLP,
     /// Layer norm 2
     pub layer_norm2: LayerNorm,
+    /// Device
+    device: Device,
 }
 
 impl Blip2VisionTransformerLayer {
-    /// Create new layer
-    pub fn new(config: &Blip2VisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create new layer with device
+    pub fn new_with_device(
+        config: &Blip2VisionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let attention_config = AttentionConfig {
             hidden_size: config.hidden_size,
             num_heads: config.num_attention_heads,
@@ -537,10 +616,11 @@ impl Blip2VisionTransformerLayer {
             attention_config.bias,
         )?;
         let layer_norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
-        let mlp = Blip2MLP::new(
+        let mlp = Blip2MLP::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             &config.hidden_act,
+            device,
         )?;
         let layer_norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
 
@@ -549,7 +629,18 @@ impl Blip2VisionTransformerLayer {
             layer_norm1,
             mlp,
             layer_norm2,
+            device,
         })
+    }
+
+    /// Create new layer (defaults to CPU)
+    pub fn new(config: &Blip2VisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass
@@ -587,17 +678,26 @@ pub struct Blip2QFormerModel {
     pub encoder_layers: Vec<Blip2QFormerLayer>,
     /// Pooler
     pub pooler: Linear,
+    /// Device
+    device: Device,
 }
 
 impl Blip2QFormerModel {
-    /// Create new Q-Former model
-    pub fn new(config: Blip2QFormerConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let embeddings = Blip2QFormerEmbeddings::new(&config)?;
+    /// Create new Q-Former model with device
+    pub fn new_with_device(
+        config: Blip2QFormerConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let embeddings = Blip2QFormerEmbeddings::new_with_device(&config, device)?;
 
         let mut encoder_layers = Vec::new();
         for layer_idx in 0..config.num_hidden_layers {
             let has_cross_attention = layer_idx % config.cross_attention_frequency == 0;
-            encoder_layers.push(Blip2QFormerLayer::new(&config, has_cross_attention)?);
+            encoder_layers.push(Blip2QFormerLayer::new_with_device(
+                &config,
+                has_cross_attention,
+                device,
+            )?);
         }
 
         let pooler = Linear::new(config.hidden_size, config.hidden_size, true);
@@ -607,7 +707,18 @@ impl Blip2QFormerModel {
             embeddings,
             encoder_layers,
             pooler,
+            device,
         })
+    }
+
+    /// Create new Q-Former model (defaults to CPU)
+    pub fn new(config: Blip2QFormerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass
@@ -662,11 +773,16 @@ pub struct Blip2QFormerEmbeddings {
     pub layer_norm: LayerNorm,
     /// Dropout
     pub dropout: f64,
+    /// Device
+    device: Device,
 }
 
 impl Blip2QFormerEmbeddings {
-    /// Create new embeddings
-    pub fn new(config: &Blip2QFormerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create new embeddings with device
+    pub fn new_with_device(
+        config: &Blip2QFormerConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let word_embeddings = Embedding::new(config.vocab_size, config.hidden_size, None)?;
         let position_embeddings =
             Embedding::new(config.max_position_embeddings, config.hidden_size, None)?;
@@ -680,7 +796,18 @@ impl Blip2QFormerEmbeddings {
             token_type_embeddings,
             layer_norm,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    /// Create new embeddings (defaults to CPU)
+    pub fn new(config: &Blip2QFormerConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass
@@ -759,13 +886,16 @@ pub struct Blip2QFormerLayer {
     pub layer_norm3: Option<LayerNorm>,
     /// MLP
     pub mlp: Blip2MLP,
+    /// Device
+    device: Device,
 }
 
 impl Blip2QFormerLayer {
-    /// Create new layer
-    pub fn new(
+    /// Create new layer with device
+    pub fn new_with_device(
         config: &Blip2QFormerConfig,
         has_cross_attention: bool,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let attention_config = AttentionConfig {
             hidden_size: config.hidden_size,
@@ -808,10 +938,11 @@ impl Blip2QFormerLayer {
             None
         };
 
-        let mlp = Blip2MLP::new(
+        let mlp = Blip2MLP::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             &config.hidden_act,
+            device,
         )?;
 
         Ok(Self {
@@ -822,7 +953,21 @@ impl Blip2QFormerLayer {
             layer_norm2,
             layer_norm3,
             mlp,
+            device,
         })
+    }
+
+    /// Create new layer (defaults to CPU)
+    pub fn new(
+        config: &Blip2QFormerConfig,
+        has_cross_attention: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, has_cross_attention, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass
@@ -893,14 +1038,17 @@ pub struct Blip2MLP {
     pub linear2: Linear,
     /// Activation
     pub activation: ActivationType,
+    /// Device
+    device: Device,
 }
 
 impl Blip2MLP {
-    /// Create new MLP
-    pub fn new(
+    /// Create new MLP with device
+    pub fn new_with_device(
         hidden_size: usize,
         intermediate_size: usize,
         activation: &str,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let linear1 = Linear::new(hidden_size, intermediate_size, true);
         let linear2 = Linear::new(intermediate_size, hidden_size, true);
@@ -917,7 +1065,22 @@ impl Blip2MLP {
             linear1,
             linear2,
             activation,
+            device,
         })
+    }
+
+    /// Create new MLP (defaults to CPU)
+    pub fn new(
+        hidden_size: usize,
+        intermediate_size: usize,
+        activation: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(hidden_size, intermediate_size, activation, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass
@@ -962,16 +1125,21 @@ pub struct Blip2OptLanguageModel {
     pub layer_norm: LayerNorm,
     /// LM head
     pub lm_head: Linear,
+    /// Device
+    device: Device,
 }
 
 impl Blip2OptLanguageModel {
-    /// Create new OPT language model
-    pub fn new(config: Blip2TextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create new OPT language model with device
+    pub fn new_with_device(
+        config: Blip2TextConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let embeddings = Embedding::new(config.vocab_size, config.hidden_size, None)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(Blip2OptLayer::new(&config)?);
+            layers.push(Blip2OptLayer::new_with_device(&config, device)?);
         }
 
         let layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
@@ -983,7 +1151,18 @@ impl Blip2OptLanguageModel {
             layers,
             layer_norm,
             lm_head,
+            device,
         })
+    }
+
+    /// Create new OPT language model (defaults to CPU)
+    pub fn new(config: Blip2TextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -1055,11 +1234,16 @@ pub struct Blip2OptLayer {
     pub mlp: Blip2MLP,
     /// Layer norm 2
     pub layer_norm2: LayerNorm,
+    /// Device
+    device: Device,
 }
 
 impl Blip2OptLayer {
-    /// Create new layer
-    pub fn new(config: &Blip2TextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create new layer with device
+    pub fn new_with_device(
+        config: &Blip2TextConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let attention_config = AttentionConfig {
             hidden_size: config.hidden_size,
             num_heads: config.num_attention_heads,
@@ -1076,10 +1260,11 @@ impl Blip2OptLayer {
             attention_config.bias,
         )?;
         let layer_norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
-        let mlp = Blip2MLP::new(
+        let mlp = Blip2MLP::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             &config.hidden_act,
+            device,
         )?;
         let layer_norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
 
@@ -1088,7 +1273,18 @@ impl Blip2OptLayer {
             layer_norm1,
             mlp,
             layer_norm2,
+            device,
         })
+    }
+
+    /// Create new layer (defaults to CPU)
+    pub fn new(config: &Blip2TextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass
@@ -1134,19 +1330,24 @@ pub struct Blip2T5LanguageModel {
     pub layer_norm: LayerNorm,
     /// LM head
     pub lm_head: Linear,
+    /// Device
+    device: Device,
 }
 
 impl Blip2T5LanguageModel {
-    /// Create new T5 language model
-    pub fn new(config: Blip2TextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Create new T5 language model with device
+    pub fn new_with_device(
+        config: Blip2TextConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let embeddings = Embedding::new(config.vocab_size, config.hidden_size, None)?;
 
         let mut encoder_layers = Vec::new();
         let mut decoder_layers = Vec::new();
 
         for _ in 0..config.num_hidden_layers {
-            encoder_layers.push(Blip2OptLayer::new(&config)?);
-            decoder_layers.push(Blip2OptLayer::new(&config)?);
+            encoder_layers.push(Blip2OptLayer::new_with_device(&config, device)?);
+            decoder_layers.push(Blip2OptLayer::new_with_device(&config, device)?);
         }
 
         let layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
@@ -1159,7 +1360,18 @@ impl Blip2T5LanguageModel {
             decoder_layers,
             layer_norm,
             lm_head,
+            device,
         })
+    }
+
+    /// Create new T5 language model (defaults to CPU)
+    pub fn new(config: Blip2TextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get device
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

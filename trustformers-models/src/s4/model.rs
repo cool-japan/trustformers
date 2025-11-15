@@ -3,6 +3,7 @@ use scirs2_core::ndarray::{Array1, Array2}; // SciRS2 Integration Policy
 use scirs2_core::Complex64; // SciRS2 Integration Policy
 use std::f32::consts::PI;
 use trustformers_core::{
+    device::Device,
     errors::{
         compute_error, invalid_format, invalid_input, runtime_error, tensor_op_error, Result,
     },
@@ -231,10 +232,12 @@ pub struct S4Layer {
     // Cached discrete parameters
     a_bar: Option<Array2<Complex64>>,
     b_bar: Option<Array1<Complex64>>,
+    // Device for computation
+    device: Device,
 }
 
 impl S4Layer {
-    pub fn new(config: &S4Config) -> Result<Self> {
+    pub fn new_with_device(config: &S4Config, device: Device) -> Result<Self> {
         let n = config.d_state;
         let h = config.get_n_ssm();
 
@@ -277,7 +280,16 @@ impl S4Layer {
             dt,
             a_bar: None,
             b_bar: None,
+            device,
         })
+    }
+
+    pub fn new(config: &S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Discretize the continuous-time parameters
@@ -393,17 +405,18 @@ pub struct S4Block {
     out_proj: Linear,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl S4Block {
-    pub fn new(config: &S4Config) -> Result<Self> {
+    pub fn new_with_device(config: &S4Config, device: Device) -> Result<Self> {
         let d_model = config.d_model;
         let n_ssm = config.get_n_ssm();
 
-        let s4_layer = S4Layer::new(config)?;
-        let norm = LayerNorm::new(vec![d_model], config.layer_norm_eps)?;
-        let in_proj = Linear::new(d_model, n_ssm, config.use_bias);
-        let out_proj = Linear::new(n_ssm, d_model, config.use_bias);
+        let s4_layer = S4Layer::new_with_device(config, device)?;
+        let norm = LayerNorm::new_with_device(vec![d_model], config.layer_norm_eps, device)?;
+        let in_proj = Linear::new_with_device(d_model, n_ssm, config.use_bias, device);
+        let out_proj = Linear::new_with_device(n_ssm, d_model, config.use_bias, device);
 
         Ok(Self {
             config: config.clone(),
@@ -412,7 +425,16 @@ impl S4Block {
             in_proj,
             out_proj,
             dropout: config.dropout,
+            device,
         })
+    }
+
+    pub fn new(config: &S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -514,27 +536,38 @@ pub struct S4Model {
     pub embeddings: Embedding,
     pub blocks: Vec<S4Block>,
     pub ln_f: LayerNorm,
+    pub device: Device,
 }
 
 impl S4Model {
-    pub fn new(config: S4Config) -> Result<Self> {
-        let embeddings = Embedding::new(config.vocab_size, config.d_model, None);
+    pub fn new_with_device(config: S4Config, device: Device) -> Result<Self> {
+        let embeddings =
+            Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
 
         let mut blocks = Vec::new();
         for _ in 0..config.n_layer {
-            if let Ok(block) = S4Block::new(&config) {
+            if let Ok(block) = S4Block::new_with_device(&config, device) {
                 blocks.push(block);
             }
         }
 
-        let ln_f = LayerNorm::new(vec![config.d_model], config.layer_norm_eps)?;
+        let ln_f = LayerNorm::new_with_device(vec![config.d_model], config.layer_norm_eps, device)?;
 
         Ok(Self {
             config,
-            embeddings: embeddings?,
+            embeddings,
             blocks,
             ln_f,
+            device,
         })
+    }
+
+    pub fn new(config: S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -926,18 +959,32 @@ impl S4Model {
 pub struct S4ForLanguageModeling {
     pub s4: S4Model,
     pub lm_head: Linear,
+    pub device: Device,
 }
 
 impl S4ForLanguageModeling {
-    pub fn new(config: S4Config) -> Result<Self> {
-        let s4 = S4Model::new(config.clone())?;
-        let lm_head = Linear::new(
+    pub fn new_with_device(config: S4Config, device: Device) -> Result<Self> {
+        let s4 = S4Model::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(
             config.d_model,
             config.vocab_size,
             false, // No bias for LM head
+            device,
         );
 
-        Ok(Self { s4, lm_head })
+        Ok(Self {
+            s4,
+            lm_head,
+            device,
+        })
+    }
+
+    pub fn new(config: S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

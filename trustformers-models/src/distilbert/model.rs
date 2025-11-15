@@ -2,6 +2,7 @@ use crate::bert::layers::BertEncoder;
 use crate::distilbert::config::DistilBertConfig;
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
@@ -11,11 +12,16 @@ pub struct DistilBertModel {
     config: DistilBertConfig,
     embeddings: DistilBertEmbeddings,
     transformer: BertEncoder,
+    device: Device,
 }
 
 impl DistilBertModel {
     pub fn new(config: DistilBertConfig) -> Result<Self> {
-        let embeddings = DistilBertEmbeddings::new(&config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DistilBertConfig, device: Device) -> Result<Self> {
+        let embeddings = DistilBertEmbeddings::new_with_device(&config, device)?;
 
         // Convert to BERT config for reusing BertEncoder
         let bert_config = crate::bert::config::BertConfig {
@@ -37,13 +43,18 @@ impl DistilBertModel {
             classifier_dropout: config.classifier_dropout,
         };
 
-        let transformer = BertEncoder::new(&bert_config)?;
+        let transformer = BertEncoder::new_with_device(&bert_config, device)?;
 
         Ok(Self {
             config,
             embeddings,
             transformer,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward_with_embeddings(
@@ -79,27 +90,40 @@ pub struct DistilBertEmbeddings {
     position_embeddings: trustformers_core::layers::Embedding,
     layer_norm: trustformers_core::layers::LayerNorm,
     dropout: f32,
+    device: Device,
 }
 
 impl DistilBertEmbeddings {
     pub fn new(config: &DistilBertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DistilBertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            word_embeddings: trustformers_core::layers::Embedding::new(
+            word_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.vocab_size,
                 config.hidden_size,
                 Some(config.pad_token_id as usize),
+                device,
             )?,
-            position_embeddings: trustformers_core::layers::Embedding::new(
+            position_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.max_position_embeddings,
                 config.hidden_size,
                 None,
+                device,
             )?,
-            layer_norm: trustformers_core::layers::LayerNorm::new(
+            layer_norm: trustformers_core::layers::LayerNorm::new_with_device(
                 vec![config.hidden_size],
                 config.layer_norm_eps,
+                device,
             )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

@@ -1,6 +1,7 @@
 use crate::gemma::config::GemmaConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, Linear},
     ops::activations::gelu,
@@ -23,6 +24,10 @@ impl GemmaRMSNorm {
     pub fn set_weight(&mut self, weight: Tensor) -> Result<()> {
         self.weight = weight;
         Ok(())
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.weight.len()
     }
 }
 
@@ -121,20 +126,27 @@ pub struct GemmaMLP {
 
 impl GemmaMLP {
     pub fn new(config: &GemmaConfig) -> Result<Self> {
-        let gate_proj = Linear::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &GemmaConfig, device: Device) -> Result<Self> {
+        let gate_proj = Linear::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             config.attention_bias,
+            device,
         );
-        let up_proj = Linear::new(
+        let up_proj = Linear::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             config.attention_bias,
+            device,
         );
-        let down_proj = Linear::new(
+        let down_proj = Linear::new_with_device(
             config.intermediate_size,
             config.hidden_size,
             config.attention_bias,
+            device,
         );
 
         Ok(Self {
@@ -142,6 +154,12 @@ impl GemmaMLP {
             up_proj,
             down_proj,
         })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.gate_proj.parameter_count()
+            + self.up_proj.parameter_count()
+            + self.down_proj.parameter_count()
     }
 }
 
@@ -188,27 +206,35 @@ pub struct GemmaAttention {
 
 impl GemmaAttention {
     pub fn new(config: &GemmaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &GemmaConfig, device: Device) -> Result<Self> {
         let scaling = 1.0 / (config.head_dim as f32).sqrt();
 
-        let q_proj = Linear::new(
+        let q_proj = Linear::new_with_device(
             config.hidden_size,
             config.num_attention_heads * config.head_dim,
             config.attention_bias,
+            device,
         );
-        let k_proj = Linear::new(
+        let k_proj = Linear::new_with_device(
             config.hidden_size,
             config.num_key_value_heads * config.head_dim,
             config.attention_bias,
+            device,
         );
-        let v_proj = Linear::new(
+        let v_proj = Linear::new_with_device(
             config.hidden_size,
             config.num_key_value_heads * config.head_dim,
             config.attention_bias,
+            device,
         );
-        let o_proj = Linear::new(
+        let o_proj = Linear::new_with_device(
             config.num_attention_heads * config.head_dim,
             config.hidden_size,
             config.attention_bias,
+            device,
         );
 
         let rotary_emb = GemmaRotaryEmbedding::new(
@@ -228,6 +254,14 @@ impl GemmaAttention {
             head_dim: config.head_dim,
             scaling,
         })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.q_proj.parameter_count()
+            + self.k_proj.parameter_count()
+            + self.v_proj.parameter_count()
+            + self.o_proj.parameter_count()
+        // Note: RotaryEmbedding doesn't have learnable parameters
     }
 }
 
@@ -276,8 +310,12 @@ pub struct GemmaDecoderLayer {
 
 impl GemmaDecoderLayer {
     pub fn new(config: &GemmaConfig) -> Result<Self> {
-        let self_attn = GemmaAttention::new(config)?;
-        let mlp = GemmaMLP::new(config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &GemmaConfig, device: Device) -> Result<Self> {
+        let self_attn = GemmaAttention::new_with_device(config, device)?;
+        let mlp = GemmaMLP::new_with_device(config, device)?;
         let input_layernorm = GemmaRMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
         let post_attention_layernorm = GemmaRMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
 
@@ -287,6 +325,13 @@ impl GemmaDecoderLayer {
             input_layernorm,
             post_attention_layernorm,
         })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.self_attn.parameter_count()
+            + self.mlp.parameter_count()
+            + self.input_layernorm.parameter_count()
+            + self.post_attention_layernorm.parameter_count()
     }
 }
 
@@ -319,13 +364,17 @@ pub struct GemmaModel {
 
 impl GemmaModel {
     pub fn new(config: GemmaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: GemmaConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
         let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(GemmaDecoderLayer::new(&config)?);
+            layers.push(GemmaDecoderLayer::new_with_device(&config, device)?);
         }
 
         let norm = GemmaRMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
@@ -412,8 +461,12 @@ pub struct GemmaForCausalLM {
 
 impl GemmaForCausalLM {
     pub fn new(config: GemmaConfig) -> Result<Self> {
-        let model = GemmaModel::new(config.clone())?;
-        let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: GemmaConfig, device: Device) -> Result<Self> {
+        let model = GemmaModel::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self { model, lm_head })
     }

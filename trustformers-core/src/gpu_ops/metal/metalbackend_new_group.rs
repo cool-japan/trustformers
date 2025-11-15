@@ -1013,7 +1013,10 @@ impl MetalBackend {
         let fused_matmul_bias_gelu_kernel =
             library.get_function("fused_matmul_bias_gelu", None).map_err(|e| {
                 TrustformersError::hardware_error(
-                    &format!("Failed to get fused_matmul_bias_gelu kernel function: {}", e),
+                    &format!(
+                        "Failed to get fused_matmul_bias_gelu kernel function: {}",
+                        e
+                    ),
                     "MetalBackend::new",
                 )
             })?;
@@ -1264,9 +1267,8 @@ impl MetalBackend {
                     "MetalBackend::new",
                 )
             })?;
-        let batched_scaled_matmul_softmax_gen_kernel = library
-            .get_function("batched_scaled_matmul_softmax_gen", None)
-            .map_err(|e| {
+        let batched_scaled_matmul_softmax_gen_kernel =
+            library.get_function("batched_scaled_matmul_softmax_gen", None).map_err(|e| {
                 TrustformersError::hardware_error(
                     &format!(
                         "Failed to get batched_scaled_matmul_softmax_gen kernel function: {}",
@@ -1304,7 +1306,10 @@ impl MetalBackend {
         let flash_attention_kernel =
             library.get_function("flash_attention_forward", None).map_err(|e| {
                 TrustformersError::hardware_error(
-                    &format!("Failed to get flash_attention_forward kernel function: {}", e),
+                    &format!(
+                        "Failed to get flash_attention_forward kernel function: {}",
+                        e
+                    ),
                     "MetalBackend::new",
                 )
             })?;

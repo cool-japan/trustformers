@@ -413,11 +413,8 @@ mod tests {
         for _ in 0..10 {
             let matmul_result = backend.matmul_f32(&a, &b, m, k, n)?;
             // Simulate bias addition (would be a separate kernel in real code)
-            let bias_result: Vec<f32> = matmul_result
-                .iter()
-                .enumerate()
-                .map(|(i, &x)| x + bias[i % n])
-                .collect();
+            let bias_result: Vec<f32> =
+                matmul_result.iter().enumerate().map(|(i, &x)| x + bias[i % n]).collect();
             let _ = backend.gelu_f32(&bias_result)?;
         }
         let separate_time = start.elapsed();

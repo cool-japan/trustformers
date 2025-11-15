@@ -1,6 +1,7 @@
 use crate::gpt_neo::config::GptNeoConfig;
 use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::{tensor_op_error, Result, TrustformersError};
 use trustformers_core::layers::{Embedding, LayerNorm, Linear};
 use trustformers_core::tensor::Tensor;
@@ -13,6 +14,7 @@ pub struct GptNeoModel {
     wpe: Embedding,
     layers: Vec<GptNeoBlock>,
     ln_f: LayerNorm,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +25,7 @@ pub struct GptNeoBlock {
     mlp: GptNeoMLP,
     #[allow(dead_code)]
     attention_type: String,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +35,7 @@ pub struct GptNeoAttention {
     #[allow(dead_code)]
     attention_type: String,
     window_size: Option<usize>,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +49,7 @@ pub struct MultiHeadAttention {
     num_heads: usize,
     head_dim: usize,
     dropout: f32,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +59,7 @@ pub struct GptNeoMLP {
     activation: String,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 #[derive(Debug)]
@@ -64,6 +70,10 @@ pub struct GptNeoModelOutput {
 
 impl GptNeoModel {
     pub fn new(config: GptNeoConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: GptNeoConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
         let wte = Embedding::new(config.vocab_size, config.hidden_size, None)?;
@@ -77,7 +87,11 @@ impl GptNeoModel {
                 .cloned()
                 .unwrap_or_else(|| "global".to_string());
 
-            layers.push(GptNeoBlock::new(&config, attention_type)?);
+            layers.push(GptNeoBlock::new_with_device(
+                &config,
+                attention_type,
+                device,
+            )?);
         }
 
         let ln_f = LayerNorm::new(vec![config.hidden_size], config.layer_norm_epsilon)?;
@@ -88,17 +102,30 @@ impl GptNeoModel {
             wpe,
             layers,
             ln_f,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
 impl GptNeoBlock {
     fn new(config: &GptNeoConfig, attention_type: String) -> Result<Self> {
+        Self::new_with_device(config, attention_type, Device::CPU)
+    }
+
+    fn new_with_device(
+        config: &GptNeoConfig,
+        attention_type: String,
+        device: Device,
+    ) -> Result<Self> {
         let ln_1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_epsilon)?;
         let ln_2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_epsilon)?;
 
-        let attn = GptNeoAttention::new(config, &attention_type)?;
-        let mlp = GptNeoMLP::new(config)?;
+        let attn = GptNeoAttention::new_with_device(config, &attention_type, device)?;
+        let mlp = GptNeoMLP::new_with_device(config, device)?;
 
         Ok(Self {
             ln_1,
@@ -106,7 +133,12 @@ impl GptNeoBlock {
             ln_2,
             mlp,
             attention_type,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -125,16 +157,16 @@ impl GptNeoBlock {
 
 impl GptNeoAttention {
     fn new(config: &GptNeoConfig, attention_type: &str) -> Result<Self> {
+        Self::new_with_device(config, attention_type, Device::CPU)
+    }
+
+    fn new_with_device(
+        config: &GptNeoConfig,
+        attention_type: &str,
+        device: Device,
+    ) -> Result<Self> {
         let head_dim = config.hidden_size / config.num_heads;
-        let attention = MultiHeadAttention {
-            q_proj: Linear::new(config.hidden_size, config.hidden_size, false),
-            k_proj: Linear::new(config.hidden_size, config.hidden_size, false),
-            v_proj: Linear::new(config.hidden_size, config.hidden_size, false),
-            out_proj: Linear::new(config.hidden_size, config.hidden_size, true),
-            num_heads: config.num_heads,
-            head_dim,
-            dropout: config.attention_dropout,
-        };
+        let attention = MultiHeadAttention::new_with_device(config, device)?;
 
         let window_size = if attention_type == "local" { Some(config.window_size) } else { None };
 
@@ -142,7 +174,12 @@ impl GptNeoAttention {
             attention,
             attention_type: attention_type.to_string(),
             window_size,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -153,6 +190,28 @@ impl GptNeoAttention {
 }
 
 impl MultiHeadAttention {
+    fn new(config: &GptNeoConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &GptNeoConfig, device: Device) -> Result<Self> {
+        let head_dim = config.hidden_size / config.num_heads;
+        Ok(Self {
+            q_proj: Linear::new(config.hidden_size, config.hidden_size, false),
+            k_proj: Linear::new(config.hidden_size, config.hidden_size, false),
+            v_proj: Linear::new(config.hidden_size, config.hidden_size, false),
+            out_proj: Linear::new(config.hidden_size, config.hidden_size, true),
+            num_heads: config.num_heads,
+            head_dim,
+            dropout: config.attention_dropout,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
     fn forward(&self, hidden_states: Tensor, _attention_mask: Option<&Tensor>) -> Result<Tensor> {
         let _batch_size = hidden_states.shape()[0];
         let _seq_len = hidden_states.shape()[1];
@@ -175,12 +234,21 @@ impl MultiHeadAttention {
 
 impl GptNeoMLP {
     fn new(config: &GptNeoConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &GptNeoConfig, device: Device) -> Result<Self> {
         Ok(Self {
             c_fc: Linear::new(config.hidden_size, config.intermediate_size, true),
             c_proj: Linear::new(config.intermediate_size, config.hidden_size, true),
             activation: config.activation_function.clone(),
             dropout: config.resid_dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -273,17 +341,27 @@ impl Model for GptNeoModel {
 pub struct GptNeoLMHeadModel {
     transformer: GptNeoModel,
     lm_head: Linear,
+    device: Device,
 }
 
 impl GptNeoLMHeadModel {
     pub fn new(config: GptNeoConfig) -> Result<Self> {
-        let transformer = GptNeoModel::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: GptNeoConfig, device: Device) -> Result<Self> {
+        let transformer = GptNeoModel::new_with_device(config.clone(), device)?;
         let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
 
         Ok(Self {
             transformer,
             lm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

@@ -59,7 +59,7 @@ impl MetalBackend {
         if head_dim > 256 {
             return Err(TrustformersError::hardware_error(
                 &format!("Head dimension {} exceeds maximum 256", head_dim),
-                "flash_attention_with_cache"
+                "flash_attention_with_cache",
             ));
         }
 
@@ -73,7 +73,7 @@ impl MetalBackend {
 
         // Create output buffer
         let output_buffer = self.device.new_buffer(
-            (output_size * 4) as u64,  // 4 bytes per f32
+            (output_size * 4) as u64, // 4 bytes per f32
             MTLResourceOptions::StorageModeShared,
         );
 
@@ -93,8 +93,8 @@ impl MetalBackend {
             q_seq_len: u32,
             kv_seq_len: u32,
             head_dim: u32,
-            scale: f32,  // 1/sqrt(head_dim) for scaled dot-product
-            use_causal_mask: u32,  // 1 for autoregressive, 0 for bidirectional
+            scale: f32,           // 1/sqrt(head_dim) for scaled dot-product
+            use_causal_mask: u32, // 1 for autoregressive, 0 for bidirectional
         }
 
         let scale = 1.0 / (head_dim as f32).sqrt();
@@ -105,7 +105,7 @@ impl MetalBackend {
             kv_seq_len: kv_seq_len as u32,
             head_dim: head_dim as u32,
             scale,
-            use_causal_mask: 1,  // Always causal for GPT-2 style models
+            use_causal_mask: 1, // Always causal for GPT-2 style models
         };
 
         let params_buffer = self.device.new_buffer_with_data(
@@ -134,7 +134,7 @@ impl MetalBackend {
         // - Q block: [BLOCK_Q, head_dim] floats
         // - K block: [BLOCK_KV, head_dim] floats
         // - V block: [BLOCK_KV, head_dim] floats
-        let shared_q_size = BLOCK_Q * head_dim * 4;  // 4 bytes per float
+        let shared_q_size = BLOCK_Q * head_dim * 4; // 4 bytes per float
         let shared_k_size = BLOCK_KV * head_dim * 4;
         let shared_v_size = BLOCK_KV * head_dim * 4;
 
@@ -208,19 +208,15 @@ mod tests {
 
         // Run flash attention
         let output_id = backend.flash_attention_with_cache(
-            &q_id,
-            &k_id,
-            &v_id,
-            batch_size,
-            seq_len,
-            seq_len,
-            num_heads,
-            head_dim,
+            &q_id, &k_id, &v_id, batch_size, seq_len, seq_len, num_heads, head_dim,
         )?;
 
         // Verify output shape
         let output_data = backend.download_buffer_to_vec(&output_id)?;
-        assert_eq!(output_data.len(), batch_size * num_heads * seq_len * head_dim);
+        assert_eq!(
+            output_data.len(),
+            batch_size * num_heads * seq_len * head_dim
+        );
 
         // Basic sanity check: output should not be all zeros
         let sum: f32 = output_data.iter().sum();
@@ -256,26 +252,12 @@ mod tests {
 
         // Run Flash Attention
         let flash_output_id = backend.flash_attention_with_cache(
-            &q_id,
-            &k_id,
-            &v_id,
-            batch_size,
-            seq_len,
-            seq_len,
-            num_heads,
-            head_dim,
+            &q_id, &k_id, &v_id, batch_size, seq_len, seq_len, num_heads, head_dim,
         )?;
 
         // Run Standard Attention
         let standard_output_id = backend.attention_with_cache_gpu_to_gpu(
-            &q_id,
-            &k_id,
-            &v_id,
-            batch_size,
-            seq_len,
-            seq_len,
-            num_heads,
-            head_dim,
+            &q_id, &k_id, &v_id, batch_size, seq_len, seq_len, num_heads, head_dim,
         )?;
 
         // Download results
@@ -289,7 +271,8 @@ mod tests {
         let mut total_diff = 0.0f32;
         let mut num_elements = 0;
 
-        for (i, (&flash, &standard)) in flash_output.iter().zip(standard_output.iter()).enumerate() {
+        for (i, (&flash, &standard)) in flash_output.iter().zip(standard_output.iter()).enumerate()
+        {
             let diff = (flash - standard).abs();
             max_diff = max_diff.max(diff);
             total_diff += diff;
@@ -297,8 +280,10 @@ mod tests {
 
             // Check element-wise tolerance
             if diff > 1e-3 {
-                println!("Large difference at index {}: flash={}, standard={}, diff={}",
-                         i, flash, standard, diff);
+                println!(
+                    "Large difference at index {}: flash={}, standard={}, diff={}",
+                    i, flash, standard, diff
+                );
             }
         }
 
@@ -310,10 +295,16 @@ mod tests {
         println!("  Total elements: {}", num_elements);
 
         // Relaxed tolerance due to numerical differences in online softmax
-        assert!(max_diff < 1e-3,
-                "Max difference {} exceeds tolerance 1e-3", max_diff);
-        assert!(avg_diff < 1e-4,
-                "Average difference {} exceeds tolerance 1e-4", avg_diff);
+        assert!(
+            max_diff < 1e-3,
+            "Max difference {} exceeds tolerance 1e-3",
+            max_diff
+        );
+        assert!(
+            avg_diff < 1e-4,
+            "Average difference {} exceeds tolerance 1e-4",
+            avg_diff
+        );
 
         Ok(())
     }
@@ -346,14 +337,7 @@ mod tests {
 
         // Run Flash Attention with causal mask
         let output_id = backend.flash_attention_with_cache(
-            &q_id,
-            &k_id,
-            &v_id,
-            batch_size,
-            seq_len,
-            seq_len,
-            num_heads,
-            head_dim,
+            &q_id, &k_id, &v_id, batch_size, seq_len, seq_len, num_heads, head_dim,
         )?;
 
         let output = backend.download_buffer_to_vec(&output_id)?;
@@ -374,12 +358,18 @@ mod tests {
             let actual = token_output[0];
             let diff = (actual - expected_avg).abs();
 
-            println!("Token {}: expected={}, actual={}, diff={}",
-                     token_idx, expected_avg, actual, diff);
+            println!(
+                "Token {}: expected={}, actual={}, diff={}",
+                token_idx, expected_avg, actual, diff
+            );
 
-            assert!(diff < 0.1,
-                    "Token {} causal mask incorrect: expected {}, got {}",
-                    token_idx, expected_avg, actual);
+            assert!(
+                diff < 0.1,
+                "Token {} causal mask incorrect: expected {}, got {}",
+                token_idx,
+                expected_avg,
+                actual
+            );
         }
 
         Ok(())
@@ -406,14 +396,7 @@ mod tests {
             let v_id = backend.create_persistent_buffer(&v_data)?;
 
             let output_id = backend.flash_attention_with_cache(
-                &q_id,
-                &k_id,
-                &v_id,
-                batch_size,
-                *seq_len,
-                *seq_len,
-                num_heads,
-                head_dim,
+                &q_id, &k_id, &v_id, batch_size, *seq_len, *seq_len, num_heads, head_dim,
             )?;
 
             let output = backend.download_buffer_to_vec(&output_id)?;
@@ -421,7 +404,11 @@ mod tests {
 
             // Sanity check: output not all zeros
             let sum: f32 = output.iter().sum();
-            assert!(sum.abs() > 0.001, "Output is all zeros for seq_len={}", seq_len);
+            assert!(
+                sum.abs() > 0.001,
+                "Output is all zeros for seq_len={}",
+                seq_len
+            );
         }
 
         Ok(())

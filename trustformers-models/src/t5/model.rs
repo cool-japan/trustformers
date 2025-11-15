@@ -1,6 +1,7 @@
 use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{Result, TrustformersError},
     layers::{Embedding, Linear},
     tensor::Tensor,
@@ -16,14 +17,20 @@ pub struct T5Model {
     shared: Embedding,
     encoder: T5Stack,
     decoder: T5Stack,
+    device: Device,
 }
 
 impl T5Model {
     pub fn new(config: T5Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: T5Config, device: Device) -> Result<Self> {
         config.validate()?;
 
         // Shared embeddings between encoder and decoder
-        let shared = Embedding::new(config.vocab_size, config.d_model, None)?;
+        let shared =
+            Embedding::new_with_device(config.vocab_size, config.d_model, None, device.clone())?;
 
         let encoder_config = config.clone();
         let decoder_config = config.clone();
@@ -31,9 +38,14 @@ impl T5Model {
         Ok(Self {
             config,
             shared,
-            encoder: T5Stack::new(encoder_config, true)?,
-            decoder: T5Stack::new(decoder_config, false)?,
+            encoder: T5Stack::new_with_device(encoder_config, true, device.clone())?,
+            decoder: T5Stack::new_with_device(decoder_config, false, device.clone())?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Load weights from a WeightReader (e.g., SafeTensors)
@@ -104,18 +116,29 @@ impl Model for T5Model {
 pub struct T5ForConditionalGeneration {
     transformer: T5Model,
     lm_head: Linear,
+    device: Device,
 }
 
 impl T5ForConditionalGeneration {
     pub fn new(config: T5Config) -> Result<Self> {
-        let transformer = T5Model::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: T5Config, device: Device) -> Result<Self> {
+        let transformer = T5Model::new_with_device(config.clone(), device.clone())?;
         // T5 uses shared embeddings as lm_head
-        let lm_head = Linear::new(config.d_model, config.vocab_size, false);
+        let lm_head =
+            Linear::new_with_device(config.d_model, config.vocab_size, false, device.clone());
 
         Ok(Self {
             transformer,
             lm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Load weights from a WeightReader (e.g., SafeTensors)
@@ -433,10 +456,15 @@ struct T5Stack {
     block: Vec<T5Block>,
     final_layer_norm: T5LayerNorm,
     dropout: f32,
+    device: Device,
 }
 
 impl T5Stack {
     fn new(config: T5Config, is_encoder: bool) -> Result<Self> {
+        Self::new_with_device(config, is_encoder, Device::CPU)
+    }
+
+    fn new_with_device(config: T5Config, is_encoder: bool, device: Device) -> Result<Self> {
         let num_layers = if is_encoder {
             config.num_layers
         } else {
@@ -445,7 +473,11 @@ impl T5Stack {
 
         let mut block = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
-            block.push(T5Block::new(&config, is_encoder)?);
+            block.push(T5Block::new_with_device(
+                &config,
+                is_encoder,
+                device.clone(),
+            )?);
         }
 
         Ok(Self {
@@ -453,9 +485,18 @@ impl T5Stack {
             is_encoder,
             embed_tokens: None,
             block,
-            final_layer_norm: T5LayerNorm::new(config.d_model, config.layer_norm_epsilon),
+            final_layer_norm: T5LayerNorm::new_with_device(
+                config.d_model,
+                config.layer_norm_epsilon,
+                device.clone(),
+            ),
             dropout: config.dropout_rate,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -522,19 +563,32 @@ struct T5Block {
     self_attention: T5Attention,
     cross_attention: Option<T5Attention>,
     feed_forward: T5DenseReluDense,
+    device: Device,
 }
 
 impl T5Block {
     fn new(config: &T5Config, is_encoder: bool) -> Result<Self> {
-        let cross_attention =
-            if !is_encoder { Some(T5Attention::new(config, true)?) } else { None };
+        Self::new_with_device(config, is_encoder, Device::CPU)
+    }
+
+    fn new_with_device(config: &T5Config, is_encoder: bool, device: Device) -> Result<Self> {
+        let cross_attention = if !is_encoder {
+            Some(T5Attention::new_with_device(config, true, device.clone())?)
+        } else {
+            None
+        };
 
         Ok(Self {
             is_encoder,
-            self_attention: T5Attention::new(config, false)?,
+            self_attention: T5Attention::new_with_device(config, false, device.clone())?,
             cross_attention,
-            feed_forward: T5DenseReluDense::new(config)?,
+            feed_forward: T5DenseReluDense::new_with_device(config, device.clone())?,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -611,16 +665,26 @@ struct T5Attention {
     relative_attention_num_buckets: usize,
     relative_attention_max_distance: usize,
     relative_attention_bias: Option<Embedding>, // For storing learned relative position biases
+    device: Device,
 }
 
 impl T5Attention {
     fn new(config: &T5Config, is_cross_attention: bool) -> Result<Self> {
+        Self::new_with_device(config, is_cross_attention, Device::CPU)
+    }
+
+    fn new_with_device(
+        config: &T5Config,
+        is_cross_attention: bool,
+        device: Device,
+    ) -> Result<Self> {
         let has_relative_bias = !is_cross_attention;
         let relative_attention_bias = if has_relative_bias {
-            Some(Embedding::new(
+            Some(Embedding::new_with_device(
                 config.relative_attention_num_buckets,
                 config.num_heads,
                 None,
+                device.clone(),
             )?)
         } else {
             None
@@ -628,11 +692,35 @@ impl T5Attention {
 
         Ok(Self {
             is_cross_attention,
-            layer_norm: T5LayerNorm::new(config.d_model, config.layer_norm_epsilon),
-            q: Linear::new(config.d_model, config.num_heads * config.d_kv, false),
-            k: Linear::new(config.d_model, config.num_heads * config.d_kv, false),
-            v: Linear::new(config.d_model, config.num_heads * config.d_kv, false),
-            o: Linear::new(config.num_heads * config.d_kv, config.d_model, false),
+            layer_norm: T5LayerNorm::new_with_device(
+                config.d_model,
+                config.layer_norm_epsilon,
+                device.clone(),
+            ),
+            q: Linear::new_with_device(
+                config.d_model,
+                config.num_heads * config.d_kv,
+                false,
+                device.clone(),
+            ),
+            k: Linear::new_with_device(
+                config.d_model,
+                config.num_heads * config.d_kv,
+                false,
+                device.clone(),
+            ),
+            v: Linear::new_with_device(
+                config.d_model,
+                config.num_heads * config.d_kv,
+                false,
+                device.clone(),
+            ),
+            o: Linear::new_with_device(
+                config.num_heads * config.d_kv,
+                config.d_model,
+                false,
+                device.clone(),
+            ),
             n_heads: config.num_heads,
             d_kv: config.d_kv,
             dropout: config.dropout_rate,
@@ -640,7 +728,12 @@ impl T5Attention {
             relative_attention_num_buckets: config.relative_attention_num_buckets,
             relative_attention_max_distance: config.relative_attention_max_distance,
             relative_attention_bias,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -1009,16 +1102,30 @@ struct T5DenseReluDense {
     wo: Linear,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl T5DenseReluDense {
     fn new(config: &T5Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &T5Config, device: Device) -> Result<Self> {
         Ok(Self {
-            layer_norm: T5LayerNorm::new(config.d_model, config.layer_norm_epsilon),
-            wi: Linear::new(config.d_model, config.d_ff, false),
-            wo: Linear::new(config.d_ff, config.d_model, false),
+            layer_norm: T5LayerNorm::new_with_device(
+                config.d_model,
+                config.layer_norm_epsilon,
+                device.clone(),
+            ),
+            wi: Linear::new_with_device(config.d_model, config.d_ff, false, device.clone()),
+            wo: Linear::new_with_device(config.d_ff, config.d_model, false, device.clone()),
             dropout: config.dropout_rate,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -1056,14 +1163,24 @@ impl T5DenseReluDense {
 struct T5LayerNorm {
     weight: Tensor,
     epsilon: f32,
+    device: Device,
 }
 
 impl T5LayerNorm {
     fn new(hidden_size: usize, epsilon: f32) -> Self {
+        Self::new_with_device(hidden_size, epsilon, Device::CPU)
+    }
+
+    fn new_with_device(hidden_size: usize, epsilon: f32, device: Device) -> Self {
         Self {
             weight: Tensor::ones(&[hidden_size]).unwrap(),
             epsilon,
+            device,
         }
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {

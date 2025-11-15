@@ -1,5 +1,6 @@
 use crate::llava::config::{LlavaConfig, LlavaVisionConfig};
 use trustformers_core::{
+    device::Device,
     errors::Result,
     layers::{Embedding, LayerNorm, Linear},
     ops::activations::{gelu, silu},
@@ -14,20 +15,31 @@ pub struct LlavaVisionTransformer {
     embeddings: LlavaVisionEmbeddings,
     encoder: LlavaVisionEncoder,
     post_layernorm: LayerNorm,
+    device: Device,
 }
 
 impl LlavaVisionTransformer {
     pub fn new(config: LlavaVisionConfig) -> Result<Self> {
-        let embeddings = LlavaVisionEmbeddings::new(config.clone())?;
-        let encoder = LlavaVisionEncoder::new(config.clone())?;
-        let post_layernorm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaVisionConfig, device: Device) -> Result<Self> {
+        let embeddings = LlavaVisionEmbeddings::new_with_device(config.clone(), device)?;
+        let encoder = LlavaVisionEncoder::new_with_device(config.clone(), device)?;
+        let post_layernorm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             config,
             embeddings,
             encoder,
             post_layernorm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -49,20 +61,27 @@ pub struct LlavaVisionEmbeddings {
     patch_embedding: Linear,
     position_embedding: Embedding,
     class_embedding: Tensor,
+    device: Device,
 }
 
 impl LlavaVisionEmbeddings {
     pub fn new(config: LlavaVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaVisionConfig, device: Device) -> Result<Self> {
         let patch_size = config.patch_size;
-        let patch_embedding = Linear::new(
+        let patch_embedding = Linear::new_with_device(
             config.num_channels * patch_size * patch_size,
             config.hidden_size,
             false,
+            device,
         );
 
         let num_patches = (config.image_size / patch_size).pow(2);
         let num_positions = num_patches + 1; // +1 for class token
-        let position_embedding = Embedding::new(num_positions, config.hidden_size, None)?;
+        let position_embedding =
+            Embedding::new_with_device(num_positions, config.hidden_size, None, device)?;
 
         let class_embedding = Tensor::randn(&[config.hidden_size])?;
 
@@ -71,7 +90,12 @@ impl LlavaVisionEmbeddings {
             patch_embedding,
             position_embedding,
             class_embedding,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -112,16 +136,28 @@ impl Layer for LlavaVisionEmbeddings {
 /// Vision transformer encoder
 pub struct LlavaVisionEncoder {
     pub layers: Vec<LlavaVisionEncoderLayer>,
+    device: Device,
 }
 
 impl LlavaVisionEncoder {
     pub fn new(config: LlavaVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaVisionConfig, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(LlavaVisionEncoderLayer::new(config.clone())?);
+            layers.push(LlavaVisionEncoderLayer::new_with_device(
+                config.clone(),
+                device,
+            )?);
         }
 
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -146,21 +182,33 @@ pub struct LlavaVisionEncoderLayer {
     mlp: LlavaVisionMLP,
     layer_norm1: LayerNorm,
     layer_norm2: LayerNorm,
+    device: Device,
 }
 
 impl LlavaVisionEncoderLayer {
     pub fn new(config: LlavaVisionConfig) -> Result<Self> {
-        let self_attn = LlavaVisionAttention::new(config.clone())?;
-        let mlp = LlavaVisionMLP::new(config.clone())?;
-        let layer_norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
-        let layer_norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaVisionConfig, device: Device) -> Result<Self> {
+        let self_attn = LlavaVisionAttention::new_with_device(config.clone(), device)?;
+        let mlp = LlavaVisionMLP::new_with_device(config.clone(), device)?;
+        let layer_norm1 =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
+        let layer_norm2 =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             self_attn,
             mlp,
             layer_norm1,
             layer_norm2,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -196,17 +244,23 @@ pub struct LlavaVisionAttention {
     out_proj: Linear,
     pub head_dim: usize,
     scale: f32,
+    device: Device,
 }
 
 impl LlavaVisionAttention {
     pub fn new(config: LlavaVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaVisionConfig, device: Device) -> Result<Self> {
         let head_dim = config.hidden_size / config.num_attention_heads;
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let q_proj = Linear::new(config.hidden_size, config.hidden_size, true);
-        let k_proj = Linear::new(config.hidden_size, config.hidden_size, true);
-        let v_proj = Linear::new(config.hidden_size, config.hidden_size, true);
-        let out_proj = Linear::new(config.hidden_size, config.hidden_size, true);
+        let q_proj = Linear::new_with_device(config.hidden_size, config.hidden_size, true, device);
+        let k_proj = Linear::new_with_device(config.hidden_size, config.hidden_size, true, device);
+        let v_proj = Linear::new_with_device(config.hidden_size, config.hidden_size, true, device);
+        let out_proj =
+            Linear::new_with_device(config.hidden_size, config.hidden_size, true, device);
 
         Ok(Self {
             config,
@@ -216,7 +270,12 @@ impl LlavaVisionAttention {
             out_proj,
             head_dim,
             scale,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -273,18 +332,30 @@ pub struct LlavaVisionMLP {
     fc1: Linear,
     fc2: Linear,
     dropout: f32,
+    device: Device,
 }
 
 impl LlavaVisionMLP {
     pub fn new(config: LlavaVisionConfig) -> Result<Self> {
-        let fc1 = Linear::new(config.hidden_size, config.intermediate_size, true);
-        let fc2 = Linear::new(config.intermediate_size, config.hidden_size, true);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaVisionConfig, device: Device) -> Result<Self> {
+        let fc1 =
+            Linear::new_with_device(config.hidden_size, config.intermediate_size, true, device);
+        let fc2 =
+            Linear::new_with_device(config.intermediate_size, config.hidden_size, true, device);
 
         Ok(Self {
             fc1,
             fc2,
             dropout: config.dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -311,25 +382,39 @@ impl Layer for LlavaVisionMLP {
 pub struct LlavaMultiModalProjector {
     projector_type: String,
     layers: Vec<Linear>,
+    device: Device,
 }
 
 impl LlavaMultiModalProjector {
     pub fn new(projector_type: String, input_dim: usize, output_dim: usize) -> Result<Self> {
+        Self::new_with_device(projector_type, input_dim, output_dim, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        projector_type: String,
+        input_dim: usize,
+        output_dim: usize,
+        device: Device,
+    ) -> Result<Self> {
         let mut layers = Vec::new();
 
         match projector_type.as_str() {
             "linear" => {
-                layers.push(Linear::new(input_dim, output_dim, true));
+                layers.push(Linear::new_with_device(input_dim, output_dim, true, device));
             },
             "mlp2x_gelu" => {
                 let hidden_dim = output_dim;
-                layers.push(Linear::new(input_dim, hidden_dim, true));
-                layers.push(Linear::new(hidden_dim, output_dim, true));
+                layers.push(Linear::new_with_device(input_dim, hidden_dim, true, device));
+                layers.push(Linear::new_with_device(
+                    hidden_dim, output_dim, true, device,
+                ));
             },
             "mlp2x_relu" => {
                 let hidden_dim = output_dim;
-                layers.push(Linear::new(input_dim, hidden_dim, true));
-                layers.push(Linear::new(hidden_dim, output_dim, true));
+                layers.push(Linear::new_with_device(input_dim, hidden_dim, true, device));
+                layers.push(Linear::new_with_device(
+                    hidden_dim, output_dim, true, device,
+                ));
             },
             _ => {
                 return Err(trustformers_core::errors::invalid_config(
@@ -342,7 +427,12 @@ impl LlavaMultiModalProjector {
         Ok(Self {
             projector_type,
             layers,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -376,16 +466,23 @@ pub struct LlavaForConditionalGeneration {
     vision_tower: LlavaVisionTransformer,
     language_model: LlavaLanguageModel,
     mm_projector: LlavaMultiModalProjector,
+    device: Device,
 }
 
 impl LlavaForConditionalGeneration {
     pub fn new(config: LlavaConfig) -> Result<Self> {
-        let vision_tower = LlavaVisionTransformer::new(config.vision_config.clone())?;
-        let language_model = LlavaLanguageModel::new(config.clone())?;
-        let mm_projector = LlavaMultiModalProjector::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaConfig, device: Device) -> Result<Self> {
+        let vision_tower =
+            LlavaVisionTransformer::new_with_device(config.vision_config.clone(), device)?;
+        let language_model = LlavaLanguageModel::new_with_device(config.clone(), device)?;
+        let mm_projector = LlavaMultiModalProjector::new_with_device(
             config.mm_projector_type.clone(),
             config.vision_config.hidden_size,
             config.mm_hidden_size,
+            device,
         )?;
 
         Ok(Self {
@@ -393,7 +490,12 @@ impl LlavaForConditionalGeneration {
             vision_tower,
             language_model,
             mm_projector,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Process images and text together
@@ -466,19 +568,26 @@ pub struct LlavaLanguageModel {
     pub layers: Vec<LlavaDecoderLayer>,
     norm: LayerNorm,
     lm_head: Linear,
+    device: Device,
 }
 
 impl LlavaLanguageModel {
     pub fn new(config: LlavaConfig) -> Result<Self> {
-        let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaConfig, device: Device) -> Result<Self> {
+        let embed_tokens =
+            Embedding::new_with_device(config.vocab_size, config.hidden_size, None, device)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(LlavaDecoderLayer::new(config.clone())?);
+            layers.push(LlavaDecoderLayer::new_with_device(config.clone(), device)?);
         }
 
-        let norm = LayerNorm::new(vec![config.hidden_size], config.rms_norm_eps)?;
-        let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+        let norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.rms_norm_eps, device)?;
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self {
             config,
@@ -486,7 +595,12 @@ impl LlavaLanguageModel {
             layers,
             norm,
             lm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn get_input_embeddings(&self, input_ids: Tensor) -> Result<Tensor> {
@@ -527,22 +641,33 @@ pub struct LlavaDecoderLayer {
     mlp: LlavaMLP,
     input_layernorm: LayerNorm,
     post_attention_layernorm: LayerNorm,
+    device: Device,
 }
 
 impl LlavaDecoderLayer {
     pub fn new(config: LlavaConfig) -> Result<Self> {
-        let self_attn = LlavaAttention::new(config.clone())?;
-        let mlp = LlavaMLP::new(config.clone())?;
-        let input_layernorm = LayerNorm::new(vec![config.hidden_size], config.rms_norm_eps)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaConfig, device: Device) -> Result<Self> {
+        let self_attn = LlavaAttention::new_with_device(config.clone(), device)?;
+        let mlp = LlavaMLP::new_with_device(config.clone(), device)?;
+        let input_layernorm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.rms_norm_eps, device)?;
         let post_attention_layernorm =
-            LayerNorm::new(vec![config.hidden_size], config.rms_norm_eps)?;
+            LayerNorm::new_with_device(vec![config.hidden_size], config.rms_norm_eps, device)?;
 
         Ok(Self {
             self_attn,
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -578,17 +703,22 @@ pub struct LlavaAttention {
     pub head_dim: usize,
     pub num_heads: usize,
     scale: f32,
+    device: Device,
 }
 
 impl LlavaAttention {
     pub fn new(config: LlavaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaConfig, device: Device) -> Result<Self> {
         let head_dim = config.head_dim();
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        let q_proj = Linear::new(config.hidden_size, config.hidden_size, false);
-        let k_proj = Linear::new(config.hidden_size, config.hidden_size, false);
-        let v_proj = Linear::new(config.hidden_size, config.hidden_size, false);
-        let o_proj = Linear::new(config.hidden_size, config.hidden_size, false);
+        let q_proj = Linear::new_with_device(config.hidden_size, config.hidden_size, false, device);
+        let k_proj = Linear::new_with_device(config.hidden_size, config.hidden_size, false, device);
+        let v_proj = Linear::new_with_device(config.hidden_size, config.hidden_size, false, device);
+        let o_proj = Linear::new_with_device(config.hidden_size, config.hidden_size, false, device);
 
         Ok(Self {
             q_proj,
@@ -598,7 +728,12 @@ impl LlavaAttention {
             head_dim,
             num_heads: config.num_attention_heads,
             scale,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -625,19 +760,32 @@ pub struct LlavaMLP {
     gate_proj: Linear,
     up_proj: Linear,
     down_proj: Linear,
+    device: Device,
 }
 
 impl LlavaMLP {
     pub fn new(config: LlavaConfig) -> Result<Self> {
-        let gate_proj = Linear::new(config.hidden_size, config.intermediate_size, false);
-        let up_proj = Linear::new(config.hidden_size, config.intermediate_size, false);
-        let down_proj = Linear::new(config.intermediate_size, config.hidden_size, false);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LlavaConfig, device: Device) -> Result<Self> {
+        let gate_proj =
+            Linear::new_with_device(config.hidden_size, config.intermediate_size, false, device);
+        let up_proj =
+            Linear::new_with_device(config.hidden_size, config.intermediate_size, false, device);
+        let down_proj =
+            Linear::new_with_device(config.intermediate_size, config.hidden_size, false, device);
 
         Ok(Self {
             gate_proj,
             up_proj,
             down_proj,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

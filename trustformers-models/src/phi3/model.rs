@@ -1,6 +1,7 @@
 use crate::phi3::config::Phi3Config;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, Linear},
     ops::activations::{gelu, silu},
@@ -13,12 +14,25 @@ use trustformers_core::{
 pub struct RMSNorm {
     weight: Tensor,
     eps: f32,
+    device: Device,
 }
 
 impl RMSNorm {
     pub fn new(normalized_shape: usize, eps: f32) -> Result<Self> {
+        Self::new_with_device(normalized_shape, eps, Device::CPU)
+    }
+
+    pub fn new_with_device(normalized_shape: usize, eps: f32, device: Device) -> Result<Self> {
         let weight = Tensor::ones(&[normalized_shape])?;
-        Ok(Self { weight, eps })
+        Ok(Self {
+            weight,
+            eps,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -63,10 +77,15 @@ pub struct RotaryEmbedding {
     pub scaling_factor: Option<f32>,
     pub long_factor: Option<Vec<f32>>,
     pub short_factor: Option<Vec<f32>>,
+    device: Device,
 }
 
 impl RotaryEmbedding {
     pub fn new(config: &Phi3Config) -> Self {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &Phi3Config, device: Device) -> Self {
         let dim = config.head_dim();
 
         let (scaling_factor, long_factor, short_factor) =
@@ -87,7 +106,12 @@ impl RotaryEmbedding {
             scaling_factor,
             long_factor,
             short_factor,
+            device,
         }
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Apply rotary embedding with LongRope scaling support
@@ -118,28 +142,40 @@ pub struct Phi3MLP {
     gate_up_proj: Linear,
     down_proj: Linear,
     hidden_act: String,
+    device: Device,
 }
 
 impl Phi3MLP {
     pub fn new(config: &Phi3Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &Phi3Config, device: Device) -> Result<Self> {
         // Combined gate and up projection for efficiency
-        let gate_up_proj = Linear::new(
+        let gate_up_proj = Linear::new_with_device(
             config.hidden_size,
             2 * config.intermediate_size, // Gate and up projections combined
             config.mlp_bias,
+            device,
         );
 
-        let down_proj = Linear::new(
+        let down_proj = Linear::new_with_device(
             config.intermediate_size,
             config.hidden_size,
             config.mlp_bias,
+            device,
         );
 
         Ok(Self {
             gate_up_proj,
             down_proj,
             hidden_act: config.hidden_act.clone(),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -239,38 +275,47 @@ pub struct Phi3Attention {
     head_dim: usize,
     sliding_window: Option<usize>,
     attention_dropout: f32,
+    device: Device,
 }
 
 impl Phi3Attention {
     pub fn new(config: &Phi3Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &Phi3Config, device: Device) -> Result<Self> {
         let head_dim = config.head_dim();
         let num_kv_heads = config.num_kv_heads();
 
-        let q_proj = Linear::new(
+        let q_proj = Linear::new_with_device(
             config.hidden_size,
             config.num_attention_heads * head_dim,
             config.attention_bias,
+            device,
         );
 
-        let k_proj = Linear::new(
+        let k_proj = Linear::new_with_device(
             config.hidden_size,
             num_kv_heads * head_dim,
             config.attention_bias,
+            device,
         );
 
-        let v_proj = Linear::new(
+        let v_proj = Linear::new_with_device(
             config.hidden_size,
             num_kv_heads * head_dim,
             config.attention_bias,
+            device,
         );
 
-        let o_proj = Linear::new(
+        let o_proj = Linear::new_with_device(
             config.num_attention_heads * head_dim,
             config.hidden_size,
             config.attention_bias,
+            device,
         );
 
-        let rotary_emb = RotaryEmbedding::new(config);
+        let rotary_emb = RotaryEmbedding::new_with_device(config, device);
 
         Ok(Self {
             q_proj,
@@ -283,7 +328,12 @@ impl Phi3Attention {
             head_dim,
             sliding_window: config.sliding_window,
             attention_dropout: config.attention_dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -321,21 +371,33 @@ pub struct Phi3DecoderLayer {
     mlp: Phi3MLP,
     input_layernorm: RMSNorm,
     post_attention_layernorm: RMSNorm,
+    device: Device,
 }
 
 impl Phi3DecoderLayer {
     pub fn new(config: &Phi3Config) -> Result<Self> {
-        let self_attn = Phi3Attention::new(config)?;
-        let mlp = Phi3MLP::new(config)?;
-        let input_layernorm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
-        let post_attention_layernorm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &Phi3Config, device: Device) -> Result<Self> {
+        let self_attn = Phi3Attention::new_with_device(config, device)?;
+        let mlp = Phi3MLP::new_with_device(config, device)?;
+        let input_layernorm =
+            RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device)?;
+        let post_attention_layernorm =
+            RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device)?;
 
         Ok(Self {
             self_attn,
             mlp,
             input_layernorm,
             post_attention_layernorm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -366,31 +428,41 @@ pub struct Phi3Model {
     embed_tokens: Embedding,
     layers: Vec<Phi3DecoderLayer>,
     norm: RMSNorm,
+    device: Device,
 }
 
 impl Phi3Model {
     pub fn new(config: Phi3Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: Phi3Config, device: Device) -> Result<Self> {
         config.validate()?;
 
         let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(Phi3DecoderLayer::new(&config)?);
+            layers.push(Phi3DecoderLayer::new_with_device(&config, device)?);
         }
 
-        let norm = RMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
+        let norm = RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device)?;
 
         Ok(Self {
             config,
             embed_tokens,
             layers,
             norm,
+            device,
         })
     }
 
     pub fn config(&self) -> &Phi3Config {
         &self.config
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -775,18 +847,31 @@ impl Phi3Model {
 pub struct Phi3ForCausalLM {
     model: Phi3Model,
     lm_head: Linear,
+    device: Device,
 }
 
 impl Phi3ForCausalLM {
     pub fn new(config: Phi3Config) -> Result<Self> {
-        let model = Phi3Model::new(config.clone())?;
-        let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { model, lm_head })
+    pub fn new_with_device(config: Phi3Config, device: Device) -> Result<Self> {
+        let model = Phi3Model::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
+
+        Ok(Self {
+            model,
+            lm_head,
+            device,
+        })
     }
 
     pub fn config(&self) -> &Phi3Config {
         self.model.config()
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

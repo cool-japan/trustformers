@@ -1,6 +1,7 @@
 use crate::albert::config::AlbertConfig;
 use crate::albert::model::AlbertModel;
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::Linear;
 use trustformers_core::tensor::Tensor;
@@ -12,6 +13,7 @@ pub struct AlbertForSequenceClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -20,18 +22,21 @@ pub struct AlbertForTokenClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertForQuestionAnswering {
     albert: AlbertModel,
     qa_outputs: Linear,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertForMaskedLM {
     albert: AlbertModel,
     predictions: AlbertMLMHead,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +45,7 @@ pub struct AlbertMLMHead {
     layer_norm: trustformers_core::layers::LayerNorm,
     decoder: Linear,
     bias: Tensor,
+    device: Device,
 }
 
 #[derive(Debug)]
@@ -73,16 +79,29 @@ pub struct AlbertMaskedLMOutput {
 
 impl AlbertForSequenceClassification {
     pub fn new(config: AlbertConfig, num_labels: usize) -> Result<Self> {
-        let albert = AlbertModel::new(config.clone())?;
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: AlbertConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let albert = AlbertModel::new_with_device(config.clone(), device)?;
         let _classifier_dropout =
             config.classifier_dropout_prob.unwrap_or(config.hidden_dropout_prob);
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             albert,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -153,14 +172,27 @@ impl Model for AlbertForSequenceClassification {
 
 impl AlbertForTokenClassification {
     pub fn new(config: AlbertConfig, num_labels: usize) -> Result<Self> {
-        let albert = AlbertModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: AlbertConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let albert = AlbertModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             albert,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -218,10 +250,22 @@ impl Model for AlbertForTokenClassification {
 
 impl AlbertForQuestionAnswering {
     pub fn new(config: AlbertConfig) -> Result<Self> {
-        let albert = AlbertModel::new(config.clone())?;
-        let qa_outputs = Linear::new(config.hidden_size, 2, true);
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { albert, qa_outputs })
+    pub fn new_with_device(config: AlbertConfig, device: Device) -> Result<Self> {
+        let albert = AlbertModel::new_with_device(config.clone(), device)?;
+        let qa_outputs = Linear::new_with_device(config.hidden_size, 2, true, device);
+
+        Ok(Self {
+            albert,
+            qa_outputs,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -286,12 +330,19 @@ impl Model for AlbertForQuestionAnswering {
 
 impl AlbertMLMHead {
     fn new(config: &AlbertConfig) -> Result<Self> {
-        let dense = Linear::new(config.hidden_size, config.embedding_size, true);
-        let layer_norm = trustformers_core::layers::LayerNorm::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
+        let dense =
+            Linear::new_with_device(config.hidden_size, config.embedding_size, true, device);
+        let layer_norm = trustformers_core::layers::LayerNorm::new_with_device(
             vec![config.embedding_size],
             config.layer_norm_eps,
+            device,
         )?;
-        let decoder = Linear::new(config.embedding_size, config.vocab_size, false);
+        let decoder =
+            Linear::new_with_device(config.embedding_size, config.vocab_size, false, device);
         let bias = Tensor::zeros(&[config.vocab_size])?;
 
         Ok(Self {
@@ -299,7 +350,12 @@ impl AlbertMLMHead {
             layer_norm,
             decoder,
             bias,
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -319,13 +375,22 @@ impl AlbertMLMHead {
 
 impl AlbertForMaskedLM {
     pub fn new(config: AlbertConfig) -> Result<Self> {
-        let albert = AlbertModel::new(config.clone())?;
-        let predictions = AlbertMLMHead::new(&config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: AlbertConfig, device: Device) -> Result<Self> {
+        let albert = AlbertModel::new_with_device(config.clone(), device)?;
+        let predictions = AlbertMLMHead::new_with_device(&config, device)?;
 
         Ok(Self {
             albert,
             predictions,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

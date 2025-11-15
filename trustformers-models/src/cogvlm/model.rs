@@ -1,6 +1,7 @@
 use crate::cogvlm::config::{CogVideoConfig, CogVlmConfig, CogVlmVisionConfig};
 use scirs2_core::ndarray::{Array3, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use trustformers_core::{
+    device::Device,
     errors::{Result, TrustformersError},
     layers::{Embedding, FeedForward, LayerNorm, Linear, MultiHeadAttention},
     tensor::Tensor,
@@ -15,12 +16,17 @@ pub struct CogVlmVisionTransformer {
     embeddings: CogVlmVisionEmbeddings,
     encoder: CogVlmVisionEncoder,
     layernorm: LayerNorm,
+    device: Device,
 }
 
 impl CogVlmVisionTransformer {
     pub fn new(config: CogVlmVisionConfig) -> Result<Self> {
-        let embeddings = CogVlmVisionEmbeddings::new(config.clone())?;
-        let encoder = CogVlmVisionEncoder::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmVisionConfig, device: Device) -> Result<Self> {
+        let embeddings = CogVlmVisionEmbeddings::new_with_device(config.clone(), device)?;
+        let encoder = CogVlmVisionEncoder::new_with_device(config.clone(), device)?;
         let layernorm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
 
         Ok(Self {
@@ -28,7 +34,12 @@ impl CogVlmVisionTransformer {
             embeddings,
             encoder,
             layernorm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -56,10 +67,15 @@ pub struct CogVlmVisionEmbeddings {
     patch_embedding: Linear,
     position_embedding: Embedding,
     cls_token: Tensor,
+    device: Device,
 }
 
 impl CogVlmVisionEmbeddings {
     pub fn new(config: CogVlmVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmVisionConfig, device: Device) -> Result<Self> {
         let patch_size = config.patch_size;
         let patch_embedding = Linear::new(
             config.num_channels * patch_size * patch_size,
@@ -78,7 +94,12 @@ impl CogVlmVisionEmbeddings {
             patch_embedding,
             position_embedding,
             cls_token,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -117,16 +138,25 @@ impl Layer for CogVlmVisionEmbeddings {
 /// Vision encoder with transformer blocks
 pub struct CogVlmVisionEncoder {
     layers: Vec<CogVlmVisionLayer>,
+    device: Device,
 }
 
 impl CogVlmVisionEncoder {
     pub fn new(config: CogVlmVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmVisionConfig, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(CogVlmVisionLayer::new(config.clone())?);
+            layers.push(CogVlmVisionLayer::new_with_device(config.clone(), device)?);
         }
 
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -157,10 +187,15 @@ pub struct CogVlmVisionLayer {
     mlp: FeedForward,
     #[allow(dead_code)]
     config: CogVlmVisionConfig,
+    device: Device,
 }
 
 impl CogVlmVisionLayer {
     pub fn new(config: CogVlmVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmVisionConfig, device: Device) -> Result<Self> {
         let layernorm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
         let attention = MultiHeadAttention::new(
             config.hidden_size,
@@ -177,7 +212,12 @@ impl CogVlmVisionLayer {
             layernorm2,
             mlp,
             config,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -215,10 +255,15 @@ pub struct VisualExpert {
     vision_expert_attention: MultiHeadAttention,
     vision_expert_mlp: FeedForward,
     cross_attention: MultiHeadAttention,
+    device: Device,
 }
 
 impl VisualExpert {
     pub fn new(config: CogVlmConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmConfig, device: Device) -> Result<Self> {
         let language_expert_attention =
             MultiHeadAttention::new(config.hidden_size, config.num_attention_heads, 0.0, true)?;
 
@@ -249,7 +294,12 @@ impl VisualExpert {
             vision_expert_attention,
             vision_expert_mlp,
             cross_attention,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -291,17 +341,23 @@ pub struct CogVlmModel {
     language_model: CogVlmLanguageModel,
     visual_experts: Vec<VisualExpert>,
     vision_projection: Linear,
+    device: Device,
 }
 
 impl CogVlmModel {
     pub fn new(config: CogVlmConfig) -> Result<Self> {
-        let vision_model = CogVlmVisionTransformer::new(config.vision_config.clone())?;
-        let language_model = CogVlmLanguageModel::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmConfig, device: Device) -> Result<Self> {
+        let vision_model =
+            CogVlmVisionTransformer::new_with_device(config.vision_config.clone(), device)?;
+        let language_model = CogVlmLanguageModel::new_with_device(config.clone(), device)?;
 
         // Create visual experts for specific layers
         let mut visual_experts = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            visual_experts.push(VisualExpert::new(config.clone())?);
+            visual_experts.push(VisualExpert::new_with_device(config.clone(), device)?);
         }
 
         let vision_projection =
@@ -313,7 +369,12 @@ impl CogVlmModel {
             language_model,
             visual_experts,
             vision_projection,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Process multi-batch embeddings efficiently
@@ -516,15 +577,23 @@ pub struct CogVlmLanguageModel {
     layers: Vec<CogVlmLanguageLayer>,
     norm: LayerNorm,
     lm_head: Linear,
+    device: Device,
 }
 
 impl CogVlmLanguageModel {
     pub fn new(config: CogVlmConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmConfig, device: Device) -> Result<Self> {
         let embeddings = Embedding::new(config.vocab_size, config.hidden_size, None)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(CogVlmLanguageLayer::new(config.clone())?);
+            layers.push(CogVlmLanguageLayer::new_with_device(
+                config.clone(),
+                device,
+            )?);
         }
 
         let norm = LayerNorm::new(vec![config.hidden_size], config.rms_norm_eps)?;
@@ -536,7 +605,12 @@ impl CogVlmLanguageModel {
             layers,
             norm,
             lm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -739,10 +813,15 @@ pub struct CogVlmLanguageLayer {
     post_attention_layernorm: LayerNorm,
     #[allow(dead_code)]
     rope: VectorizedRoPE,
+    device: Device,
 }
 
 impl CogVlmLanguageLayer {
     pub fn new(config: CogVlmConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVlmConfig, device: Device) -> Result<Self> {
         let self_attn =
             MultiHeadAttention::new(config.hidden_size, config.num_attention_heads, 0.0, true)?;
 
@@ -765,7 +844,12 @@ impl CogVlmLanguageLayer {
             input_layernorm,
             post_attention_layernorm,
             rope,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -862,18 +946,28 @@ pub struct CogVideoModel {
     config: CogVideoConfig,
     base_model: CogVlmModel,
     temporal_encoder: TemporalEncoder,
+    device: Device,
 }
 
 impl CogVideoModel {
     pub fn new(config: CogVideoConfig) -> Result<Self> {
-        let base_model = CogVlmModel::new(config.base_config.clone())?;
-        let temporal_encoder = TemporalEncoder::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVideoConfig, device: Device) -> Result<Self> {
+        let base_model = CogVlmModel::new_with_device(config.base_config.clone(), device)?;
+        let temporal_encoder = TemporalEncoder::new_with_device(config.clone(), device)?;
 
         Ok(Self {
             config,
             base_model,
             temporal_encoder,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -939,19 +1033,29 @@ impl Model for CogVideoModel {
 pub struct TemporalEncoder {
     config: CogVideoConfig,
     temporal_layers: Vec<TemporalLayer>,
+    device: Device,
 }
 
 impl TemporalEncoder {
     pub fn new(config: CogVideoConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVideoConfig, device: Device) -> Result<Self> {
         let mut temporal_layers = Vec::new();
         for _ in 0..config.temporal_num_layers {
-            temporal_layers.push(TemporalLayer::new(config.clone())?);
+            temporal_layers.push(TemporalLayer::new_with_device(config.clone(), device)?);
         }
 
         Ok(Self {
             config,
             temporal_layers,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -1014,10 +1118,15 @@ pub struct TemporalLayer {
     mlp: FeedForward,
     norm1: LayerNorm,
     norm2: LayerNorm,
+    device: Device,
 }
 
 impl TemporalLayer {
     pub fn new(config: CogVideoConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: CogVideoConfig, device: Device) -> Result<Self> {
         // Ensure num_heads divides evenly into temporal_hidden_size
         let num_heads = if config.temporal_hidden_size % config.base_config.num_attention_heads == 0
         {
@@ -1056,7 +1165,12 @@ impl TemporalLayer {
             mlp,
             norm1,
             norm2,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {

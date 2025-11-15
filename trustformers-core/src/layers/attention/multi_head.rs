@@ -8,6 +8,7 @@
 use super::common::{
     AttentionConfig, AttentionOptimizationHints, AttentionProjections, AttentionUtils,
 };
+use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::Layer;
@@ -27,15 +28,16 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
-    /// Create a new multi-head attention layer
-    pub fn new(
+    /// Create a new multi-head attention layer with device support
+    pub fn new_with_device(
         hidden_size: usize,
         num_heads: usize,
         dropout_prob: f32,
         bias: bool,
+        device: Device,
     ) -> Result<Self> {
         let config = AttentionConfig::new(hidden_size, num_heads, dropout_prob, bias)?;
-        let projections = AttentionProjections::new(&config);
+        let projections = AttentionProjections::new_with_device(&config, device);
         let optimization_hints = AttentionOptimizationHints::default();
 
         Ok(Self {
@@ -43,6 +45,16 @@ impl MultiHeadAttention {
             projections,
             optimization_hints,
         })
+    }
+
+    /// Create a new multi-head attention layer
+    pub fn new(
+        hidden_size: usize,
+        num_heads: usize,
+        dropout_prob: f32,
+        bias: bool,
+    ) -> Result<Self> {
+        Self::new_with_device(hidden_size, num_heads, dropout_prob, bias, Device::CPU)
     }
 
     /// Create a new multi-head attention layer from an existing config

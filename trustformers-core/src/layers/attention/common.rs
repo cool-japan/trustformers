@@ -5,6 +5,7 @@
 
 #![allow(unused_variables)] // Attention implementation with reserved parameters
 
+use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
@@ -77,14 +78,19 @@ pub struct AttentionProjections {
 }
 
 impl AttentionProjections {
+    /// Create new attention projections with device support
+    pub fn new_with_device(config: &AttentionConfig, device: Device) -> Self {
+        Self {
+            query: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
+            key: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
+            value: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
+            out_proj: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
+        }
+    }
+
     /// Create new attention projections from configuration
     pub fn new(config: &AttentionConfig) -> Self {
-        Self {
-            query: Linear::new(config.hidden_size, config.hidden_size, config.bias),
-            key: Linear::new(config.hidden_size, config.hidden_size, config.bias),
-            value: Linear::new(config.hidden_size, config.hidden_size, config.bias),
-            out_proj: Linear::new(config.hidden_size, config.hidden_size, config.bias),
-        }
+        Self::new_with_device(config, Device::CPU)
     }
 }
 

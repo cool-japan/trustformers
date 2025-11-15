@@ -2,6 +2,7 @@ use crate::dalle::config::{
     DalleConfig, DalleDiffusionConfig, DalleImageConfig, DalleTextConfig, DalleVisionConfig,
 };
 use trustformers_core::{
+    device::Device,
     kernels::fused_ops::ActivationType,
     layers::{
         attention::{AttentionConfig, MultiHeadAttention},
@@ -33,15 +34,30 @@ pub struct DalleModel {
     pub image_projection: Linear,
     /// Temperature parameter for CLIP loss
     pub logit_scale: Tensor,
+    /// Device for computation
+    device: Device,
 }
 
 impl DalleModel {
-    /// Create a new DALL-E model
+    /// Create a new DALL-E model on CPU
     pub fn new(config: DalleConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let text_encoder = DalleTextEncoder::new(config.text_config.clone())?;
-        let image_encoder = DalleImageEncoder::new(config.vision_config.clone())?;
-        let unet = DalleUNet::new(config.image_config.clone(), config.diffusion_config.clone())?;
-        let vae = DalleVAE::new(config.image_config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Create a new DALL-E model with specified device
+    pub fn new_with_device(
+        config: DalleConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let text_encoder = DalleTextEncoder::new_with_device(config.text_config.clone(), device)?;
+        let image_encoder =
+            DalleImageEncoder::new_with_device(config.vision_config.clone(), device)?;
+        let unet = DalleUNet::new_with_device(
+            config.image_config.clone(),
+            config.diffusion_config.clone(),
+            device,
+        )?;
+        let vae = DalleVAE::new_with_device(config.image_config.clone(), device)?;
 
         let text_projection = Linear::new(
             config.text_config.hidden_size,
@@ -66,7 +82,13 @@ impl DalleModel {
             text_projection,
             image_projection,
             logit_scale,
+            device,
         })
+    }
+
+    /// Get the device this model is on
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass for training (CLIP alignment + diffusion loss)
@@ -349,15 +371,23 @@ pub struct DalleTextEncoder {
     pub embeddings: Embedding,
     pub layers: Vec<DalleTextLayer>,
     pub final_layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl DalleTextEncoder {
     pub fn new(config: DalleTextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DalleTextConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let embeddings = Embedding::new(config.vocab_size, config.hidden_size, None)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(DalleTextLayer::new(&config)?);
+            layers.push(DalleTextLayer::new_with_device(&config, device)?);
         }
 
         let final_layer_norm =
@@ -368,7 +398,12 @@ impl DalleTextEncoder {
             embeddings,
             layers,
             final_layer_norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -431,10 +466,18 @@ pub struct DalleTextLayer {
     pub mlp: DalleMLP,
     pub layer_norm1: LayerNorm,
     pub layer_norm2: LayerNorm,
+    device: Device,
 }
 
 impl DalleTextLayer {
     pub fn new(config: &DalleTextConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: &DalleTextConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let attention_config = AttentionConfig {
             hidden_size: config.hidden_size,
             num_heads: config.num_attention_heads,
@@ -450,10 +493,11 @@ impl DalleTextLayer {
             attention_config.dropout_prob,
             attention_config.bias,
         )?;
-        let mlp = DalleMLP::new(
+        let mlp = DalleMLP::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             &config.hidden_act,
+            device,
         )?;
         let layer_norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
         let layer_norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
@@ -463,7 +507,12 @@ impl DalleTextLayer {
             mlp,
             layer_norm1,
             layer_norm2,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -499,10 +548,18 @@ pub struct DalleImageEncoder {
     pub pre_layer_norm: LayerNorm,
     pub layers: Vec<DalleVisionLayer>,
     pub post_layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl DalleImageEncoder {
     pub fn new(config: DalleVisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DalleVisionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let patch_embedding = Conv2d::new(
             config.num_channels,
             config.hidden_size,
@@ -522,7 +579,7 @@ impl DalleImageEncoder {
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(DalleVisionLayer::new(&config)?);
+            layers.push(DalleVisionLayer::new_with_device(&config, device)?);
         }
 
         Ok(Self {
@@ -533,7 +590,12 @@ impl DalleImageEncoder {
             pre_layer_norm,
             layers,
             post_layer_norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -577,10 +639,18 @@ pub struct DalleVisionLayer {
     pub mlp: DalleMLP,
     pub layer_norm1: LayerNorm,
     pub layer_norm2: LayerNorm,
+    device: Device,
 }
 
 impl DalleVisionLayer {
     pub fn new(config: &DalleVisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: &DalleVisionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let attention_config = AttentionConfig {
             hidden_size: config.hidden_size,
             num_heads: config.num_attention_heads,
@@ -596,10 +666,11 @@ impl DalleVisionLayer {
             attention_config.dropout_prob,
             attention_config.bias,
         )?;
-        let mlp = DalleMLP::new(
+        let mlp = DalleMLP::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             &config.hidden_act,
+            device,
         )?;
         let layer_norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
         let layer_norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
@@ -609,7 +680,12 @@ impl DalleVisionLayer {
             mlp,
             layer_norm1,
             layer_norm2,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -638,14 +714,23 @@ pub struct DalleUNet {
     pub mid_block: DalleUNetBlock,
     pub up_blocks: Vec<DalleUNetBlock>,
     pub conv_out: Conv2d,
+    device: Device,
 }
 
 impl DalleUNet {
     pub fn new(
         image_config: DalleImageConfig,
-        _diffusion_config: DalleDiffusionConfig,
+        diffusion_config: DalleDiffusionConfig,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let time_embedding = DalleTimeEmbedding::new(image_config.hidden_size)?;
+        Self::new_with_device(image_config, diffusion_config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        image_config: DalleImageConfig,
+        _diffusion_config: DalleDiffusionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let time_embedding = DalleTimeEmbedding::new_with_device(image_config.hidden_size, device)?;
         let text_projection =
             Linear::new(image_config.hidden_size, image_config.hidden_size, false);
 
@@ -678,13 +763,19 @@ impl DalleUNet {
                 image_config.hidden_size * (2_usize.pow(i as u32))
             };
             let out_channels = image_config.hidden_size * (2_usize.pow((i + 1) as u32));
-            down_blocks.push(DalleUNetBlock::new(in_channels, out_channels, true)?);
+            down_blocks.push(DalleUNetBlock::new_with_device(
+                in_channels,
+                out_channels,
+                true,
+                device,
+            )?);
         }
 
-        let mid_block = DalleUNetBlock::new(
+        let mid_block = DalleUNetBlock::new_with_device(
             image_config.hidden_size * 8,
             image_config.hidden_size * 8,
             false,
+            device,
         )?;
 
         for i in (0..3).rev() {
@@ -695,7 +786,12 @@ impl DalleUNet {
             } else {
                 image_config.hidden_size * (2_usize.pow(i as u32))
             };
-            up_blocks.push(DalleUNetBlock::new(in_channels, out_channels, true)?);
+            up_blocks.push(DalleUNetBlock::new_with_device(
+                in_channels,
+                out_channels,
+                true,
+                device,
+            )?);
         }
 
         Ok(Self {
@@ -707,7 +803,12 @@ impl DalleUNet {
             mid_block,
             up_blocks,
             conv_out,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -761,6 +862,7 @@ pub struct DalleUNetBlock {
     pub norm1: LayerNorm,
     pub norm2: LayerNorm,
     pub downsample: Option<Conv2d>,
+    device: Device,
 }
 
 impl DalleUNetBlock {
@@ -768,6 +870,15 @@ impl DalleUNetBlock {
         in_channels: usize,
         out_channels: usize,
         downsample: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(in_channels, out_channels, downsample, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        in_channels: usize,
+        out_channels: usize,
+        downsample: bool,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let conv1 = Conv2d::new(in_channels, out_channels, (3, 3), (1, 1), (1, 1), false)?;
         let conv2 = Conv2d::new(out_channels, out_channels, (3, 3), (1, 1), (1, 1), false)?;
@@ -819,7 +930,12 @@ impl DalleUNetBlock {
             norm1,
             norm2,
             downsample,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -880,10 +996,18 @@ pub struct DalleTimeEmbedding {
     pub linear1: Linear,
     pub linear2: Linear,
     pub embedding_dim: usize,
+    device: Device,
 }
 
 impl DalleTimeEmbedding {
     pub fn new(embedding_dim: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(embedding_dim, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        embedding_dim: usize,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let linear1 = Linear::new(embedding_dim, embedding_dim * 4, true);
         let linear2 = Linear::new(embedding_dim * 4, embedding_dim, true);
 
@@ -891,7 +1015,12 @@ impl DalleTimeEmbedding {
             linear1,
             linear2,
             embedding_dim,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, timestep: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -935,12 +1064,20 @@ pub struct DalleVAE {
     pub decoder: DalleVAEDecoder,
     pub quant_conv: Conv2d,
     pub post_quant_conv: Conv2d,
+    device: Device,
 }
 
 impl DalleVAE {
     pub fn new(config: DalleImageConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let encoder = DalleVAEEncoder::new(&config)?;
-        let decoder = DalleVAEDecoder::new(&config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DalleImageConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let encoder = DalleVAEEncoder::new_with_device(&config, device)?;
+        let decoder = DalleVAEDecoder::new_with_device(&config, device)?;
         let quant_conv = Conv2d::new(
             config.hidden_size,
             config.latent_channels * 2,
@@ -963,7 +1100,12 @@ impl DalleVAE {
             decoder,
             quant_conv,
             post_quant_conv,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn encode(&self, x: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -998,10 +1140,18 @@ pub struct DalleVAEEncoder {
     pub mid_block: Conv2d,
     pub norm_out: LayerNorm,
     pub conv_out: Conv2d,
+    device: Device,
 }
 
 impl DalleVAEEncoder {
     pub fn new(config: &DalleImageConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: &DalleImageConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let conv_in = Conv2d::new(config.num_channels, 128, (3, 3), (1, 1), (1, 1), false)?;
 
         let mut down_blocks = Vec::new();
@@ -1034,7 +1184,12 @@ impl DalleVAEEncoder {
             mid_block,
             norm_out,
             conv_out,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -1063,10 +1218,18 @@ pub struct DalleVAEDecoder {
     pub up_blocks: Vec<Conv2d>,
     pub norm_out: LayerNorm,
     pub conv_out: Conv2d,
+    device: Device,
 }
 
 impl DalleVAEDecoder {
     pub fn new(config: &DalleImageConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: &DalleImageConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let conv_in = Conv2d::new(
             config.hidden_size,
             config.hidden_size,
@@ -1100,7 +1263,12 @@ impl DalleVAEDecoder {
             up_blocks,
             norm_out,
             conv_out,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, z: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -1134,6 +1302,7 @@ pub struct DalleMLP {
     pub fc1: Linear,
     pub fc2: Linear,
     pub activation: ActivationType,
+    device: Device,
 }
 
 impl DalleMLP {
@@ -1141,6 +1310,15 @@ impl DalleMLP {
         hidden_size: usize,
         intermediate_size: usize,
         activation: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(hidden_size, intermediate_size, activation, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        hidden_size: usize,
+        intermediate_size: usize,
+        activation: &str,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let fc1 = Linear::new(hidden_size, intermediate_size, true);
         let fc2 = Linear::new(intermediate_size, hidden_size, true);
@@ -1157,7 +1335,12 @@ impl DalleMLP {
             fc1,
             fc2,
             activation,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {

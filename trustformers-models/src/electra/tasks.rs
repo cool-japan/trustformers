@@ -1,5 +1,6 @@
 use crate::electra::config::ElectraConfig;
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Layer;
@@ -9,27 +10,51 @@ pub struct ElectraForTokenClassification {
     pub classifier: trustformers_core::layers::linear::Linear,
     pub dropout: f32,
     pub num_labels: usize,
+    device: Device,
 }
 
 impl ElectraForTokenClassification {
     pub fn new(config: ElectraConfig, num_labels: usize) -> Result<Self> {
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: ElectraConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            electra: crate::electra::model::ElectraDiscriminator::new(&config)?,
-            classifier: trustformers_core::layers::linear::Linear::new(
+            electra: crate::electra::model::ElectraDiscriminator::new_with_device(&config, device)?,
+            classifier: trustformers_core::layers::linear::Linear::new_with_device(
                 config.discriminator_hidden_size,
                 num_labels,
                 true,
+                device,
             ),
             dropout,
             num_labels,
+            device,
         })
     }
 
     pub fn from_pretrained(model_name: &str, num_labels: usize) -> Result<Self> {
         let config = ElectraConfig::from_pretrained_name(model_name);
         Self::new(config, num_labels)
+    }
+
+    pub fn from_pretrained_with_device(
+        model_name: &str,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let config = ElectraConfig::from_pretrained_name(model_name);
+        Self::new_with_device(config, num_labels, device)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -70,26 +95,42 @@ pub struct ElectraForQuestionAnswering {
     pub electra: crate::electra::model::ElectraDiscriminator,
     pub qa_outputs: trustformers_core::layers::linear::Linear,
     pub dropout: f32,
+    device: Device,
 }
 
 impl ElectraForQuestionAnswering {
     pub fn new(config: ElectraConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: ElectraConfig, device: Device) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            electra: crate::electra::model::ElectraDiscriminator::new(&config)?,
-            qa_outputs: trustformers_core::layers::linear::Linear::new(
+            electra: crate::electra::model::ElectraDiscriminator::new_with_device(&config, device)?,
+            qa_outputs: trustformers_core::layers::linear::Linear::new_with_device(
                 config.discriminator_hidden_size,
                 2,
                 true,
+                device,
             ), // start and end logits
             dropout,
+            device,
         })
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
         let config = ElectraConfig::from_pretrained_name(model_name);
         Self::new(config)
+    }
+
+    pub fn from_pretrained_with_device(model_name: &str, device: Device) -> Result<Self> {
+        let config = ElectraConfig::from_pretrained_name(model_name);
+        Self::new_with_device(config, device)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -134,26 +175,42 @@ pub struct ElectraForMultipleChoice {
     pub electra: crate::electra::model::ElectraDiscriminator,
     pub classifier: trustformers_core::layers::linear::Linear,
     pub dropout: f32,
+    device: Device,
 }
 
 impl ElectraForMultipleChoice {
     pub fn new(config: ElectraConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: ElectraConfig, device: Device) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            electra: crate::electra::model::ElectraDiscriminator::new(&config)?,
-            classifier: trustformers_core::layers::linear::Linear::new(
+            electra: crate::electra::model::ElectraDiscriminator::new_with_device(&config, device)?,
+            classifier: trustformers_core::layers::linear::Linear::new_with_device(
                 config.discriminator_hidden_size,
                 1,
                 true,
+                device,
             ),
             dropout,
+            device,
         })
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
         let config = ElectraConfig::from_pretrained_name(model_name);
         Self::new(config)
+    }
+
+    pub fn from_pretrained_with_device(model_name: &str, device: Device) -> Result<Self> {
+        let config = ElectraConfig::from_pretrained_name(model_name);
+        Self::new_with_device(config, device)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(

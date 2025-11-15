@@ -29,8 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Warmup
         for _ in 0..5 {
             let _ = backend.flash_attention_with_cache(
-                &q_id, &k_id, &v_id,
-                batch_size, *seq_len, *seq_len, num_heads, head_dim
+                &q_id, &k_id, &v_id, batch_size, *seq_len, *seq_len, num_heads, head_dim,
             )?;
         }
 
@@ -39,8 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         for _ in 0..iterations {
             let _ = backend.flash_attention_with_cache(
-                &q_id, &k_id, &v_id,
-                batch_size, *seq_len, *seq_len, num_heads, head_dim
+                &q_id, &k_id, &v_id, batch_size, *seq_len, *seq_len, num_heads, head_dim,
             )?;
         }
         let flash_time = start.elapsed().as_secs_f64() / iterations as f64;
@@ -49,8 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         for _ in 0..iterations {
             let _ = backend.attention_with_cache_gpu_to_gpu(
-                &q_id, &k_id, &v_id,
-                batch_size, *seq_len, *seq_len, num_heads, head_dim
+                &q_id, &k_id, &v_id, batch_size, *seq_len, *seq_len, num_heads, head_dim,
             )?;
         }
         let standard_time = start.elapsed().as_secs_f64() / iterations as f64;

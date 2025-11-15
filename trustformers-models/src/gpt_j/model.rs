@@ -1,6 +1,7 @@
 use crate::gpt_j::config::GptJConfig;
 use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::{tensor_op_error, Result, TrustformersError};
 use trustformers_core::layers::{Embedding, LayerNorm, Linear};
 use trustformers_core::tensor::Tensor;
@@ -129,6 +130,48 @@ impl GptJModel {
             ln_f,
         })
     }
+
+    pub fn new_with_device(config: GptJConfig, device: Device) -> Result<Self> {
+        config.validate()?;
+
+        let wte = Embedding::new_with_device(config.vocab_size, config.n_embd, None, device)?;
+
+        let mut blocks = Vec::new();
+        for _ in 0..config.n_layer {
+            blocks.push(GptJBlock::new_with_device(&config, device)?);
+        }
+
+        let ln_f =
+            LayerNorm::new_with_device(vec![config.n_embd], config.layer_norm_epsilon, device)?;
+
+        Ok(Self {
+            config,
+            wte,
+            blocks,
+            ln_f,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.wte.weights_to_gpu(device)?;
+        for block in &mut self.blocks {
+            block.weights_to_gpu(device)?;
+        }
+        self.ln_f.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.wte.weights_to_gpu_cuda(device)?;
+        for block in &mut self.blocks {
+            block.weights_to_gpu_cuda(device)?;
+        }
+        self.ln_f.weights_to_gpu_cuda(device)?;
+        println!("✓ GptJModel: All layer weights cached on CUDA GPU");
+        Ok(())
+    }
 }
 
 impl GptJBlock {
@@ -138,6 +181,35 @@ impl GptJBlock {
         let mlp = GptJMLP::new(config)?;
 
         Ok(Self { ln_1, attn, mlp })
+    }
+
+    fn new_with_device(config: &GptJConfig, device: Device) -> Result<Self> {
+        let ln_1 =
+            LayerNorm::new_with_device(vec![config.n_embd], config.layer_norm_epsilon, device)?;
+        let attn = GptJAttention::new_with_device(config, device)?;
+        let mlp = GptJMLP::new_with_device(config, device)?;
+
+        Ok(Self { ln_1, attn, mlp })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.ln_1.parameter_count() + self.attn.parameter_count() + self.mlp.parameter_count()
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.ln_1.weights_to_gpu(device)?;
+        self.attn.weights_to_gpu(device)?;
+        self.mlp.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.ln_1.weights_to_gpu_cuda(device)?;
+        self.attn.weights_to_gpu_cuda(device)?;
+        self.mlp.weights_to_gpu_cuda(device)?;
+        Ok(())
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -176,6 +248,52 @@ impl GptJAttention {
             dropout: config.attn_pdrop,
             rotary_emb,
         })
+    }
+
+    fn new_with_device(config: &GptJConfig, device: Device) -> Result<Self> {
+        let head_dim = config.head_dim();
+        let rotary_emb = GptJRotaryEmbedding::new(
+            config.rotary_dim,
+            config.n_positions,
+            10000.0, // Standard RoPE theta value
+        );
+
+        Ok(Self {
+            q_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            k_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            v_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            out_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            num_heads: config.n_head,
+            head_dim,
+            rotary_dim: config.rotary_dim,
+            dropout: config.attn_pdrop,
+            rotary_emb,
+        })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.q_proj.parameter_count()
+            + self.k_proj.parameter_count()
+            + self.v_proj.parameter_count()
+            + self.out_proj.parameter_count()
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.q_proj.weights_to_gpu(device)?;
+        self.k_proj.weights_to_gpu(device)?;
+        self.v_proj.weights_to_gpu(device)?;
+        self.out_proj.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.q_proj.weights_to_gpu_cuda(device)?;
+        self.k_proj.weights_to_gpu_cuda(device)?;
+        self.v_proj.weights_to_gpu_cuda(device)?;
+        self.out_proj.weights_to_gpu_cuda(device)?;
+        Ok(())
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -224,6 +342,35 @@ impl GptJMLP {
             activation: config.activation_function.clone(),
             dropout: config.resid_pdrop,
         })
+    }
+
+    fn new_with_device(config: &GptJConfig, device: Device) -> Result<Self> {
+        let intermediate_size = 4 * config.n_embd; // GPT-J uses 4x hidden size for MLP
+
+        Ok(Self {
+            fc_in: Linear::new_with_device(config.n_embd, intermediate_size, true, device),
+            fc_out: Linear::new_with_device(intermediate_size, config.n_embd, true, device),
+            activation: config.activation_function.clone(),
+            dropout: config.resid_pdrop,
+        })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.fc_in.parameter_count() + self.fc_out.parameter_count()
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.fc_in.weights_to_gpu(device)?;
+        self.fc_out.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.fc_in.weights_to_gpu_cuda(device)?;
+        self.fc_out.weights_to_gpu_cuda(device)?;
+        Ok(())
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -317,6 +464,32 @@ impl GptJLMHeadModel {
             transformer,
             lm_head,
         })
+    }
+
+    pub fn new_with_device(config: GptJConfig, device: Device) -> Result<Self> {
+        let transformer = GptJModel::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.n_embd, config.vocab_size, false, device);
+
+        Ok(Self {
+            transformer,
+            lm_head,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.transformer.weights_to_gpu(device)?;
+        self.lm_head.weights_to_gpu(device)?;
+        println!("✓ GptJLMHeadModel: All model weights uploaded to Metal GPU");
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.transformer.weights_to_gpu_cuda(device)?;
+        self.lm_head.weights_to_gpu_cuda(device)?;
+        println!("✓ GptJLMHeadModel: All model weights uploaded to CUDA GPU");
+        Ok(())
     }
 }
 

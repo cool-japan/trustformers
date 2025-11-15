@@ -2,6 +2,7 @@ use crate::clip::config::{CLIPConfig, CLIPTextConfig, CLIPVisionConfig};
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, FeedForward, LayerNorm, Linear, MultiHeadAttention},
     tensor::Tensor,
@@ -15,11 +16,12 @@ pub struct CLIPVisionEmbeddings {
     position_embedding: Embedding,
     num_patches: usize,
     num_positions: usize,
+    device: Device,
 }
 
 impl CLIPVisionEmbeddings {
-    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
-        let patch_embedding = CLIPPatchEmbedding::new(config)?;
+    pub fn new_with_device(config: &CLIPVisionConfig, device: Device) -> Result<Self> {
+        let patch_embedding = CLIPPatchEmbedding::new_with_device(config, device)?;
         let num_patches = config.num_patches();
         let num_positions = config.seq_length();
 
@@ -32,7 +34,16 @@ impl CLIPVisionEmbeddings {
             position_embedding,
             num_patches,
             num_positions,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load weights for vision embeddings
@@ -130,10 +141,11 @@ pub struct CLIPPatchEmbedding {
     projection: Linear,
     patch_size: usize,
     hidden_size: usize,
+    device: Device,
 }
 
 impl CLIPPatchEmbedding {
-    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+    pub fn new_with_device(config: &CLIPVisionConfig, device: Device) -> Result<Self> {
         let in_features = config.patch_size * config.patch_size * config.num_channels;
         let projection = Linear::new(in_features, config.hidden_size, true);
 
@@ -141,7 +153,16 @@ impl CLIPPatchEmbedding {
             projection,
             patch_size: config.patch_size,
             hidden_size: config.hidden_size,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load weights for patch embedding
@@ -222,19 +243,29 @@ pub struct CLIPTextTransformer {
     embeddings: CLIPTextEmbeddings,
     encoder: CLIPEncoder<CLIPTextConfig>,
     final_layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl CLIPTextTransformer {
-    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
-        let embeddings = CLIPTextEmbeddings::new(config)?;
-        let encoder = CLIPEncoder::new(config)?;
+    pub fn new_with_device(config: &CLIPTextConfig, device: Device) -> Result<Self> {
+        let embeddings = CLIPTextEmbeddings::new_with_device(config, device)?;
+        let encoder = CLIPEncoder::new_with_device(config, device)?;
         let final_layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
 
         Ok(Self {
             embeddings,
             encoder,
             final_layer_norm,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load weights for text transformer
@@ -273,19 +304,29 @@ pub struct CLIPVisionTransformer {
     embeddings: CLIPVisionEmbeddings,
     encoder: CLIPEncoder<CLIPVisionConfig>,
     layernorm: LayerNorm,
+    device: Device,
 }
 
 impl CLIPVisionTransformer {
-    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
-        let embeddings = CLIPVisionEmbeddings::new(config)?;
-        let encoder = CLIPEncoder::new(config)?;
+    pub fn new_with_device(config: &CLIPVisionConfig, device: Device) -> Result<Self> {
+        let embeddings = CLIPVisionEmbeddings::new_with_device(config, device)?;
+        let encoder = CLIPEncoder::new_with_device(config, device)?;
         let layernorm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
 
         Ok(Self {
             embeddings,
             encoder,
             layernorm,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load weights for vision transformer
@@ -323,10 +364,11 @@ impl Layer for CLIPVisionTransformer {
 pub struct CLIPTextEmbeddings {
     token_embedding: Embedding,
     position_embedding: Embedding,
+    device: Device,
 }
 
 impl CLIPTextEmbeddings {
-    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
+    pub fn new_with_device(config: &CLIPTextConfig, device: Device) -> Result<Self> {
         let token_embedding = Embedding::new(config.vocab_size, config.hidden_size, None)?;
         let position_embedding =
             Embedding::new(config.max_position_embeddings, config.hidden_size, None)?;
@@ -334,7 +376,16 @@ impl CLIPTextEmbeddings {
         Ok(Self {
             token_embedding,
             position_embedding,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load weights for text embeddings
@@ -377,6 +428,7 @@ impl Layer for CLIPTextEmbeddings {
 /// Generic CLIP encoder (works for both text and vision)
 pub struct CLIPEncoder<C> {
     layers: Vec<CLIPEncoderLayer>,
+    device: Device,
     _phantom: std::marker::PhantomData<C>,
 }
 
@@ -384,7 +436,7 @@ impl<C> CLIPEncoder<C>
 where
     C: Config + Send + Sync,
 {
-    pub fn new(_config: &C) -> Result<Self> {
+    pub fn new_with_device(_config: &C, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
 
         // Note: This is a simplified implementation
@@ -402,13 +454,22 @@ where
 
         for _ in 0..12 {
             // This would come from config.num_hidden_layers
-            layers.push(CLIPEncoderLayer::new(&layer_config)?);
+            layers.push(CLIPEncoderLayer::new_with_device(&layer_config, device)?);
         }
 
         Ok(Self {
             layers,
+            device,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    pub fn new(_config: &C) -> Result<Self> {
+        Self::new_with_device(_config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load weights for all encoder layers
@@ -457,10 +518,11 @@ pub struct CLIPEncoderLayer {
     layer_norm1: LayerNorm,
     mlp: FeedForward,
     layer_norm2: LayerNorm,
+    device: Device,
 }
 
 impl CLIPEncoderLayer {
-    pub fn new(config: &CLIPEncoderLayerConfig) -> Result<Self> {
+    pub fn new_with_device(config: &CLIPEncoderLayerConfig, device: Device) -> Result<Self> {
         let self_attn = MultiHeadAttention::new(
             config.hidden_size,
             config.num_attention_heads,
@@ -476,7 +538,16 @@ impl CLIPEncoderLayer {
             layer_norm1,
             mlp,
             layer_norm2,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPEncoderLayerConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load weights for encoder layer
@@ -570,14 +641,15 @@ pub struct CLIPModel {
     text_projection: Linear,
     visual_projection: Linear,
     pub logit_scale: Tensor,
+    device: Device,
 }
 
 impl CLIPModel {
-    pub fn new(config: CLIPConfig) -> Result<Self> {
+    pub fn new_with_device(config: CLIPConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let text_model = CLIPTextTransformer::new(&config.text_config)?;
-        let vision_model = CLIPVisionTransformer::new(&config.vision_config)?;
+        let text_model = CLIPTextTransformer::new_with_device(&config.text_config, device)?;
+        let vision_model = CLIPVisionTransformer::new_with_device(&config.vision_config, device)?;
 
         let text_projection =
             Linear::new(config.text_config.hidden_size, config.projection_dim, false);
@@ -597,7 +669,16 @@ impl CLIPModel {
             text_projection,
             visual_projection,
             logit_scale,
+            device,
         })
+    }
+
+    pub fn new(config: CLIPConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Get text features

@@ -1,3 +1,4 @@
+use crate::device::Device;
 use crate::errors::Result;
 use crate::layers::Linear;
 use crate::ops::activations::gelu;
@@ -13,12 +14,21 @@ pub struct FeedForward {
 }
 
 impl FeedForward {
-    pub fn new(hidden_size: usize, intermediate_size: usize, dropout_prob: f32) -> Result<Self> {
-        Ok(Self {
-            dense: Linear::new(hidden_size, intermediate_size, true),
-            output: Linear::new(intermediate_size, hidden_size, true),
+    pub fn new_with_device(
+        hidden_size: usize,
+        intermediate_size: usize,
+        dropout_prob: f32,
+        device: Device,
+    ) -> Self {
+        Self {
+            dense: Linear::new_with_device(hidden_size, intermediate_size, true, device),
+            output: Linear::new_with_device(intermediate_size, hidden_size, true, device),
             dropout_prob,
-        })
+        }
+    }
+
+    pub fn new(hidden_size: usize, intermediate_size: usize, dropout_prob: f32) -> Result<Self> {
+        Ok(Self::new_with_device(hidden_size, intermediate_size, dropout_prob, Device::CPU))
     }
 
     pub fn parameter_count(&self) -> usize {

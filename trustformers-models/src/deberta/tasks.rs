@@ -1,5 +1,6 @@
 use crate::deberta::config::DebertaConfig;
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::linear::Linear;
 use trustformers_core::ops::activations::gelu;
@@ -10,18 +11,32 @@ pub struct DebertaForTokenClassification {
     pub classifier: Linear,
     pub dropout: f32,
     pub num_labels: usize,
+    device: Device,
 }
 
 impl DebertaForTokenClassification {
     pub fn new(config: DebertaConfig, num_labels: usize) -> Result<Self> {
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DebertaConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            deberta: crate::deberta::model::DebertaModel::new(config.clone())?,
-            classifier: Linear::new(config.hidden_size, num_labels, true),
+            deberta: crate::deberta::model::DebertaModel::new_with_device(config.clone(), device)?,
+            classifier: Linear::new_with_device(config.hidden_size, num_labels, true, device),
             dropout,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str, num_labels: usize) -> Result<Self> {
@@ -66,17 +81,27 @@ pub struct DebertaForQuestionAnswering {
     pub deberta: crate::deberta::model::DebertaModel,
     pub qa_outputs: Linear,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaForQuestionAnswering {
     pub fn new(config: DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DebertaConfig, device: Device) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            deberta: crate::deberta::model::DebertaModel::new(config.clone())?,
-            qa_outputs: Linear::new(config.hidden_size, 2, true), // start and end logits
+            deberta: crate::deberta::model::DebertaModel::new_with_device(config.clone(), device)?,
+            qa_outputs: Linear::new_with_device(config.hidden_size, 2, true, device), // start and end logits
             dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
@@ -126,18 +151,28 @@ pub struct DebertaForMultipleChoice {
     pub pooler: Linear,
     pub classifier: Linear,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaForMultipleChoice {
     pub fn new(config: DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DebertaConfig, device: Device) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            deberta: crate::deberta::model::DebertaModel::new(config.clone())?,
-            pooler: Linear::new(config.hidden_size, config.hidden_size, true),
-            classifier: Linear::new(config.hidden_size, 1, true),
+            deberta: crate::deberta::model::DebertaModel::new_with_device(config.clone(), device)?,
+            pooler: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            classifier: Linear::new_with_device(config.hidden_size, 1, true, device),
             dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {

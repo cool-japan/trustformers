@@ -1,5 +1,6 @@
 use crate::electra::config::ElectraConfig;
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
+use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{
     attention::MultiHeadAttention, embedding::Embedding, feedforward::FeedForward,
@@ -15,29 +16,46 @@ pub struct ElectraEmbeddings {
     pub token_type_embeddings: Embedding,
     pub layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl ElectraEmbeddings {
     pub fn new(config: &ElectraConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ElectraConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            word_embeddings: Embedding::new(
+            word_embeddings: Embedding::new_with_device(
                 config.vocab_size,
                 config.embedding_size,
                 Some(config.pad_token_id as usize),
+                device,
             )?,
-            position_embeddings: Embedding::new(
+            position_embeddings: Embedding::new_with_device(
                 config.max_position_embeddings,
                 config.embedding_size,
                 None,
+                device,
             )?,
-            token_type_embeddings: Embedding::new(
+            token_type_embeddings: Embedding::new_with_device(
                 config.type_vocab_size,
                 config.embedding_size,
                 None,
+                device,
             )?,
-            layer_norm: LayerNorm::new(vec![config.embedding_size], config.layer_norm_eps)?,
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.embedding_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -130,6 +148,7 @@ pub struct ElectraLayer {
     pub attention_layer_norm: LayerNorm,
     pub output_layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl ElectraLayer {
@@ -139,22 +158,53 @@ impl ElectraLayer {
         num_heads: usize,
         intermediate_size: usize,
     ) -> Result<Self> {
+        Self::new_with_device(
+            config,
+            hidden_size,
+            num_heads,
+            intermediate_size,
+            Device::CPU,
+        )
+    }
+
+    pub fn new_with_device(
+        config: &ElectraConfig,
+        hidden_size: usize,
+        num_heads: usize,
+        intermediate_size: usize,
+        device: Device,
+    ) -> Result<Self> {
         Ok(Self {
-            attention: MultiHeadAttention::new(
+            attention: MultiHeadAttention::new_with_device(
                 hidden_size,
                 num_heads,
                 config.attention_probs_dropout_prob,
                 true,
+                device,
             )?,
-            feed_forward: FeedForward::new(
+            feed_forward: FeedForward::new_with_device(
                 hidden_size,
                 intermediate_size,
                 config.hidden_dropout_prob,
+                device,
             )?,
-            attention_layer_norm: LayerNorm::new(vec![hidden_size], config.layer_norm_eps)?,
-            output_layer_norm: LayerNorm::new(vec![hidden_size], config.layer_norm_eps)?,
+            attention_layer_norm: LayerNorm::new_with_device(
+                vec![hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
+            output_layer_norm: LayerNorm::new_with_device(
+                vec![hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -234,6 +284,7 @@ impl ElectraLayer {
 #[derive(Debug, Clone)]
 pub struct ElectraEncoder {
     pub layers: Vec<ElectraLayer>,
+    device: Device,
 }
 
 impl ElectraEncoder {
@@ -244,17 +295,40 @@ impl ElectraEncoder {
         num_heads: usize,
         intermediate_size: usize,
     ) -> Result<Self> {
+        Self::new_with_device(
+            config,
+            hidden_size,
+            num_layers,
+            num_heads,
+            intermediate_size,
+            Device::CPU,
+        )
+    }
+
+    pub fn new_with_device(
+        config: &ElectraConfig,
+        hidden_size: usize,
+        num_layers: usize,
+        num_heads: usize,
+        intermediate_size: usize,
+        device: Device,
+    ) -> Result<Self> {
         let mut layers = Vec::new();
         for _ in 0..num_layers {
-            layers.push(ElectraLayer::new(
+            layers.push(ElectraLayer::new_with_device(
                 config,
                 hidden_size,
                 num_heads,
                 intermediate_size,
+                device,
             )?);
         }
 
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -278,35 +352,56 @@ pub struct ElectraGenerator {
     pub layer_norm: LayerNorm,
     pub lm_head: Linear,
     pub config: ElectraConfig,
+    device: Device,
 }
 
 impl ElectraGenerator {
     pub fn new(config: &ElectraConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ElectraConfig, device: Device) -> Result<Self> {
         // Create projection layer if embedding size differs from generator hidden size
         let embeddings_project = if config.embedding_size != config.generator_hidden_size {
-            Some(Linear::new(
+            Some(Linear::new_with_device(
                 config.embedding_size,
                 config.generator_hidden_size,
                 true,
+                device,
             ))
         } else {
             None
         };
 
         Ok(Self {
-            embeddings: ElectraEmbeddings::new(config)?,
+            embeddings: ElectraEmbeddings::new_with_device(config, device)?,
             embeddings_project,
-            encoder: ElectraEncoder::new(
+            encoder: ElectraEncoder::new_with_device(
                 config,
                 config.generator_hidden_size,
                 config.generator_num_hidden_layers,
                 config.generator_num_attention_heads,
                 config.generator_intermediate_size,
+                device,
             )?,
-            layer_norm: LayerNorm::new(vec![config.generator_hidden_size], config.layer_norm_eps)?,
-            lm_head: Linear::new(config.generator_hidden_size, config.vocab_size, true),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.generator_hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
+            lm_head: Linear::new_with_device(
+                config.generator_hidden_size,
+                config.vocab_size,
+                true,
+                device,
+            ),
             config: config.clone(),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -388,37 +483,50 @@ pub struct ElectraDiscriminator {
     pub encoder: ElectraEncoder,
     pub layer_norm: LayerNorm,
     pub config: ElectraConfig,
+    device: Device,
 }
 
 impl ElectraDiscriminator {
     pub fn new(config: &ElectraConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ElectraConfig, device: Device) -> Result<Self> {
         // Create projection layer if embedding size differs from discriminator hidden size
         let embeddings_project = if config.embedding_size != config.discriminator_hidden_size {
-            Some(Linear::new(
+            Some(Linear::new_with_device(
                 config.embedding_size,
                 config.discriminator_hidden_size,
                 true,
+                device,
             ))
         } else {
             None
         };
 
         Ok(Self {
-            embeddings: ElectraEmbeddings::new(config)?,
+            embeddings: ElectraEmbeddings::new_with_device(config, device)?,
             embeddings_project,
-            encoder: ElectraEncoder::new(
+            encoder: ElectraEncoder::new_with_device(
                 config,
                 config.discriminator_hidden_size,
                 config.discriminator_num_hidden_layers,
                 config.discriminator_num_attention_heads,
                 config.discriminator_intermediate_size,
+                device,
             )?,
-            layer_norm: LayerNorm::new(
+            layer_norm: LayerNorm::new_with_device(
                 vec![config.discriminator_hidden_size],
                 config.layer_norm_eps,
+                device,
             )?,
             config: config.clone(),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -483,20 +591,35 @@ pub struct ElectraModel {
     pub generator: ElectraGenerator,
     pub discriminator: ElectraDiscriminator,
     pub config: ElectraConfig,
+    device: Device,
 }
 
 impl ElectraModel {
     pub fn new(config: ElectraConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: ElectraConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            generator: ElectraGenerator::new(&config)?,
-            discriminator: ElectraDiscriminator::new(&config)?,
+            generator: ElectraGenerator::new_with_device(&config, device)?,
+            discriminator: ElectraDiscriminator::new_with_device(&config, device)?,
             config,
+            device,
         })
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
         let config = ElectraConfig::from_pretrained_name(model_name);
         Self::new(config)
+    }
+
+    pub fn from_pretrained_with_device(model_name: &str, device: Device) -> Result<Self> {
+        let config = ElectraConfig::from_pretrained_name(model_name);
+        Self::new_with_device(config, device)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn get_generator(&self) -> &ElectraGenerator {
@@ -513,19 +636,39 @@ impl ElectraModel {
 pub struct ElectraForPreTraining {
     pub electra: ElectraModel,
     pub discriminator_head: Linear,
+    device: Device,
 }
 
 impl ElectraForPreTraining {
     pub fn new(config: ElectraConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: ElectraConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            electra: ElectraModel::new(config.clone())?,
-            discriminator_head: Linear::new(config.discriminator_hidden_size, 1, true),
+            electra: ElectraModel::new_with_device(config.clone(), device)?,
+            discriminator_head: Linear::new_with_device(
+                config.discriminator_hidden_size,
+                1,
+                true,
+                device,
+            ),
+            device,
         })
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
         let config = ElectraConfig::from_pretrained_name(model_name);
         Self::new(config)
+    }
+
+    pub fn from_pretrained_with_device(model_name: &str, device: Device) -> Result<Self> {
+        let config = ElectraConfig::from_pretrained_name(model_name);
+        Self::new_with_device(config, device)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -576,23 +719,51 @@ pub struct ElectraForSequenceClassification {
     pub classifier: Linear,
     pub dropout: f32,
     pub num_labels: usize,
+    device: Device,
 }
 
 impl ElectraForSequenceClassification {
     pub fn new(config: ElectraConfig, num_labels: usize) -> Result<Self> {
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: ElectraConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            electra: ElectraDiscriminator::new(&config)?,
-            classifier: Linear::new(config.discriminator_hidden_size, num_labels, true),
+            electra: ElectraDiscriminator::new_with_device(&config, device)?,
+            classifier: Linear::new_with_device(
+                config.discriminator_hidden_size,
+                num_labels,
+                true,
+                device,
+            ),
             dropout,
             num_labels,
+            device,
         })
     }
 
     pub fn from_pretrained(model_name: &str, num_labels: usize) -> Result<Self> {
         let config = ElectraConfig::from_pretrained_name(model_name);
         Self::new(config, num_labels)
+    }
+
+    pub fn from_pretrained_with_device(
+        model_name: &str,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let config = ElectraConfig::from_pretrained_name(model_name);
+        Self::new_with_device(config, num_labels, device)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(

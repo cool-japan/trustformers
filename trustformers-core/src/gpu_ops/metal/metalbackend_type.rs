@@ -3,6 +3,8 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::common::*;
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::types::BufferCache;
 
 /// Metal GPU backend for matrix multiplication and element-wise operations

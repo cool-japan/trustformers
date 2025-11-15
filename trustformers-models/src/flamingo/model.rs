@@ -3,6 +3,7 @@ use crate::flamingo::config::{
     FlamingoXAttentionConfig,
 };
 use trustformers_core::{
+    device::Device,
     kernels::fused_ops::ActivationType,
     layers::{
         attention::{AttentionConfig, MultiHeadAttention},
@@ -30,20 +31,28 @@ pub struct FlamingoModel {
     pub vision_projection: Linear,
     /// Media token embeddings
     pub media_token_embedding: Embedding,
+    /// Device
+    device: Device,
 }
 
 impl FlamingoModel {
-    /// Create a new Flamingo model
-    pub fn new(config: FlamingoConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        let vision_encoder = FlamingoVisionEncoder::new(config.vision_config.clone())?;
-        let language_model = FlamingoLanguageModel::new(
+    /// Create a new Flamingo model with a specific device
+    pub fn new_with_device(
+        config: FlamingoConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let vision_encoder =
+            FlamingoVisionEncoder::new_with_device(config.vision_config.clone(), device)?;
+        let language_model = FlamingoLanguageModel::new_with_device(
             config.language_config.clone(),
             config.cross_attention_config.clone(),
             config.cross_attention_layers.clone(),
+            device,
         )?;
-        let perceiver_resampler = PerceiverResampler::new(
+        let perceiver_resampler = PerceiverResampler::new_with_device(
             config.perceiver_config.clone(),
             config.vision_config.hidden_size,
+            device,
         )?;
 
         let vision_projection = Linear::new(
@@ -65,7 +74,18 @@ impl FlamingoModel {
             perceiver_resampler,
             vision_projection,
             media_token_embedding,
+            device,
         })
+    }
+
+    /// Create a new Flamingo model (defaults to CPU)
+    pub fn new(config: FlamingoConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    /// Get the device the model is on
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass for training
@@ -248,10 +268,14 @@ pub struct FlamingoVisionEncoder {
     pub pre_layer_norm: LayerNorm,
     pub layers: Vec<FlamingoVisionLayer>,
     pub post_layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl FlamingoVisionEncoder {
-    pub fn new(config: FlamingoVisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_with_device(
+        config: FlamingoVisionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let patch_embedding = Conv2d::new(
             config.num_channels,
             config.hidden_size,
@@ -271,7 +295,7 @@ impl FlamingoVisionEncoder {
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(FlamingoVisionLayer::new(&config)?);
+            layers.push(FlamingoVisionLayer::new_with_device(&config, device)?);
         }
 
         Ok(Self {
@@ -282,7 +306,16 @@ impl FlamingoVisionEncoder {
             pre_layer_norm,
             layers,
             post_layer_norm,
+            device,
         })
+    }
+
+    pub fn new(config: FlamingoVisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -324,10 +357,14 @@ pub struct FlamingoVisionLayer {
     pub mlp: FlamingoMLP,
     pub layer_norm1: LayerNorm,
     pub layer_norm2: LayerNorm,
+    device: Device,
 }
 
 impl FlamingoVisionLayer {
-    pub fn new(config: &FlamingoVisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_with_device(
+        config: &FlamingoVisionConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let attention_config = AttentionConfig {
             hidden_size: config.hidden_size,
             num_heads: config.num_attention_heads,
@@ -343,10 +380,11 @@ impl FlamingoVisionLayer {
             attention_config.dropout_prob,
             attention_config.bias,
         )?;
-        let mlp = FlamingoMLP::new(
+        let mlp = FlamingoMLP::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             &config.hidden_act,
+            device,
         )?;
         let layer_norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
         let layer_norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
@@ -356,7 +394,16 @@ impl FlamingoVisionLayer {
             mlp,
             layer_norm1,
             layer_norm2,
+            device,
         })
+    }
+
+    pub fn new(config: &FlamingoVisionConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -384,13 +431,15 @@ pub struct FlamingoLanguageModel {
     pub final_layer_norm: LayerNorm,
     pub lm_head: Linear,
     pub cross_attention_layers: Vec<usize>,
+    device: Device,
 }
 
 impl FlamingoLanguageModel {
-    pub fn new(
+    pub fn new_with_device(
         config: FlamingoLanguageConfig,
         cross_attention_config: FlamingoXAttentionConfig,
         cross_attention_layers: Vec<usize>,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let token_embedding = Embedding::new(config.vocab_size, config.hidden_size, None)?;
         let position_embedding =
@@ -399,10 +448,11 @@ impl FlamingoLanguageModel {
         let mut layers = Vec::new();
         for i in 0..config.num_hidden_layers {
             let has_cross_attention = cross_attention_layers.contains(&i);
-            layers.push(FlamingoLanguageLayer::new(
+            layers.push(FlamingoLanguageLayer::new_with_device(
                 &config,
                 &cross_attention_config,
                 has_cross_attention,
+                device,
             )?);
         }
 
@@ -418,7 +468,25 @@ impl FlamingoLanguageModel {
             final_layer_norm,
             lm_head,
             cross_attention_layers,
+            device,
         })
+    }
+
+    pub fn new(
+        config: FlamingoLanguageConfig,
+        cross_attention_config: FlamingoXAttentionConfig,
+        cross_attention_layers: Vec<usize>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(
+            config,
+            cross_attention_config,
+            cross_attention_layers,
+            Device::CPU,
+        )
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -484,13 +552,15 @@ pub struct FlamingoLanguageLayer {
     pub layer_norm1: LayerNorm,
     pub layer_norm2: LayerNorm,
     pub layer_norm3: Option<LayerNorm>, // For cross-attention
+    device: Device,
 }
 
 impl FlamingoLanguageLayer {
-    pub fn new(
+    pub fn new_with_device(
         config: &FlamingoLanguageConfig,
         cross_attention_config: &FlamingoXAttentionConfig,
         has_cross_attention: bool,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let attention_config = AttentionConfig {
             hidden_size: config.hidden_size,
@@ -507,17 +577,21 @@ impl FlamingoLanguageLayer {
             attention_config.dropout_prob,
             attention_config.bias,
         )?;
-        let mlp = FlamingoMLP::new(
+        let mlp = FlamingoMLP::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             &config.hidden_act,
+            device,
         )?;
         let layer_norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
         let layer_norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
 
         let (cross_attention, layer_norm3) = if has_cross_attention {
-            let cross_attn =
-                GatedCrossAttention::new(config.hidden_size, cross_attention_config.clone())?;
+            let cross_attn = GatedCrossAttention::new_with_device(
+                config.hidden_size,
+                cross_attention_config.clone(),
+                device,
+            )?;
             let norm3 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps as f32)?;
             (Some(cross_attn), Some(norm3))
         } else {
@@ -531,7 +605,25 @@ impl FlamingoLanguageLayer {
             layer_norm1,
             layer_norm2,
             layer_norm3,
+            device,
         })
+    }
+
+    pub fn new(
+        config: &FlamingoLanguageConfig,
+        cross_attention_config: &FlamingoXAttentionConfig,
+        has_cross_attention: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(
+            config,
+            cross_attention_config,
+            has_cross_attention,
+            Device::CPU,
+        )
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -587,12 +679,14 @@ pub struct GatedCrossAttention {
     pub o_proj: Linear,
     pub gate_proj: Linear,
     pub layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl GatedCrossAttention {
-    pub fn new(
+    pub fn new_with_device(
         hidden_size: usize,
         config: FlamingoXAttentionConfig,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let q_proj = Linear::new(hidden_size, config.cross_attention_dim, config.use_bias);
         let k_proj = Linear::new(
@@ -617,7 +711,19 @@ impl GatedCrossAttention {
             o_proj,
             gate_proj,
             layer_norm,
+            device,
         })
+    }
+
+    pub fn new(
+        hidden_size: usize,
+        config: FlamingoXAttentionConfig,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(hidden_size, config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -705,12 +811,14 @@ pub struct PerceiverResampler {
     pub input_projection: Linear,
     pub layers: Vec<PerceiverLayer>,
     pub output_projection: Linear,
+    device: Device,
 }
 
 impl PerceiverResampler {
-    pub fn new(
+    pub fn new_with_device(
         config: FlamingoPerceiverConfig,
         input_dim: usize,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let latent_queries = Tensor::randn(&[config.num_latents, config.latent_dim])?;
         let input_projection = Linear::new(input_dim, config.latent_dim, false);
@@ -718,7 +826,7 @@ impl PerceiverResampler {
 
         let mut layers = Vec::new();
         for _ in 0..config.num_layers {
-            layers.push(PerceiverLayer::new(&config)?);
+            layers.push(PerceiverLayer::new_with_device(&config, device)?);
         }
 
         Ok(Self {
@@ -727,7 +835,19 @@ impl PerceiverResampler {
             input_projection,
             layers,
             output_projection,
+            device,
         })
+    }
+
+    pub fn new(
+        config: FlamingoPerceiverConfig,
+        input_dim: usize,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, input_dim, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, vision_features: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
@@ -764,10 +884,14 @@ pub struct PerceiverLayer {
     pub layer_norm1: LayerNorm,
     pub layer_norm2: LayerNorm,
     pub layer_norm3: LayerNorm,
+    device: Device,
 }
 
 impl PerceiverLayer {
-    pub fn new(config: &FlamingoPerceiverConfig) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_with_device(
+        config: &FlamingoPerceiverConfig,
+        device: Device,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let cross_attention_config = AttentionConfig {
             hidden_size: config.latent_dim,
             num_heads: config.num_heads,
@@ -788,7 +912,12 @@ impl PerceiverLayer {
 
         let cross_attention = MultiHeadAttention::from_config(cross_attention_config)?;
         let self_attention = MultiHeadAttention::from_config(self_attention_config)?;
-        let mlp = FlamingoMLP::new(config.latent_dim, config.mlp_hidden_size, "gelu")?;
+        let mlp = FlamingoMLP::new_with_device(
+            config.latent_dim,
+            config.mlp_hidden_size,
+            "gelu",
+            device,
+        )?;
 
         let layer_norm1 = LayerNorm::new(vec![config.latent_dim], config.layer_norm_eps as f32)?;
         let layer_norm2 = LayerNorm::new(vec![config.latent_dim], config.layer_norm_eps as f32)?;
@@ -801,7 +930,16 @@ impl PerceiverLayer {
             layer_norm1,
             layer_norm2,
             layer_norm3,
+            device,
         })
+    }
+
+    pub fn new(config: &FlamingoPerceiverConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -835,13 +973,15 @@ pub struct FlamingoMLP {
     pub fc1: Linear,
     pub fc2: Linear,
     pub activation: ActivationType,
+    device: Device,
 }
 
 impl FlamingoMLP {
-    pub fn new(
+    pub fn new_with_device(
         hidden_size: usize,
         intermediate_size: usize,
         activation: &str,
+        device: Device,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let fc1 = Linear::new(hidden_size, intermediate_size, true);
         let fc2 = Linear::new(intermediate_size, hidden_size, true);
@@ -858,7 +998,20 @@ impl FlamingoMLP {
             fc1,
             fc2,
             activation,
+            device,
         })
+    }
+
+    pub fn new(
+        hidden_size: usize,
+        intermediate_size: usize,
+        activation: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::new_with_device(hidden_size, intermediate_size, activation, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {

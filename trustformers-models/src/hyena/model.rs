@@ -1,6 +1,7 @@
 use crate::hyena::config::HyenaConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
@@ -23,17 +24,24 @@ pub struct HyenaFilter {
     use_fft: bool,
     w: f32,
     wd: f32,
+    device: Device,
 }
 
 impl HyenaFilter {
     pub fn new(config: &HyenaConfig, seq_len: usize) -> Result<Self> {
-        let filter_fn = Linear::new(config.filter_order, config.hidden_size, config.bias);
+        Self::new_with_device(config, seq_len, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, seq_len: usize, device: Device) -> Result<Self> {
+        let filter_fn =
+            Linear::new_with_device(config.filter_order, config.hidden_size, config.bias, device);
 
         let modulation = if config.modulate {
-            Some(Linear::new(
+            Some(Linear::new_with_device(
                 config.hidden_size,
                 config.hidden_size,
                 config.bias,
+                device,
             ))
         } else {
             None
@@ -48,7 +56,12 @@ impl HyenaFilter {
             use_fft: config.use_flashfft,
             w: config.w,
             wd: config.wd,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Generate implicit filter coefficients
@@ -193,31 +206,42 @@ pub struct HyenaOperator {
 
     // Local convolution for short-range dependencies
     local_conv: Option<LocalConvolution>,
+
+    device: Device,
 }
 
 impl HyenaOperator {
     pub fn new(config: &HyenaConfig, seq_len: usize) -> Result<Self> {
+        Self::new_with_device(config, seq_len, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, seq_len: usize, device: Device) -> Result<Self> {
         let mut projections = Vec::new();
         let mut filters = Vec::new();
 
         // Create projections and filters for each order
         for _ in 0..config.order {
-            projections.push(Linear::new(
+            projections.push(Linear::new_with_device(
                 config.hidden_size,
                 config.hidden_size,
                 config.bias,
+                device,
             ));
-            filters.push(HyenaFilter::new(config, seq_len)?);
+            filters.push(HyenaFilter::new_with_device(config, seq_len, device)?);
         }
 
-        let output_proj = Linear::new(
+        let output_proj = Linear::new_with_device(
             config.hidden_size * config.order,
             config.hidden_size,
             config.bias,
+            device,
         );
 
-        let local_conv =
-            if config.local_order > 0 { Some(LocalConvolution::new(config)?) } else { None };
+        let local_conv = if config.local_order > 0 {
+            Some(LocalConvolution::new_with_device(config, device)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             order: config.order,
@@ -226,7 +250,12 @@ impl HyenaOperator {
             filters,
             output_proj,
             local_conv,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -315,25 +344,36 @@ pub struct LocalConvolution {
     kernel_size: usize,
     conv: Linear,
     padding: usize,
+    device: Device,
 }
 
 impl LocalConvolution {
     pub fn new(config: &HyenaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, device: Device) -> Result<Self> {
         let kernel_size = config.conv_kernel_size;
         let padding = kernel_size / 2;
 
         // This would be a 1D convolution in practice
-        let conv = Linear::new(
+        let conv = Linear::new_with_device(
             config.hidden_size * kernel_size,
             config.hidden_size,
             config.bias,
+            device,
         );
 
         Ok(Self {
             kernel_size,
             conv,
             padding,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -448,14 +488,21 @@ pub struct HyenaBlock {
     norm2: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl HyenaBlock {
     pub fn new(config: &HyenaConfig, seq_len: usize) -> Result<Self> {
-        let hyena_op = HyenaOperator::new(config, seq_len)?;
-        let mlp = HyenaMLp::new(config)?;
-        let norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
-        let norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        Self::new_with_device(config, seq_len, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, seq_len: usize, device: Device) -> Result<Self> {
+        let hyena_op = HyenaOperator::new_with_device(config, seq_len, device)?;
+        let mlp = HyenaMLp::new_with_device(config, device)?;
+        let norm1 =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
+        let norm2 =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             hyena_op,
@@ -463,7 +510,12 @@ impl HyenaBlock {
             norm1,
             norm2,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -500,19 +552,39 @@ pub struct HyenaMLp {
     activation: String,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl HyenaMLp {
     pub fn new(config: &HyenaConfig) -> Result<Self> {
-        let up_proj = Linear::new(config.hidden_size, config.intermediate_size, config.bias);
-        let down_proj = Linear::new(config.intermediate_size, config.hidden_size, config.bias);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, device: Device) -> Result<Self> {
+        let up_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.intermediate_size,
+            config.bias,
+            device,
+        );
+        let down_proj = Linear::new_with_device(
+            config.intermediate_size,
+            config.hidden_size,
+            config.bias,
+            device,
+        );
 
         Ok(Self {
             up_proj,
             down_proj,
             activation: config.hidden_act.clone(),
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -547,34 +619,47 @@ pub struct HyenaEmbeddings {
     layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl HyenaEmbeddings {
     pub fn new(config: &HyenaConfig) -> Result<Self> {
-        let word_embeddings = Embedding::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, device: Device) -> Result<Self> {
+        let word_embeddings = Embedding::new_with_device(
             config.vocab_size,
             config.hidden_size,
             Some(config.pad_token_id as usize),
+            device,
         )?;
 
         let position_embeddings = if config.use_positional_embeddings {
-            Some(Embedding::new(
+            Some(Embedding::new_with_device(
                 config.max_position_embeddings,
                 config.hidden_size,
                 None,
+                device,
             )?)
         } else {
             None
         };
 
-        let layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        let layer_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             word_embeddings,
             position_embeddings,
             layer_norm,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -618,27 +703,42 @@ pub struct HyenaModel {
     embeddings: HyenaEmbeddings,
     layers: Vec<HyenaBlock>,
     final_norm: LayerNorm,
+    device: Device,
 }
 
 impl HyenaModel {
     pub fn new(config: HyenaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: HyenaConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let embeddings = HyenaEmbeddings::new(&config)?;
+        let embeddings = HyenaEmbeddings::new_with_device(&config, device)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(HyenaBlock::new(&config, config.max_position_embeddings)?);
+            layers.push(HyenaBlock::new_with_device(
+                &config,
+                config.max_position_embeddings,
+                device,
+            )?);
         }
 
-        let final_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        let final_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             config,
             embeddings,
             layers,
             final_norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -687,14 +787,28 @@ impl Model for HyenaModel {
 pub struct HyenaForLanguageModeling {
     hyena: HyenaModel,
     lm_head: Linear,
+    device: Device,
 }
 
 impl HyenaForLanguageModeling {
     pub fn new(config: HyenaConfig) -> Result<Self> {
-        let hyena = HyenaModel::new(config.clone())?;
-        let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { hyena, lm_head })
+    pub fn new_with_device(config: HyenaConfig, device: Device) -> Result<Self> {
+        let hyena = HyenaModel::new_with_device(config.clone(), device)?;
+        let lm_head =
+            Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
+
+        Ok(Self {
+            hyena,
+            lm_head,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -727,18 +841,28 @@ pub struct HyenaForSequenceClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl HyenaForSequenceClassification {
     pub fn new(config: HyenaConfig, num_labels: usize) -> Result<Self> {
-        let hyena = HyenaModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(config: HyenaConfig, num_labels: usize, device: Device) -> Result<Self> {
+        let hyena = HyenaModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             hyena,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

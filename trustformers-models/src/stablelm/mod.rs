@@ -91,10 +91,21 @@ impl StableLMVariant {
     }
 }
 
+use trustformers_core::device::Device;
+
 /// Helper function to create a StableLM model from a variant
 pub fn create_model(variant: StableLMVariant) -> Result<StableLMForCausalLM, TrustformersError> {
     let config = variant.config();
     StableLMForCausalLM::new(config)
+}
+
+/// Helper function to create a StableLM model from a variant with device support
+pub fn create_model_with_device(
+    variant: StableLMVariant,
+    device: Device,
+) -> Result<StableLMForCausalLM, TrustformersError> {
+    let config = variant.config();
+    StableLMForCausalLM::new_with_device(config, device)
 }
 
 /// Helper function to create a StableLM model from a HuggingFace model name
@@ -102,6 +113,15 @@ pub fn from_pretrained_name(
     model_name: &str,
 ) -> Option<Result<StableLMForCausalLM, TrustformersError>> {
     StableLMConfig::from_pretrained_name(model_name).map(StableLMForCausalLM::new)
+}
+
+/// Helper function to create a StableLM model from a HuggingFace model name with device support
+pub fn from_pretrained_name_with_device(
+    model_name: &str,
+    device: Device,
+) -> Option<Result<StableLMForCausalLM, TrustformersError>> {
+    StableLMConfig::from_pretrained_name(model_name)
+        .map(|config| StableLMForCausalLM::new_with_device(config, device))
 }
 
 #[cfg(test)]

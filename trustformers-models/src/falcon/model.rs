@@ -2,6 +2,7 @@ use crate::falcon::config::FalconConfig;
 use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     ops::activations::{gelu, silu},
@@ -14,10 +15,15 @@ use trustformers_core::{
 pub struct ALiBi {
     slopes: Tensor,
     num_heads: usize,
+    device: Device,
 }
 
 impl ALiBi {
     pub fn new(num_heads: usize) -> Result<Self> {
+        Self::new_with_device(num_heads, Device::CPU)
+    }
+
+    pub fn new_with_device(num_heads: usize, device: Device) -> Result<Self> {
         // Calculate slopes based on the geometric sequence pattern
         let mut slopes = Vec::new();
         let ratio = 2.0_f32.powf(-8.0 / num_heads as f32);
@@ -42,7 +48,12 @@ impl ALiBi {
         Ok(Self {
             slopes: slopes_tensor,
             num_heads,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Apply ALiBi bias to attention scores
@@ -98,12 +109,17 @@ pub struct FalconAttention {
     attention_dropout: f32,
     #[allow(dead_code)]
     use_flash_attention: bool,
+    device: Device,
     // Note: Multi-query attention is implemented through num_kv_heads parameter
     // Future enhancement: could add dedicated MultiQueryAttention component when needed
 }
 
 impl FalconAttention {
     pub fn new(config: &FalconConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FalconConfig, device: Device) -> Result<Self> {
         let head_dim = config.head_dim();
         let num_kv_heads = config.num_kv_heads();
 
@@ -120,7 +136,11 @@ impl FalconAttention {
             config.bias,
         );
 
-        let alibi = if config.alibi { Some(ALiBi::new(config.num_attention_heads)?) } else { None };
+        let alibi = if config.alibi {
+            Some(ALiBi::new_with_device(config.num_attention_heads, device)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             q_proj,
@@ -133,7 +153,12 @@ impl FalconAttention {
             head_dim,
             attention_dropout: config.attention_dropout,
             use_flash_attention: config.use_flash_attention.unwrap_or(false),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Create causal mask for autoregressive attention
@@ -258,10 +283,15 @@ pub struct FalconMLP {
     dense_h_to_4h: Linear,
     dense_4h_to_h: Linear,
     activation: String,
+    device: Device,
 }
 
 impl FalconMLP {
     pub fn new(config: &FalconConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FalconConfig, device: Device) -> Result<Self> {
         let intermediate_size = 4 * config.hidden_size;
 
         let dense_h_to_4h = Linear::new(config.hidden_size, intermediate_size, config.bias);
@@ -271,7 +301,12 @@ impl FalconMLP {
             dense_h_to_4h,
             dense_4h_to_h,
             activation: config.hidden_act.clone(),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -306,13 +341,18 @@ pub struct FalconDecoderLayer {
     mlp: FalconMLP,
     parallel_attn: bool,
     apply_residual_connection_post_layernorm: bool,
+    device: Device,
 }
 
 impl FalconDecoderLayer {
     pub fn new(config: &FalconConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FalconConfig, device: Device) -> Result<Self> {
         let input_layernorm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_epsilon)?;
-        let self_attention = FalconAttention::new(config)?;
-        let mlp = FalconMLP::new(config)?;
+        let self_attention = FalconAttention::new_with_device(config, device)?;
+        let mlp = FalconMLP::new_with_device(config, device)?;
 
         Ok(Self {
             input_layernorm,
@@ -321,7 +361,12 @@ impl FalconDecoderLayer {
             parallel_attn: config.parallel_attn,
             apply_residual_connection_post_layernorm: config
                 .apply_residual_connection_post_layernorm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -378,10 +423,15 @@ pub struct FalconModel {
     layers: Vec<FalconDecoderLayer>,
     ln_f: LayerNorm,
     config: FalconConfig,
+    device: Device,
 }
 
 impl FalconModel {
     pub fn new(config: FalconConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: FalconConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
         let word_embeddings = Embedding::new(
@@ -392,7 +442,7 @@ impl FalconModel {
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(FalconDecoderLayer::new(&config)?);
+            layers.push(FalconDecoderLayer::new_with_device(&config, device)?);
         }
 
         let ln_f = LayerNorm::new(vec![config.hidden_size], config.layer_norm_epsilon)?;
@@ -402,7 +452,12 @@ impl FalconModel {
             layers,
             ln_f,
             config,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn config(&self) -> &FalconConfig {
@@ -481,11 +536,16 @@ impl Layer for FalconModel {
 pub struct FalconForCausalLM {
     transformer: FalconModel,
     lm_head: Linear,
+    device: Device,
 }
 
 impl FalconForCausalLM {
     pub fn new(config: FalconConfig) -> Result<Self> {
-        let transformer = FalconModel::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: FalconConfig, device: Device) -> Result<Self> {
+        let transformer = FalconModel::new_with_device(config.clone(), device)?;
         let lm_head = Linear::new(
             config.hidden_size,
             config.vocab_size,
@@ -495,7 +555,12 @@ impl FalconForCausalLM {
         Ok(Self {
             transformer,
             lm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Load model weights from a directory containing HuggingFace format weights

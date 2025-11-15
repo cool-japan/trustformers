@@ -4,6 +4,7 @@ use crate::weight_loading::{WeightDataType, WeightFormat, WeightLoadingConfig};
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Model, TokenizedInput};
@@ -14,20 +15,30 @@ pub struct BertModel {
     embeddings: BertEmbeddings,
     encoder: BertEncoder,
     pooler: Option<BertPooler>,
+    device: Device,
 }
 
 impl BertModel {
     pub fn new(config: BertConfig) -> Result<Self> {
-        let embeddings = BertEmbeddings::new(&config)?;
-        let encoder = BertEncoder::new(&config)?;
-        let pooler = Some(BertPooler::new(&config)?);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: BertConfig, device: Device) -> Result<Self> {
+        let embeddings = BertEmbeddings::new_with_device(&config, device)?;
+        let encoder = BertEncoder::new_with_device(&config, device)?;
+        let pooler = Some(BertPooler::new_with_device(&config, device)?);
 
         Ok(Self {
             config,
             embeddings,
             encoder,
             pooler,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward_with_embeddings(
