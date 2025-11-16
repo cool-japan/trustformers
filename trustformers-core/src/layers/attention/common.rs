@@ -81,10 +81,30 @@ impl AttentionProjections {
     /// Create new attention projections with device support
     pub fn new_with_device(config: &AttentionConfig, device: Device) -> Self {
         Self {
-            query: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
-            key: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
-            value: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
-            out_proj: Linear::new_with_device(config.hidden_size, config.hidden_size, config.bias, device),
+            query: Linear::new_with_device(
+                config.hidden_size,
+                config.hidden_size,
+                config.bias,
+                device,
+            ),
+            key: Linear::new_with_device(
+                config.hidden_size,
+                config.hidden_size,
+                config.bias,
+                device,
+            ),
+            value: Linear::new_with_device(
+                config.hidden_size,
+                config.hidden_size,
+                config.bias,
+                device,
+            ),
+            out_proj: Linear::new_with_device(
+                config.hidden_size,
+                config.hidden_size,
+                config.bias,
+                device,
+            ),
         }
     }
 

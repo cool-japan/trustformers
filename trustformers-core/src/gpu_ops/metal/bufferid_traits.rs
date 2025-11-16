@@ -8,6 +8,7 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::types::BufferId;
 
 #[cfg(feature = "metal")]

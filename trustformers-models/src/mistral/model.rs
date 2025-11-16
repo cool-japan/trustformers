@@ -130,7 +130,9 @@ impl MistralAttention {
                     }
                 }
             }
-            let mask = Tensor::from_vec(mask_data, &[seq_len, seq_len])?;
+            // Reshape to [1, 1, seq_len, seq_len] for broadcasting across batch and num_heads
+            let mask = Tensor::from_vec(mask_data, &[seq_len, seq_len])?
+                .reshape(&[1, 1, seq_len, seq_len])?;
             attention_scores.add(&mask)
         } else {
             Ok(attention_scores.clone())
@@ -152,7 +154,8 @@ impl MistralAttention {
                 mask_data[i * seq_len + j] = f32::NEG_INFINITY;
             }
         }
-        Tensor::from_vec(mask_data, &[seq_len, seq_len])
+        // Reshape to [1, 1, seq_len, seq_len] for broadcasting across batch and num_heads
+        Tensor::from_vec(mask_data, &[seq_len, seq_len])?.reshape(&[1, 1, seq_len, seq_len])
     }
 }
 
@@ -163,22 +166,41 @@ impl Layer for MistralAttention {
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         let batch_size = input.shape()[0];
         let seq_len = input.shape()[1];
+        eprintln!("[Mistral] Input shape: {:?}", input.shape());
 
         // Project to Q, K, V
         let q = self.q_proj.forward(input.clone())?;
         let k = self.k_proj.forward(input.clone())?;
         let v = self.v_proj.forward(input)?;
+        eprintln!(
+            "[Mistral] After projection - Q: {:?}, K: {:?}, V: {:?}",
+            q.shape(),
+            k.shape(),
+            v.shape()
+        );
 
         // Reshape for multi-head attention with grouped-query attention
         let head_dim = self.head_dim;
         let q = q.reshape(&[batch_size, seq_len, self.num_heads, head_dim])?;
         let k = k.reshape(&[batch_size, seq_len, self.num_kv_heads, head_dim])?;
         let v = v.reshape(&[batch_size, seq_len, self.num_kv_heads, head_dim])?;
+        eprintln!(
+            "[Mistral] After reshape - Q: {:?}, K: {:?}, V: {:?}",
+            q.shape(),
+            k.shape(),
+            v.shape()
+        );
 
         // Transpose to [batch, num_heads, seq_len, head_dim]
         let q = q.transpose(1, 2)?;
         let k = k.transpose(1, 2)?;
         let v = v.transpose(1, 2)?;
+        eprintln!(
+            "[Mistral] After transpose - Q: {:?}, K: {:?}, V: {:?}",
+            q.shape(),
+            k.shape(),
+            v.shape()
+        );
 
         // Apply rotary embedding (simplified implementation)
         let q = self.apply_rotary_embedding(&q, seq_len)?;
@@ -186,6 +208,12 @@ impl Layer for MistralAttention {
 
         // Repeat k and v heads for grouped-query attention
         let (k, v) = if self.num_kv_heads < self.num_heads {
+            eprintln!(
+                "[Mistral GQA] Expanding {} KV heads to {} query heads (repeats={})",
+                self.num_kv_heads,
+                self.num_heads,
+                self.num_heads / self.num_kv_heads
+            );
             let repeats = self.num_heads / self.num_kv_heads;
             let mut k_heads = Vec::new();
             let mut v_heads = Vec::new();
@@ -203,6 +231,12 @@ impl Layer for MistralAttention {
                     (0, seq_len),
                     (0, head_dim),
                 ])?;
+                eprintln!(
+                    "[Mistral GQA] Head {} - k_head: {:?}, v_head: {:?}",
+                    head_idx,
+                    k_head.shape(),
+                    v_head.shape()
+                );
 
                 for _ in 0..repeats {
                     k_heads.push(k_head.clone());
@@ -212,23 +246,37 @@ impl Layer for MistralAttention {
 
             let k_repeated = Tensor::concat(&k_heads, 1)?;
             let v_repeated = Tensor::concat(&v_heads, 1)?;
+            eprintln!(
+                "[Mistral GQA] After concat - K: {:?}, V: {:?}",
+                k_repeated.shape(),
+                v_repeated.shape()
+            );
             (k_repeated, v_repeated)
         } else {
+            eprintln!("[Mistral] No GQA expansion needed (num_kv_heads == num_heads)");
             (k, v)
         };
 
         // Compute attention scores
         let k_transposed = k.transpose(2, 3)?;
+        eprintln!("[Mistral] K transposed shape: {:?}", k_transposed.shape());
         let scores = q.matmul(&k_transposed)?;
+        eprintln!("[Mistral] Attention scores shape: {:?}", scores.shape());
         let scale = (head_dim as f32).sqrt();
         let scaled_scores = scores.div_scalar(scale)?;
 
         // Apply sliding window attention mask
         let masked_scores = self.apply_sliding_window_mask(&scaled_scores, seq_len)?;
+        eprintln!(
+            "[Mistral] After sliding window mask: {:?}",
+            masked_scores.shape()
+        );
 
         // Apply causal mask
         let causal_mask = self.create_causal_mask(seq_len)?;
+        eprintln!("[Mistral] Causal mask shape: {:?}", causal_mask.shape());
         let final_scores = masked_scores.add(&causal_mask)?;
+        eprintln!("[Mistral] Final scores shape: {:?}", final_scores.shape());
 
         // Apply softmax
         let attention_weights = final_scores.softmax(-1)?;

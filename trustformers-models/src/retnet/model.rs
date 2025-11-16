@@ -459,8 +459,8 @@ impl MultiScaleRetention {
         let k_heads = self.reshape_for_heads(k)?;
         let v_heads = self.reshape_for_heads(v)?;
 
-        let mut output =
-            Tensor::zeros(&[batch_size, num_heads, seq_len, head_dim])?.to_device_enum(&self.device)?;
+        let mut output = Tensor::zeros(&[batch_size, num_heads, seq_len, head_dim])?
+            .to_device_enum(&self.device)?;
 
         // Apply retention for each head
         for h in 0..num_heads {
@@ -736,8 +736,8 @@ impl MultiScaleRetention {
         let hidden_size = chunks[0].shape()[2];
         let total_seq_len: usize = chunks.iter().map(|c| c.shape()[1]).sum();
 
-        let mut result =
-            Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?.to_device_enum(&self.device)?;
+        let mut result = Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?
+            .to_device_enum(&self.device)?;
         let mut offset = 0;
 
         for chunk in chunks {
@@ -1253,8 +1253,8 @@ impl RetNetLongSequence {
         let hidden_size = outputs[0].shape()[2];
         let total_seq_len: usize = outputs.iter().map(|o| o.shape()[1]).sum();
 
-        let mut result =
-            Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?.to_device_enum(&self.device)?;
+        let mut result = Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?
+            .to_device_enum(&self.device)?;
         let mut offset = 0;
 
         for output in outputs {
@@ -1445,7 +1445,8 @@ impl RetNetForSequenceClassification {
         let hidden_size = x.shape()[2];
 
         // Extract last token embeddings
-        let mut last_tokens = Tensor::zeros(&[batch_size, hidden_size])?.to_device_enum(&self.device)?;
+        let mut last_tokens =
+            Tensor::zeros(&[batch_size, hidden_size])?.to_device_enum(&self.device)?;
 
         for b in 0..batch_size {
             for h in 0..hidden_size {

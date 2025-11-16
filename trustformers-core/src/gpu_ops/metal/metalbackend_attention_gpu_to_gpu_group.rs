@@ -5,9 +5,12 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::common::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::metalbackend_type::MetalBackend;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::types::{BufferCache, BufferId};
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Execute full multi-head attention on GPU (ZERO CPU transfers!)
     /// Inputs: Q, K, V buffers [batch, seq_len, hidden_size]

@@ -797,8 +797,7 @@ impl HyenaForLanguageModeling {
 
     pub fn new_with_device(config: HyenaConfig, device: Device) -> Result<Self> {
         let hyena = HyenaModel::new_with_device(config.clone(), device)?;
-        let lm_head =
-            Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self {
             hyena,

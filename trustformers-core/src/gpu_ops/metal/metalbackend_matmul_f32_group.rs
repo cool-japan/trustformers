@@ -5,8 +5,10 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::common::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::metalbackend_type::MetalBackend;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Perform matrix multiplication using Apple Accelerate framework (100-500x faster than naive kernel)
     pub fn matmul_f32(

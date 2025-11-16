@@ -5,6 +5,7 @@ use trustformers_core::layers::Linear;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::Layer;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 fn main() -> Result<()> {
     println!("================================================================================");
     println!("🔬 Linear Layer CPU vs GPU Test");
@@ -165,5 +166,11 @@ fn main() -> Result<()> {
     }
     println!("================================================================================");
 
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
+fn main() -> Result<()> {
+    println!("This test requires macOS and the 'metal' feature to be enabled.");
     Ok(())
 }

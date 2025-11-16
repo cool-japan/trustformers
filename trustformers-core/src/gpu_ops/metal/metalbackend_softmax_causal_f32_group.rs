@@ -5,8 +5,10 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::common::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::metalbackend_type::MetalBackend;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Execute Softmax with causal mask on GPU
     /// Applies causal mask: position i can only attend to j <= i

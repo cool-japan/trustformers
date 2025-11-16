@@ -43,7 +43,9 @@ pub use metalbackend_new_group::*;
 pub use metalbackend_remove_persistent_buffer_group::*;
 pub use metalbackend_rope_f32_group::*;
 pub use metalbackend_softmax_causal_f32_group::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metalbackend_type::MetalBackend;
 pub use metalbackend_type::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub use types::BufferId;
 pub use types::*;

@@ -296,7 +296,7 @@ impl ViTMLP {
                 config.intermediate_size,
                 0.0, // dropout is handled separately
                 device,
-            )?,
+            ),
             layer_norm: LayerNorm::new_with_device(
                 vec![config.hidden_size],
                 config.layer_norm_eps,

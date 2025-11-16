@@ -5,9 +5,12 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::common::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::metalbackend_type::MetalBackend;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::types::{BufferCache, BufferId};
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Get a persistent buffer by ID
     pub fn get_persistent_buffer(&self, id: &BufferId) -> Result<Arc<Buffer>> {

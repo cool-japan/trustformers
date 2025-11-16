@@ -28,7 +28,12 @@ impl FeedForward {
     }
 
     pub fn new(hidden_size: usize, intermediate_size: usize, dropout_prob: f32) -> Result<Self> {
-        Ok(Self::new_with_device(hidden_size, intermediate_size, dropout_prob, Device::CPU))
+        Ok(Self::new_with_device(
+            hidden_size,
+            intermediate_size,
+            dropout_prob,
+            Device::CPU,
+        ))
     }
 
     pub fn parameter_count(&self) -> usize {

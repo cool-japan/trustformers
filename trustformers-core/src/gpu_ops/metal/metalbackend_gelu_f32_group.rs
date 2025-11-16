@@ -5,8 +5,10 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::common::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::metalbackend_type::MetalBackend;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Execute GELU activation on GPU
     /// GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))

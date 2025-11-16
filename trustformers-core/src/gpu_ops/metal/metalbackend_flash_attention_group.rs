@@ -8,8 +8,11 @@
 // - Numerically stable softmax computation
 
 use crate::errors::TrustformersError;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use crate::gpu_ops::metal::metalbackend_type::MetalBackend;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use crate::gpu_ops::metal::types::BufferId;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use metal::*;
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -22,6 +25,7 @@ type Result<T> = std::result::Result<T, TrustformersError>;
 const BLOCK_Q: usize = 32;
 const BLOCK_KV: usize = 64;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Flash Attention forward pass with KV-cache support
     ///

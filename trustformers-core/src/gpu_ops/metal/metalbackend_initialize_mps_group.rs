@@ -5,17 +5,23 @@
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
 use super::common::*;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::metalbackend_type::MetalBackend;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::types::{BufferCache, BufferId};
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Initialize MPS operations by converting metal-rs types to objc2-metal types
     pub(crate) fn initialize_mps(
         device: &MetalDevice,
         command_queue: &CommandQueue,
     ) -> Option<MPSOperations> {
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         use objc2::rc::Retained;
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         use objc2::runtime::ProtocolObject;
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         use objc2_metal::{MTLCommandQueue as ObjC2CommandQueue, MTLDevice as ObjC2Device};
         let device_ptr = ForeignType::as_ptr(device) as *mut objc2::runtime::AnyObject;
         let queue_ptr = ForeignType::as_ptr(command_queue) as *mut objc2::runtime::AnyObject;

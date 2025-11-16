@@ -1,7 +1,10 @@
 use anyhow::Result;
 use trustformers_core::device::Device;
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::gpu_ops::metal::get_metal_backend;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 fn main() -> Result<()> {
     println!("===============================================");
     println!("🧪 Testing GPU Multi-Head Attention Fix");
@@ -98,5 +101,11 @@ fn main() -> Result<()> {
     }
 
     println!("\n===============================================");
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
+fn main() -> Result<()> {
+    println!("This test requires macOS and the 'metal' feature to be enabled.");
     Ok(())
 }
