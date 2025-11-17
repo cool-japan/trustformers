@@ -2,7 +2,9 @@ use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use scirs2_core::ndarray::{s, Array1, Array2, ArrayBase, ArrayD, Axis, Dimension, IxDyn, OwnedRepr, Zip};
+use scirs2_core::ndarray::{
+    s, Array1, Array2, ArrayBase, ArrayD, Axis, Dimension, IxDyn, OwnedRepr, Zip,
+};
 
 /// FlashAttention: Memory-efficient attention computation
 ///
@@ -291,9 +293,8 @@ impl FlashAttention {
 
                         // Update row sums
                         let l_new = exp_scores.sum_axis(Axis(3));
-                        let l_prev_scaled = Zip::from(&l_block)
-                            .and(&exp_prev)
-                            .map_collect(|&l, &exp| l * exp);
+                        let l_prev_scaled =
+                            Zip::from(&l_block).and(&exp_prev).map_collect(|&l, &exp| l * exp);
                         l_block = l_prev_scaled + l_new;
 
                         // Update output - broadcast exp_prev to match o_block shape

@@ -648,10 +648,8 @@ impl Tensor {
                         "Tensor must have at least 2 dimensions".into(),
                     ));
                 }
-                let result = a
-                    .slice_axis(Axis(1), Slice::from(0..1))
-                    .remove_axis(Axis(1))
-                    .to_owned();
+                let result =
+                    a.slice_axis(Axis(1), Slice::from(0..1)).remove_axis(Axis(1)).to_owned();
                 Ok(Tensor::F32(result))
             },
             _ => Err(TrustformersError::tensor_op_error(

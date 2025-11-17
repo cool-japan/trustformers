@@ -296,17 +296,13 @@ unsafe impl Sync for Tensor {}
 
 // The implementations are in separate modules but the methods are part of the Tensor impl blocks
 
-impl From<ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>>>
-    for Tensor
-{
+impl From<ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>>> for Tensor {
     fn from(arr: ArrayD<f32>) -> Self {
         Tensor::F32(arr)
     }
 }
 
-impl From<ArrayBase<OwnedRepr<f64>, Dim<IxDynImpl>>>
-    for Tensor
-{
+impl From<ArrayBase<OwnedRepr<f64>, Dim<IxDynImpl>>> for Tensor {
     fn from(arr: ArrayD<f64>) -> Self {
         Tensor::F64(arr)
     }

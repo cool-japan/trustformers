@@ -26,9 +26,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x < y { 1.0f32 } else { 0.0f32 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x < y { 1.0f32 } else { 0.0f32 });
                 Ok(Tensor::F32(result))
             },
             (Tensor::F64(a), Tensor::F64(b)) => {
@@ -38,9 +36,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x < y { 1.0f64 } else { 0.0f64 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x < y { 1.0f64 } else { 0.0f64 });
                 Ok(Tensor::F64(result))
             },
             (Tensor::I64(a), Tensor::I64(b)) => {
@@ -50,9 +46,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x < y { 1i64 } else { 0i64 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x < y { 1i64 } else { 0i64 });
                 Ok(Tensor::I64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -110,9 +104,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x == y { 1i64 } else { 0i64 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x == y { 1i64 } else { 0i64 });
                 Ok(Tensor::I64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -140,11 +132,10 @@ impl Tensor {
                         "All tensors must have the same shape for where operation".to_string(),
                     ));
                 }
-                let result =
-                    Zip::from(cond)
-                        .and(a)
-                        .and(b)
-                        .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
+                let result = Zip::from(cond)
+                    .and(a)
+                    .and(b)
+                    .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
                 Ok(Tensor::F32(result))
             },
             (Tensor::F64(a), Tensor::F64(cond), Tensor::F64(b)) => {
@@ -153,11 +144,10 @@ impl Tensor {
                         "All tensors must have the same shape for where operation".to_string(),
                     ));
                 }
-                let result =
-                    Zip::from(cond)
-                        .and(a)
-                        .and(b)
-                        .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
+                let result = Zip::from(cond)
+                    .and(a)
+                    .and(b)
+                    .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
                 Ok(Tensor::F64(result))
             },
             (Tensor::I64(a), Tensor::I64(cond), Tensor::I64(b)) => {
@@ -166,11 +156,10 @@ impl Tensor {
                         "All tensors must have the same shape for where operation".to_string(),
                     ));
                 }
-                let result =
-                    Zip::from(cond)
-                        .and(a)
-                        .and(b)
-                        .map_collect(|&c, &x, &y| if c > 0 { x } else { y });
+                let result = Zip::from(cond)
+                    .and(a)
+                    .and(b)
+                    .map_collect(|&c, &x, &y| if c > 0 { x } else { y });
                 Ok(Tensor::I64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(

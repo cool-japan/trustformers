@@ -107,23 +107,23 @@ impl WebGpuBackend {
                 force_fallback_adapter: false,
             })
             .block_on()
-            .map_err(|e| TrustformersError::hardware_error(
-                &format!("No suitable WebGPU adapter found: {:?}", e),
-                "WebGpuBackend::new",
-            ))?;
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("No suitable WebGPU adapter found: {:?}", e),
+                    "WebGpuBackend::new",
+                )
+            })?;
 
         // Request device and queue
         let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("TrustformeRS WebGPU Device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
-                    memory_hints: wgpu::MemoryHints::default(),
-                    experimental_features: Default::default(),
-                    trace: Default::default(),
-                },
-            )
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("TrustformeRS WebGPU Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
+                experimental_features: Default::default(),
+                trace: Default::default(),
+            })
             .block_on()
             .map_err(|e| {
                 TrustformersError::hardware_error(

@@ -358,11 +358,9 @@ impl WeightReader for PyTorchReader {
         // Convert the tensor data to a Tensor
         match tensor_data.dtype.as_str() {
             "f32" => {
-                let arr = ArrayD::from_shape_vec(
-                    IxDyn(&tensor_data.shape),
-                    tensor_data.data.clone(),
-                )
-                .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                let arr =
+                    ArrayD::from_shape_vec(IxDyn(&tensor_data.shape), tensor_data.data.clone())
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
 
                 Ok(Tensor::F32(arr))
             },

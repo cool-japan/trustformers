@@ -602,10 +602,7 @@ mod tests {
         let norm_squared = tensor.norm_squared()?;
 
         if let Tensor::F32(arr) = norm_squared {
-            assert!(
-                (arr.into_dimensionality::<Ix0>().unwrap().into_scalar() - 25.0).abs()
-                    < 1e-6
-            );
+            assert!((arr.into_dimensionality::<Ix0>().unwrap().into_scalar() - 25.0).abs() < 1e-6);
         }
         Ok(())
     }

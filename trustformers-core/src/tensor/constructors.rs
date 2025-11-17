@@ -648,9 +648,7 @@ impl Tensor {
         let complex_data: Vec<Complex<half::bf16>> = real
             .into_iter()
             .zip(imag)
-            .map(|(r, i)| {
-                Complex::new(half::bf16::from_f32(r), half::bf16::from_f32(i))
-            })
+            .map(|(r, i)| Complex::new(half::bf16::from_f32(r), half::bf16::from_f32(i)))
             .collect();
 
         Ok(Tensor::CBF16(

@@ -172,13 +172,18 @@ impl OpenClBackend {
     /// Create a persistent GPU buffer and return its ID
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
         let mut buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, data.len(), std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create buffer: {:?}", e),
-                        "create_persistent_buffer",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_READ_ONLY,
+                data.len(),
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create buffer: {:?}", e),
+                    "create_persistent_buffer",
+                )
+            })?
         };
 
         // Write data to buffer
@@ -306,34 +311,49 @@ __kernel void matmul_kernel(
 
         // Create buffers
         let mut a_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, a.len(), std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create A buffer: {:?}", e),
-                        "matmul_f32",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_READ_ONLY,
+                a.len(),
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create A buffer: {:?}", e),
+                    "matmul_f32",
+                )
+            })?
         };
 
         let mut b_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, b.len(), std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create B buffer: {:?}", e),
-                        "matmul_f32",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_READ_ONLY,
+                b.len(),
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create B buffer: {:?}", e),
+                    "matmul_f32",
+                )
+            })?
         };
 
         let result_size = m * n;
         let c_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, result_size, std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create C buffer: {:?}", e),
-                        "matmul_f32",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_WRITE_ONLY,
+                result_size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create C buffer: {:?}", e),
+                    "matmul_f32",
+                )
+            })?
         };
 
         // Write input data
@@ -456,25 +476,33 @@ __kernel void gelu_kernel(
 
         // Create buffers
         let mut input_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, size, std::ptr::null_mut()).map_err(
-                |e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create input buffer: {:?}", e),
-                        "gelu_f32",
-                    )
-                },
-            )?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_READ_ONLY,
+                size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create input buffer: {:?}", e),
+                    "gelu_f32",
+                )
+            })?
         };
 
         let output_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, size, std::ptr::null_mut()).map_err(
-                |e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create output buffer: {:?}", e),
-                        "gelu_f32",
-                    )
-                },
-            )?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_WRITE_ONLY,
+                size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create output buffer: {:?}", e),
+                    "gelu_f32",
+                )
+            })?
         };
 
         // Write input data
@@ -614,43 +642,63 @@ __kernel void layernorm_kernel(
 
         // Create buffers
         let mut input_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, total_size, std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create input buffer: {:?}", e),
-                        "layernorm_f32",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_READ_ONLY,
+                total_size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create input buffer: {:?}", e),
+                    "layernorm_f32",
+                )
+            })?
         };
 
         let mut weight_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, hidden_size, std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create weight buffer: {:?}", e),
-                        "layernorm_f32",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_READ_ONLY,
+                hidden_size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create weight buffer: {:?}", e),
+                    "layernorm_f32",
+                )
+            })?
         };
 
         let mut bias_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, hidden_size, std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create bias buffer: {:?}", e),
-                        "layernorm_f32",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_READ_ONLY,
+                hidden_size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create bias buffer: {:?}", e),
+                    "layernorm_f32",
+                )
+            })?
         };
 
         let output_buffer = unsafe {
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, total_size, std::ptr::null_mut())
-                .map_err(|e| {
-                    TrustformersError::hardware_error(
-                        &format!("Failed to create output buffer: {:?}", e),
-                        "layernorm_f32",
-                    )
-                })?
+            ClBuffer::<cl_float>::create(
+                &self.context,
+                CL_MEM_WRITE_ONLY,
+                total_size,
+                std::ptr::null_mut(),
+            )
+            .map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create output buffer: {:?}", e),
+                    "layernorm_f32",
+                )
+            })?
         };
 
         // Write input data
