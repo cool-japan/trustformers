@@ -212,8 +212,7 @@ impl Tensor {
     ///
     /// A tensor with dropout applied.
     pub fn dropout(&self, dropout_prob: f32) -> Result<Tensor> {
-        use rand::thread_rng;
-        use rand::Rng;
+        use scirs2_core::random::*;
 
         if !(0.0..=1.0).contains(&dropout_prob) {
             return Err(TrustformersError::tensor_op_error(

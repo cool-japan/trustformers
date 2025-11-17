@@ -174,10 +174,10 @@ impl Tensor {
             Tensor::F16(a) => a.len() * std::mem::size_of::<half::f16>(),
             Tensor::BF16(a) => a.len() * std::mem::size_of::<half::bf16>(),
             Tensor::I64(a) => a.len() * std::mem::size_of::<i64>(),
-            Tensor::C32(a) => a.len() * std::mem::size_of::<num_complex::Complex32>(),
-            Tensor::C64(a) => a.len() * std::mem::size_of::<num_complex::Complex64>(),
-            Tensor::CF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::f16>>(),
-            Tensor::CBF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::bf16>>(),
+            Tensor::C32(a) => a.len() * std::mem::size_of::<scirs2_core::Complex32>(),
+            Tensor::C64(a) => a.len() * std::mem::size_of::<scirs2_core::Complex64>(),
+            Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
+            Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.nnz() * std::mem::size_of::<f32>(), // Simplified estimate
             #[cfg(feature = "torch")]
             Tensor::Torch(t) => t.numel() * std::mem::size_of::<f32>(), // Simplified
@@ -463,62 +463,92 @@ impl Tensor {
             // F32 → CUDA
             #[cfg(feature = "cuda")]
             (Tensor::F32(arr), crate::device::Device::CUDA(device_id)) => {
-                use crate::gpu_ops::cuda::get_cuda_backend;
-                let backend = get_cuda_backend(*device_id)?;
-                let data_vec: Vec<f32> = arr.iter().copied().collect();
-                let buffer_id = backend.create_persistent_buffer(&data_vec)?;
-                Ok(Tensor::CUDA(super::CudaTensorData {
-                    buffer_id,
-                    shape: arr.shape().to_vec(),
-                    dtype: DType::F32,
-                }))
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    use crate::gpu_ops::cuda::get_cuda_backend;
+                    let backend = get_cuda_backend(*device_id)?;
+                    let data_vec: Vec<f32> = arr.iter().copied().collect();
+                    let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+                    Ok(Tensor::CUDA(super::CudaTensorData {
+                        buffer_id,
+                        shape: arr.shape().to_vec(),
+                        dtype: DType::F32,
+                    }))
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                {
+                    Err(TrustformersError::hardware_error(
+                        "CUDA is only supported on Linux and Windows",
+                        "to_device_enum",
+                    ))
+                }
             },
 
             // F64 → CUDA (convert to F32 first)
             #[cfg(feature = "cuda")]
             (Tensor::F64(arr), crate::device::Device::CUDA(device_id)) => {
-                use crate::gpu_ops::cuda::get_cuda_backend;
-                let backend = get_cuda_backend(*device_id)?;
-                let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
-                let buffer_id = backend.create_persistent_buffer(&data_vec)?;
-                Ok(Tensor::CUDA(super::CudaTensorData {
-                    buffer_id,
-                    shape: arr.shape().to_vec(),
-                    dtype: DType::F32,
-                }))
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    use crate::gpu_ops::cuda::get_cuda_backend;
+                    let backend = get_cuda_backend(*device_id)?;
+                    let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
+                    let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+                    Ok(Tensor::CUDA(super::CudaTensorData {
+                        buffer_id,
+                        shape: arr.shape().to_vec(),
+                        dtype: DType::F32,
+                    }))
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                {
+                    Err(TrustformersError::hardware_error(
+                        "CUDA is only supported on Linux and Windows",
+                        "to_device_enum",
+                    ))
+                }
             },
 
             // CUDA → F32
             #[cfg(feature = "cuda")]
             (Tensor::CUDA(cuda_data), crate::device::Device::CPU) => {
-                use crate::gpu_ops::cuda::get_cuda_backend;
-                // Use device 0 by default for downloading
-                let backend = get_cuda_backend(0)?;
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    use crate::gpu_ops::cuda::get_cuda_backend;
+                    // Use device 0 by default for downloading
+                    let backend = get_cuda_backend(0)?;
 
-                // Handle different dtypes
-                match cuda_data.dtype {
-                    DType::F32 => {
-                        // Download from GPU to CPU
-                        let data_vec = backend.download_buffer(&cuda_data.buffer_id)?;
+                    // Handle different dtypes
+                    match cuda_data.dtype {
+                        DType::F32 => {
+                            // Download from GPU to CPU
+                            let data_vec = backend.download_buffer(&cuda_data.buffer_id)?;
 
-                        // Convert to ArrayD
-                        use scirs2_core::ndarray::ArrayD;
-                        let arr = ArrayD::from_shape_vec(
-                            scirs2_core::ndarray::IxDyn(&cuda_data.shape),
-                            data_vec,
-                        )
-                        .map_err(|e| {
-                            TrustformersError::tensor_op_error(
-                                &format!("Failed to create array from shape: {}", e),
-                                "to_device_enum",
+                            // Convert to ArrayD
+                            use scirs2_core::ndarray::ArrayD;
+                            let arr = ArrayD::from_shape_vec(
+                                scirs2_core::ndarray::IxDyn(&cuda_data.shape),
+                                data_vec,
                             )
-                        })?;
-                        Ok(Tensor::F32(arr))
-                    },
-                    _ => Err(TrustformersError::tensor_op_error(
-                        &format!("Unsupported CUDA tensor dtype: {:?}", cuda_data.dtype),
+                            .map_err(|e| {
+                                TrustformersError::tensor_op_error(
+                                    &format!("Failed to create array from shape: {}", e),
+                                    "to_device_enum",
+                                )
+                            })?;
+                            Ok(Tensor::F32(arr))
+                        },
+                        _ => Err(TrustformersError::tensor_op_error(
+                            &format!("Unsupported CUDA tensor dtype: {:?}", cuda_data.dtype),
+                            "to_device_enum",
+                        )),
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                {
+                    Err(TrustformersError::hardware_error(
+                        "CUDA is only supported on Linux and Windows",
                         "to_device_enum",
-                    )),
+                    ))
                 }
             },
 
@@ -838,10 +868,10 @@ impl Tensor {
             Tensor::F16(a) => a.len() * std::mem::size_of::<half::f16>(),
             Tensor::BF16(a) => a.len() * std::mem::size_of::<half::bf16>(),
             Tensor::I64(a) => a.len() * std::mem::size_of::<i64>(),
-            Tensor::C32(a) => a.len() * std::mem::size_of::<num_complex::Complex32>(),
-            Tensor::C64(a) => a.len() * std::mem::size_of::<num_complex::Complex64>(),
-            Tensor::CF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::f16>>(),
-            Tensor::CBF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::bf16>>(),
+            Tensor::C32(a) => a.len() * std::mem::size_of::<scirs2_core::Complex32>(),
+            Tensor::C64(a) => a.len() * std::mem::size_of::<scirs2_core::Complex64>(),
+            Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
+            Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.memory_usage(),
             #[cfg(feature = "torch")]
             Tensor::Torch(t) => t.numel() * 4, // Approximate

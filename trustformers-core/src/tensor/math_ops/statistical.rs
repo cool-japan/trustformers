@@ -13,7 +13,7 @@
 use super::super::Tensor;
 use super::utilities::{simd_min_max_f32, simd_min_max_f64};
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::{ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{arr0, ArrayD, Axis, IxDyn, Zip};
 
 impl Tensor {
     /// Standard deviation across all elements.
@@ -82,7 +82,7 @@ impl Tensor {
                     Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), max_val)))
                 } else {
                     // Regular element-wise operation
-                    let result = ndarray::Zip::from(a).and(b).map_collect(|&x, &y| x.max(y));
+                    let result = Zip::from(a).and(b).map_collect(|&x, &y| x.max(y));
                     Ok(Tensor::F32(result))
                 }
             },
@@ -106,7 +106,7 @@ impl Tensor {
                     Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), max_val)))
                 } else {
                     // Regular element-wise operation
-                    let result = ndarray::Zip::from(a).and(b).map_collect(|&x, &y| x.max(y));
+                    let result = Zip::from(a).and(b).map_collect(|&x, &y| x.max(y));
                     Ok(Tensor::F64(result))
                 }
             },
@@ -258,7 +258,7 @@ impl Tensor {
                             "sum_axes",
                         ));
                     }
-                    result = result.sum_axis(ndarray::Axis(axis));
+                    result = result.sum_axis(Axis(axis));
                 }
                 Ok(Tensor::F32(result))
             },
@@ -275,7 +275,7 @@ impl Tensor {
                             "sum_axes",
                         ));
                     }
-                    result = result.sum_axis(ndarray::Axis(axis));
+                    result = result.sum_axis(Axis(axis));
                 }
                 Ok(Tensor::F64(result))
             },
@@ -308,7 +308,7 @@ impl Tensor {
                         // Sum along specified axes
                         let mut result = a.clone();
                         for &axis in axes.iter().rev() {
-                            result = result.sum_axis(ndarray::Axis(axis));
+                            result = result.sum_axis(Axis(axis));
                         }
                         Ok(Tensor::F32(result))
                     }
@@ -328,7 +328,7 @@ impl Tensor {
                         // Sum along specified axes
                         let mut result = a.clone();
                         for &axis in axes.iter().rev() {
-                            result = result.sum_axis(ndarray::Axis(axis));
+                            result = result.sum_axis(Axis(axis));
                         }
                         Ok(Tensor::F64(result))
                     }
@@ -370,7 +370,7 @@ impl Tensor {
                             "mean_axes",
                         ));
                     }
-                    result = result.mean_axis(ndarray::Axis(axis)).unwrap();
+                    result = result.mean_axis(Axis(axis)).unwrap();
                 }
                 Ok(Tensor::F32(result))
             },
@@ -387,7 +387,7 @@ impl Tensor {
                             "mean_axes",
                         ));
                     }
-                    result = result.mean_axis(ndarray::Axis(axis)).unwrap();
+                    result = result.mean_axis(Axis(axis)).unwrap();
                 }
                 Ok(Tensor::F64(result))
             },
@@ -608,15 +608,15 @@ impl Tensor {
         match self {
             Tensor::F32(a) => {
                 let max_val = a.iter().fold(f32::NEG_INFINITY, |acc, &x| acc.max(x));
-                Ok(Tensor::F32(ndarray::arr0(max_val).into_dyn()))
+                Ok(Tensor::F32(arr0(max_val).into_dyn()))
             },
             Tensor::F64(a) => {
                 let max_val = a.iter().fold(f64::NEG_INFINITY, |acc, &x| acc.max(x));
-                Ok(Tensor::F64(ndarray::arr0(max_val).into_dyn()))
+                Ok(Tensor::F64(arr0(max_val).into_dyn()))
             },
             Tensor::I64(a) => {
                 let max_val = a.iter().fold(i64::MIN, |acc, &x| acc.max(x));
-                Ok(Tensor::I64(ndarray::arr0(max_val).into_dyn()))
+                Ok(Tensor::I64(arr0(max_val).into_dyn()))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "max_scalar not implemented for this tensor type",
@@ -630,15 +630,15 @@ impl Tensor {
         match self {
             Tensor::F32(a) => {
                 let min_val = a.iter().fold(f32::INFINITY, |acc, &x| acc.min(x));
-                Ok(Tensor::F32(ndarray::arr0(min_val).into_dyn()))
+                Ok(Tensor::F32(arr0(min_val).into_dyn()))
             },
             Tensor::F64(a) => {
                 let min_val = a.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
-                Ok(Tensor::F64(ndarray::arr0(min_val).into_dyn()))
+                Ok(Tensor::F64(arr0(min_val).into_dyn()))
             },
             Tensor::I64(a) => {
                 let min_val = a.iter().fold(i64::MAX, |acc, &x| acc.min(x));
-                Ok(Tensor::I64(ndarray::arr0(min_val).into_dyn()))
+                Ok(Tensor::I64(arr0(min_val).into_dyn()))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "min_scalar not implemented for this tensor type",

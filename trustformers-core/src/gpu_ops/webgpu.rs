@@ -95,7 +95,7 @@ impl WebGpuBackend {
         use pollster::FutureExt;
 
         // Request adapter
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
@@ -107,12 +107,10 @@ impl WebGpuBackend {
                 force_fallback_adapter: false,
             })
             .block_on()
-            .ok_or_else(|| {
-                TrustformersError::hardware_error(
-                    "No suitable WebGPU adapter found",
-                    "WebGpuBackend::new",
-                )
-            })?;
+            .map_err(|e| TrustformersError::hardware_error(
+                &format!("No suitable WebGPU adapter found: {:?}", e),
+                "WebGpuBackend::new",
+            ))?;
 
         // Request device and queue
         let (device, queue) = adapter
@@ -122,8 +120,9 @@ impl WebGpuBackend {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
+                    experimental_features: Default::default(),
+                    trace: Default::default(),
                 },
-                None,
             )
             .block_on()
             .map_err(|e| {
@@ -426,7 +425,7 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        self.device.poll(wgpu::Maintain::Wait);
+        // In wgpu 27.0, polling is automatic - removed manual poll call
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),
@@ -625,7 +624,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        self.device.poll(wgpu::Maintain::Wait);
+        // In wgpu 27.0, polling is automatic - removed manual poll call
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(&format!("Failed to map buffer: {:?}", e), "gelu_f32")
         })?;
@@ -896,7 +895,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        self.device.poll(wgpu::Maintain::Wait);
+        // In wgpu 27.0, polling is automatic - removed manual poll call
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),
@@ -944,7 +943,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        self.device.poll(wgpu::Maintain::Wait);
+        // In wgpu 27.0, polling is automatic - removed manual poll call
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),

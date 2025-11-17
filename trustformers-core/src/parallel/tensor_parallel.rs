@@ -511,17 +511,16 @@ impl TensorParallelInit {
     }
 
     fn init_weight(shape: &[usize], method: InitMethod) -> Result<Tensor> {
-        use rand::thread_rng;
-        use rand_distr::{Distribution, Normal, Uniform as UniformDist};
+        use scirs2_core::random::*;
 
         let mut rng = thread_rng();
         let size = shape.iter().product();
 
         match method {
             InitMethod::Normal { mean, std } => {
-                let normal = Normal::new(mean, std)
+                let normal = Normal::new(mean as f64, std as f64)
                     .map_err(|e| invalid_input(format!("Normal distribution parameters: {}", e)))?;
-                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
             InitMethod::Uniform { low, high } => {
@@ -531,29 +530,29 @@ impl TensorParallelInit {
                         low, high
                     )));
                 }
-                let uniform = UniformDist::new(low, high).map_err(|e| {
+                let uniform = UniformDist::new(low as f64, high as f64).map_err(|e| {
                     invalid_input(format!("Uniform distribution parameters: {}", e))
                 })?;
-                let data: Vec<f32> = (0..size).map(|_| uniform.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| uniform.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
             InitMethod::Xavier => {
                 let fan_in = shape[0] as f32;
                 let fan_out = shape[1] as f32;
                 let std = (2.0 / (fan_in + fan_out)).sqrt();
-                let normal = Normal::new(0.0, std).map_err(|e| {
+                let normal = Normal::new(0.0, std as f64).map_err(|e| {
                     invalid_input(format!("Xavier initialization parameters: {}", e))
                 })?;
-                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
             InitMethod::Kaiming => {
                 let fan_in = shape[0] as f32;
                 let std = (2.0 / fan_in).sqrt();
-                let normal = Normal::new(0.0, std).map_err(|e| {
+                let normal = Normal::new(0.0, std as f64).map_err(|e| {
                     invalid_input(format!("Kaiming initialization parameters: {}", e))
                 })?;
-                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
         }

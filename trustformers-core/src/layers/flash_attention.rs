@@ -2,7 +2,7 @@ use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use scirs2_core::ndarray::{s, Array1, Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{s, Array1, Array2, ArrayBase, ArrayD, Axis, Dimension, IxDyn, OwnedRepr, Zip};
 
 /// FlashAttention: Memory-efficient attention computation
 ///
@@ -263,7 +263,7 @@ impl FlashAttention {
                         });
 
                         let m_prev = m_block.clone();
-                        let m_combined = ndarray::Zip::from(&m_block)
+                        let m_combined = Zip::from(&m_block)
                             .and(&m_new)
                             .map_collect(|&m_old, &m_curr| m_old.max(m_curr));
 
@@ -281,17 +281,17 @@ impl FlashAttention {
                                 }
                             }
                         }
-                        let exp_scores = ndarray::Zip::from(&scores)
+                        let exp_scores = Zip::from(&scores)
                             .and(&m_combined_expanded)
                             .map_collect(|&score, &m_max| (score - m_max).exp());
 
-                        let exp_prev = ndarray::Zip::from(&m_prev)
+                        let exp_prev = Zip::from(&m_prev)
                             .and(&m_combined)
                             .map_collect(|&m_old, &m_new| (m_old - m_new).exp());
 
                         // Update row sums
                         let l_new = exp_scores.sum_axis(Axis(3));
-                        let l_prev_scaled = ndarray::Zip::from(&l_block)
+                        let l_prev_scaled = Zip::from(&l_block)
                             .and(&exp_prev)
                             .map_collect(|&l, &exp| l * exp);
                         l_block = l_prev_scaled + l_new;
@@ -347,12 +347,12 @@ impl FlashAttention {
     /// Helper function for batched matrix multiplication with array slices
     fn batched_matmul_slices<D1, D2>(
         &self,
-        a: &ndarray::ArrayBase<ndarray::OwnedRepr<f32>, D1>,
-        b: &ndarray::ArrayBase<ndarray::OwnedRepr<f32>, D2>,
+        a: &ArrayBase<OwnedRepr<f32>, D1>,
+        b: &ArrayBase<OwnedRepr<f32>, D2>,
     ) -> Result<ArrayD<f32>>
     where
-        D1: ndarray::Dimension,
-        D2: ndarray::Dimension,
+        D1: Dimension,
+        D2: Dimension,
     {
         // Convert to dynamic arrays for uniform handling
         let a_dyn = a.view().into_dyn().to_owned();

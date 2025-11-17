@@ -6,6 +6,7 @@
 
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
+use scirs2_core::ArrayD;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
@@ -660,7 +661,7 @@ impl TensorVisualizer {
     }
 
     /// Format 1D tensor
-    fn format_1d_tensor(&self, arr: &ndarray::ArrayD<f32>) -> Result<String> {
+    fn format_1d_tensor(&self, arr: &ArrayD<f32>) -> Result<String> {
         let mut output = String::new();
         let len = arr.len();
         let max_display = self.config.max_display_elements;
@@ -716,7 +717,7 @@ impl TensorVisualizer {
     }
 
     /// Format 2D tensor
-    fn format_2d_tensor(&self, arr: &ndarray::ArrayD<f32>) -> Result<String> {
+    fn format_2d_tensor(&self, arr: &ArrayD<f32>) -> Result<String> {
         let mut output = String::new();
         let shape = arr.shape();
         let rows = shape[0];
@@ -799,7 +800,7 @@ impl TensorVisualizer {
     }
 
     /// Format N-dimensional tensor
-    fn format_nd_tensor(&self, arr: &ndarray::ArrayD<f32>) -> Result<String> {
+    fn format_nd_tensor(&self, arr: &ArrayD<f32>) -> Result<String> {
         let shape = arr.shape();
         Ok(format!(
             "Tensor with shape {:?} (displaying shape only for >2D tensors)",

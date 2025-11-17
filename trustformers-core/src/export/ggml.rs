@@ -287,7 +287,7 @@ impl GGMLExporter {
     fn generate_dummy_weights(&self, size: usize, tensor_type: GGMLType) -> Result<Vec<u8>> {
         // Generate realistic weight patterns based on neural network initialization schemes
         let mut data = Vec::new();
-        use rand::Rng;
+        use scirs2_core::random::*;
         let mut rng = thread_rng();
 
         match tensor_type {

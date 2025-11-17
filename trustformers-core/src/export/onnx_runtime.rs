@@ -333,7 +333,7 @@ impl ONNXRuntimeSession {
         inputs: HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
         let mut outputs = HashMap::new();
-        use rand::Rng;
+        use scirs2_core::random::*;
         let mut rng = thread_rng();
 
         // Determine model type from output names and generate appropriate simulated outputs

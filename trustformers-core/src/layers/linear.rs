@@ -9,6 +9,7 @@ use crate::errors::{Result, TrustformersError};
 use crate::gpu_ops::dispatch_matmul;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
+use scirs2_core::ndarray::{Ix2, IxDyn};
 
 /// A linear transformation layer (fully connected layer).
 ///
@@ -329,7 +330,7 @@ impl Linear {
 
     /// Initialize persistent GPU weight buffer for CUDA device
     /// This is called automatically on first forward pass with CUDA device
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     fn ensure_weight_buffer_cached_cuda(&self) -> Result<()> {
         use crate::gpu_ops::cuda::get_cuda_backend;
 
@@ -396,7 +397,7 @@ impl Linear {
 
     /// Pre-cache layer weights on GPU for zero-transfer pipeline (CUDA)
     /// This uploads weights to GPU memory in advance to avoid transfers during forward pass
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &crate::device::Device) -> Result<()> {
         use crate::device::Device;
 
@@ -570,7 +571,7 @@ impl Layer for Linear {
         // =====================================================================
         // GPU-TO-GPU PATH: Tensor::CUDA (ZERO CPU TRANSFERS!)
         // =====================================================================
-        #[cfg(feature = "cuda")]
+        #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
         if let Tensor::CUDA(ref input_cuda) = input {
             use crate::gpu_ops::cuda::get_cuda_backend;
             use crate::tensor::CudaTensorData;
@@ -808,7 +809,7 @@ impl Layer for Linear {
                                             )?;
 
                                         let result_3d = result_arr
-                                            .into_shape_with_order(ndarray::IxDyn(&[
+                                            .into_shape_with_order(IxDyn(&[
                                                 batch,
                                                 seq_len,
                                                 out_features,
@@ -847,7 +848,7 @@ impl Layer for Linear {
 
                     // Ensure contiguous layout for weight and convert to 2D for dot product
                     let w_contiguous = w.to_owned();
-                    let w_2d = w_contiguous.into_dimensionality::<ndarray::Ix2>().map_err(|e| {
+                    let w_2d = w_contiguous.into_dimensionality::<Ix2>().map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to convert weight to 2D: {}",
                             e
@@ -859,7 +860,7 @@ impl Layer for Linear {
 
                     // Reshape back to 3D
                     let out_3d = out_2d
-                        .into_shape_with_order(ndarray::IxDyn(&[batch, seq_len, out_features]))
+                        .into_shape_with_order(IxDyn(&[batch, seq_len, out_features]))
                         .map_err(|e| {
                             TrustformersError::shape_error(format!(
                                 "Failed to reshape output: {}",
@@ -888,7 +889,7 @@ impl Layer for Linear {
 
                     // Ensure contiguous layout for weight and convert to 2D
                     let w_contiguous = w.to_owned();
-                    let w_2d = w_contiguous.into_dimensionality::<ndarray::Ix2>().map_err(|e| {
+                    let w_2d = w_contiguous.into_dimensionality::<Ix2>().map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to convert weight to 2D: {}",
                             e
@@ -898,7 +899,7 @@ impl Layer for Linear {
                     let out_2d = inp_2d.dot(&w_2d);
 
                     let out_3d = out_2d
-                        .into_shape_with_order(ndarray::IxDyn(&[batch, seq_len, out_features]))
+                        .into_shape_with_order(IxDyn(&[batch, seq_len, out_features]))
                         .map_err(|e| {
                             TrustformersError::shape_error(format!(
                                 "Failed to reshape output: {}",

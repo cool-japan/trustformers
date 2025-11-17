@@ -5,6 +5,7 @@
 use crate::neuromorphic::SpikeEvent;
 use crate::tensor::Tensor;
 use anyhow::Result;
+use scirs2_core::random::*;
 
 /// Spike encoding schemes
 #[derive(Debug, Clone, Copy)]
@@ -61,13 +62,14 @@ impl SpikeEncoder {
     fn rate_encode(&self, data: &[f32], time_step: f64) -> Result<Vec<SpikeEvent>> {
         let mut spikes = Vec::new();
         let steps = (self.time_window / time_step) as usize;
+        let mut rng = thread_rng();
 
         for (neuron_id, &value) in data.iter().enumerate() {
             let frequency = value.abs() * (self.max_frequency as f32);
             let spike_probability = frequency * (time_step as f32) / 1000.0;
 
             for step in 0..steps {
-                if rand::random::<f64>() < spike_probability as f64 {
+                if rng.random::<f64>() < spike_probability as f64 {
                     let timestamp = step as f64 * time_step;
                     spikes.push(SpikeEvent::new(neuron_id, timestamp, value));
                 }
@@ -93,6 +95,7 @@ impl SpikeEncoder {
     fn population_encode(&self, data: &[f32], time_step: f64) -> Result<Vec<SpikeEvent>> {
         let mut spikes = Vec::new();
         let population_size = 10; // Use 10 neurons per input value
+        let mut rng = thread_rng();
 
         for (input_id, &value) in data.iter().enumerate() {
             let normalized_value = (value + 1.0) / 2.0; // Normalize to [0,1]
@@ -103,7 +106,7 @@ impl SpikeEncoder {
                 let activation =
                     (-0.5 * ((normalized_value as f64 - center) / sigma).powi(2)).exp();
 
-                if activation > 0.5 && rand::random::<f64>() < activation {
+                if activation > 0.5 && rng.random::<f64>() < activation {
                     let neuron_id = input_id * population_size + pop_neuron;
                     spikes.push(SpikeEvent::new(neuron_id, 0.0, activation as f32));
                 }

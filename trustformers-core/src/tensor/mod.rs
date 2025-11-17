@@ -52,7 +52,8 @@ mod utils;
 mod property_tests;
 
 use crate::errors::Result;
-use scirs2_core::ndarray::ArrayD;
+use scirs2_core::ndarray::{ArrayBase, ArrayD, Dim, IxDynImpl, OwnedRepr};
+use scirs2_core::Complex;
 use scirs2_core::{Complex32, Complex64};
 use serde::{Deserialize, Serialize};
 
@@ -207,8 +208,8 @@ pub enum Tensor {
     // Complex number types
     C32(ArrayD<Complex32>),
     C64(ArrayD<Complex64>),
-    CF16(ArrayD<num_complex::Complex<half::f16>>),
-    CBF16(ArrayD<num_complex::Complex<half::bf16>>),
+    CF16(ArrayD<Complex<half::f16>>),
+    CBF16(ArrayD<Complex<half::bf16>>),
     // Sparse tensor variant
     Sparse(crate::sparse_tensor::SparseTensor),
     // GPU support available via hardware acceleration module (CUDA, ROCm, Intel OneAPI, Vulkan, Metal)
@@ -295,7 +296,7 @@ unsafe impl Sync for Tensor {}
 
 // The implementations are in separate modules but the methods are part of the Tensor impl blocks
 
-impl From<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<ndarray::IxDynImpl>>>
+impl From<ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>>>
     for Tensor
 {
     fn from(arr: ArrayD<f32>) -> Self {
@@ -303,7 +304,7 @@ impl From<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<ndarray::IxDy
     }
 }
 
-impl From<ndarray::ArrayBase<ndarray::OwnedRepr<f64>, ndarray::Dim<ndarray::IxDynImpl>>>
+impl From<ArrayBase<OwnedRepr<f64>, Dim<IxDynImpl>>>
     for Tensor
 {
     fn from(arr: ArrayD<f64>) -> Self {

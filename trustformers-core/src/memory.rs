@@ -1,5 +1,6 @@
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
+use scirs2_core::ndarray::{s, IxDyn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -208,12 +209,12 @@ impl TensorView {
                     .view()
                     .into_shape_with_order(arr.len())
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                let slice = flat.slice(ndarray::s![
+                let slice = flat.slice(s![
                     self.offset..self.offset + self.shape.iter().product::<usize>()
                 ]);
                 let sliced_arr = slice
                     .to_owned()
-                    .into_shape_with_order(ndarray::IxDyn(&self.shape))
+                    .into_shape_with_order(IxDyn(&self.shape))
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                 Ok(Tensor::F32(sliced_arr))
             },

@@ -488,7 +488,7 @@ impl Tensor {
                     .iter()
                     .zip(b.iter())
                     .map(|(a_val, b_val)| {
-                        num_complex::Complex::new(
+                        Complex::new(
                             a_val.re * b_val.re - a_val.im * b_val.im,
                             a_val.re * b_val.im + a_val.im * b_val.re,
                         )
@@ -506,7 +506,7 @@ impl Tensor {
                     .iter()
                     .zip(b.iter())
                     .map(|(a_val, b_val)| {
-                        num_complex::Complex::new(
+                        Complex::new(
                             a_val.re * b_val.re - a_val.im * b_val.im,
                             a_val.re * b_val.im + a_val.im * b_val.re,
                         )

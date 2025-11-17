@@ -162,7 +162,7 @@ impl GptJModel {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         self.wte.weights_to_gpu_cuda(device)?;
         for block in &mut self.blocks {
@@ -204,7 +204,7 @@ impl GptJBlock {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         self.ln_1.weights_to_gpu_cuda(device)?;
         self.attn.weights_to_gpu_cuda(device)?;
@@ -287,7 +287,7 @@ impl GptJAttention {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         self.q_proj.weights_to_gpu_cuda(device)?;
         self.k_proj.weights_to_gpu_cuda(device)?;
@@ -366,7 +366,7 @@ impl GptJMLP {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         self.fc_in.weights_to_gpu_cuda(device)?;
         self.fc_out.weights_to_gpu_cuda(device)?;
@@ -484,7 +484,7 @@ impl GptJLMHeadModel {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         self.transformer.weights_to_gpu_cuda(device)?;
         self.lm_head.weights_to_gpu_cuda(device)?;

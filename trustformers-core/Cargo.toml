@@ -18,14 +18,11 @@ serde_json.workspace = true
 semver.workspace = true
 tracing.workspace = true
 log.workspace = true
-# Transitioning from ndarray to SciRS2
-ndarray.workspace = true  # Keep for gradual migration
-num-traits.workspace = true
-num-complex.workspace = true
-rand.workspace = true
-rand_distr.workspace = true
-# rayon removed - using scirs2_core::parallel_ops per SciRS2 Core Usage Policy
-rayon.workspace = true  # Re-added for checkpoint conversion parallelization
+# SciRS2 Integration Policy - using scirs2-core for all scientific computing
+# Direct ndarray, rand, rand_distr, rayon dependencies removed per SciRS2 Policy
+# Use scirs2_core::ndarray, scirs2_core::random, scirs2_core::parallel_ops instead
+num-traits.workspace = true  # Still needed for trait bounds
+# num-complex removed - use scirs2_core::Complex instead
 half.workspace = true
 bincode.workspace = true
 safetensors.workspace = true
@@ -48,7 +45,8 @@ tempfile.workspace = true
 tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS2 Integration Policy
 
 # SciRS2 dependencies - required for SciRS2 Integration Policy
-scirs2-core = { workspace = true, features = ["random"] }
+# Includes: array ops (ndarray), random (rand/rand_distr), parallel (rayon), simd, linalg, complex numbers
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "linalg", "gpu"] }
 
 # Optional backends
 tch = { workspace = true, optional = true }

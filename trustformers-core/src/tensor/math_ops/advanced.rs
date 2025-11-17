@@ -5,7 +5,7 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::{ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{ArrayD, Axis, IxDyn, Zip};
 
 impl Tensor {
     /// Element-wise less-than comparison.
@@ -26,7 +26,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
+                    Zip::from(a)
                         .and(b)
                         .map_collect(|&x, &y| if x < y { 1.0f32 } else { 0.0f32 });
                 Ok(Tensor::F32(result))
@@ -38,7 +38,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
+                    Zip::from(a)
                         .and(b)
                         .map_collect(|&x, &y| if x < y { 1.0f64 } else { 0.0f64 });
                 Ok(Tensor::F64(result))
@@ -50,7 +50,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
+                    Zip::from(a)
                         .and(b)
                         .map_collect(|&x, &y| if x < y { 1i64 } else { 0i64 });
                 Ok(Tensor::I64(result))
@@ -79,7 +79,7 @@ impl Tensor {
                         "Tensors must have the same shape for equal comparison".to_string(),
                     ));
                 }
-                let result = ndarray::Zip::from(a).and(b).map_collect(|&x, &y| {
+                let result = Zip::from(a).and(b).map_collect(|&x, &y| {
                     if (x - y).abs() < f32::EPSILON {
                         1.0f32
                     } else {
@@ -94,7 +94,7 @@ impl Tensor {
                         "Tensors must have the same shape for equal comparison".to_string(),
                     ));
                 }
-                let result = ndarray::Zip::from(a).and(b).map_collect(|&x, &y| {
+                let result = Zip::from(a).and(b).map_collect(|&x, &y| {
                     if (x - y).abs() < f64::EPSILON {
                         1.0f64
                     } else {
@@ -110,7 +110,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
+                    Zip::from(a)
                         .and(b)
                         .map_collect(|&x, &y| if x == y { 1i64 } else { 0i64 });
                 Ok(Tensor::I64(result))
@@ -141,7 +141,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(cond)
+                    Zip::from(cond)
                         .and(a)
                         .and(b)
                         .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
@@ -154,7 +154,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(cond)
+                    Zip::from(cond)
                         .and(a)
                         .and(b)
                         .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
@@ -167,7 +167,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(cond)
+                    Zip::from(cond)
                         .and(a)
                         .and(b)
                         .map_collect(|&c, &x, &y| if c > 0 { x } else { y });
@@ -239,7 +239,7 @@ impl Tensor {
             (Tensor::F32(predictions), Tensor::F32(targets)) => {
                 // Calculate cross entropy: -sum(target * log(prediction))
                 let log_preds = predictions.mapv(|x| (x + 1e-8).ln()); // Add small epsilon to avoid log(0)
-                let losses = ndarray::Zip::from(&log_preds)
+                let losses = Zip::from(&log_preds)
                     .and(targets)
                     .map_collect(|&log_pred, &target| -target * log_pred);
 
@@ -275,14 +275,14 @@ impl Tensor {
 
                 // Calculate dot product along the specified dimension
                 let dot_product =
-                    ndarray::Zip::from(a).and(b).map_collect(|&x, &y| x * y).sum_axis(Axis(axis));
+                    Zip::from(a).and(b).map_collect(|&x, &y| x * y).sum_axis(Axis(axis));
 
                 // Calculate norms
                 let norm_a = a.mapv(|x| x * x).sum_axis(Axis(axis)).mapv(|x| (x + eps).sqrt());
                 let norm_b = b.mapv(|x| x * x).sum_axis(Axis(axis)).mapv(|x| (x + eps).sqrt());
 
                 // Calculate cosine similarity
-                let similarity = ndarray::Zip::from(&dot_product)
+                let similarity = Zip::from(&dot_product)
                     .and(&norm_a)
                     .and(&norm_b)
                     .map_collect(|&dot, &norm_a, &norm_b| dot / (norm_a * norm_b));

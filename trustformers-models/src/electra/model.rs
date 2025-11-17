@@ -187,7 +187,7 @@ impl ElectraLayer {
                 intermediate_size,
                 config.hidden_dropout_prob,
                 device,
-            )?,
+            ),
             attention_layer_norm: LayerNorm::new_with_device(
                 vec![hidden_size],
                 config.layer_norm_eps,

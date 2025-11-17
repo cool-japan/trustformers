@@ -7,7 +7,7 @@
 
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
-use scirs2_core::random::Rng; // SciRS2 Policy compliant
+use scirs2_core::random::*; // SciRS2 Policy compliant
 use std::collections::{HashMap, HashSet};
 
 /// Pruning configuration
@@ -263,12 +263,12 @@ impl PruningStrategy for UnstructuredPruner {
 
         if self.random {
             // Random pruning
-            let mut rng = rand::rng();
+            let mut rng = thread_rng();
             let mut indices: Vec<usize> = (0..data.len()).collect();
 
             // Fisher-Yates shuffle
             for i in (1..indices.len()).rev() {
-                let j = rng.random_range(0..=i);
+                let j = rng.gen_range(0..=i);
                 indices.swap(i, j);
             }
 
@@ -291,11 +291,11 @@ impl PruningStrategy for UnstructuredPruner {
         let mut mask = vec![1.0; data.len()];
 
         if self.random {
-            let mut rng = rand::rng();
+            let mut rng = thread_rng();
             let mut indices: Vec<usize> = (0..data.len()).collect();
 
             for i in (1..indices.len()).rev() {
-                let j = rng.random_range(0..=i);
+                let j = rng.gen_range(0..=i);
                 indices.swap(i, j);
             }
 

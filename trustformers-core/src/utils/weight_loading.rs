@@ -2,6 +2,7 @@ use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::WeightReader;
 use safetensors::{SafeTensors, View};
+use scirs2_core::ndarray::{ArrayD, IxDyn};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -106,7 +107,7 @@ impl WeightReader for SafeTensorsReader {
                     .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
                     .collect();
 
-                let arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&info.shape), values)
+                let arr = ArrayD::from_shape_vec(IxDyn(&info.shape), values)
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                 Ok(Tensor::F32(arr))
             },
@@ -121,7 +122,7 @@ impl WeightReader for SafeTensorsReader {
                     })
                     .collect();
 
-                let arr = ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&info.shape), values)
+                let arr = ArrayD::from_shape_vec(IxDyn(&info.shape), values)
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                 Ok(Tensor::F32(arr))
             },
@@ -357,8 +358,8 @@ impl WeightReader for PyTorchReader {
         // Convert the tensor data to a Tensor
         match tensor_data.dtype.as_str() {
             "f32" => {
-                let arr = ndarray::ArrayD::from_shape_vec(
-                    ndarray::IxDyn(&tensor_data.shape),
+                let arr = ArrayD::from_shape_vec(
+                    IxDyn(&tensor_data.shape),
                     tensor_data.data.clone(),
                 )
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?;

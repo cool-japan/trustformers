@@ -32,22 +32,33 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         Tensor::CUDA(cuda_data) => {
             use crate::device::Device;
-            use crate::gpu_ops::cuda::get_cuda_backend;
             use crate::tensor::CudaTensorData;
 
-            // Get device ID (default to 0)
-            let device_id = 0; // TODO: Get from tensor metadata
-            let backend = get_cuda_backend(device_id)?;
-            let size: usize = cuda_data.shape.iter().product();
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            {
+                use crate::gpu_ops::cuda::get_cuda_backend;
 
-            // Execute GELU GPU-to-GPU (NO CPU transfers!)
-            let output_buffer_id = backend.gelu_gpu_to_gpu(&cuda_data.buffer_id, size)?;
+                // Get device ID (default to 0)
+                let device_id = 0; // TODO: Get from tensor metadata
+                let backend = get_cuda_backend(device_id)?;
+                let size: usize = cuda_data.shape.iter().product();
 
-            Ok(Tensor::CUDA(CudaTensorData {
-                buffer_id: output_buffer_id,
-                shape: cuda_data.shape.clone(),
-                dtype: cuda_data.dtype,
-            }))
+                // Execute GELU GPU-to-GPU (NO CPU transfers!)
+                let output_buffer_id = backend.gelu_gpu_to_gpu(&cuda_data.buffer_id, size)?;
+
+                return Ok(Tensor::CUDA(CudaTensorData {
+                    buffer_id: output_buffer_id,
+                    shape: cuda_data.shape.clone(),
+                    dtype: cuda_data.dtype,
+                }));
+            }
+
+            // Fallback for non-Linux/Windows platforms
+            #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+            {
+                let cpu_tensor = Tensor::CUDA(cuda_data.clone()).to_device_enum(&Device::CPU)?;
+                return gelu(&cpu_tensor);
+            }
         },
 
         Tensor::F32(arr) => {

@@ -63,14 +63,13 @@ impl EvaluationDataset {
     }
 
     pub fn shuffle(&mut self, seed: Option<u64>) {
-        use rand::seq::SliceRandom;
-        use rand::SeedableRng;
+        use scirs2_core::random::*;
 
         if let Some(seed) = seed {
             let mut rng = StdRng::seed_from_u64(seed);
             self.samples.shuffle(&mut rng);
         } else {
-            let mut rng = rand::rng();
+            let mut rng = thread_rng();
             self.samples.shuffle(&mut rng);
         }
     }

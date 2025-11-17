@@ -37,7 +37,7 @@
 use super::super::Tensor;
 use super::stability::*;
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::{s, ArrayD, IxDyn};
+use scirs2_core::ndarray::{s, ArrayD, Axis, Ix0, Ix2, IxDyn};
 
 impl Tensor {
     /// Matrix multiplication with numerical stability enhancements.
@@ -130,11 +130,11 @@ impl Tensor {
                     // Simple 2D matrix multiplication with numerical stability
                     let a_2d = a
                         .view()
-                        .into_dimensionality::<ndarray::Ix2>()
+                        .into_dimensionality::<Ix2>()
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                     let b_2d = b
                         .view()
-                        .into_dimensionality::<ndarray::Ix2>()
+                        .into_dimensionality::<Ix2>()
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
 
                     // Check for stability before computation
@@ -195,10 +195,10 @@ impl Tensor {
                             let b_contiguous = b_slice.to_owned().as_standard_layout().to_owned();
 
                             let a_2d = a_contiguous
-                                .into_dimensionality::<ndarray::Ix2>()
+                                .into_dimensionality::<Ix2>()
                                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                             let b_2d = b_contiguous
-                                .into_dimensionality::<ndarray::Ix2>()
+                                .into_dimensionality::<Ix2>()
                                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
 
                             let batch_result = a_2d.dot(&b_2d);
@@ -231,10 +231,10 @@ impl Tensor {
 
                                 // Convert to 2D arrays for dot product
                                 let a_2d = a_contiguous
-                                    .into_dimensionality::<ndarray::Ix2>()
+                                    .into_dimensionality::<Ix2>()
                                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                                 let b_2d = b_contiguous
-                                    .into_dimensionality::<ndarray::Ix2>()
+                                    .into_dimensionality::<Ix2>()
                                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
 
                                 // Perform 2D matrix multiplication
@@ -455,8 +455,6 @@ impl Tensor {
     /// # }
     /// ```
     pub fn norm_dim(&self, p: i32, dims: Option<Vec<i32>>, keepdim: bool) -> Result<Tensor> {
-        use ndarray::Axis;
-
         if p != 2 {
             return Err(TrustformersError::tensor_op_error(
                 &format!("Only L2 norm (p=2) is currently supported, got p={}", p),
@@ -605,7 +603,7 @@ mod tests {
 
         if let Tensor::F32(arr) = norm_squared {
             assert!(
-                (arr.into_dimensionality::<ndarray::Ix0>().unwrap().into_scalar() - 25.0).abs()
+                (arr.into_dimensionality::<Ix0>().unwrap().into_scalar() - 25.0).abs()
                     < 1e-6
             );
         }

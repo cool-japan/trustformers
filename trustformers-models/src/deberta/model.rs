@@ -539,7 +539,7 @@ impl DebertaLayer {
                 config.intermediate_size,
                 config.hidden_dropout_prob,
                 device,
-            )?,
+            ),
             output_layer_norm: LayerNorm::new_with_device(
                 vec![config.hidden_size],
                 config.layer_norm_eps,

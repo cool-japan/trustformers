@@ -414,9 +414,9 @@ mod tests {
     use crate::ab_testing::MetricValue;
 
     fn create_test_data(mean: f64, std_dev: f64, size: usize) -> Vec<MetricDataPoint> {
-        use rand_distr::{Distribution, Normal};
+        use scirs2_core::random::*;
         let normal = Normal::new(mean, std_dev).unwrap();
-        let mut rng = rand::rng();
+        let mut rng = thread_rng();
 
         (0..size)
             .map(|_| MetricDataPoint {

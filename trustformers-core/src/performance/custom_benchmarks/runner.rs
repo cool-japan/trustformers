@@ -155,7 +155,7 @@ impl BenchmarkRunner {
 
     /// Run benchmarks in parallel
     fn run_parallel(&mut self) -> Result<()> {
-        use rayon::prelude::*;
+        use scirs2_core::parallel_ops::*;
 
         let config = &self.config;
         let results = self

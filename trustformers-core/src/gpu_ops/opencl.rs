@@ -171,24 +171,27 @@ impl OpenClBackend {
 
     /// Create a persistent GPU buffer and return its ID
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
-        let buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, data.len(), None)
+        let mut buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, data.len(), std::ptr::null_mut())
                 .map_err(|e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create buffer: {:?}", e),
                         "create_persistent_buffer",
                     )
-                })?;
+                })?
+        };
 
         // Write data to buffer
-        self.queue
-            .enqueue_write_buffer(&buffer, CL_BLOCKING, 0, data, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to write buffer: {:?}", e),
-                    "create_persistent_buffer",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_write_buffer(&mut buffer, CL_BLOCKING, 0, data, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to write buffer: {:?}", e),
+                        "create_persistent_buffer",
+                    )
+                })?
+        };
 
         let buffer_id = BufferId::new();
 
@@ -302,68 +305,79 @@ __kernel void matmul_kernel(
         })?;
 
         // Create buffers
-        let a_buffer = ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, a.len(), None)
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to create A buffer: {:?}", e),
-                    "matmul_f32",
-                )
-            })?;
+        let mut a_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, a.len(), std::ptr::null_mut())
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to create A buffer: {:?}", e),
+                        "matmul_f32",
+                    )
+                })?
+        };
 
-        let b_buffer = ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, b.len(), None)
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to create B buffer: {:?}", e),
-                    "matmul_f32",
-                )
-            })?;
+        let mut b_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, b.len(), std::ptr::null_mut())
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to create B buffer: {:?}", e),
+                        "matmul_f32",
+                    )
+                })?
+        };
 
         let result_size = m * n;
-        let c_buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, result_size, None)
+        let c_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, result_size, std::ptr::null_mut())
                 .map_err(|e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create C buffer: {:?}", e),
                         "matmul_f32",
                     )
-                })?;
+                })?
+        };
 
         // Write input data
-        self.queue
-            .enqueue_write_buffer(&a_buffer, CL_BLOCKING, 0, a, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to write A buffer: {:?}", e),
-                    "matmul_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_write_buffer(&mut a_buffer, CL_BLOCKING, 0, a, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to write A buffer: {:?}", e),
+                        "matmul_f32",
+                    )
+                })?
+        };
 
-        self.queue
-            .enqueue_write_buffer(&b_buffer, CL_BLOCKING, 0, b, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to write B buffer: {:?}", e),
-                    "matmul_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_write_buffer(&mut b_buffer, CL_BLOCKING, 0, b, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to write B buffer: {:?}", e),
+                        "matmul_f32",
+                    )
+                })?
+        };
 
         // Execute kernel
-        let kernel_event = ExecuteKernel::new(&kernel)
-            .set_arg(&a_buffer)
-            .set_arg(&b_buffer)
-            .set_arg(&c_buffer)
-            .set_arg(&(m as u32))
-            .set_arg(&(n as u32))
-            .set_arg(&(k as u32))
-            .set_global_work_sizes(&[n, m])
-            .set_local_work_sizes(&[16, 16])
-            .enqueue_nd_range(&self.queue)
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to execute OpenCL kernel: {:?}", e),
-                    "matmul_f32",
-                )
-            })?;
+        let kernel_event = unsafe {
+            ExecuteKernel::new(&kernel)
+                .set_arg(&a_buffer)
+                .set_arg(&b_buffer)
+                .set_arg(&c_buffer)
+                .set_arg(&(m as u32))
+                .set_arg(&(n as u32))
+                .set_arg(&(k as u32))
+                .set_global_work_sizes(&[n, m])
+                .set_local_work_sizes(&[16, 16])
+                .enqueue_nd_range(&self.queue)
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to execute OpenCL kernel: {:?}", e),
+                        "matmul_f32",
+                    )
+                })?
+        };
 
         kernel_event.wait().map_err(|e| {
             TrustformersError::hardware_error(
@@ -374,14 +388,16 @@ __kernel void matmul_kernel(
 
         // Read result
         let mut result = vec![0.0f32; result_size];
-        self.queue
-            .enqueue_read_buffer(&c_buffer, CL_BLOCKING, 0, &mut result, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to read result buffer: {:?}", e),
-                    "matmul_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_read_buffer(&c_buffer, CL_BLOCKING, 0, &mut result, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to read result buffer: {:?}", e),
+                        "matmul_f32",
+                    )
+                })?
+        };
 
         Ok(result)
     }
@@ -439,50 +455,56 @@ __kernel void gelu_kernel(
         })?;
 
         // Create buffers
-        let input_buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, size, None).map_err(
+        let mut input_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, size, std::ptr::null_mut()).map_err(
                 |e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create input buffer: {:?}", e),
                         "gelu_f32",
                     )
                 },
-            )?;
+            )?
+        };
 
-        let output_buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, size, None).map_err(
+        let output_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, size, std::ptr::null_mut()).map_err(
                 |e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create output buffer: {:?}", e),
                         "gelu_f32",
                     )
                 },
-            )?;
+            )?
+        };
 
         // Write input data
-        self.queue
-            .enqueue_write_buffer(&input_buffer, CL_BLOCKING, 0, input, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to write input buffer: {:?}", e),
-                    "gelu_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_write_buffer(&mut input_buffer, CL_BLOCKING, 0, input, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to write input buffer: {:?}", e),
+                        "gelu_f32",
+                    )
+                })?
+        };
 
         // Execute kernel
-        let kernel_event = ExecuteKernel::new(&kernel)
-            .set_arg(&input_buffer)
-            .set_arg(&output_buffer)
-            .set_arg(&(size as u32))
-            .set_global_work_size(size)
-            .set_local_work_size(256)
-            .enqueue_nd_range(&self.queue)
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to execute OpenCL kernel: {:?}", e),
-                    "gelu_f32",
-                )
-            })?;
+        let kernel_event = unsafe {
+            ExecuteKernel::new(&kernel)
+                .set_arg(&input_buffer)
+                .set_arg(&output_buffer)
+                .set_arg(&(size as u32))
+                .set_global_work_size(size)
+                .set_local_work_size(256)
+                .enqueue_nd_range(&self.queue)
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to execute OpenCL kernel: {:?}", e),
+                        "gelu_f32",
+                    )
+                })?
+        };
 
         kernel_event.wait().map_err(|e| {
             TrustformersError::hardware_error(
@@ -493,14 +515,16 @@ __kernel void gelu_kernel(
 
         // Read result
         let mut result = vec![0.0f32; size];
-        self.queue
-            .enqueue_read_buffer(&output_buffer, CL_BLOCKING, 0, &mut result, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to read result buffer: {:?}", e),
-                    "gelu_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_read_buffer(&output_buffer, CL_BLOCKING, 0, &mut result, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to read result buffer: {:?}", e),
+                        "gelu_f32",
+                    )
+                })?
+        };
 
         Ok(result)
     }
@@ -589,88 +613,100 @@ __kernel void layernorm_kernel(
         })?;
 
         // Create buffers
-        let input_buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, total_size, None)
+        let mut input_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, total_size, std::ptr::null_mut())
                 .map_err(|e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create input buffer: {:?}", e),
                         "layernorm_f32",
                     )
-                })?;
+                })?
+        };
 
-        let weight_buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, hidden_size, None)
+        let mut weight_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, hidden_size, std::ptr::null_mut())
                 .map_err(|e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create weight buffer: {:?}", e),
                         "layernorm_f32",
                     )
-                })?;
+                })?
+        };
 
-        let bias_buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, hidden_size, None)
+        let mut bias_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_READ_ONLY, hidden_size, std::ptr::null_mut())
                 .map_err(|e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create bias buffer: {:?}", e),
                         "layernorm_f32",
                     )
-                })?;
+                })?
+        };
 
-        let output_buffer =
-            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, total_size, None)
+        let output_buffer = unsafe {
+            ClBuffer::<cl_float>::create(&self.context, CL_MEM_WRITE_ONLY, total_size, std::ptr::null_mut())
                 .map_err(|e| {
                     TrustformersError::hardware_error(
                         &format!("Failed to create output buffer: {:?}", e),
                         "layernorm_f32",
                     )
-                })?;
+                })?
+        };
 
         // Write input data
-        self.queue
-            .enqueue_write_buffer(&input_buffer, CL_BLOCKING, 0, input, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to write input buffer: {:?}", e),
-                    "layernorm_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_write_buffer(&mut input_buffer, CL_BLOCKING, 0, input, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to write input buffer: {:?}", e),
+                        "layernorm_f32",
+                    )
+                })?
+        };
 
-        self.queue
-            .enqueue_write_buffer(&weight_buffer, CL_BLOCKING, 0, weight, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to write weight buffer: {:?}", e),
-                    "layernorm_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_write_buffer(&mut weight_buffer, CL_BLOCKING, 0, weight, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to write weight buffer: {:?}", e),
+                        "layernorm_f32",
+                    )
+                })?
+        };
 
-        self.queue
-            .enqueue_write_buffer(&bias_buffer, CL_BLOCKING, 0, bias, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to write bias buffer: {:?}", e),
-                    "layernorm_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_write_buffer(&mut bias_buffer, CL_BLOCKING, 0, bias, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to write bias buffer: {:?}", e),
+                        "layernorm_f32",
+                    )
+                })?
+        };
 
         // Execute kernel
-        let kernel_event = ExecuteKernel::new(&kernel)
-            .set_arg(&input_buffer)
-            .set_arg(&weight_buffer)
-            .set_arg(&bias_buffer)
-            .set_arg(&output_buffer)
-            .set_arg(&(seq_len as u32))
-            .set_arg(&(hidden_size as u32))
-            .set_arg(&eps)
-            .set_global_work_size(seq_len)
-            .set_local_work_size(64)
-            .enqueue_nd_range(&self.queue)
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to execute OpenCL kernel: {:?}", e),
-                    "layernorm_f32",
-                )
-            })?;
+        let kernel_event = unsafe {
+            ExecuteKernel::new(&kernel)
+                .set_arg(&input_buffer)
+                .set_arg(&weight_buffer)
+                .set_arg(&bias_buffer)
+                .set_arg(&output_buffer)
+                .set_arg(&(seq_len as u32))
+                .set_arg(&(hidden_size as u32))
+                .set_arg(&eps)
+                .set_global_work_size(seq_len)
+                .set_local_work_size(64)
+                .enqueue_nd_range(&self.queue)
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to execute OpenCL kernel: {:?}", e),
+                        "layernorm_f32",
+                    )
+                })?
+        };
 
         kernel_event.wait().map_err(|e| {
             TrustformersError::hardware_error(
@@ -681,14 +717,16 @@ __kernel void layernorm_kernel(
 
         // Read result
         let mut result = vec![0.0f32; total_size];
-        self.queue
-            .enqueue_read_buffer(&output_buffer, CL_BLOCKING, 0, &mut result, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to read result buffer: {:?}", e),
-                    "layernorm_f32",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_read_buffer(&output_buffer, CL_BLOCKING, 0, &mut result, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to read result buffer: {:?}", e),
+                        "layernorm_f32",
+                    )
+                })?
+        };
 
         Ok(result)
     }
@@ -698,14 +736,16 @@ __kernel void layernorm_kernel(
         let buffer = self.get_persistent_buffer(buffer_id)?;
 
         let mut result = vec![0.0f32; size];
-        self.queue
-            .enqueue_read_buffer(&buffer, CL_BLOCKING, 0, &mut result, &[])
-            .map_err(|e| {
-                TrustformersError::hardware_error(
-                    &format!("Failed to read buffer: {:?}", e),
-                    "buffer_to_cpu",
-                )
-            })?;
+        unsafe {
+            self.queue
+                .enqueue_read_buffer(&buffer, CL_BLOCKING, 0, &mut result, &[])
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("Failed to read buffer: {:?}", e),
+                        "buffer_to_cpu",
+                    )
+                })?
+        };
 
         Ok(result)
     }

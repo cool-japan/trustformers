@@ -6,8 +6,8 @@
 use super::{DType, Tensor};
 use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Policy compliant
-use scirs2_core::random::thread_rng;
-use scirs2_core::{Complex32, Complex64}; // SciRS2 Policy compliant (root level) // SciRS2 Policy compliant
+use scirs2_core::random::{thread_rng, Distribution, Normal};
+use scirs2_core::{Complex, Complex32, Complex64}; // SciRS2 Policy compliant (root level)
 
 impl Tensor {
     /// Creates a new 1D tensor from a vector of data.
@@ -172,7 +172,6 @@ impl Tensor {
     /// # }
     /// ```
     pub fn randn(shape: &[usize]) -> Result<Self> {
-        use rand_distr::{Distribution, Normal};
         let normal = Normal::new(0.0, 1.0).unwrap();
         let mut rng = thread_rng();
         let size = shape.iter().product();
@@ -376,14 +375,14 @@ impl Tensor {
     /// Creates a tensor filled with zeros (complex f16).
     pub fn zeros_cf16(shape: &[usize]) -> Result<Self> {
         let total_size: usize = shape.iter().product();
-        let data = vec![num_complex::Complex::new(half::f16::ZERO, half::f16::ZERO); total_size];
+        let data = vec![Complex::new(half::f16::ZERO, half::f16::ZERO); total_size];
         Ok(Tensor::CF16(ArrayD::from_shape_vec(IxDyn(shape), data)?))
     }
 
     /// Creates a tensor filled with zeros (complex bf16).
     pub fn zeros_cbf16(shape: &[usize]) -> Result<Self> {
         let total_size: usize = shape.iter().product();
-        let data = vec![num_complex::Complex::new(half::bf16::ZERO, half::bf16::ZERO); total_size];
+        let data = vec![Complex::new(half::bf16::ZERO, half::bf16::ZERO); total_size];
         Ok(Tensor::CBF16(ArrayD::from_shape_vec(IxDyn(shape), data)?))
     }
 
@@ -594,7 +593,6 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (f16 precision).
     pub fn randn_f16(shape: &[usize]) -> Result<Self> {
-        use rand_distr::{Distribution, Normal};
         let normal = Normal::new(0.0, 1.0).unwrap();
         let mut rng = thread_rng();
         let size = shape.iter().product();
@@ -608,7 +606,6 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (bf16 precision).
     pub fn randn_bf16(shape: &[usize]) -> Result<Self> {
-        use rand_distr::{Distribution, Normal};
         let normal = Normal::new(0.0, 1.0).unwrap();
         let mut rng = thread_rng();
         let size = shape.iter().product();
@@ -628,10 +625,10 @@ impl Tensor {
             ));
         }
 
-        let complex_data: Vec<num_complex::Complex<half::f16>> = real
+        let complex_data: Vec<Complex<half::f16>> = real
             .into_iter()
             .zip(imag)
-            .map(|(r, i)| num_complex::Complex::new(half::f16::from_f32(r), half::f16::from_f32(i)))
+            .map(|(r, i)| Complex::new(half::f16::from_f32(r), half::f16::from_f32(i)))
             .collect();
 
         Ok(Tensor::CF16(
@@ -648,11 +645,11 @@ impl Tensor {
             ));
         }
 
-        let complex_data: Vec<num_complex::Complex<half::bf16>> = real
+        let complex_data: Vec<Complex<half::bf16>> = real
             .into_iter()
             .zip(imag)
             .map(|(r, i)| {
-                num_complex::Complex::new(half::bf16::from_f32(r), half::bf16::from_f32(i))
+                Complex::new(half::bf16::from_f32(r), half::bf16::from_f32(i))
             })
             .collect();
 

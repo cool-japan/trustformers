@@ -4,7 +4,7 @@
 
 use super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::{s, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{concatenate, s, ArrayD, Axis, IxDyn, Slice};
 
 impl Tensor {
     /// Helper to normalize negative axis indices.
@@ -464,7 +464,7 @@ impl Tensor {
                     })
                     .collect();
 
-                let result = ndarray::concatenate(Axis(axis), &arrays)
+                let result = concatenate(Axis(axis), &arrays)
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                 Ok(Tensor::F32(result))
             },
@@ -477,7 +477,7 @@ impl Tensor {
                     })
                     .collect();
 
-                let result = ndarray::concatenate(Axis(axis), &arrays)
+                let result = concatenate(Axis(axis), &arrays)
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                 Ok(Tensor::F64(result))
             },
@@ -490,7 +490,7 @@ impl Tensor {
                     })
                     .collect();
 
-                let result = ndarray::concatenate(Axis(axis), &arrays)
+                let result = concatenate(Axis(axis), &arrays)
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                 Ok(Tensor::I64(result))
             },
@@ -579,7 +579,7 @@ impl Tensor {
                     )));
                 }
 
-                let result = a.index_axis(ndarray::Axis(dim), actual_index as usize).to_owned();
+                let result = a.index_axis(Axis(dim), actual_index as usize).to_owned();
                 Ok(Tensor::F32(result))
             },
             Tensor::F64(a) => {
@@ -602,7 +602,7 @@ impl Tensor {
                     )));
                 }
 
-                let result = a.index_axis(ndarray::Axis(dim), actual_index as usize).to_owned();
+                let result = a.index_axis(Axis(dim), actual_index as usize).to_owned();
                 Ok(Tensor::F64(result))
             },
             Tensor::I64(a) => {
@@ -625,7 +625,7 @@ impl Tensor {
                     )));
                 }
 
-                let result = a.index_axis(ndarray::Axis(dim), actual_index as usize).to_owned();
+                let result = a.index_axis(Axis(dim), actual_index as usize).to_owned();
                 Ok(Tensor::I64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -649,8 +649,8 @@ impl Tensor {
                     ));
                 }
                 let result = a
-                    .slice_axis(ndarray::Axis(1), ndarray::Slice::from(0..1))
-                    .remove_axis(ndarray::Axis(1))
+                    .slice_axis(Axis(1), Slice::from(0..1))
+                    .remove_axis(Axis(1))
                     .to_owned();
                 Ok(Tensor::F32(result))
             },
@@ -903,7 +903,7 @@ impl Tensor {
                         "to_scalar",
                     ));
                 }
-                Ok(a[ndarray::IxDyn(&[])])
+                Ok(a[IxDyn(&[])])
             },
             Tensor::F64(a) => {
                 if a.ndim() != 0 {
@@ -912,7 +912,7 @@ impl Tensor {
                         "to_scalar",
                     ));
                 }
-                Ok(a[ndarray::IxDyn(&[])] as f32)
+                Ok(a[IxDyn(&[])] as f32)
             },
             Tensor::I64(a) => {
                 if a.ndim() != 0 {
@@ -921,7 +921,7 @@ impl Tensor {
                         "to_scalar",
                     ));
                 }
-                Ok(a[ndarray::IxDyn(&[])] as f32)
+                Ok(a[IxDyn(&[])] as f32)
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "to_scalar not supported for this tensor type",
@@ -1086,8 +1086,6 @@ impl Tensor {
     /// # }
     /// ```
     pub fn repeat(&self, repeats: &[usize]) -> Result<Tensor> {
-        use ndarray::concatenate;
-
         match self {
             Tensor::F32(arr) => {
                 let mut result = arr.clone();

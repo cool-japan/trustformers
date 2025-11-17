@@ -14,6 +14,7 @@ pub use photonic_networks::*;
 
 use crate::tensor::Tensor;
 use anyhow::Result;
+use scirs2_core::random::*;
 use std::collections::HashMap;
 
 /// Optical computing platforms
@@ -217,8 +218,9 @@ impl OpticalSignal {
 
     /// Add noise to the signal
     pub fn add_noise(&mut self, noise_power: f64) {
+        let mut rng = thread_rng();
         for amp in &mut self.amplitude {
-            let noise = noise_power.sqrt() * (rand::random::<f64>() - 0.5);
+            let noise = noise_power.sqrt() * (rng.gen::<f64>() - 0.5);
             *amp += noise;
         }
     }

@@ -4,7 +4,7 @@
 //! numerical computations, helping identify potential instability issues
 //! in transformer models and training processes.
 
-use rand;
+use scirs2_core::random::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -194,7 +194,8 @@ impl PrecisionTracker {
         }
 
         // Check if we should sample this operation
-        if rand::random::<f64>() > self.config.sample_rate {
+        let mut rng = thread_rng();
+        if rng.gen::<f64>() > self.config.sample_rate {
             return Ok(());
         }
 

@@ -55,7 +55,7 @@ impl GPTNeoXMLP {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -143,7 +143,7 @@ impl GPTNeoXAttention {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -432,7 +432,7 @@ impl GPTNeoXLayer {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -571,7 +571,7 @@ impl GPTNeoXModel {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -804,7 +804,7 @@ impl GPTNeoXForCausalLM {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(
         &mut self,
         device: &trustformers_core::device::Device,

@@ -109,7 +109,7 @@ impl Gpt2Model {
     }
 
     /// Upload model weights to GPU (CUDA)
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::CUDA(_)) {
             return Ok(());
@@ -480,7 +480,7 @@ impl Gpt2LMHeadModel {
     }
 
     /// Upload model weights to GPU (CUDA)
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::CUDA(_)) {
             return Ok(());
@@ -1229,7 +1229,7 @@ impl Gpt2Block {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::CUDA(_)) {
             return Ok(());
@@ -1375,7 +1375,7 @@ impl Gpt2Attention {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::CUDA(_)) {
             return Ok(());
@@ -2068,7 +2068,7 @@ impl Gpt2MLP {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::CUDA(_)) {
             return Ok(());
