@@ -220,7 +220,7 @@ impl OpticalSignal {
     pub fn add_noise(&mut self, noise_power: f64) {
         let mut rng = thread_rng();
         for amp in &mut self.amplitude {
-            let noise = noise_power.sqrt() * (rng.gen::<f64>() - 0.5);
+            let noise = noise_power.sqrt() * (rng.random::<f64>() - 0.5);
             *amp += noise;
         }
     }

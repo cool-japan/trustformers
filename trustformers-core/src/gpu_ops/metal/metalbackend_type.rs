@@ -2,9 +2,10 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
+#[allow(unused_imports)]
 use super::common::*;
 
-#[cfg(all(target_os = "macos", feature = "metal"))]
 use super::types::BufferCache;
 
 /// Metal GPU backend for matrix multiplication and element-wise operations

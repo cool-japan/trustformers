@@ -475,6 +475,7 @@ pub fn can_load_model_size(model_size_gb: f64) -> Result<bool, JsValue> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

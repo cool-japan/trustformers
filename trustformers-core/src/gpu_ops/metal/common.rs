@@ -14,7 +14,7 @@ pub(crate) use metal::{
 };
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
-pub(crate) use std::collections::{HashMap, HashSet};
+pub(crate) use std::collections::HashMap;
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub(crate) use std::mem;

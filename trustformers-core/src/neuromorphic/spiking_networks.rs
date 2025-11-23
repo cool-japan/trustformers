@@ -295,7 +295,7 @@ impl SpikingNeuralNetwork {
                 for next in 0..next_layer_size {
                     let pre = neuron_idx + current;
                     let post = neuron_idx + current_layer_size + next;
-                    let weight = (rng.gen::<f32>() - 0.5) * 2.0; // Random weight [-1, 1]
+                    let weight = (rng.random::<f32>() - 0.5) * 2.0; // Random weight [-1, 1]
                     let _ = self.add_synapse(pre, post, weight, 1.0);
                 }
             }
@@ -312,14 +312,14 @@ impl SpikingNeuralNetwork {
         // Create ring lattice
         for i in 0..n {
             let next = (i + 1) % n;
-            let weight = (rng.gen::<f32>() - 0.5) * 2.0;
+            let weight = (rng.random::<f32>() - 0.5) * 2.0;
             let _ = self.add_synapse(i, next, weight, 1.0);
         }
 
         // Rewire some connections
         let mut synapses_to_rewire = Vec::new();
         for (idx, synapse) in self.synapses.iter().enumerate() {
-            if rng.gen::<f32>() < rewiring_prob {
+            if rng.random::<f32>() < rewiring_prob {
                 synapses_to_rewire.push(idx);
             }
         }

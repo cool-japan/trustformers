@@ -12,7 +12,8 @@ workspace = true
 
 [dependencies]
 trustformers-core = { workspace = true }
-scirs2-core.workspace = true
+# Note: ndarray version controlled by trustformers-core feature (ndarray17 by default, ndarray16-compat for Python)
+scirs2-core = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

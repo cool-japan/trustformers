@@ -797,9 +797,9 @@ mod tests {
             assert!(stats.is_ok());
 
             let (total, peak, free) = stats.unwrap();
-            assert!(total >= 0);
-            assert!(peak >= 0);
-            assert!(free >= 0);
+            // assert!(total >= 0);
+            // assert!(peak >= 0);
+            // assert!(free >= 0);
         }
     }
 }

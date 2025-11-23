@@ -384,8 +384,8 @@ mod tests {
         assert_eq!(model_metal.device(), Device::Metal(0));
 
         // Test CUDA device creation
-        let model_cuda = XLSTMModel::new_with_device(config.clone(), Device::Cuda(0)).unwrap();
-        assert_eq!(model_cuda.device(), Device::Cuda(0));
+        let model_cuda = XLSTMModel::new_with_device(config.clone(), Device::CUDA(0)).unwrap();
+        assert_eq!(model_cuda.device(), Device::CUDA(0));
     }
 
     #[test]
@@ -415,10 +415,10 @@ mod tests {
         let model_cuda = XLSTMForSequenceClassification::new_with_device(
             config.clone(),
             num_labels,
-            Device::Cuda(0),
+            Device::CUDA(0),
         )
         .unwrap();
-        assert_eq!(model_cuda.device(), Device::Cuda(0));
+        assert_eq!(model_cuda.device(), Device::CUDA(0));
     }
 
     #[test]
@@ -445,8 +445,8 @@ mod tests {
         assert_eq!(block_cpu.device(), Device::CPU);
 
         // Test explicit device creation
-        let block_cuda = SLstmBlock::new_with_device(hidden_size, Device::Cuda(0));
-        assert_eq!(block_cuda.device(), Device::Cuda(0));
+        let block_cuda = SLstmBlock::new_with_device(hidden_size, Device::CUDA(0));
+        assert_eq!(block_cuda.device(), Device::CUDA(0));
     }
 
     #[test]
@@ -473,8 +473,8 @@ mod tests {
         assert_eq!(ff_cpu.device(), Device::CPU);
 
         // Test explicit device creation
-        let ff_cuda = FeedForward::new_with_device(hidden_size, intermediate_size, Device::Cuda(0));
-        assert_eq!(ff_cuda.device(), Device::Cuda(0));
+        let ff_cuda = FeedForward::new_with_device(hidden_size, intermediate_size, Device::CUDA(0));
+        assert_eq!(ff_cuda.device(), Device::CUDA(0));
     }
 
     #[test]
@@ -488,9 +488,9 @@ mod tests {
         assert_eq!(model.device(), Device::Metal(0));
 
         // Create causal LM model on CUDA
-        let causal_lm = XLSTMForCausalLM::new_with_device(config.clone(), Device::Cuda(1)).unwrap();
-        assert_eq!(causal_lm.device(), Device::Cuda(1));
-        assert_eq!(causal_lm.xlstm.device(), Device::Cuda(1));
+        let causal_lm = XLSTMForCausalLM::new_with_device(config.clone(), Device::CUDA(1)).unwrap();
+        assert_eq!(causal_lm.device(), Device::CUDA(1));
+        assert_eq!(causal_lm.xlstm.device(), Device::CUDA(1));
     }
 
     #[test]

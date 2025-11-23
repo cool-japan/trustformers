@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::gpt_neo::config::GptNeoConfig;
 use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
@@ -165,7 +167,7 @@ impl GptNeoAttention {
         attention_type: &str,
         device: Device,
     ) -> Result<Self> {
-        let head_dim = config.hidden_size / config.num_heads;
+        let _head_dim = config.hidden_size / config.num_heads;
         let attention = MultiHeadAttention::new_with_device(config, device)?;
 
         let window_size = if attention_type == "local" { Some(config.window_size) } else { None };

@@ -195,7 +195,7 @@ impl PrecisionTracker {
 
         // Check if we should sample this operation
         let mut rng = thread_rng();
-        if rng.gen::<f64>() > self.config.sample_rate {
+        if rng.random::<f64>() > self.config.sample_rate {
             return Ok(());
         }
 

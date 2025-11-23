@@ -1,6 +1,7 @@
 use anyhow::Result;
-use trustformers_core::device::Device;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use trustformers_core::device::Device;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::gpu_ops::metal::get_metal_backend;
 

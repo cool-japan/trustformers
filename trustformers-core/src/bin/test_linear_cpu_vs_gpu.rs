@@ -1,8 +1,12 @@
 /// Test a single Linear layer CPU vs GPU to isolate the bug
 use anyhow::Result;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::device::Device;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::layers::Linear;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::tensor::Tensor;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::traits::Layer;
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -22,7 +26,7 @@ fn main() -> Result<()> {
     );
 
     // Create CPU version
-    let mut cpu_layer = Linear::new(in_features, out_features, has_bias);
+    let cpu_layer = Linear::new(in_features, out_features, has_bias);
 
     // Create GPU version with same weights
     let device = Device::metal_if_available(0);

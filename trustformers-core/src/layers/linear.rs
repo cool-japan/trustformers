@@ -484,7 +484,7 @@ impl Layer for Linear {
             // Try MPS first, fallback to naive kernel if MPS unavailable
             let output_buffer_id = backend
                 .matmul_gpu_to_gpu_mps(&input_metal.buffer_id, &weight_buffer_id, m, k, n)
-                .or_else(|e| {
+                .or_else(|_e| {
                     // eprintln!(
                     //     "⚠️  MPS matmul failed: {:?}, falling back to naive Metal kernel",
                     //     e

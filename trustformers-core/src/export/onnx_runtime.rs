@@ -4,7 +4,6 @@
 
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::path::Path;
 

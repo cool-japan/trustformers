@@ -99,7 +99,7 @@ toml = { version = "0.9", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 
 # SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
-scirs2-core.workspace = true
+scirs2-core = { workspace = true, features = ["ndarray17"] }
 
 # Standards framework dependencies
 regex = "1.12"

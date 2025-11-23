@@ -181,7 +181,7 @@ fn main() -> Result<()> {
 
     // Head 1: Attending to first and last tokens
     let mut head1 = Vec::new();
-    for i in 0..num_tokens {
+    for _i in 0..num_tokens {
         let mut row = vec![0.15; num_tokens];
         row[0] = 0.3; // Attend to first token
         row[num_tokens - 1] = 0.3; // Attend to last token

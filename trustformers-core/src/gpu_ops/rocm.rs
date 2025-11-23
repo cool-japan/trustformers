@@ -14,6 +14,7 @@
 //! - Rust HIP bindings (hip-rs or similar)
 //! - AMD GPU hardware
 
+#[allow(unused_imports)]
 use crate::device::Device;
 use crate::errors::Result;
 use crate::tensor::Tensor;

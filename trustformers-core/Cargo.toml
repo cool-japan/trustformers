@@ -45,8 +45,10 @@ tempfile.workspace = true
 tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS2 Integration Policy
 
 # SciRS2 dependencies - required for SciRS2 Integration Policy
-# Includes: array ops (ndarray), random (rand/rand_distr), parallel (rayon), simd, linalg, complex numbers
-scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "linalg", "gpu"] }
+# Includes: array ops (ndarray), random (rand/rand_distr), parallel (rayon), simd, complex numbers
+# Note: ndarray version selection is controlled via features (ndarray17 enabled by default feature)
+# Note: linalg feature is optional to support Python bindings (ndarray-linalg requires ndarray 0.17)
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu"] }
 
 # Optional backends
 tch = { workspace = true, optional = true }
@@ -85,7 +87,10 @@ tempfile.workspace = true
 criterion.workspace = true
 
 [features]
-default = []
+default = ["ndarray17", "linalg"]
+ndarray17 = ["scirs2-core/ndarray17"]  # Use ndarray 0.17 (default for non-Python)
+python-compat = ["scirs2-core/ndarray16-compat"]  # Use ndarray 0.16 (for Python bindings)
+linalg = ["scirs2-core/linalg"]  # Linear algebra operations (requires ndarray17)
 torch = ["dep:tch"]
 candle = ["dep:candle-core"]
 parallel = []

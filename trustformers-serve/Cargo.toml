@@ -96,7 +96,7 @@ azure_mgmt_web = "0.21"
 # Internal dependencies
 trustformers-core.workspace = true
 trustformers-mobile.workspace = true
-scirs2-core.workspace = true
+scirs2-core = { workspace = true, features = ["ndarray17"] }
 
 [dev-dependencies]
 axum-test.workspace = true

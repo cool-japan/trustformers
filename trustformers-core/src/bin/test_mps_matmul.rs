@@ -42,7 +42,6 @@ fn main() -> Result<()> {
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
     {
-        use std::mem;
         use trustformers_core::gpu_ops::metal::get_metal_backend;
 
         println!("Testing MPS matmul...");

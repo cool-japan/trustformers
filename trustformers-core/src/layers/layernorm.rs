@@ -317,7 +317,8 @@ impl Layer for LayerNorm {
 
             // GPU-resident CUDA tensor - process on GPU
             #[cfg(feature = "cuda")]
-            Tensor::CUDA(cuda_data) => {
+            Tensor::CUDA(_cuda_data) => {
+                #[allow(unused_imports)]
                 use crate::tensor::CudaTensorData;
 
                 #[cfg(any(target_os = "linux", target_os = "windows"))]

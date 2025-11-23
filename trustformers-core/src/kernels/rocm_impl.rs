@@ -1149,6 +1149,7 @@ unsafe impl Sync for RocmMemoryBlock {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use crate::tensor::Tensor;
 
     #[test]

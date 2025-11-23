@@ -11,7 +11,6 @@ use crate::kernels::rocm_kernels::RocmKernel;
 #[cfg(feature = "vulkan")]
 use crate::kernels::vulkan_kernels::VulkanKernel;
 use crate::tensor::Tensor;
-use std::sync::{Arc, Mutex};
 
 /// GPU-accelerated operations manager
 ///
@@ -27,6 +26,7 @@ pub struct GpuAcceleratedOps {
     intel_kernel: Option<Arc<Mutex<IntelKernel>>>,
     #[cfg(feature = "vulkan")]
     vulkan_kernel: Option<Arc<Mutex<VulkanKernel>>>,
+    #[allow(dead_code)]
     device_id: usize,
     #[allow(dead_code)]
     enable_async: bool,

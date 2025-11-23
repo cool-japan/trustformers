@@ -37,7 +37,7 @@
 use super::super::Tensor;
 use super::stability::*;
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::{s, ArrayD, Axis, Ix0, Ix2, IxDyn};
+use scirs2_core::ndarray::{s, ArrayD, Axis, Ix2, IxDyn};
 
 impl Tensor {
     /// Matrix multiplication with numerical stability enhancements.
@@ -568,8 +568,10 @@ impl Tensor {
 }
 
 #[cfg(test)]
+#[allow(unused_variables)]
 mod tests {
     use super::*;
+    use scirs2_core::ndarray::Ix0;
 
     #[test]
     fn test_matmul_2d() -> Result<()> {

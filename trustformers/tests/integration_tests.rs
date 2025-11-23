@@ -301,10 +301,10 @@ mod workflow_tests {
     #[rstest]
     #[cfg(feature = "vision")]
     fn test_multimodal_pipeline_configuration() {
+        #[allow(unused_imports)]
         use trustformers::pipeline::multimodal::{
             AttentionConfig, FusionStrategy, MultiModalConfig, MultiModalPipeline,
         };
-
         let config = MultiModalConfig {
             max_text_length: 512,
             max_image_size: (224, 224),

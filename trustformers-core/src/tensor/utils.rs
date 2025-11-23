@@ -462,7 +462,7 @@ impl Tensor {
 
             // F32 → CUDA
             #[cfg(feature = "cuda")]
-            (Tensor::F32(arr), crate::device::Device::CUDA(device_id)) => {
+            (Tensor::F32(_arr), crate::device::Device::CUDA(_device_id)) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     use crate::gpu_ops::cuda::get_cuda_backend;
@@ -486,7 +486,7 @@ impl Tensor {
 
             // F64 → CUDA (convert to F32 first)
             #[cfg(feature = "cuda")]
-            (Tensor::F64(arr), crate::device::Device::CUDA(device_id)) => {
+            (Tensor::F64(_arr), crate::device::Device::CUDA(_device_id)) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     use crate::gpu_ops::cuda::get_cuda_backend;
@@ -510,7 +510,7 @@ impl Tensor {
 
             // CUDA → F32
             #[cfg(feature = "cuda")]
-            (Tensor::CUDA(cuda_data), crate::device::Device::CPU) => {
+            (Tensor::CUDA(_cuda_data), crate::device::Device::CPU) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     use crate::gpu_ops::cuda::get_cuda_backend;
@@ -580,6 +580,7 @@ impl Tensor {
             )),
 
             // Fallback for unsupported combinations
+            #[allow(unreachable_patterns)]
             _ => Err(TrustformersError::tensor_op_error(
                 &format!(
                     "Unsupported device transfer from {:?} to {:?}",

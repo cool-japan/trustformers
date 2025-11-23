@@ -1,4 +1,5 @@
 //! SIMD Optimizations for Optimizers
+#![cfg_attr(test, allow(unused_variables, unused_mut))]
 //!
 //! This module provides SIMD-optimized implementations of optimizer operations
 //! for improved performance on x86_64, ARM, and other architectures.

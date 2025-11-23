@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::roberta::config::RobertaConfig;
 use crate::roberta::model::RobertaModel;
 use std::io::Read;
@@ -8,6 +10,7 @@ use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RobertaForSequenceClassification {
     roberta: RobertaModel,
     classifier: RobertaClassificationHead,
@@ -113,6 +116,7 @@ impl Model for RobertaForSequenceClassification {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RobertaForMaskedLM {
     roberta: RobertaModel,
     lm_head: RobertaLMHead,

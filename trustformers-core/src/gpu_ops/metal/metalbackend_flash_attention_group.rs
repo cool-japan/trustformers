@@ -14,17 +14,22 @@ use crate::gpu_ops::metal::metalbackend_type::MetalBackend;
 use crate::gpu_ops::metal::types::BufferId;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 use metal::*;
-use std::ffi::c_void;
-use std::sync::Arc;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use std::ffi::c_void;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+use std::sync::Arc;
+#[allow(dead_code)]
 type Result<T> = std::result::Result<T, TrustformersError>;
 
 // Block sizes optimized for M1 Max (48KB SRAM per threadgroup)
 // Block_Q: Number of query tokens processed per threadgroup
 // Block_KV: Number of key/value tokens processed per inner loop iteration
+#[allow(dead_code)]
 const BLOCK_Q: usize = 32;
+#[allow(dead_code)]
 const BLOCK_KV: usize = 64;
-
+#[allow(dead_code)]
 #[cfg(all(target_os = "macos", feature = "metal"))]
 impl MetalBackend {
     /// Flash Attention forward pass with KV-cache support

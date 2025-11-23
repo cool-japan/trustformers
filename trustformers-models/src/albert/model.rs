@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::albert::config::AlbertConfig;
 use std::io::Read;
 use trustformers_core::device::Device;
@@ -7,6 +9,7 @@ use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Config, Layer, Model, TokenizedInput};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertEmbeddings {
     word_embeddings: Embedding,
     position_embeddings: Embedding,
@@ -25,6 +28,7 @@ pub struct AlbertTransformerGroup {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertLayer {
     attention: AlbertAttention,
     ffn: AlbertFeedForward,
@@ -34,6 +38,7 @@ pub struct AlbertLayer {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 #[allow(dead_code)]
 pub struct AlbertAttention {
     query: Linear,
@@ -74,6 +79,7 @@ pub struct AlbertFFNOutput {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertModel {
     config: AlbertConfig,
     embeddings: AlbertEmbeddings,
@@ -83,6 +89,7 @@ pub struct AlbertModel {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertTransformer {
     #[allow(dead_code)]
     embedding_hidden_mapping_in: Linear,

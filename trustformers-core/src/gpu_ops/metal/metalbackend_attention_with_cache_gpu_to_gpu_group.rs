@@ -4,10 +4,13 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::common::*;
 #[cfg(all(target_os = "macos", feature = "metal"))]
+#[allow(unused_imports)]
+use super::common::*;
+
 use super::metalbackend_type::MetalBackend;
 #[cfg(all(target_os = "macos", feature = "metal"))]
+#[allow(unused_imports)]
 use super::types::{BufferCache, BufferId};
 
 #[cfg(all(target_os = "macos", feature = "metal"))]

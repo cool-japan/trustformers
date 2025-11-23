@@ -1,3 +1,6 @@
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_imports)]
 //! Hardware acceleration performance benchmarks
 //!
 //! This module benchmarks different hardware acceleration backends

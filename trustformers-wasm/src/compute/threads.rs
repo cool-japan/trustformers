@@ -475,6 +475,7 @@ impl ThreadPool {
             let mut all_complete = true;
 
             for thread_id in 0..self.max_threads {
+                #[allow(unused_imports)]
                 let control_index = thread_id * 16;
                 let status = Atomics::load(control_buffer, control_index as u32)?;
 
@@ -655,6 +656,7 @@ pub fn initialize() -> Result<(), crate::compute::ComputeError> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]

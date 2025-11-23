@@ -957,7 +957,7 @@ impl Gpt2LMHeadModel {
                         ));
                     }
 
-                    let batch_size = metal_data.shape[0];
+                    let _batch_size = metal_data.shape[0];
                     let seq_len = metal_data.shape[1];
                     let vocab_size = metal_data.shape[2];
 

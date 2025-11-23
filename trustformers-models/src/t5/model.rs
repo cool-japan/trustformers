@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
@@ -113,6 +115,7 @@ impl Model for T5Model {
 
 /// T5 for conditional generation (seq2seq tasks)
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct T5ForConditionalGeneration {
     transformer: T5Model,
     lm_head: Linear,

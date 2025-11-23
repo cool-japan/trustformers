@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::albert::config::AlbertConfig;
 use crate::albert::model::AlbertModel;
 use std::io::Read;

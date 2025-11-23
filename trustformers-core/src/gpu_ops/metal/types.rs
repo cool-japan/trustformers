@@ -2,9 +2,11 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+#[allow(unused_imports)]
 use super::common::*;
 
 /// Buffer ID for persistent GPU buffers
+
 #[cfg(feature = "metal")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(u64);

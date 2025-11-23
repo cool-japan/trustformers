@@ -4,8 +4,10 @@
 //!
 //! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
-use super::common::*;
 #[cfg(all(target_os = "macos", feature = "metal"))]
+#[allow(unused_imports)]
+use super::common::*;
+
 use super::metalbackend_type::MetalBackend;
 
 #[cfg(all(target_os = "macos", feature = "metal"))]
@@ -219,8 +221,9 @@ impl MetalBackend {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
+    use super::*;
+    use crate::errors::Result;
     #[test]
     #[cfg(all(target_os = "macos", feature = "metal"))]
     fn test_fused_matmul_gelu_correctness() -> Result<()> {

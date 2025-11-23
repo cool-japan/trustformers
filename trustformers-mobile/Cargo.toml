@@ -24,7 +24,7 @@ sha2.workspace = true
 hex.workspace = true
 
 # SciRS2 Policy: Using SciRS2-Core instead of ndarray/rand
-scirs2-core.workspace = true
+scirs2-core = { workspace = true, features = ["ndarray17"] }
 scirs2-linalg.workspace = true
 fastrand.workspace = true
 

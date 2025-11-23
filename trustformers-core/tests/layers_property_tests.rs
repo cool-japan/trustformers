@@ -1,7 +1,7 @@
 //! Property-based tests for neural network layers
 
 use proptest::prelude::*;
-use rand::Rng;
+use scirs2_core::random::*;
 use trustformers_core::{
     layers::{Embedding, FeedForward, LayerNorm, Linear, MultiHeadAttention},
     tensor::Tensor,
@@ -109,7 +109,7 @@ proptest! {
         let embedding = Embedding::new(vocab_size, embedding_dim, None).unwrap();
 
         // Generate valid token indices
-        let mut rng = rand::rng();
+        let mut rng = thread_rng();
         let indices: Vec<u32> = (0..seq_len)
             .map(|_| rng.random_range(0..vocab_size) as u32)
             .collect();

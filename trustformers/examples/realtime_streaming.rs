@@ -7,7 +7,7 @@
 
 use clap::Parser;
 use colored::*;
-use rand::Rng; // For examples, using rand directly is acceptable
+use fastrand; // Using fastrand from dependencies
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -349,12 +349,12 @@ impl MessageGenerator {
 
         StreamMessage {
             id: self.message_counter,
-            text: templates[rand::rng().random_range(0..templates.len())].to_string(),
+            text: templates[fastrand::usize(0..templates.len())].to_string(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_millis() as u64,
-            source: self.sources[rand::rng().random_range(0..self.sources.len())].clone(),
+            source: self.sources[fastrand::usize(0..self.sources.len())].clone(),
         }
     }
 

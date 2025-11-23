@@ -6,7 +6,6 @@ use super::{ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};

@@ -11,6 +11,7 @@
 //! - Persistent buffer caching
 //! - GPU-to-GPU operations
 
+#[allow(unused_imports)]
 use crate::device::Device;
 use crate::errors::Result;
 use crate::tensor::Tensor;

@@ -154,7 +154,7 @@ fn test_image_to_text_pipeline_e2e() {
     let model = AutoModel::from_pretrained("nlpconnect/vit-gpt2-image-captioning").unwrap();
     let tokenizer = AutoTokenizer::from_pretrained("nlpconnect/vit-gpt2-image-captioning").unwrap();
 
-    let pipeline = ImageToTextPipeline::new(model, tokenizer)
+    let _pipeline = ImageToTextPipeline::new(model, tokenizer)
         .unwrap()
         .with_max_new_tokens(50)
         .with_temperature(1.0)
@@ -167,24 +167,30 @@ fn test_image_to_text_pipeline_e2e() {
 #[rstest]
 #[cfg(feature = "audio")]
 fn test_speech_to_text_pipeline_e2e() {
-    use trustformers::pipeline::speech_to_text::{SpeechToTextConfig, SpeechToTextPipeline};
+    #[allow(unused_imports)]
+    use trustformers::pipeline::speech_to_text::{
+        SpeechTask, SpeechToTextConfig, SpeechToTextPipeline,
+    };
 
     let config = SpeechToTextConfig {
-        language: Some("en".to_string()),
-        task: "transcribe".to_string(),
+        sample_rate: 16000,
+        max_duration: None,
         return_timestamps: false,
-        chunk_length_s: 30.0,
-        stride_length_s: 5.0,
-        decoder_start_token_id: None,
-        max_new_tokens: None,
-        return_language: false,
+        language: Some("en".to_string()),
+        task: SpeechTask::Transcribe,
+        num_beams: 1,
+        temperature: 0.0,
+        length_penalty: 1.0,
+        repetition_penalty: 1.0,
+        no_repeat_ngram_size: 0,
+        chunk_length_s: Some(30.0),
+        stride_length_s: Some(5.0),
     };
 
     // Validate speech-to-text configuration
-    assert!(config.chunk_length_s > config.stride_length_s);
-    assert!(config.chunk_length_s > 0.0);
-    assert!(config.stride_length_s >= 0.0);
-    assert!(!config.task.is_empty());
+    assert!(config.chunk_length_s.unwrap() > config.stride_length_s.unwrap());
+    assert!(config.chunk_length_s.unwrap() > 0.0);
+    assert!(config.stride_length_s.unwrap() >= 0.0);
 }
 
 #[rstest]
@@ -215,10 +221,10 @@ fn test_text_to_speech_pipeline_e2e() {
 #[rstest]
 #[cfg(feature = "vision")]
 fn test_visual_question_answering_pipeline_e2e() {
+    #[allow(unused_imports)]
     use trustformers::pipeline::visual_question_answering::{
         VisualQuestionAnsweringConfig, VisualQuestionAnsweringPipeline,
     };
-
     let config = VisualQuestionAnsweringConfig {
         max_question_length: 512,
         max_answer_length: 256,

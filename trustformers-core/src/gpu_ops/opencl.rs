@@ -11,6 +11,7 @@
 //!
 //! Note: OpenCL support requires opencl3 crate and OpenCL runtime installed.
 
+#[allow(unused_imports)]
 use crate::device::Device;
 use crate::errors::Result;
 use crate::tensor::Tensor;
@@ -26,11 +27,11 @@ use opencl3::device::{get_all_devices, Device as ClDevice, CL_DEVICE_TYPE_GPU};
 #[cfg(feature = "opencl")]
 use opencl3::kernel::{ExecuteKernel, Kernel};
 #[cfg(feature = "opencl")]
-use opencl3::memory::{Buffer as ClBuffer, CL_MEM_READ_ONLY, CL_MEM_READ_WRITE, CL_MEM_WRITE_ONLY};
+use opencl3::memory::{Buffer as ClBuffer, CL_MEM_READ_ONLY, CL_MEM_WRITE_ONLY};
 #[cfg(feature = "opencl")]
 use opencl3::program::Program;
 #[cfg(feature = "opencl")]
-use opencl3::types::{cl_float, CL_BLOCKING, CL_NON_BLOCKING};
+use opencl3::types::{cl_float, CL_BLOCKING};
 #[cfg(feature = "opencl")]
 use std::collections::HashMap;
 #[cfg(feature = "opencl")]

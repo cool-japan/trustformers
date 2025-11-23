@@ -205,7 +205,7 @@ impl Layer for GPTNeoXAttention {
 
                 // Step 1: Reshape to [seq_len, num_heads, 3*head_dim]
                 let qkv_reshaped = arr
-                    .into_shape((seq_len, num_heads, 3 * head_dim))
+                    .to_shape((seq_len, num_heads, 3 * head_dim))
                     .map_err(|_| tensor_op_error("GPTNeoXAttention", "QKV reshape failed"))?;
 
                 // Step 2: Transpose to [num_heads, seq_len, 3*head_dim]

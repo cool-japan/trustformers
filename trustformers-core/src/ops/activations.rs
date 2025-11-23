@@ -32,6 +32,7 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         Tensor::CUDA(cuda_data) => {
             use crate::device::Device;
+            #[allow(unused_imports)]
             use crate::tensor::CudaTensorData;
 
             #[cfg(any(target_os = "linux", target_os = "windows"))]

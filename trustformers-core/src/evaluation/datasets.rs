@@ -1,6 +1,5 @@
 // Dataset loading and management for evaluation
 use anyhow::Result;
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
