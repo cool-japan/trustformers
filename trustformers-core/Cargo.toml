@@ -46,8 +46,9 @@ tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS
 
 # SciRS2 dependencies - required for SciRS2 Integration Policy
 # Includes: array ops (ndarray), random (rand/rand_distr), parallel (rayon), simd, complex numbers
-# Note: ndarray version selection is controlled via features (ndarray17 enabled by default feature)
+# Note: ndarray support provided by scirs2-core
 # Note: linalg feature is optional to support Python bindings (ndarray-linalg requires ndarray 0.17)
+# Note: GPU backends (metal, cuda, opencl, wgpu) should be enabled via scirs2-core for policy compliance
 scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu"] }
 
 # Optional backends
@@ -62,14 +63,7 @@ mpi = { version = "0.8", optional = true, default-features = false }
 vulkano = { workspace = true, optional = true }
 vulkano-shaders = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
-metal = { version = "0.32", optional = true }
-mpsgraph = { version = "0.2", optional = true }
-objc2 = { version = "0.6", optional = true }
-objc2-metal = { version = "0.3", optional = true }
-
-# BLAS for macOS Accelerate framework (used with metal feature)
-cblas-sys = { workspace = true, optional = true }
-blas-src = { workspace = true, optional = true }
+# Metal-specific dependencies moved to target-specific section for macOS only
 
 # WebGPU backend (cross-platform)
 wgpu = { version = "27.0", optional = true }
@@ -87,10 +81,8 @@ tempfile.workspace = true
 criterion.workspace = true
 
 [features]
-default = ["ndarray17", "linalg"]
-ndarray17 = ["scirs2-core/ndarray17"]  # Use ndarray 0.17 (default for non-Python)
-python-compat = ["scirs2-core/ndarray16-compat"]  # Use ndarray 0.16 (for Python bindings)
-linalg = ["scirs2-core/linalg"]  # Linear algebra operations (requires ndarray17)
+default = ["linalg"]
+linalg = ["scirs2-core/linalg"]  # Linear algebra operations
 torch = ["dep:tch"]
 candle = ["dep:candle-core"]
 parallel = []
@@ -127,3 +119,13 @@ path = "src/bin/naming_checker.rs"
 # CUDA is only supported on Linux and Windows (not macOS)
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 cudarc = { version = "0.17", optional = true, features = ["nvrtc", "cuda-12000"] }
+
+# Metal is only supported on macOS
+[target.'cfg(target_os = "macos")'.dependencies]
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu", "metal"] }
+metal = { version = "0.32", optional = true }
+mpsgraph = { version = "0.2", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-metal = { version = "0.3", optional = true }
+cblas-sys = { workspace = true, optional = true }
+blas-src = { workspace = true, optional = true }

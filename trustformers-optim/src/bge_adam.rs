@@ -312,7 +312,8 @@ impl Optimizer for BGEAdam {
     }
 
     fn update(&mut self, parameter: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        let param_id = format!("{:p}", parameter.data()?.as_ptr());
+        let param_data = parameter.data()?;
+        let param_id = format!("{:p}", param_data.as_ptr());
         self.step_count += 1;
 
         // Calculate gradient entropy

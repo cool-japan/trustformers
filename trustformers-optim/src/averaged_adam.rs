@@ -295,9 +295,9 @@ impl AveragedAdam {
 
 impl Optimizer for AveragedAdam {
     fn update(&mut self, param: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        let param_name = format!("{:p}", param.data()?.as_ptr());
-        // Get parameter data
+        // Get parameter data (bind to variable before taking pointer)
         let param_data = param.data()?;
+        let param_name = format!("{:p}", param_data.as_ptr());
         let grad_data = gradient.data()?;
 
         if param_data.len() != grad_data.len() {

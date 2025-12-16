@@ -6,6 +6,7 @@
 
 use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use crate::gpu_ops::dispatch_matmul;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
@@ -305,7 +306,7 @@ impl Linear {
 
     /// Pre-cache layer weights on GPU for zero-transfer pipeline
     /// This uploads weights to GPU memory in advance to avoid transfers during forward pass
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &crate::device::Device) -> Result<()> {
         use crate::device::Device;
 
@@ -429,7 +430,7 @@ impl Layer for Linear {
         // =====================================================================
         // GPU-TO-GPU PATH: Tensor::Metal (ZERO CPU TRANSFERS!)
         // =====================================================================
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         if let Tensor::Metal(ref input_metal) = input {
             use crate::gpu_ops::metal::get_metal_backend;
             use crate::tensor::MetalTensorData;
@@ -751,9 +752,16 @@ impl Layer for Linear {
             }
 
             // Fallback: Use standard dispatch (for non-Metal or if cached path failed)
-            if self.device.is_gpu() {
-                dispatch_matmul(&input, &weight_t, &self.device)?
-            } else {
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            {
+                if self.device.is_gpu() {
+                    dispatch_matmul(&input, &weight_t, &self.device)?
+                } else {
+                    input.matmul(&weight_t)?
+                }
+            }
+            #[cfg(not(all(target_os = "macos", feature = "metal")))]
+            {
                 input.matmul(&weight_t)?
             }
         } else if input_shape.len() == 3 {

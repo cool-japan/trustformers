@@ -1,7 +1,7 @@
 use crate::errors::{TrustformersError, Result};
 use crate::tensor::Tensor;
 use crate::layers::attention::MultiHeadAttention;
-use scirs2_core::ndarray::{Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{Array2, ArrayD, Axis, IxDyn, s};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -162,7 +162,7 @@ impl InterpretabilityAnalyzer {
                 }
 
                 let seq_len = shape[shape.len() - 1];
-                let attention_matrix = arr.slice(ndarray::s![.., ..]).to_owned();
+                let attention_matrix = arr.slice(s![.., ..]).to_owned();
 
                 // Convert to nested Vec for serialization
                 let attention_weights_vec: Vec<Vec<f32>> = (0..seq_len)

@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 trustformers-core.workspace = true
-# Note: ndarray version controlled by trustformers-core feature (ndarray17 by default, ndarray16-compat for Python)
+# Note: ndarray support provided by scirs2-core
 scirs2-core = { workspace = true, features = ["parallel"] }
 tokenizers.workspace = true
 serde.workspace = true

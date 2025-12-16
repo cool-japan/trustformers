@@ -148,27 +148,80 @@ impl HuggingFaceLoader {
         let bin_path = model_dir.join("pytorch_model.bin");
         let safetensors_path = model_dir.join("model.safetensors");
 
-        let weight_file = if safetensors_path.exists() {
-            "model.safetensors"
+        let (weight_file, is_safetensors) = if safetensors_path.exists() {
+            ("model.safetensors", true)
         } else if bin_path.exists() {
-            "pytorch_model.bin"
+            ("pytorch_model.bin", false)
         } else {
             return Err(TrustformersError::file_not_found(
                 "No weight files found in model directory".to_string(),
             ));
         };
 
-        // Create basic index
+        // Create index with proper tensor names
         let mut weight_map = HashMap::new();
-        weight_map.insert("*".to_string(), weight_file.to_string());
+
+        if is_safetensors {
+            // Read SafeTensors header to get actual tensor names
+            match Self::read_safetensors_tensor_names(&model_dir.join(weight_file)) {
+                Ok(tensor_names) => {
+                    // Map each tensor name to the weight file
+                    for name in tensor_names {
+                        weight_map.insert(name, weight_file.to_string());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to read SafeTensors header: {}. Using fallback index.", e);
+                    // Fallback to old behavior
+                    weight_map.insert("*".to_string(), weight_file.to_string());
+                }
+            }
+        } else {
+            // For PyTorch files, use wildcard (we can't easily parse .bin files)
+            weight_map.insert("*".to_string(), weight_file.to_string());
+        }
 
         Ok(HuggingFaceIndex {
             metadata: HuggingFaceMetadata {
                 total_size: 0,
-                format: "pytorch".to_string(),
+                format: if is_safetensors { "safetensors" } else { "pytorch" }.to_string(),
             },
             weight_map,
         })
+    }
+
+    fn read_safetensors_tensor_names(path: &Path) -> Result<Vec<String>> {
+        use std::io::Read;
+
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        // Read header length (first 8 bytes)
+        let mut header_len_bytes = [0u8; 8];
+        reader.read_exact(&mut header_len_bytes)?;
+        let header_len = u64::from_le_bytes(header_len_bytes);
+
+        // Read header JSON
+        let mut header_bytes = vec![0u8; header_len as usize];
+        reader.read_exact(&mut header_bytes)?;
+        let header_str = String::from_utf8(header_bytes)
+            .map_err(|e| TrustformersError::weight_load_error(format!("Invalid UTF-8 in SafeTensors header: {}", e)))?;
+
+        // Parse JSON and extract tensor names
+        let header: serde_json::Value = serde_json::from_str(&header_str)
+            .map_err(|e| TrustformersError::weight_load_error(format!("Failed to parse SafeTensors header: {}", e)))?;
+
+        let mut tensor_names = Vec::new();
+        if let Some(obj) = header.as_object() {
+            for (key, _value) in obj {
+                // Skip metadata entries
+                if key != "__metadata__" {
+                    tensor_names.push(key.clone());
+                }
+            }
+        }
+
+        Ok(tensor_names)
     }
 
     fn get_file_handle(&mut self, filename: &str) -> Result<&mut BufReader<File>> {

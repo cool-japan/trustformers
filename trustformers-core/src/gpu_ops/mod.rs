@@ -25,6 +25,7 @@
 // GPU backend modules
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
 #[cfg(feature = "opencl")]
 pub mod opencl;
@@ -34,6 +35,7 @@ pub mod rocm;
 pub mod webgpu;
 
 // Default dispatch (Metal on macOS, others on respective platforms)
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metal::dispatch_matmul;
 
 // Export persistent buffer types and functions
