@@ -553,7 +553,7 @@ fn apply_cross_platform_optimizations() {
         != env::var("CARGO_CFG_HOST_ARCH").unwrap_or_default()
     {
         println!("cargo:rustc-cfg=cross_compiling");
-        println!("cargo:warning=Cross-compiling for {}", target_arch);
+        // Note: Cross-compiling for target_arch (documented via cfg flag)
     }
 }
 
@@ -570,6 +570,7 @@ fn compile_metal_implementation() {
     cc::Build::new()
         .file("src/platform/metal_impl.m")
         .flag("-fobjc-arc") // Enable ARC
+        .flag("-Wno-unused-command-line-argument") // Suppress framework warnings during cross-compilation
         .flag("-framework")
         .flag("Foundation")
         .flag("-framework")
@@ -589,7 +590,7 @@ fn compile_metal_implementation() {
 
 /// Automated header file synchronization system
 fn automated_header_sync(crate_dir: &str, output_dir: &PathBuf) {
-    println!("cargo:warning=Running automated header file synchronization...");
+    // Automated header file synchronization (silent mode)
 
     // Configuration for header synchronization
     let mut sync_config = HeaderSyncConfig::new();
@@ -618,7 +619,7 @@ fn automated_header_sync(crate_dir: &str, output_dir: &PathBuf) {
     // Validate header consistency
     validate_header_consistency(output_dir);
 
-    println!("cargo:warning=Header synchronization completed successfully");
+    // Header synchronization completed successfully (silent mode)
 }
 
 /// Configuration for header synchronization
@@ -872,7 +873,7 @@ fn extract_c_function_signatures(_src_dir: &Path) -> Vec<FunctionSignature> {
     // like nm, objdump, or parse debug symbols
 
     // For now, we'll rely on the scanning approach above
-    println!("cargo:warning=Using source-based signature extraction");
+    // Note: Using source-based signature extraction (silent mode)
 
     signatures
 }
@@ -988,10 +989,7 @@ fn synchronize_headers(
     // Generate compatibility headers
     generate_compatibility_headers(output_dir);
 
-    println!(
-        "cargo:warning=Generated {} function signatures",
-        signatures.len()
-    );
+    // Note: Generated function signatures count available via ABI json file
 }
 
 /// Generate the main header file

@@ -9,9 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Consider using pre-generated proto files
     //
     // For now, skip proto compilation to unblock other development
-    println!(
-        "cargo:warning=Proto compilation skipped - API investigation needed for tonic-build 0.14"
-    );
+    // Note: Proto compilation requires tonic-build 0.14 API migration (documented above)
     println!("cargo:rerun-if-changed=proto/inference.proto");
 
     Ok(())
