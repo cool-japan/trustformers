@@ -7,10 +7,10 @@ use super::common::*;
 
 /// Buffer ID for persistent GPU buffers
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(u64);
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl BufferId {
     pub fn new() -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};

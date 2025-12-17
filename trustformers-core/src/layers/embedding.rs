@@ -107,9 +107,20 @@ impl Embedding {
     }
 
     /// Upload embedding weights to GPU for GPU-resident inference
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::Metal(_)) {
+            return Ok(());
+        }
+        self.device = *device;
+        self.weight = self.weight.to_device_enum(device)?;
+        Ok(())
+    }
+
+    /// Upload embedding weights to CUDA GPU for GPU-resident inference
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        if !matches!(device, Device::CUDA(_)) {
             return Ok(());
         }
         self.device = *device;
@@ -124,7 +135,7 @@ impl Layer for Embedding {
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         // Handle Metal weights: convert to CPU for lookup, return Metal tensor
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         if let Tensor::Metal(_) = &self.weight {
             // Convert Metal weights to CPU for lookup
             let cpu_weight = self.weight.to_device_enum(&Device::CPU)?;

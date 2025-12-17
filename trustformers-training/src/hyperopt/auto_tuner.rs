@@ -614,7 +614,7 @@ impl AutomatedHyperparameterTuner {
 
         let mut iteration = 0;
         #[allow(unused_variables)]
-        let mut trials_without_improvement = 0;
+        let mut _trials_without_improvement = 0;
 
         while iteration < self.config.max_trials {
             // Check time limit
@@ -726,7 +726,7 @@ impl AutomatedHyperparameterTuner {
 
                         if is_improvement {
                             batch_improved = true;
-                            trials_without_improvement = 0;
+                            _trials_without_improvement = 0;
                             println!("🎉 New best result found!");
                         }
 
@@ -743,7 +743,7 @@ impl AutomatedHyperparameterTuner {
             }
 
             if !batch_improved {
-                trials_without_improvement += parallel_trials;
+                _trials_without_improvement += parallel_trials;
             }
 
             iteration += parallel_trials;

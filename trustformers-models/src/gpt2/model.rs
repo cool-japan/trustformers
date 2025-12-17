@@ -93,7 +93,7 @@ impl Gpt2Model {
     }
 
     /// Upload model weights to GPU (Metal)
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::Metal(_)) {
             return Ok(());
@@ -220,7 +220,7 @@ impl Gpt2Model {
                         eprintln!("🔍 F32 key shape: {:?}", past_k.shape());
                         past_k.shape()[1] as u32 // past_seq_len
                     },
-                    #[cfg(feature = "metal")]
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
                     Some(Tensor::Metal(ref metal_data)) => {
                         eprintln!("🔍 Metal key shape: {:?}", metal_data.shape);
                         metal_data.shape[1] as u32 // past_seq_len from Metal tensor
@@ -288,7 +288,7 @@ impl Gpt2Model {
                     hidden_states = Tensor::F32(arr.clone().insert_axis(Axis(0)).to_owned());
                 }
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(metal_data) => {
                 // For Metal tensors, check shape and add batch dimension if needed
                 if metal_data.shape.len() == 2 {
@@ -309,7 +309,7 @@ impl Gpt2Model {
         }
 
         // Upload hidden states to GPU if weights are on GPU (enables GPU-to-GPU Linear pipeline)
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             if matches!(self.device, Device::Metal(_)) {
                 eprintln!(
@@ -469,7 +469,7 @@ impl Gpt2LMHeadModel {
     }
 
     /// Upload model weights to GPU (Metal)
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::Metal(_)) {
             return Ok(());
@@ -728,7 +728,7 @@ impl Gpt2LMHeadModel {
                     }
                     max_idx as u32
                 },
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 Tensor::Metal(metal_data) => {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
 
@@ -867,7 +867,7 @@ impl Gpt2LMHeadModel {
                 "🔍 Hidden states before lm_head: shape={:?}, type={:?}",
                 match &hidden_states {
                     Tensor::F32(arr) => format!("{:?}", arr.shape()),
-                    #[cfg(feature = "metal")]
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
                     Tensor::Metal(m) => format!("{:?}", m.shape),
                     _ => "unknown".to_string(),
                 },
@@ -875,7 +875,7 @@ impl Gpt2LMHeadModel {
             );
 
             // Debug: Download and check hidden state values
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             if let Tensor::Metal(ref metal_data) = hidden_states {
                 use trustformers_core::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
@@ -899,7 +899,7 @@ impl Gpt2LMHeadModel {
                 "🔍 Logits after lm_head: shape={:?}, type={:?}",
                 match &logits {
                     Tensor::F32(arr) => format!("{:?}", arr.shape()),
-                    #[cfg(feature = "metal")]
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
                     Tensor::Metal(m) => format!("{:?}", m.shape),
                     _ => "unknown".to_string(),
                 },
@@ -909,7 +909,7 @@ impl Gpt2LMHeadModel {
             // Debug: Check which match arm will be taken
             match &logits {
                 Tensor::F32(_) => eprintln!("🔍 Logits match: Tensor::F32"),
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 Tensor::Metal(_) => eprintln!("🔍 Logits match: Tensor::Metal"),
                 _ => eprintln!("❌ Logits match: WILDCARD (unsupported!)"),
             }
@@ -941,7 +941,7 @@ impl Gpt2LMHeadModel {
                     eprintln!("🔍 Argmax (F32): idx={}, val={:.4}", max_idx, max_val);
                     max_idx as u32
                 },
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 Tensor::Metal(metal_data) => {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
 
@@ -1217,7 +1217,7 @@ impl Gpt2Block {
         self
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::Metal(_)) {
             return Ok(());
@@ -1365,7 +1365,7 @@ impl Gpt2Attention {
         }
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::Metal(_)) {
             return Ok(());
@@ -1458,7 +1458,7 @@ impl Gpt2Attention {
         let qkv = self.c_attn.forward(hidden_states)?;
 
         // GPU attention path with GPU-aware KV-cache (ZERO CPU transfers!)
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         if let Tensor::Metal(qkv_data) = &qkv {
             use trustformers_core::gpu_ops::metal::get_metal_backend;
             use trustformers_core::tensor::MetalTensorData;
@@ -1594,7 +1594,7 @@ impl Gpt2Attention {
         }
 
         // Fallback: CPU attention path (with cache support)
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         let qkv = match &qkv {
             Tensor::Metal(qkv_data) => {
                 use trustformers_core::gpu_ops::metal::get_metal_backend;
@@ -1722,6 +1722,7 @@ impl Gpt2Attention {
                 // Compute attention scores
                 // Q * K^T / sqrt(head_dim)
                 let scale = 1.0 / (head_dim as f32).sqrt();
+                #[allow(unused_variables)]
                 let k_t = k.clone().permuted_axes(vec![0, 1, 3, 2]); // Transpose last two dims
 
                 // Compute Q * K^T
@@ -1731,7 +1732,7 @@ impl Gpt2Attention {
                 let mut scores =
                     ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, q_seq_len, kv_seq_len]));
 
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
                     // Only use GPU for small models (overhead from transfers dominates for large models)
@@ -1879,7 +1880,7 @@ impl Gpt2Attention {
                 let mut output =
                     ArrayD::<f32>::zeros(IxDyn(&[batch_size, n_heads, q_seq_len, head_dim]));
 
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     use trustformers_core::gpu_ops::metal::get_metal_backend;
                     // Only use GPU for small models (same threshold as Q*K^T)
@@ -2058,7 +2059,7 @@ impl Gpt2MLP {
         }
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         if !matches!(device, Device::Metal(_)) {
             return Ok(());
@@ -2313,7 +2314,7 @@ fn stack_tensors(tensors: &[Tensor]) -> Result<Tensor> {
 
             Ok(Tensor::F32(stacked))
         },
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(first_data) => {
             use trustformers_core::gpu_ops::metal::get_metal_backend;
             use trustformers_core::tensor::MetalTensorData;

@@ -3,7 +3,7 @@
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use mpsgraph as mps;
 
 /// Metal Performance Shaders implementation for Apple Silicon hardware acceleration
@@ -22,11 +22,11 @@ use mpsgraph as mps;
 /// - macOS 10.15+ or iOS 13+ for Metal Performance Shaders
 /// - Apple Silicon hardware for optimal performance
 pub struct MetalImpl {
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     device: metal::Device,
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     command_queue: metal::CommandQueue,
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     library: metal::Library,
 
     #[cfg(not(feature = "metal"))]
@@ -36,7 +36,7 @@ pub struct MetalImpl {
 impl MetalImpl {
     /// Create new Metal implementation
     pub fn new() -> Result<Self> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             Self::new_with_metal()
         }
@@ -47,7 +47,7 @@ impl MetalImpl {
         }
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn new_with_metal() -> Result<Self> {
         // Create Metal device (automatically selects the best available GPU)
         let device = metal::Device::system_default().ok_or_else(|| {
@@ -87,7 +87,7 @@ impl MetalImpl {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     #[allow(deprecated)]
     fn supports_mps(device: &metal::Device) -> bool {
         // Check for Metal Performance Shaders support
@@ -107,7 +107,7 @@ impl MetalImpl {
             || device.supports_feature_set(metal::MTLFeatureSet::iOS_GPUFamily4_v1)
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn create_kernel_library(device: &metal::Device) -> Result<metal::Library> {
         // Metal Shading Language source for custom kernels
         let kernel_source = r#"
@@ -299,7 +299,7 @@ impl MetalImpl {
     /// - Utilizes GPU parallelization with 2D thread grid
     /// - Memory-efficient with unified memory on Apple Silicon
     /// - Batching handled via thread groups for optimal throughput
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn matrix_multiply(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // Validate input tensors
         if a.shape().len() < 2 || b.shape().len() < 2 {
@@ -403,7 +403,7 @@ impl MetalImpl {
     }
 
     /// Execute element-wise addition using custom Metal kernel
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn add_tensors(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         if a.shape() != b.shape() {
             return Err(TrustformersError::tensor_op_error(
@@ -545,7 +545,7 @@ impl MetalImpl {
     /// - `key`: Key tensor [batch, seq_k, dim]
     /// - `value`: Value tensor [batch, seq_k, dim_v]
     /// - `output`: Output tensor (modified in-place) [batch, seq_q, dim_v]
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn flash_attention(
         &self,
         query: &Tensor,
@@ -693,7 +693,7 @@ impl MetalImpl {
 
     /// Get device information
     pub fn device_info(&self) -> Result<String> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             Ok(format!(
                 "Metal Device: {}\nUnified Memory: {} GB\nMax Threads Per Group: {}",
@@ -892,7 +892,7 @@ trait TensorMetalExt {
 }
 
 impl TensorMetalExt for Tensor {
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn to_metal_buffer(&self, device: &metal::Device) -> Result<metal::Buffer> {
         let data = self.data()?;
         let buffer = device.new_buffer_with_data(
@@ -911,7 +911,7 @@ impl TensorMetalExt for Tensor {
         ))
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn from_metal_buffer(buffer: &metal::Buffer, shape: &[usize]) -> Result<Tensor> {
         let data_ptr = buffer.contents() as *const f32;
         let len = shape.iter().product::<usize>();
@@ -947,7 +947,7 @@ mod tests {
         assert!(!info.is_empty());
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn test_matrix_multiply() {
         let metal_impl = MetalImpl::new().unwrap();
@@ -962,7 +962,7 @@ mod tests {
         assert_eq!(result_tensor.shape(), &[2, 2]);
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn test_add_tensors() {
         let metal_impl = MetalImpl::new().unwrap();

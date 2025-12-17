@@ -353,6 +353,16 @@ pub mod mpi_utils {
     }
 }
 
+// SAFETY: MPI communicators are thread-safe when properly initialized with MPI_THREAD_MULTIPLE.
+// The SimpleCommunicator and Request types from the mpi crate contain raw pointers that are not
+// Send/Sync by default, but MPI guarantees thread safety for these operations.
+// The pending_requests field is protected by a Mutex for additional safety.
+#[cfg(feature = "mpi")]
+unsafe impl Send for MpiCommunicatorImpl {}
+
+#[cfg(feature = "mpi")]
+unsafe impl Sync for MpiCommunicatorImpl {}
+
 #[cfg(test)]
 mod tests {
     use super::*;

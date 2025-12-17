@@ -68,7 +68,7 @@ impl Tensor {
                 arr.as_ptr().hash(&mut hasher);
                 arr.len().hash(&mut hasher);
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => {
                 // Use buffer_id as a unique identifier for Metal tensors
                 data.buffer_id.hash(&mut hasher);
@@ -109,7 +109,7 @@ impl Tensor {
             Tensor::Torch(t) => t.size().iter().map(|&d| d as usize).collect(),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.shape().dims().to_vec(),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.shape.clone(),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => data.shape.clone(),
@@ -137,7 +137,7 @@ impl Tensor {
             Tensor::Torch(t) => t.numel(),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count(),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.shape.iter().product(),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => data.shape.iter().product(),
@@ -183,7 +183,7 @@ impl Tensor {
             Tensor::Torch(t) => t.numel() * std::mem::size_of::<f32>(), // Simplified
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count() * std::mem::size_of::<f32>(), // Simplified
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => {
                 let num_elements: usize = data.shape.iter().product();
                 num_elements * data.dtype.size_in_bytes()
@@ -333,7 +333,7 @@ impl Tensor {
     pub fn to_device_enum(&self, device: &crate::device::Device) -> Result<Tensor> {
         match (self, device) {
             // F32 → Metal
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::F32(arr), crate::device::Device::Metal(_)) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
@@ -383,7 +383,7 @@ impl Tensor {
             },
 
             // F64 → Metal (convert to F32 first)
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::F64(arr), crate::device::Device::Metal(_)) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
@@ -397,7 +397,7 @@ impl Tensor {
             },
 
             // Metal → F32
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(metal_data), crate::device::Device::CPU) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 let backend = get_metal_backend()?;
@@ -434,7 +434,7 @@ impl Tensor {
             },
 
             // Metal → Metal (different device, currently just clone)
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(metal_data), crate::device::Device::Metal(_)) => {
                 // For now, just return a clone (buffer is reference counted)
                 // TODO: Implement actual device-to-device transfer if needed
@@ -462,7 +462,7 @@ impl Tensor {
 
             // F32 → CUDA
             #[cfg(feature = "cuda")]
-            (Tensor::F32(_arr), crate::device::Device::CUDA(_device_id)) => {
+            (Tensor::F32(arr), crate::device::Device::CUDA(device_id)) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     use crate::gpu_ops::cuda::get_cuda_backend;
@@ -486,7 +486,7 @@ impl Tensor {
 
             // F64 → CUDA (convert to F32 first)
             #[cfg(feature = "cuda")]
-            (Tensor::F64(_arr), crate::device::Device::CUDA(_device_id)) => {
+            (Tensor::F64(arr), crate::device::Device::CUDA(device_id)) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     use crate::gpu_ops::cuda::get_cuda_backend;
@@ -510,7 +510,7 @@ impl Tensor {
 
             // CUDA → F32
             #[cfg(feature = "cuda")]
-            (Tensor::CUDA(_cuda_data), crate::device::Device::CPU) => {
+            (Tensor::CUDA(cuda_data), crate::device::Device::CPU) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     use crate::gpu_ops::cuda::get_cuda_backend;
@@ -709,7 +709,7 @@ impl Tensor {
             Tensor::F32(a) => Ok(a.iter().cloned().collect()),
             Tensor::F64(a) => Ok(a.iter().map(|&x| x as f32).collect()),
             Tensor::I64(a) => Ok(a.iter().map(|&x| x as f32).collect()),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => {
                 // Convert to CPU first, then get data
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
@@ -841,7 +841,7 @@ impl Tensor {
             Tensor::Torch(t) => format!("{:?}", t.device()),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => format!("{:?}", t.device()),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => "metal".to_string(),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(_) => "cuda".to_string(),
@@ -878,7 +878,7 @@ impl Tensor {
             Tensor::Torch(t) => t.numel() * 4, // Approximate
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count() * 4, // Approximate
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(m) => m.shape.iter().product::<usize>() * 4, // Approximate as f32
             #[cfg(feature = "cuda")]
             Tensor::CUDA(c) => c.shape.iter().product::<usize>() * 4, // Approximate as f32
@@ -906,7 +906,7 @@ impl Tensor {
             Tensor::Torch(_) => DType::F32, // Default assumption
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => DType::F32, // Default assumption
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => data.dtype,
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => data.dtype,
@@ -955,7 +955,7 @@ impl Tensor {
                 }
                 Ok(a.iter().nth(index).copied().unwrap_or(0.0) as f32)
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => {
                 // Convert to CPU first, then get float
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
@@ -1025,7 +1025,7 @@ impl Tensor {
                     )
                 })
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => {
                 // Convert to CPU first, then get item
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;

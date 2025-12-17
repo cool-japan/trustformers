@@ -21,7 +21,7 @@ impl MetalBackend {
         k: usize,
         n: usize,
     ) -> Result<Vec<f32>> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         unsafe {
             use cblas_sys::{cblas_sgemm, CblasNoTrans, CblasRowMajor};
             let mut result = vec![0.0f32; m * n];

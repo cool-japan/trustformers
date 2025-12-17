@@ -1,7 +1,10 @@
 // Microbenchmark: Flash Attention vs Standard Attention
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use std::time::Instant;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::gpu_ops::metal::functions::get_metal_backend;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = get_metal_backend()?;
 
@@ -64,4 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
+fn main() {
+    println!("This example requires macOS with Metal support.");
+    println!("Please compile with --features metal on macOS.");
 }

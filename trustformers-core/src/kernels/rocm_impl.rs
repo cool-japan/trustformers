@@ -1008,17 +1008,6 @@ impl Default for RocmMemoryPool {
     }
 }
 
-impl RocmMemoryPool {
-    pub fn new() -> Self {
-        Self {
-            available_blocks: Vec::new(),
-            allocated_blocks: HashMap::new(),
-            total_allocated: 0,
-            peak_memory: 0,
-        }
-    }
-}
-
 /// Public API functions for external use
 #[cfg(all(feature = "rocm", target_os = "linux"))]
 pub mod api {

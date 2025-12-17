@@ -103,7 +103,7 @@ impl LayerNorm {
 
     /// Pre-upload layer parameters to GPU for zero-transfer pipeline
     /// This converts weight and bias to Metal tensors for GPU-resident computation
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &crate::device::Device) -> Result<()> {
         use crate::device::Device;
 
@@ -151,7 +151,7 @@ impl Layer for LayerNorm {
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
         match &input {
             // GPU-resident Metal tensor - process on GPU
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(metal_data) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 use crate::tensor::MetalTensorData;
@@ -317,7 +317,7 @@ impl Layer for LayerNorm {
 
             // GPU-resident CUDA tensor - process on GPU
             #[cfg(feature = "cuda")]
-            Tensor::CUDA(_cuda_data) => {
+            Tensor::CUDA(cuda_data) => {
                 #[allow(unused_imports)]
                 use crate::tensor::CudaTensorData;
 
@@ -441,7 +441,7 @@ impl Layer for LayerNorm {
 
             Tensor::F32(arr) => {
                 // Try Metal GPU acceleration for 2D tensors (seq_len, hidden_size)
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     use crate::gpu_ops::metal::get_metal_backend;
                     if arr.ndim() == 2 && self.normalized_shape.len() == 1 {
@@ -545,7 +545,7 @@ impl Layer for LayerNorm {
                 // Convert weight/bias to F32 if needed
                 let weight_f32 = match &self.weight {
                     Tensor::F32(w) => w.clone(),
-                    #[cfg(feature = "metal")]
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
                     Tensor::Metal(_) => {
                         let cpu_weight = self.weight.to_device_enum(&crate::device::Device::CPU)?;
                         match cpu_weight {
@@ -581,7 +581,7 @@ impl Layer for LayerNorm {
 
                 let bias_f32 = match &self.bias {
                     Tensor::F32(b) => b.clone(),
-                    #[cfg(feature = "metal")]
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
                     Tensor::Metal(_) => {
                         let cpu_bias = self.bias.to_device_enum(&crate::device::Device::CPU)?;
                         match cpu_bias {

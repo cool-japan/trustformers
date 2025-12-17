@@ -45,7 +45,7 @@ impl GPTNeoXMLP {
         self.dense_h_to_4h.parameter_count() + self.dense_4h_to_h.parameter_count()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -133,7 +133,7 @@ impl GPTNeoXAttention {
         self.query_key_value.parameter_count() + self.dense.parameter_count()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -164,7 +164,7 @@ impl Layer for GPTNeoXAttention {
         // Temporary fallback: Convert Metal/CUDA tensors to F32
         // TODO: Implement full Tensor::Metal/CUDA support in Attention
         // Complex operations (QKV split, RoPE) are CPU-friendly
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         let input = match &input {
             Tensor::Metal(_) => input.to_device_enum(&trustformers_core::device::Device::CPU)?,
             _ => input,
@@ -275,7 +275,7 @@ impl Layer for GPTNeoXAttention {
                 let mut attn_output = Array2::<f32>::zeros((seq_len, hidden_size));
 
                 // Helper function: Try Metal attention (returns Some on success, None on failure)
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 let try_metal_attention = |q_head: &Array2<f32>,
                                            k_head: &Array2<f32>,
                                            v_head: &Array2<f32>,
@@ -350,14 +350,14 @@ impl Layer for GPTNeoXAttention {
 
                     // Compute head_output (try Metal, fallback to CPU)
                     let head_output: Array2<f32> = {
-                        #[cfg(feature = "metal")]
+                        #[cfg(all(target_os = "macos", feature = "metal"))]
                         {
                             try_metal_attention(&q_head, &k_head, &v_head, h).unwrap_or_else(|| {
                                 cpu_attention(q_head.clone(), k_head.clone(), v_head.clone())
                             })
                         }
 
-                        #[cfg(not(feature = "metal"))]
+                        #[cfg(not(all(target_os = "macos", feature = "metal")))]
                         {
                             cpu_attention(q_head, k_head, v_head)
                         }
@@ -420,7 +420,7 @@ impl GPTNeoXLayer {
         self.attention.parameter_count() + self.mlp.parameter_count()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -555,7 +555,7 @@ impl GPTNeoXModel {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(
         &mut self,
         device: &trustformers_core::device::Device,
@@ -793,7 +793,7 @@ impl GPTNeoXForCausalLM {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(
         &mut self,
         device: &trustformers_core::device::Device,

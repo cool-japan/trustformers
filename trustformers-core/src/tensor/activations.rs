@@ -256,7 +256,7 @@ impl Tensor {
     pub fn gelu(&self) -> Result<Tensor> {
         match self {
             // Metal GPU path - stays on GPU!
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(metal_data) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 use crate::tensor::MetalTensorData;

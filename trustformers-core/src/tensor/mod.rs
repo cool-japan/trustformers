@@ -155,7 +155,7 @@ impl DType {
 /// ```
 
 /// Metal GPU buffer wrapper for GPU-resident tensors
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[derive(Debug)]
 pub struct MetalTensorData {
     pub buffer_id: crate::gpu_ops::metal::BufferId,
@@ -163,7 +163,7 @@ pub struct MetalTensorData {
     pub dtype: DType,
 }
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl Clone for MetalTensorData {
     fn clone(&self) -> Self {
         // Note: This creates a reference to the same GPU buffer
@@ -219,7 +219,7 @@ pub enum Tensor {
     #[cfg(feature = "candle")]
     Candle(candle_core::Tensor),
     // Metal GPU-resident tensor (data lives on GPU)
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     Metal(MetalTensorData),
     // CUDA GPU-resident tensor (data lives on GPU)
     #[cfg(feature = "cuda")]
@@ -244,7 +244,7 @@ impl Clone for Tensor {
             Tensor::Torch(t) => Tensor::Torch(t.shallow_clone()),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => Tensor::Candle(t.clone()),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => Tensor::Metal(data.clone()),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => Tensor::CUDA(data.clone()),
@@ -270,7 +270,7 @@ impl std::fmt::Debug for Tensor {
             Tensor::Torch(_) => write!(f, "Tensor::Torch(shape: {:?})", self.shape()),
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => write!(f, "Tensor::Candle(shape: {:?})", self.shape()),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => write!(
                 f,
                 "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",

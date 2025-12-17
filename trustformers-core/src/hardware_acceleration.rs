@@ -177,7 +177,7 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Metal => {
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     // Metal backend initialization using Metal Performance Shaders
                     let _metal = crate::kernels::metal_impl::MetalImpl::new()?;
@@ -297,7 +297,7 @@ impl HardwareAccelerator {
             },
             AccelerationBackend::Metal => {
                 // Check if Metal is available by attempting to create a Metal implementation
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     crate::kernels::metal_impl::MetalImpl::new().is_ok()
                 }
@@ -357,7 +357,7 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Metal => {
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     let metal_impl = crate::kernels::metal_impl::MetalImpl::new()?;
                     metal_impl.matrix_multiply(a, b).and_then(|result| {
@@ -445,7 +445,7 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Metal => {
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     let metal_impl = crate::kernels::metal_impl::MetalImpl::new()?;
                     metal_impl.flash_attention(query, key, value, output)

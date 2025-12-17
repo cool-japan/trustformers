@@ -241,7 +241,7 @@ impl SmoothQuantizer {
                     ));
                 },
                 #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 Tensor::Metal(_) => {
                     return Err(TrustformersError::tensor_op_error(
                         "Metal tensors not yet supported for calibration",
@@ -408,7 +408,7 @@ impl SmoothQuantizer {
                     "calculate_weight_scales",
                 ));
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => {
                 return Err(TrustformersError::tensor_op_error(
                     "Metal tensors not yet supported for weight scaling",
@@ -633,7 +633,7 @@ impl SmoothQuantizer {
                 "calculate_range",
             )),
             #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => Err(TrustformersError::tensor_op_error(
                 "Metal tensors not yet supported",
                 "calculate_range",
@@ -715,7 +715,7 @@ impl SmoothQuantizer {
                 "tensor_to_u8",
             )),
             #[allow(unreachable_patterns)] // Feature-gated patterns after catch-all
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => Err(TrustformersError::tensor_op_error(
                 "Metal tensors not yet supported",
                 "tensor_to_u8",
@@ -921,7 +921,7 @@ mod tests {
             Tensor::CF16(_) => panic!("CF16 tensor type not expected in smoothing test"),
             Tensor::CBF16(_) => panic!("CBF16 tensor type not expected in smoothing test"),
             Tensor::Sparse(_) => panic!("Sparse tensor type not expected in smoothing test"),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => panic!("Metal tensor type not expected in smoothing test"),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(_) => panic!("CUDA tensor type not expected in smoothing test"),

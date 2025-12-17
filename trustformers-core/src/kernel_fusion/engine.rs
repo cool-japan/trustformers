@@ -554,7 +554,7 @@ impl KernelFusionEngine {
         let db = self.performance_database.read().unwrap();
 
         let mut total_individual_cost = 0.0;
-        let mut total_ops = 0u64;
+        let mut _total_ops = 0u64;
 
         for node_id in node_ids {
             if let Some(node) = graph.get_node(node_id) {
@@ -563,7 +563,7 @@ impl KernelFusionEngine {
 
                     total_individual_cost +=
                         cost.ops_per_element * elements as f64 + cost.launch_overhead_ns as f64;
-                    total_ops += node.metadata.estimated_ops;
+                    _total_ops += node.metadata.estimated_ops;
                 }
             }
         }

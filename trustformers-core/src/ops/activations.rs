@@ -5,7 +5,7 @@ use std::f32::consts::PI;
 pub fn gelu(x: &Tensor) -> Result<Tensor> {
     match x {
         // GPU-resident Metal tensor - process directly on GPU (ZERO TRANSFERS!)
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         Tensor::Metal(metal_data) => {
             use crate::gpu_ops::metal::get_metal_backend;
             use crate::tensor::MetalTensorData;
@@ -31,7 +31,6 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
         // GPU-resident CUDA tensor - process directly on GPU (ZERO TRANSFERS!)
         #[cfg(feature = "cuda")]
         Tensor::CUDA(cuda_data) => {
-            use crate::device::Device;
             #[allow(unused_imports)]
             use crate::tensor::CudaTensorData;
 
@@ -64,7 +63,7 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
 
         Tensor::F32(arr) => {
             // Try Metal GPU acceleration if available
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             {
                 use crate::gpu_ops::metal::get_metal_backend;
                 if let Ok(backend) = get_metal_backend() {
