@@ -5,6 +5,47 @@ use crate::traits::Layer;
 use scirs2_core::ndarray::{
     s, Array1, Array2, ArrayBase, ArrayD, Axis, Dimension, IxDyn, OwnedRepr, Zip,
 };
+#[cfg(not(target_os = "macos"))]
+use scirs2_core::simd_ops::SimdUnifiedOps;
+
+/// Minimum size threshold for BLAS GEMM
+const MIN_SIZE_FOR_BLAS: usize = 32;
+
+/// Direct BLAS GEMM using cblas_sgemm for maximum performance on macOS (Accelerate)
+#[cfg(target_os = "macos")]
+#[inline]
+fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+    unsafe {
+        use cblas_sys::{cblas_sgemm, CblasNoTrans, CblasRowMajor};
+        cblas_sgemm(
+            CblasRowMajor,
+            CblasNoTrans,
+            CblasNoTrans,
+            m as i32,
+            n as i32,
+            k as i32,
+            1.0,
+            a.as_ptr(),
+            k as i32,
+            b.as_ptr(),
+            n as i32,
+            0.0,
+            c.as_mut_ptr(),
+            n as i32,
+        );
+    }
+}
+
+/// Fallback for non-macOS: use scirs2-core SIMD GEMM
+#[cfg(not(target_os = "macos"))]
+#[inline]
+fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
+    c.copy_from_slice(c_arr.as_slice().unwrap());
+}
 
 /// FlashAttention: Memory-efficient attention computation
 ///
@@ -395,14 +436,27 @@ impl FlashAttention {
                 let b_slice = b.index_axis(Axis(0), b_idx);
                 let b_mat = b_slice.index_axis(Axis(0), h_idx);
 
-                // Convert to owned 2D arrays for matrix multiplication
-                let a_2d = Array2::from_shape_vec((m, k), a_mat.iter().cloned().collect())
-                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                // Collect data for matrix multiplication
+                let a_data: Vec<f32> = a_mat.iter().cloned().collect();
+                let b_data: Vec<f32> = b_mat.iter().cloned().collect();
 
-                let b_2d = Array2::from_shape_vec((k, n), b_mat.iter().cloned().collect())
-                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                let product = a_2d.dot(&b_2d);
+                // Use direct BLAS for larger matrices
+                let product = if m >= MIN_SIZE_FOR_BLAS
+                    && k >= MIN_SIZE_FOR_BLAS
+                    && n >= MIN_SIZE_FOR_BLAS
+                {
+                    let mut result_vec = vec![0.0f32; m * n];
+                    blas_sgemm(&a_data, &b_data, &mut result_vec, m, k, n);
+                    Array2::from_shape_vec((m, n), result_vec)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?
+                } else {
+                    // Fallback to ndarray dot for small matrices
+                    let a_2d = Array2::from_shape_vec((m, k), a_data)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let b_2d = Array2::from_shape_vec((k, n), b_data)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    a_2d.dot(&b_2d)
+                };
 
                 result
                     .index_axis_mut(Axis(0), b_idx)
