@@ -152,7 +152,7 @@ impl GptJModel {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         self.wte.weights_to_gpu(device)?;
         for block in &mut self.blocks {
@@ -196,7 +196,7 @@ impl GptJBlock {
         self.ln_1.parameter_count() + self.attn.parameter_count() + self.mlp.parameter_count()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         self.ln_1.weights_to_gpu(device)?;
         self.attn.weights_to_gpu(device)?;
@@ -278,7 +278,7 @@ impl GptJAttention {
             + self.out_proj.parameter_count()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         self.q_proj.weights_to_gpu(device)?;
         self.k_proj.weights_to_gpu(device)?;
@@ -359,7 +359,7 @@ impl GptJMLP {
         self.fc_in.parameter_count() + self.fc_out.parameter_count()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         self.fc_in.weights_to_gpu(device)?;
         self.fc_out.weights_to_gpu(device)?;
@@ -476,7 +476,7 @@ impl GptJLMHeadModel {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
         self.transformer.weights_to_gpu(device)?;
         self.lm_head.weights_to_gpu(device)?;

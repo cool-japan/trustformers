@@ -423,7 +423,7 @@ impl MemoryPressureManager {
 
     /// Get current memory pressure as a percentage (0.0 to 1.0)
     fn get_memory_pressure(&self) -> TrustformersPyResult<f64> {
-        let used_memory = MemoryMonitor::get_process_memory_usage()?;
+        let _used_memory = MemoryMonitor::get_process_memory_usage()?;
 
         // Get available system memory (simplified approach)
         #[cfg(target_os = "linux")]

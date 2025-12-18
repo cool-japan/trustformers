@@ -433,7 +433,7 @@ impl TensorMemoryPool {
             Tensor::Torch(_) => elements * 4, // Default to 32-bit
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => elements * 4, // Default to 32-bit
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(data) => elements * data.dtype.size_in_bytes(),
             #[cfg(feature = "cuda")]
             Tensor::CUDA(data) => elements * data.dtype.size_in_bytes(),

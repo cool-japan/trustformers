@@ -1,8 +1,13 @@
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use std::time::Instant;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_core::device::Device;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_models::gpt2::config::Gpt2Config;
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use trustformers_models::gpt2::model::Gpt2LMHeadModel;
 
+#[cfg(all(target_os = "macos", feature = "metal"))]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("===============================================");
     println!("🧪 Testing GPT-2 Text Generation with Fixed Multi-Head Attention");
@@ -80,4 +85,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n===============================================");
     Ok(())
+}
+
+
+#[cfg(not(all(target_os = "macos", feature = "metal")))]
+fn main() {
+    println!("This example requires macOS with Metal support.");
+    println!("Please compile with --features metal on macOS.");
 }

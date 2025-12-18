@@ -4,11 +4,8 @@ use numpy::{
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyMemoryView};
-use scirs2_core::ndarray::{ArrayD, ArrayViewD, IxDyn as NdIxDyn};
-use std::ptr;
-use std::sync::Arc;
-use trustformers_core::autodiff::variable::{Variable, VariableRef};
+use pyo3::types::PyDict;
+use trustformers_core::autodiff::variable::Variable;
 use trustformers_core::tensor::Tensor;
 
 /// Python wrapper for TrustformeRS Tensor
@@ -172,7 +169,7 @@ impl PyTensor {
     pub fn new(
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
-        device: Option<String>,
+        _device: Option<String>,
         requires_grad: bool,
     ) -> PyResult<Self> {
         // Try to handle as numpy array first (zero-copy when possible)
@@ -222,7 +219,7 @@ impl PyTensor {
     /// Create a tensor of zeros
     #[staticmethod]
     #[pyo3(signature = (shape, device=None, requires_grad=false))]
-    pub fn zeros(shape: Vec<usize>, device: Option<String>, requires_grad: bool) -> PyResult<Self> {
+    pub fn zeros(shape: Vec<usize>, _device: Option<String>, requires_grad: bool) -> PyResult<Self> {
         let tensor = Tensor::zeros(&shape)
             .map_err(|e| PyValueError::new_err(format!("Failed to create zeros tensor: {}", e)))?;
         Ok(PyTensor::from_tensor_with_grad(tensor, requires_grad))
@@ -231,7 +228,7 @@ impl PyTensor {
     /// Create a tensor of ones
     #[staticmethod]
     #[pyo3(signature = (shape, device=None, requires_grad=false))]
-    pub fn ones(shape: Vec<usize>, device: Option<String>, requires_grad: bool) -> PyResult<Self> {
+    pub fn ones(shape: Vec<usize>, _device: Option<String>, requires_grad: bool) -> PyResult<Self> {
         let tensor = Tensor::ones(&shape)
             .map_err(|e| PyValueError::new_err(format!("Failed to create ones tensor: {}", e)))?;
         Ok(PyTensor::from_tensor_with_grad(tensor, requires_grad))
@@ -242,9 +239,9 @@ impl PyTensor {
     #[pyo3(signature = (shape, mean=0.0, std=1.0, device=None, requires_grad=false))]
     pub fn randn(
         shape: Vec<usize>,
-        mean: f32,
-        std: f32,
-        device: Option<String>,
+        _mean: f32,
+        _std: f32,
+        _device: Option<String>,
         requires_grad: bool,
     ) -> PyResult<Self> {
         let tensor = Tensor::randn(&shape)
@@ -257,9 +254,9 @@ impl PyTensor {
     #[pyo3(signature = (shape, low=0.0, high=1.0, device=None, requires_grad=false))]
     pub fn rand(
         shape: Vec<usize>,
-        low: f32,
-        high: f32,
-        device: Option<String>,
+        _low: f32,
+        _high: f32,
+        _device: Option<String>,
         requires_grad: bool,
     ) -> PyResult<Self> {
         let tensor = Tensor::randn(&shape)
@@ -681,7 +678,7 @@ impl PyTensor {
     }
 
     /// Get item
-    pub fn __getitem__(&self, indices: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+    pub fn __getitem__(&self, _indices: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
         // Simple implementation for now
         Ok(self.clone())
     }
@@ -689,8 +686,8 @@ impl PyTensor {
     /// Set item
     pub fn __setitem__(
         &mut self,
-        indices: &Bound<'_, PyAny>,
-        value: PyTensorOrScalar,
+        _indices: &Bound<'_, PyAny>,
+        _value: PyTensorOrScalar,
     ) -> PyResult<()> {
         // Simple implementation for now
         Ok(())

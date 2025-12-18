@@ -11,7 +11,7 @@
 #[cfg(all(target_os = "macos", feature = "metal"))]
 use super::types::BufferId;
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 impl Default for BufferId {
     fn default() -> Self {
         Self::new()

@@ -108,7 +108,7 @@ impl Tensor {
                 let result = a + b;
                 Ok(Tensor::C64(result))
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(a_data), Tensor::Metal(b_data)) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 use crate::tensor::MetalTensorData;
@@ -135,7 +135,7 @@ impl Tensor {
                     dtype: a_data.dtype,
                 }))
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(_), _) | (_, Tensor::Metal(_)) => {
                 // Mixed Metal/CPU - convert to CPU for now
                 // TODO: Could upload CPU tensor to GPU instead
@@ -220,12 +220,12 @@ impl Tensor {
                 let result = a - b;
                 Ok(Tensor::C64(result))
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(_), _) => {
                 let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
                 cpu_self.sub(other)
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (_, Tensor::Metal(_)) => {
                 let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
                 self.sub(&cpu_other)

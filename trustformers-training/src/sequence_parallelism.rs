@@ -765,8 +765,8 @@ impl SequenceParallelism {
         };
 
         // Create config with adjusted chunk size
-        let mut adjusted_config = self.config.clone();
-        adjusted_config.max_sequence_length_per_device = adjusted_chunk_size;
+        let mut _adjusted_config = self.config.clone();
+        _adjusted_config.max_sequence_length_per_device = adjusted_chunk_size;
 
         // Use equal chunks with adjusted size
         self.split_equal_chunks(total_length)

@@ -511,7 +511,7 @@ impl Layer for Linear {
                 // eprintln!("🔍 Linear: Has bias, checking type...");
                 // Try GPU-to-GPU bias addition if bias is on GPU
                 match bias {
-                    #[cfg(feature = "metal")]
+                    #[cfg(all(target_os = "macos", feature = "metal"))]
                     Tensor::Metal(bias_data) => {
                         // eprintln!("🔍 Linear: Bias is Metal, using GPU-to-GPU bias addition");
                         // Both output and bias are Metal tensors - use GPU kernel!

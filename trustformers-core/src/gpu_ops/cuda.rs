@@ -1906,6 +1906,7 @@ extern "C" __global__ void matmul_tiled_kernel(
         n: usize,
     ) -> Result<Vec<f32>> {
         // Tensor Core kernel using WMMA API
+        #[allow(dead_code)]
         const KERNEL_SRC: &str = r#"
 #include <mma.h>
 using namespace nvcuda;
@@ -2161,10 +2162,10 @@ extern "C" __global__ void matmul_gelu_fused_kernel(
     pub fn transformer_layer_forward_optimized(
         &self,
         hidden_states: &[f32],
-        qkv_weight_id: &BufferId,
-        seq_len: usize,
-        hidden_size: usize,
-        num_heads: usize,
+        _qkv_weight_id: &BufferId,
+        _seq_len: usize,
+        _hidden_size: usize,
+        _num_heads: usize,
     ) -> Result<Vec<f32>> {
         eprintln!("ℹ️  Optimized transformer layer using tiled operations");
 

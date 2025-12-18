@@ -168,7 +168,7 @@ impl RLHFTrainer {
 
         let mut total_accuracy = 0.0;
         #[allow(unused_variables)]
-        let mut total_loss = 0.0;
+        let mut _total_loss = 0.0;
         let num_batches =
             (self.preference_pairs.len() + self.config.batch_size - 1) / self.config.batch_size;
 
@@ -193,7 +193,7 @@ impl RLHFTrainer {
             }
 
             total_accuracy += epoch_accuracy / num_batches as f32;
-            total_loss += epoch_loss / num_batches as f32;
+            _total_loss += epoch_loss / num_batches as f32;
         }
 
         // Update metrics with realistic values
@@ -256,7 +256,7 @@ impl RLHFTrainer {
         let mut total_ppo_objective = 0.0;
         let mut total_kl_divergence = 0.0;
         #[allow(unused_variables)]
-        let mut total_value_loss = 0.0;
+        let mut _total_value_loss = 0.0;
         let clip_epsilon = 0.2; // PPO clip parameter
 
         // Simulate PPO training epochs
@@ -283,7 +283,7 @@ impl RLHFTrainer {
 
             total_ppo_objective += epoch_ppo_obj / num_batches as f32;
             total_kl_divergence += epoch_kl_div / num_batches as f32;
-            total_value_loss += epoch_value_loss / num_batches as f32;
+            _total_value_loss += epoch_value_loss / num_batches as f32;
         }
 
         // Update metrics with realistic values
@@ -348,7 +348,7 @@ impl RLHFTrainer {
         }
 
         #[allow(unused_variables)]
-        let mut total_dpo_loss = 0.0;
+        let mut _total_dpo_loss = 0.0;
         let mut total_reward = 0.0;
         let beta = 0.1; // Temperature parameter for DPO
 
@@ -374,7 +374,7 @@ impl RLHFTrainer {
                 epoch_reward += avg_reward;
             }
 
-            total_dpo_loss += epoch_dpo_loss / num_batches as f32;
+            _total_dpo_loss += epoch_dpo_loss / num_batches as f32;
             total_reward += epoch_reward / num_batches as f32;
         }
 
@@ -460,7 +460,7 @@ impl RLHFTrainer {
 
         let mut total_violations = 0;
         #[allow(unused_variables)]
-        let mut total_constitutional_loss = 0.0;
+        let mut _total_constitutional_loss = 0.0;
 
         // Simulate Constitutional AI training epochs
         for _epoch in 0..self.config.epochs {
@@ -483,7 +483,7 @@ impl RLHFTrainer {
             }
 
             total_violations += epoch_violations;
-            total_constitutional_loss += epoch_loss / num_batches as f32;
+            _total_constitutional_loss += epoch_loss / num_batches as f32;
         }
 
         // Update metrics with realistic values

@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tracing::error;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]

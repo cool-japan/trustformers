@@ -76,7 +76,7 @@ impl Tensor {
                 Ok(Tensor::F64(result))
             },
             (tensor, target_dtype) if tensor.dtype() == target_dtype => Ok(tensor.clone()),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             (Tensor::Metal(_), _) => {
                 // Convert Metal tensor to CPU first, then apply dtype conversion
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
@@ -105,7 +105,7 @@ impl Tensor {
             Tensor::I64(a) => Ok(a.iter().map(|&x| x as f32).collect()),
             Tensor::C32(a) => Ok(a.iter().map(|x| x.re).collect()),
             Tensor::C64(a) => Ok(a.iter().map(|x| x.re as f32).collect()),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => {
                 // Convert Metal tensor to CPU first, then get vec
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
@@ -128,7 +128,7 @@ impl Tensor {
             Tensor::F32(a) => Ok(a.iter().map(|&x| x as u8).collect()),
             Tensor::F64(a) => Ok(a.iter().map(|&x| x as u8).collect()),
             Tensor::I64(a) => Ok(a.iter().map(|&x| x as u8).collect()),
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(_) => {
                 // Convert Metal tensor to CPU first, then get vec
                 let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;

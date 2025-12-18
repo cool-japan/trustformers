@@ -3,11 +3,10 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// Get available device (CPU, CUDA, Metal, etc.)
 #[pyfunction]
-pub fn get_device(py: Python<'_>) -> PyResult<String> {
+pub fn get_device(_py: Python<'_>) -> PyResult<String> {
     // Check for available devices
     #[cfg(feature = "cuda")]
     {
@@ -100,10 +99,10 @@ impl NoGradContext {
 pub fn download_model(
     py: Python<'_>,
     model_name: String,
-    cache_dir: Option<String>,
+    _cache_dir: Option<String>,
     force_download: bool,
-    resume_download: bool,
-    token: Option<String>,
+    _resume_download: bool,
+    _token: Option<String>,
 ) -> PyResult<Bound<'_, PyDict>> {
     // In a real implementation, this would download from HF Hub
     // For now, return mock information

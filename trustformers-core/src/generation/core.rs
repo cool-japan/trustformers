@@ -89,7 +89,7 @@ impl TextGenerator {
                 let data: Vec<f32> = arr.iter().cloned().collect();
                 self.greedy_select_from_data(&data)
             },
-            #[cfg(feature = "metal")]
+            #[cfg(all(target_os = "macos", feature = "metal"))]
             Tensor::Metal(metal_data) => {
                 use crate::gpu_ops::metal::get_metal_backend;
 

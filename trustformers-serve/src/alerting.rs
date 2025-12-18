@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// Alerting service configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]

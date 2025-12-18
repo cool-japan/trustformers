@@ -628,7 +628,7 @@ impl OptimizationPass for OperationFusionPass {
         &self,
         graph: &ComputationGraph,
     ) -> Result<f64, crate::errors::TrustformersError> {
-        let mut potential_fusions = 0;
+        let mut _potential_fusions = 0;
         let mut total_benefit = 0.0;
 
         for pattern in &self.fusion_patterns {
@@ -640,7 +640,7 @@ impl OptimizationPass for OperationFusionPass {
                 if let (Some(from), Some(to)) = (graph.get_node(edge.from), graph.get_node(edge.to))
                 {
                     if from.op_type == pattern.pattern[0] && to.op_type == pattern.pattern[1] {
-                        potential_fusions += 1;
+                        _potential_fusions += 1;
                         total_benefit += pattern.benefit - 1.0; // Convert to improvement ratio
                     }
                 }

@@ -3,7 +3,7 @@ use numpy::{PyArray, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use scirs2_core::ndarray::{self as ndarray, ArrayD, ArrayViewD, Axis, Dimension, IxDyn};
+use scirs2_core::ndarray::{self as ndarray, ArrayD, Axis, Dimension, IxDyn};
 use scirs2_core::parallel_ops::*; // SciRS2 Integration Policy - replaces rayon
 use trustformers_core::quantization::{
     QuantizationConfig, QuantizationScheme, QuantizedTensor, Quantizer,
@@ -288,7 +288,7 @@ impl TensorOptimizer {
         key: &ArrayD<f32>,
         value: &ArrayD<f32>,
         mask: Option<&ArrayD<f32>>,
-        dropout_p: f32,
+        _dropout_p: f32,
         scale: Option<f32>,
     ) -> TrustformersPyResult<ArrayD<f32>> {
         let q_shape = query.shape();
@@ -314,7 +314,7 @@ impl TensorOptimizer {
         }
 
         // Compute attention scores: Q @ K^T
-        let key_t = key.clone().reversed_axes(); // Transpose last two dimensions
+        let _key_t = key.clone().reversed_axes(); // Transpose last two dimensions
 
         // For simplicity, compute attention for 2D case (can be extended for batch dims)
         let mut scores = ArrayD::<f32>::zeros(IxDyn(&[seq_len_q, seq_len_k]));
@@ -1473,7 +1473,7 @@ impl PyTensorOptimized {
 
         // Simple implementation for demonstration - can be optimized
         let original_data: Vec<f32> = array.iter().cloned().collect();
-        let elements_per_repeat = array.len();
+        let _elements_per_repeat = array.len();
 
         for _ in 0..repeats.iter().product::<usize>() / array.len() {
             result_data.extend(original_data.iter());

@@ -47,7 +47,7 @@ pub mod oneapi_impl;
 #[cfg(feature = "riscv")]
 pub mod riscv_impl;
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal_impl;
 
 pub use fused_ops::*;
@@ -94,5 +94,5 @@ pub use oneapi_impl::*;
 #[cfg(feature = "riscv")]
 pub use riscv_impl::*;
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metal_impl::*;

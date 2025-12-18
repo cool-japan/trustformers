@@ -469,7 +469,7 @@ impl GPUBackend {
 
     fn discover_metal_devices(&self) -> HardwareResult<Vec<String>> {
         // Enhanced Metal device discovery for Apple platforms
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             use std::process::Command;
 
@@ -525,7 +525,7 @@ impl GPUBackend {
             }
         }
 
-        #[cfg(not(feature = "metal"))]
+        #[cfg(not(all(target_os = "macos", feature = "metal")))]
         Ok(vec![])
     }
 
@@ -705,7 +705,7 @@ impl GPUBackend {
                 }
             },
             GPUBackendType::Metal => {
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     log::info!("Setting up Metal performance monitoring");
                     // Metal performance counters setup would go here
