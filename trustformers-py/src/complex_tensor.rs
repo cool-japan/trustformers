@@ -22,7 +22,7 @@ impl PyComplexTensor {
         py: Python<'_>,
         real: &Bound<'_, PyArray<f32, IxDyn>>,
         imag: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let real_array = real.try_readonly()?.as_array().to_owned();
         let imag_array = imag.try_readonly()?.as_array().to_owned();
 
@@ -50,7 +50,7 @@ impl PyComplexTensor {
     pub fn real(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -72,7 +72,7 @@ impl PyComplexTensor {
     pub fn imag(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -94,7 +94,7 @@ impl PyComplexTensor {
     pub fn magnitude(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -123,7 +123,7 @@ impl PyComplexTensor {
     pub fn phase(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -152,7 +152,7 @@ impl PyComplexTensor {
     pub fn conj(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -177,7 +177,7 @@ impl PyComplexTensor {
         py: Python<'_>,
         tensor1: &Bound<'_, PyArray<f32, IxDyn>>,
         tensor2: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array1 = tensor1.try_readonly()?.as_array().to_owned();
         let array2 = tensor2.try_readonly()?.as_array().to_owned();
 
@@ -211,7 +211,7 @@ impl PyComplexTensor {
         py: Python<'_>,
         tensor1: &Bound<'_, PyArray<f32, IxDyn>>,
         tensor2: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array1 = tensor1.try_readonly()?.as_array().to_owned();
         let array2 = tensor2.try_readonly()?.as_array().to_owned();
 
@@ -250,7 +250,7 @@ impl PyComplexTensor {
         py: Python<'_>,
         tensor1: &Bound<'_, PyArray<f32, IxDyn>>,
         tensor2: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array1 = tensor1.try_readonly()?.as_array().to_owned();
         let array2 = tensor2.try_readonly()?.as_array().to_owned();
 
@@ -297,7 +297,7 @@ impl PyComplexTensor {
     pub fn exp(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -327,7 +327,7 @@ impl PyComplexTensor {
     pub fn log(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -359,7 +359,7 @@ impl PyComplexTensor {
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         exponent: f32,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = complex_tensor.try_readonly()?.as_array().to_owned();
 
         if array.shape().is_empty() || array.shape()[array.ndim() - 1] != 2 {
@@ -403,7 +403,7 @@ impl PyComplexTensor {
         py: Python<'_>,
         magnitude: &Bound<'_, PyArray<f32, IxDyn>>,
         phase: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let mag_array = magnitude.try_readonly()?.as_array().to_owned();
         let phase_array = phase.try_readonly()?.as_array().to_owned();
 
@@ -431,7 +431,7 @@ impl PyComplexTensor {
     pub fn to_polar(
         py: Python<'_>,
         complex_tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let magnitude = Self::magnitude(py, complex_tensor)?;
         let phase = Self::phase(py, complex_tensor)?;
 

@@ -1,9 +1,8 @@
-use crate::errors::{TrustformersPyError, TrustformersPyResult};
+use crate::errors::TrustformersPyResult;
 use parking_lot::RwLock;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 /// Memory statistics for monitoring
 #[derive(Debug, Clone, Default)]
@@ -17,7 +16,6 @@ pub struct MemoryStats {
 
 /// Custom memory allocator with tracking
 pub struct TrackingAllocator {
-    stats: Arc<RwLock<MemoryStats>>,
     current_usage: AtomicUsize,
     peak_usage: AtomicUsize,
     total_allocated: AtomicUsize,
@@ -28,7 +26,6 @@ pub struct TrackingAllocator {
 impl TrackingAllocator {
     pub fn new() -> Self {
         Self {
-            stats: Arc::new(RwLock::new(MemoryStats::default())),
             current_usage: AtomicUsize::new(0),
             peak_usage: AtomicUsize::new(0),
             total_allocated: AtomicUsize::new(0),
@@ -591,20 +588,18 @@ where
     }
 }
 
-/// Global memory pressure manager instance
-static mut GLOBAL_PRESSURE_MANAGER: Option<MemoryPressureManager> = None;
-static PRESSURE_MANAGER_INIT: std::sync::Once = std::sync::Once::new();
+/// Global memory pressure manager instance (using safe OnceLock pattern)
+static GLOBAL_PRESSURE_MANAGER: std::sync::OnceLock<RwLock<MemoryPressureManager>> =
+    std::sync::OnceLock::new();
 
 /// Initialize global memory pressure management
 pub fn init_memory_pressure_management(threshold: f64) {
-    PRESSURE_MANAGER_INIT.call_once(|| unsafe {
-        GLOBAL_PRESSURE_MANAGER = Some(MemoryPressureManager::new(threshold));
-    });
+    GLOBAL_PRESSURE_MANAGER.get_or_init(|| RwLock::new(MemoryPressureManager::new(threshold)));
 }
 
 /// Get global memory pressure manager
-pub fn get_pressure_manager() -> Option<&'static mut MemoryPressureManager> {
-    unsafe { GLOBAL_PRESSURE_MANAGER.as_mut() }
+pub fn get_pressure_manager() -> Option<&'static RwLock<MemoryPressureManager>> {
+    GLOBAL_PRESSURE_MANAGER.get()
 }
 
 #[cfg(test)]

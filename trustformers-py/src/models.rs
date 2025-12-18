@@ -1010,7 +1010,7 @@ impl PyLlamaModel {
 
 // Helper functions for config parsing
 fn parse_bert_config(config_dict: &Bound<'_, PyAny>) -> PyResult<BertConfig> {
-    let dict = config_dict.downcast::<pyo3::types::PyDict>()?;
+    let dict = config_dict.cast::<pyo3::types::PyDict>()?;
 
     let mut config = BertConfig::default();
 

@@ -576,7 +576,8 @@ mod tests {
         );
         assert_eq!(metric.normalize_answer("PARIS"), "paris");
         assert_eq!(metric.normalize_answer("New York City"), "new york city");
-        assert_eq!(metric.normalize_answer("123-456-7890"), "123 456 7890");
+        // Hyphens are punctuation and get removed (standard SQuAD normalization)
+        assert_eq!(metric.normalize_answer("123-456-7890"), "1234567890");
         assert_eq!(metric.normalize_answer(""), "");
         assert_eq!(metric.normalize_answer("   "), "");
     }

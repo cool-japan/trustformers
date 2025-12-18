@@ -1004,7 +1004,12 @@ impl RocmMemoryPool {
 #[cfg(not(all(feature = "rocm", target_os = "linux")))]
 impl Default for RocmMemoryPool {
     fn default() -> Self {
-        Self::new()
+        Self {
+            available_blocks: Vec::new(),
+            allocated_blocks: HashMap::new(),
+            total_allocated: 0,
+            peak_memory: 0,
+        }
     }
 }
 
@@ -1172,7 +1177,7 @@ mod tests {
 
     #[test]
     fn test_memory_pool() {
-        let pool = RocmMemoryPool::new();
+        let pool = RocmMemoryPool::default();
         assert_eq!(pool.total_allocated, 0);
         assert_eq!(pool.peak_memory, 0);
     }

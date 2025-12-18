@@ -53,7 +53,7 @@ impl PerformanceProfiler {
     }
 
     /// Get timing statistics for an operation
-    pub fn get_stats(&self, py: Python<'_>, operation: String) -> PyResult<PyObject> {
+    pub fn get_stats(&self, py: Python<'_>, operation: String) -> PyResult<Py<PyAny>> {
         if let Some(measurements) = self.measurements.get(&operation) {
             if measurements.is_empty() {
                 return Ok(py.None());
@@ -104,7 +104,7 @@ impl PerformanceProfiler {
     }
 
     /// Get all recorded statistics
-    pub fn get_all_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_all_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let all_stats = PyDict::new(py);
 
         for operation in self.measurements.keys() {
@@ -132,7 +132,7 @@ impl PerformanceProfiler {
         operation_name: String,
         tensor: &Bound<'_, PyArray<f32, scirs2_core::ndarray::IxDyn>>,
         iterations: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let mut durations = Vec::with_capacity(iterations);
 
@@ -196,7 +196,7 @@ impl PerformanceProfiler {
         operations: Vec<String>,
         tensor: &Bound<'_, PyArray<f32, scirs2_core::ndarray::IxDyn>>,
         iterations: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let mut results = Vec::new();
 
         for operation in operations {
@@ -280,7 +280,7 @@ impl MemoryTracker {
     }
 
     /// Get memory usage summary
-    pub fn get_summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let summary = PyDict::new(py);
         summary.set_item("current_usage_bytes", self.current_usage)?;
         summary.set_item("current_usage_mb", self.current_usage_mb())?;
@@ -324,9 +324,9 @@ impl ProfilerContext {
     pub fn __exit__(
         &mut self,
         py: Python<'_>,
-        _exc_type: Option<PyObject>,
-        _exc_value: Option<PyObject>,
-        _traceback: Option<PyObject>,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_value: Option<Py<PyAny>>,
+        _traceback: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
         let _ = self.profiler.borrow_mut(py).stop_timer(self.operation.clone());
         Ok(false) // Don't suppress exceptions

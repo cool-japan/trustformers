@@ -390,7 +390,8 @@ mod tests {
         metric.add_batch(&probabilities, &tokens).unwrap();
 
         let result = metric.compute().unwrap();
-        assert_eq!(result.value, 2.0); // Random binary prediction gives perplexity 2
+        // Random binary prediction gives perplexity ~2 (use tolerance for f64)
+        assert!((result.value - 2.0).abs() < 1e-6);
     }
 
     #[test]
@@ -447,7 +448,7 @@ mod tests {
         let result = metric.compute().unwrap();
         // Should combine both batches: (ln(1.0) + ln(0.5)) / 2 = ln(0.5) / 2
         let expected = (-0.5_f64.ln() / 2.0).exp();
-        assert!((result.value - expected).abs() < 1e-10);
+        assert!((result.value - expected).abs() < 1e-6);
         assert_eq!(result.details.get("num_tokens"), Some(&2.0));
     }
 

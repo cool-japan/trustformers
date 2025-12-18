@@ -91,10 +91,10 @@ impl NoGradContext {
 #[pyfunction]
 #[pyo3(signature = (
     model_name,
-    cache_dir = None,
+    _cache_dir = None,
     force_download = false,
-    resume_download = true,
-    token = None,
+    _resume_download = true,
+    _token = None,
 ))]
 pub fn download_model(
     py: Python<'_>,

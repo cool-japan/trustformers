@@ -1,3 +1,5 @@
+#[cfg(feature = "cuda")]
+use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use std::f32::consts::PI;

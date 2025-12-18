@@ -462,6 +462,7 @@ impl Tensor {
 
             // F32 → CUDA
             #[cfg(feature = "cuda")]
+            #[allow(unused_variables)]
             (Tensor::F32(arr), crate::device::Device::CUDA(device_id)) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
@@ -486,6 +487,7 @@ impl Tensor {
 
             // F64 → CUDA (convert to F32 first)
             #[cfg(feature = "cuda")]
+            #[allow(unused_variables)]
             (Tensor::F64(arr), crate::device::Device::CUDA(device_id)) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
@@ -510,6 +512,7 @@ impl Tensor {
 
             // CUDA → F32
             #[cfg(feature = "cuda")]
+            #[allow(unused_variables)]
             (Tensor::CUDA(cuda_data), crate::device::Device::CPU) => {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
