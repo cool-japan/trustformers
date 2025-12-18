@@ -75,6 +75,7 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 
 /// Direct BLAS GEMM using cblas_dgemm for f64
 #[cfg(target_os = "macos")]
+#[allow(dead_code)] // Reserved for f64 tensor matmul
 #[inline]
 fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
     unsafe {

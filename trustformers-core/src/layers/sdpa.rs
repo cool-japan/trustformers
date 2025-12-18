@@ -4,14 +4,68 @@ use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use scirs2_core::ndarray::{s, Array1, Array2, ArrayD, Axis, IxDyn};
 use scirs2_core::simd::activation::simd_softmax_f32;
+#[cfg(not(target_os = "macos"))]
 use scirs2_core::simd_ops::SimdUnifiedOps;
 
-/// Minimum size threshold for SIMD GEMM (avoid scirs2-core bug with small matrices)
-/// Note: scirs2-core has bugs with matrices of size <64, so we use 64 as the threshold
-const MIN_SIZE_FOR_SIMD_GEMM: usize = 64;
+/// Minimum size threshold for BLAS GEMM
+const MIN_SIZE_FOR_BLAS: usize = 32;
 
 /// Minimum size threshold for SIMD softmax
 const MIN_SIZE_FOR_SIMD_SOFTMAX: usize = 64;
+
+/// Direct BLAS GEMM using cblas_sgemm for maximum performance on macOS (Accelerate)
+#[cfg(target_os = "macos")]
+#[inline]
+fn blas_sgemm(
+    alpha: f32,
+    a: &[f32],
+    b: &[f32],
+    beta: f32,
+    c: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    unsafe {
+        use cblas_sys::{cblas_sgemm, CblasNoTrans, CblasRowMajor};
+        cblas_sgemm(
+            CblasRowMajor,
+            CblasNoTrans,
+            CblasNoTrans,
+            m as i32,
+            n as i32,
+            k as i32,
+            alpha,
+            a.as_ptr(),
+            k as i32,
+            b.as_ptr(),
+            n as i32,
+            beta,
+            c.as_mut_ptr(),
+            n as i32,
+        );
+    }
+}
+
+/// Fallback for non-macOS: use scirs2-core SIMD GEMM
+#[cfg(not(target_os = "macos"))]
+#[inline]
+fn blas_sgemm(
+    alpha: f32,
+    a: &[f32],
+    b: &[f32],
+    beta: f32,
+    c: &mut [f32],
+    m: usize,
+    k: usize,
+    n: usize,
+) {
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    f32::simd_gemm(alpha, &a_arr.view(), &b_arr.view(), beta, &mut c_arr);
+    c.copy_from_slice(c_arr.as_slice().unwrap());
+}
 
 /// Optimized Scaled Dot-Product Attention (SDPA) kernels
 ///
@@ -112,22 +166,18 @@ impl SDPA {
                         let k_t = k_2d.t();
                         let k_t_owned: Array2<f32> = k_t.to_owned();
 
-                        let scores = if seq_q >= MIN_SIZE_FOR_SIMD_GEMM
-                            && seq_k >= MIN_SIZE_FOR_SIMD_GEMM
-                            && head_dim >= MIN_SIZE_FOR_SIMD_GEMM
+                        let scores = if seq_q >= MIN_SIZE_FOR_BLAS
+                            && seq_k >= MIN_SIZE_FOR_BLAS
+                            && head_dim >= MIN_SIZE_FOR_BLAS
                         {
-                            // Use BLAS GEMM for larger matrices
-                            let mut result = Array2::<f32>::zeros((seq_q, seq_k));
-                            f32::simd_gemm(
-                                scale,
-                                &q_2d.view(),
-                                &k_t_owned.view(),
-                                0.0,
-                                &mut result,
-                            );
-                            result
+                            // Use direct BLAS (Accelerate on macOS) for larger matrices
+                            let q_vec: Vec<f32> = q_2d.iter().copied().collect();
+                            let k_t_vec: Vec<f32> = k_t_owned.iter().copied().collect();
+                            let mut result_vec = vec![0.0f32; seq_q * seq_k];
+                            blas_sgemm(scale, &q_vec, &k_t_vec, 0.0, &mut result_vec, seq_q, head_dim, seq_k);
+                            Array2::from_shape_vec((seq_q, seq_k), result_vec).unwrap()
                         } else {
-                            // Use ndarray dot for smaller matrices (avoid scirs2-core bug)
+                            // Use ndarray dot for smaller matrices
                             let mut result = q_2d.dot(&k_t_owned);
                             result.mapv_inplace(|x| x * scale);
                             result
@@ -187,14 +237,16 @@ impl SDPA {
 
                         // Apply attention to values using BLAS gemm: scores @ V
                         // scores: [seq_q, seq_k], V: [seq_k, head_dim] => output: [seq_q, head_dim]
-                        let attn_output = if seq_q >= MIN_SIZE_FOR_SIMD_GEMM
-                            && seq_k >= MIN_SIZE_FOR_SIMD_GEMM
-                            && head_dim >= MIN_SIZE_FOR_SIMD_GEMM
+                        let attn_output = if seq_q >= MIN_SIZE_FOR_BLAS
+                            && seq_k >= MIN_SIZE_FOR_BLAS
+                            && head_dim >= MIN_SIZE_FOR_BLAS
                         {
-                            // Use BLAS GEMM for larger matrices
-                            let mut result = Array2::<f32>::zeros((seq_q, head_dim));
-                            f32::simd_gemm(1.0, &scores.view(), &v_2d.view(), 0.0, &mut result);
-                            result
+                            // Use direct BLAS (Accelerate on macOS) for larger matrices
+                            let scores_vec: Vec<f32> = scores.iter().copied().collect();
+                            let v_vec: Vec<f32> = v_2d.iter().copied().collect();
+                            let mut result_vec = vec![0.0f32; seq_q * head_dim];
+                            blas_sgemm(1.0, &scores_vec, &v_vec, 0.0, &mut result_vec, seq_q, seq_k, head_dim);
+                            Array2::from_shape_vec((seq_q, head_dim), result_vec).unwrap()
                         } else {
                             // Use ndarray dot for smaller matrices
                             scores.dot(&v_2d)
@@ -266,19 +318,16 @@ impl SDPA {
                         let k_t = k_2d.t();
                         let k_t_owned: Array2<f32> = k_t.to_owned();
 
-                        let mut scores = if seq_q >= MIN_SIZE_FOR_SIMD_GEMM
-                            && seq_k >= MIN_SIZE_FOR_SIMD_GEMM
-                            && head_dim >= MIN_SIZE_FOR_SIMD_GEMM
+                        let mut scores = if seq_q >= MIN_SIZE_FOR_BLAS
+                            && seq_k >= MIN_SIZE_FOR_BLAS
+                            && head_dim >= MIN_SIZE_FOR_BLAS
                         {
-                            let mut result = Array2::<f32>::zeros((seq_q, seq_k));
-                            f32::simd_gemm(
-                                scale,
-                                &q_2d.view(),
-                                &k_t_owned.view(),
-                                0.0,
-                                &mut result,
-                            );
-                            result
+                            // Use direct BLAS (Accelerate on macOS)
+                            let q_vec: Vec<f32> = q_2d.iter().copied().collect();
+                            let k_t_vec: Vec<f32> = k_t_owned.iter().copied().collect();
+                            let mut result_vec = vec![0.0f32; seq_q * seq_k];
+                            blas_sgemm(scale, &q_vec, &k_t_vec, 0.0, &mut result_vec, seq_q, head_dim, seq_k);
+                            Array2::from_shape_vec((seq_q, seq_k), result_vec).unwrap()
                         } else {
                             let mut result = q_2d.dot(&k_t_owned);
                             result.mapv_inplace(|x| x * scale);
@@ -340,13 +389,16 @@ impl SDPA {
                             .into_shape_with_order((seq_k, head_dim))
                             .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
 
-                        let attn_output = if seq_q >= MIN_SIZE_FOR_SIMD_GEMM
-                            && seq_k >= MIN_SIZE_FOR_SIMD_GEMM
-                            && head_dim >= MIN_SIZE_FOR_SIMD_GEMM
+                        let attn_output = if seq_q >= MIN_SIZE_FOR_BLAS
+                            && seq_k >= MIN_SIZE_FOR_BLAS
+                            && head_dim >= MIN_SIZE_FOR_BLAS
                         {
-                            let mut result = Array2::<f32>::zeros((seq_q, head_dim));
-                            f32::simd_gemm(1.0, &scores.view(), &v_2d.view(), 0.0, &mut result);
-                            result
+                            // Use direct BLAS (Accelerate on macOS)
+                            let scores_vec: Vec<f32> = scores.iter().copied().collect();
+                            let v_vec: Vec<f32> = v_2d.iter().copied().collect();
+                            let mut result_vec = vec![0.0f32; seq_q * head_dim];
+                            blas_sgemm(1.0, &scores_vec, &v_vec, 0.0, &mut result_vec, seq_q, seq_k, head_dim);
+                            Array2::from_shape_vec((seq_q, head_dim), result_vec).unwrap()
                         } else {
                             scores.dot(&v_2d)
                         };
@@ -439,20 +491,16 @@ impl SDPA {
                                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                                 let k_tile_t = k_tile_2d.t().to_owned();
 
-                                let mut scores_tile = if q_tile_size >= MIN_SIZE_FOR_SIMD_GEMM
-                                    && k_tile_size >= MIN_SIZE_FOR_SIMD_GEMM
-                                    && head_dim >= MIN_SIZE_FOR_SIMD_GEMM
+                                let mut scores_tile = if q_tile_size >= MIN_SIZE_FOR_BLAS
+                                    && k_tile_size >= MIN_SIZE_FOR_BLAS
+                                    && head_dim >= MIN_SIZE_FOR_BLAS
                                 {
-                                    let mut result =
-                                        Array2::<f32>::zeros((q_tile_size, k_tile_size));
-                                    f32::simd_gemm(
-                                        scale,
-                                        &q_tile_2d.view(),
-                                        &k_tile_t.view(),
-                                        0.0,
-                                        &mut result,
-                                    );
-                                    result
+                                    // Use direct BLAS (Accelerate on macOS)
+                                    let q_vec: Vec<f32> = q_tile_2d.iter().copied().collect();
+                                    let k_t_vec: Vec<f32> = k_tile_t.iter().copied().collect();
+                                    let mut result_vec = vec![0.0f32; q_tile_size * k_tile_size];
+                                    blas_sgemm(scale, &q_vec, &k_t_vec, 0.0, &mut result_vec, q_tile_size, head_dim, k_tile_size);
+                                    Array2::from_shape_vec((q_tile_size, k_tile_size), result_vec).unwrap()
                                 } else {
                                     let mut result = q_tile_2d.dot(&k_tile_t);
                                     result.mapv_inplace(|x| x * scale);
@@ -529,18 +577,15 @@ impl SDPA {
                                     .into_shape_with_order((k_tile_size, head_dim))
                                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
 
-                                if q_tile_size >= MIN_SIZE_FOR_SIMD_GEMM
-                                    && k_tile_size >= MIN_SIZE_FOR_SIMD_GEMM
-                                    && head_dim >= MIN_SIZE_FOR_SIMD_GEMM
+                                if q_tile_size >= MIN_SIZE_FOR_BLAS
+                                    && k_tile_size >= MIN_SIZE_FOR_BLAS
+                                    && head_dim >= MIN_SIZE_FOR_BLAS
                                 {
-                                    // Use BLAS gemm with beta=1.0 to add to existing o_tile
-                                    f32::simd_gemm(
-                                        1.0,
-                                        &exp_scores.view(),
-                                        &v_tile_2d.view(),
-                                        1.0,
-                                        &mut o_tile,
-                                    );
+                                    // Use direct BLAS with beta=1.0 to add to existing o_tile
+                                    let exp_vec: Vec<f32> = exp_scores.iter().copied().collect();
+                                    let v_vec: Vec<f32> = v_tile_2d.iter().copied().collect();
+                                    let o_slice = o_tile.as_slice_mut().unwrap();
+                                    blas_sgemm(1.0, &exp_vec, &v_vec, 1.0, o_slice, q_tile_size, k_tile_size, head_dim);
                                 } else {
                                     // Fallback to ndarray dot for small tiles
                                     let new_contrib = exp_scores.dot(&v_tile_2d);
