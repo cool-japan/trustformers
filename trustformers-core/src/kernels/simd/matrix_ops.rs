@@ -82,12 +82,11 @@ impl SIMDMatrixOps {
         }
     }
 
-    /// SIMD-optimized matrix multiplication using scirs2-core's BLAS-accelerated GEMM.
+    /// SIMD-optimized matrix multiplication using direct BLAS (cblas_sgemm).
     ///
-    /// This function uses scirs2-core's `SimdUnifiedOps::simd_gemm` which provides:
-    /// - BLAS acceleration (Accelerate/MKL/OpenBLAS) for larger matrices
-    /// - SIMD optimization (AVX2/AVX-512/NEON) for smaller matrices
-    /// - Automatic platform detection and optimal backend selection
+    /// On macOS, this uses Apple Accelerate framework directly via cblas_sgemm
+    /// for maximum performance (~100-200 GFLOPS on Apple Silicon).
+    /// On other platforms, falls back to scirs2-core's SIMD GEMM implementation.
     ///
     /// Optimized for transformer feed-forward layers and attention projections.
     pub fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
@@ -113,7 +112,7 @@ impl SIMDMatrixOps {
             ));
         }
 
-        // Use scirs2-core's BLAS-accelerated GEMM
+        // Use direct BLAS GEMM (Accelerate on macOS, simd_gemm fallback elsewhere)
         self.matmul_blas(a, b, m, k, n)
     }
 
