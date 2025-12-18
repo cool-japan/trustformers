@@ -387,8 +387,16 @@ impl Tensor {
                                     let a_vec: Vec<f32> = a_2d.iter().copied().collect();
                                     let b_vec: Vec<f32> = b_2d.iter().copied().collect();
                                     let mut result_vec = vec![0.0f32; seq_len_a * seq_len_b];
-                                    blas_sgemm(&a_vec, &b_vec, &mut result_vec, seq_len_a, inner, seq_len_b);
-                                    Array2::from_shape_vec((seq_len_a, seq_len_b), result_vec).unwrap()
+                                    blas_sgemm(
+                                        &a_vec,
+                                        &b_vec,
+                                        &mut result_vec,
+                                        seq_len_a,
+                                        inner,
+                                        seq_len_b,
+                                    );
+                                    Array2::from_shape_vec((seq_len_a, seq_len_b), result_vec)
+                                        .unwrap()
                                 };
 
                                 // Assign result back to 4D tensor

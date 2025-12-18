@@ -87,7 +87,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-
 #[cfg(not(all(target_os = "macos", feature = "metal")))]
 fn main() {
     println!("This example requires macOS with Metal support.");

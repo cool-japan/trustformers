@@ -174,7 +174,16 @@ impl SDPA {
                             let q_vec: Vec<f32> = q_2d.iter().copied().collect();
                             let k_t_vec: Vec<f32> = k_t_owned.iter().copied().collect();
                             let mut result_vec = vec![0.0f32; seq_q * seq_k];
-                            blas_sgemm(scale, &q_vec, &k_t_vec, 0.0, &mut result_vec, seq_q, head_dim, seq_k);
+                            blas_sgemm(
+                                scale,
+                                &q_vec,
+                                &k_t_vec,
+                                0.0,
+                                &mut result_vec,
+                                seq_q,
+                                head_dim,
+                                seq_k,
+                            );
                             Array2::from_shape_vec((seq_q, seq_k), result_vec).unwrap()
                         } else {
                             // Use ndarray dot for smaller matrices
@@ -245,7 +254,16 @@ impl SDPA {
                             let scores_vec: Vec<f32> = scores.iter().copied().collect();
                             let v_vec: Vec<f32> = v_2d.iter().copied().collect();
                             let mut result_vec = vec![0.0f32; seq_q * head_dim];
-                            blas_sgemm(1.0, &scores_vec, &v_vec, 0.0, &mut result_vec, seq_q, seq_k, head_dim);
+                            blas_sgemm(
+                                1.0,
+                                &scores_vec,
+                                &v_vec,
+                                0.0,
+                                &mut result_vec,
+                                seq_q,
+                                seq_k,
+                                head_dim,
+                            );
                             Array2::from_shape_vec((seq_q, head_dim), result_vec).unwrap()
                         } else {
                             // Use ndarray dot for smaller matrices
@@ -326,7 +344,16 @@ impl SDPA {
                             let q_vec: Vec<f32> = q_2d.iter().copied().collect();
                             let k_t_vec: Vec<f32> = k_t_owned.iter().copied().collect();
                             let mut result_vec = vec![0.0f32; seq_q * seq_k];
-                            blas_sgemm(scale, &q_vec, &k_t_vec, 0.0, &mut result_vec, seq_q, head_dim, seq_k);
+                            blas_sgemm(
+                                scale,
+                                &q_vec,
+                                &k_t_vec,
+                                0.0,
+                                &mut result_vec,
+                                seq_q,
+                                head_dim,
+                                seq_k,
+                            );
                             Array2::from_shape_vec((seq_q, seq_k), result_vec).unwrap()
                         } else {
                             let mut result = q_2d.dot(&k_t_owned);
@@ -397,7 +424,16 @@ impl SDPA {
                             let scores_vec: Vec<f32> = scores.iter().copied().collect();
                             let v_vec: Vec<f32> = v_2d.iter().copied().collect();
                             let mut result_vec = vec![0.0f32; seq_q * head_dim];
-                            blas_sgemm(1.0, &scores_vec, &v_vec, 0.0, &mut result_vec, seq_q, seq_k, head_dim);
+                            blas_sgemm(
+                                1.0,
+                                &scores_vec,
+                                &v_vec,
+                                0.0,
+                                &mut result_vec,
+                                seq_q,
+                                seq_k,
+                                head_dim,
+                            );
                             Array2::from_shape_vec((seq_q, head_dim), result_vec).unwrap()
                         } else {
                             scores.dot(&v_2d)
@@ -499,8 +535,18 @@ impl SDPA {
                                     let q_vec: Vec<f32> = q_tile_2d.iter().copied().collect();
                                     let k_t_vec: Vec<f32> = k_tile_t.iter().copied().collect();
                                     let mut result_vec = vec![0.0f32; q_tile_size * k_tile_size];
-                                    blas_sgemm(scale, &q_vec, &k_t_vec, 0.0, &mut result_vec, q_tile_size, head_dim, k_tile_size);
-                                    Array2::from_shape_vec((q_tile_size, k_tile_size), result_vec).unwrap()
+                                    blas_sgemm(
+                                        scale,
+                                        &q_vec,
+                                        &k_t_vec,
+                                        0.0,
+                                        &mut result_vec,
+                                        q_tile_size,
+                                        head_dim,
+                                        k_tile_size,
+                                    );
+                                    Array2::from_shape_vec((q_tile_size, k_tile_size), result_vec)
+                                        .unwrap()
                                 } else {
                                     let mut result = q_tile_2d.dot(&k_tile_t);
                                     result.mapv_inplace(|x| x * scale);
@@ -585,7 +631,16 @@ impl SDPA {
                                     let exp_vec: Vec<f32> = exp_scores.iter().copied().collect();
                                     let v_vec: Vec<f32> = v_tile_2d.iter().copied().collect();
                                     let o_slice = o_tile.as_slice_mut().unwrap();
-                                    blas_sgemm(1.0, &exp_vec, &v_vec, 1.0, o_slice, q_tile_size, k_tile_size, head_dim);
+                                    blas_sgemm(
+                                        1.0,
+                                        &exp_vec,
+                                        &v_vec,
+                                        1.0,
+                                        o_slice,
+                                        q_tile_size,
+                                        k_tile_size,
+                                        head_dim,
+                                    );
                                 } else {
                                     // Fallback to ndarray dot for small tiles
                                     let new_contrib = exp_scores.dot(&v_tile_2d);

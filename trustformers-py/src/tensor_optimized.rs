@@ -485,7 +485,10 @@ impl PyTensorOptimized {
 
     /// Apply fast GELU activation function
     #[staticmethod]
-    pub fn gelu_fast(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
+    pub fn gelu_fast(
+        py: Python<'_>,
+        input: &Bound<'_, PyArray<f32, IxDyn>>,
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::gelu_fast(&input_array);
         let result_shape = result.shape().to_vec();
@@ -1820,7 +1823,10 @@ impl PyAdvancedActivations {
 
     /// Hardswish activation function
     #[staticmethod]
-    pub fn hardswish(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
+    pub fn hardswish(
+        py: Python<'_>,
+        input: &Bound<'_, PyArray<f32, IxDyn>>,
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| {
             let relu6 = (x + 3.0).max(0.0).min(6.0);

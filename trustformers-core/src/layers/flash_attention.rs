@@ -441,22 +441,20 @@ impl FlashAttention {
                 let b_data: Vec<f32> = b_mat.iter().cloned().collect();
 
                 // Use direct BLAS for larger matrices
-                let product = if m >= MIN_SIZE_FOR_BLAS
-                    && k >= MIN_SIZE_FOR_BLAS
-                    && n >= MIN_SIZE_FOR_BLAS
-                {
-                    let mut result_vec = vec![0.0f32; m * n];
-                    blas_sgemm(&a_data, &b_data, &mut result_vec, m, k, n);
-                    Array2::from_shape_vec((m, n), result_vec)
-                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?
-                } else {
-                    // Fallback to ndarray dot for small matrices
-                    let a_2d = Array2::from_shape_vec((m, k), a_data)
-                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                    let b_2d = Array2::from_shape_vec((k, n), b_data)
-                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                    a_2d.dot(&b_2d)
-                };
+                let product =
+                    if m >= MIN_SIZE_FOR_BLAS && k >= MIN_SIZE_FOR_BLAS && n >= MIN_SIZE_FOR_BLAS {
+                        let mut result_vec = vec![0.0f32; m * n];
+                        blas_sgemm(&a_data, &b_data, &mut result_vec, m, k, n);
+                        Array2::from_shape_vec((m, n), result_vec)
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?
+                    } else {
+                        // Fallback to ndarray dot for small matrices
+                        let a_2d = Array2::from_shape_vec((m, k), a_data)
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                        let b_2d = Array2::from_shape_vec((k, n), b_data)
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                        a_2d.dot(&b_2d)
+                    };
 
                 result
                     .index_axis_mut(Axis(0), b_idx)

@@ -218,7 +218,11 @@ impl PyTensor {
     /// Create a tensor of zeros
     #[staticmethod]
     #[pyo3(signature = (shape, _device=None, requires_grad=false))]
-    pub fn zeros(shape: Vec<usize>, _device: Option<String>, requires_grad: bool) -> PyResult<Self> {
+    pub fn zeros(
+        shape: Vec<usize>,
+        _device: Option<String>,
+        requires_grad: bool,
+    ) -> PyResult<Self> {
         let tensor = Tensor::zeros(&shape)
             .map_err(|e| PyValueError::new_err(format!("Failed to create zeros tensor: {}", e)))?;
         Ok(PyTensor::from_tensor_with_grad(tensor, requires_grad))

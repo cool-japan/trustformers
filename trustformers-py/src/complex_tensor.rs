@@ -3,7 +3,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use scirs2_core::ndarray::IxDyn;
- // SciRS2 Integration Policy
+// SciRS2 Integration Policy
 
 /// Complex tensor operations for trustformers-py
 #[pyclass(name = "ComplexTensor")]
