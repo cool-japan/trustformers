@@ -6,7 +6,6 @@
 use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{Array1, Array2, ArrayView1, ArrayView2};
 
-
 /// SIMD-optimized matrix multiplication with cache-aware tiling
 ///
 /// This implementation uses:

@@ -169,12 +169,15 @@ impl HuggingFaceLoader {
                     for name in tensor_names {
                         weight_map.insert(name, weight_file.to_string());
                     }
-                }
+                },
                 Err(e) => {
-                    eprintln!("Warning: Failed to read SafeTensors header: {}. Using fallback index.", e);
+                    eprintln!(
+                        "Warning: Failed to read SafeTensors header: {}. Using fallback index.",
+                        e
+                    );
                     // Fallback to old behavior
                     weight_map.insert("*".to_string(), weight_file.to_string());
-                }
+                },
             }
         } else {
             // For PyTorch files, use wildcard (we can't easily parse .bin files)
@@ -204,12 +207,20 @@ impl HuggingFaceLoader {
         // Read header JSON
         let mut header_bytes = vec![0u8; header_len as usize];
         reader.read_exact(&mut header_bytes)?;
-        let header_str = String::from_utf8(header_bytes)
-            .map_err(|e| TrustformersError::weight_load_error(format!("Invalid UTF-8 in SafeTensors header: {}", e)))?;
+        let header_str = String::from_utf8(header_bytes).map_err(|e| {
+            TrustformersError::weight_load_error(format!(
+                "Invalid UTF-8 in SafeTensors header: {}",
+                e
+            ))
+        })?;
 
         // Parse JSON and extract tensor names
-        let header: serde_json::Value = serde_json::from_str(&header_str)
-            .map_err(|e| TrustformersError::weight_load_error(format!("Failed to parse SafeTensors header: {}", e)))?;
+        let header: serde_json::Value = serde_json::from_str(&header_str).map_err(|e| {
+            TrustformersError::weight_load_error(format!(
+                "Failed to parse SafeTensors header: {}",
+                e
+            ))
+        })?;
 
         let mut tensor_names = Vec::new();
         if let Some(obj) = header.as_object() {

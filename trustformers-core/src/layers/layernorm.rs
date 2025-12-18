@@ -6,7 +6,8 @@ use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use scirs2_core::ndarray::{Axis, IxDyn};
+use scirs2_core::ndarray::{Array2, ArrayView1, ArrayView2, Axis, IxDyn};
+use scirs2_core::simd::normalization::simd_layer_norm_f32;
 
 /// Layer Normalization
 ///
@@ -518,10 +519,71 @@ impl Layer for LayerNorm {
                     }
                 }
 
-                // Fallback to CPU implementation
+                // SIMD-accelerated CPU path for 2D and 3D tensors
                 let ndim = arr.ndim();
                 let norm_ndim = self.normalized_shape.len();
 
+                // Minimum size threshold for SIMD (avoid overhead on small tensors)
+                const MIN_SIZE_FOR_SIMD_LAYER_NORM: usize = 64;
+
+                // Fast path: Use scirs2-core SIMD layer norm for 2D/3D tensors with 1D normalized_shape
+                if norm_ndim == 1 && (ndim == 2 || ndim == 3) {
+                    let hidden_size = self.normalized_shape[0];
+                    let last_dim = arr.shape()[ndim - 1];
+
+                    if last_dim == hidden_size && arr.len() >= MIN_SIZE_FOR_SIMD_LAYER_NORM {
+                        // Extract weight and bias as 1D arrays (owned copies for proper lifetime)
+                        let weight_1d = match &self.weight {
+                            Tensor::F32(w) => {
+                                use scirs2_core::ndarray::Array1;
+                                let data: Vec<f32> = w.iter().copied().collect();
+                                Array1::from_vec(data).into_shape_with_order(hidden_size).ok()
+                            },
+                            _ => None,
+                        };
+                        let bias_1d = match &self.bias {
+                            Tensor::F32(b) => {
+                                use scirs2_core::ndarray::Array1;
+                                let data: Vec<f32> = b.iter().copied().collect();
+                                Array1::from_vec(data).into_shape_with_order(hidden_size).ok()
+                            },
+                            _ => None,
+                        };
+
+                        if let (Some(w), Some(b)) = (weight_1d, bias_1d) {
+                            // Reshape input to 2D: (batch_size, hidden_size)
+                            let original_shape = arr.shape().to_vec();
+                            let batch_size = arr.len() / hidden_size;
+
+                            if let Ok(input_2d) = arr
+                                .as_standard_layout()
+                                .view()
+                                .into_shape_with_order((batch_size, hidden_size))
+                            {
+                                // Call scirs2-core SIMD layer norm
+                                let input_view: ArrayView2<f32> = input_2d;
+                                let weight_view: ArrayView1<f32> = w.view();
+                                let bias_view: ArrayView1<f32> = b.view();
+
+                                let (output_2d, _means, _vars) = simd_layer_norm_f32(
+                                    &input_view,
+                                    &weight_view,
+                                    &bias_view,
+                                    self.eps,
+                                );
+
+                                // Reshape back to original shape
+                                if let Ok(output) =
+                                    output_2d.into_shape_with_order(IxDyn(&original_shape))
+                                {
+                                    return Ok(Tensor::F32(output));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to standard CPU implementation for other cases
                 // For LayerNorm, we normalize over the last norm_ndim dimensions
                 // Calculate mean and variance
                 let axes: Vec<usize> = ((ndim - norm_ndim)..ndim).collect();
@@ -724,7 +786,69 @@ impl Layer for RMSNorm {
             Tensor::F32(arr) => {
                 let ndim = arr.ndim();
                 let last_dim = ndim - 1;
+                let hidden_size = arr.shape()[last_dim];
 
+                // Minimum size threshold for SIMD (avoid overhead on small tensors)
+                const MIN_SIZE_FOR_SIMD_RMS_NORM: usize = 64;
+
+                // SIMD-accelerated path for 2D/3D tensors
+                if (ndim == 2 || ndim == 3) && arr.len() >= MIN_SIZE_FOR_SIMD_RMS_NORM {
+                    // Extract weight as 1D array (owned copy for proper lifetime)
+                    let weight_1d = match &self.weight {
+                        Tensor::F32(w) => {
+                            if w.len() == hidden_size {
+                                use scirs2_core::ndarray::Array1;
+                                let data: Vec<f32> = w.iter().copied().collect();
+                                Array1::from_vec(data).into_shape_with_order(hidden_size).ok()
+                            } else {
+                                None
+                            }
+                        },
+                        _ => None,
+                    };
+
+                    if let Some(w) = weight_1d {
+                        // Reshape to 2D: (batch_size, hidden_size)
+                        let original_shape = arr.shape().to_vec();
+                        let batch_size = arr.len() / hidden_size;
+
+                        if let Ok(input_2d) = arr
+                            .as_standard_layout()
+                            .view()
+                            .into_shape_with_order((batch_size, hidden_size))
+                        {
+                            // Compute RMS using SIMD for each row
+                            let mut output_2d = Array2::<f32>::zeros((batch_size, hidden_size));
+
+                            for i in 0..batch_size {
+                                let row = input_2d.row(i);
+
+                                // Compute mean(x^2) using SIMD
+                                // Note: We compute squares inline to avoid allocation
+                                let mut squares_sum = 0.0f32;
+                                for &x in row.iter() {
+                                    squares_sum += x * x;
+                                }
+                                let mean_sq = squares_sum / (hidden_size as f32);
+                                let inv_rms = 1.0 / (mean_sq + self.eps).sqrt();
+
+                                // Normalize and apply weight in one pass
+                                for j in 0..hidden_size {
+                                    output_2d[[i, j]] = row[j] * inv_rms * w[j];
+                                }
+                            }
+
+                            // Reshape back to original shape
+                            if let Ok(output) =
+                                output_2d.into_shape_with_order(IxDyn(&original_shape))
+                            {
+                                return Ok(Tensor::F32(output));
+                            }
+                        }
+                    }
+                }
+
+                // Fallback to standard implementation
                 // Compute RMS: sqrt(mean(x^2))
                 let squares = arr.mapv(|x| x * x);
                 let mean_squares =

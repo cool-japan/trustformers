@@ -10,7 +10,8 @@ use crate::errors::{Result, TrustformersError};
 use crate::gpu_ops::dispatch_matmul;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use scirs2_core::ndarray::{Ix2, IxDyn};
+use scirs2_core::ndarray::{Array2, Ix2, IxDyn};
+use scirs2_core::simd_ops::SimdUnifiedOps;
 
 /// A linear transformation layer (fully connected layer).
 ///
@@ -854,7 +855,7 @@ impl Layer for Linear {
                             ))
                         })?;
 
-                    // Ensure contiguous layout for weight and convert to 2D for dot product
+                    // Ensure contiguous layout for weight and convert to 2D for GEMM
                     let w_contiguous = w.to_owned();
                     let w_2d = w_contiguous.into_dimensionality::<Ix2>().map_err(|e| {
                         TrustformersError::shape_error(format!(
@@ -863,8 +864,22 @@ impl Layer for Linear {
                         ))
                     })?;
 
-                    // Perform dot product directly with ndarray
-                    let out_2d = inp_2d.dot(&w_2d);
+                    // Use BLAS-accelerated GEMM via scirs2-core for larger matrices
+                    let m = inp_2d.nrows();
+                    let n = w_2d.ncols();
+                    let k = inp_2d.ncols();
+                    // Note: scirs2-core has bugs with matrices of size <64, use 64 as threshold
+                    const MIN_SIZE_FOR_SIMD_GEMM: usize = 64;
+                    let out_2d = if m < MIN_SIZE_FOR_SIMD_GEMM
+                        || n < MIN_SIZE_FOR_SIMD_GEMM
+                        || k < MIN_SIZE_FOR_SIMD_GEMM
+                    {
+                        inp_2d.dot(&w_2d)
+                    } else {
+                        let mut res = Array2::<f32>::zeros((m, n));
+                        f32::simd_gemm(1.0, &inp_2d.view(), &w_2d.view(), 0.0, &mut res);
+                        res
+                    };
 
                     // Reshape back to 3D
                     let out_3d = out_2d
@@ -895,7 +910,7 @@ impl Layer for Linear {
                             ))
                         })?;
 
-                    // Ensure contiguous layout for weight and convert to 2D
+                    // Ensure contiguous layout for weight and convert to 2D for GEMM
                     let w_contiguous = w.to_owned();
                     let w_2d = w_contiguous.into_dimensionality::<Ix2>().map_err(|e| {
                         TrustformersError::shape_error(format!(
@@ -904,7 +919,22 @@ impl Layer for Linear {
                         ))
                     })?;
 
-                    let out_2d = inp_2d.dot(&w_2d);
+                    // Use BLAS-accelerated GEMM via scirs2-core for larger matrices
+                    let m = inp_2d.nrows();
+                    let n = w_2d.ncols();
+                    let k = inp_2d.ncols();
+                    // Note: scirs2-core has bugs with matrices of size <64, use 64 as threshold
+                    const MIN_SIZE_FOR_SIMD_GEMM: usize = 64;
+                    let out_2d = if m < MIN_SIZE_FOR_SIMD_GEMM
+                        || n < MIN_SIZE_FOR_SIMD_GEMM
+                        || k < MIN_SIZE_FOR_SIMD_GEMM
+                    {
+                        inp_2d.dot(&w_2d)
+                    } else {
+                        let mut res = Array2::<f64>::zeros((m, n));
+                        f64::simd_gemm(1.0, &inp_2d.view(), &w_2d.view(), 0.0, &mut res);
+                        res
+                    };
 
                     let out_3d = out_2d
                         .into_shape_with_order(IxDyn(&[batch, seq_len, out_features]))

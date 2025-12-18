@@ -1,12 +1,26 @@
 //! Tensor activation functions.
 //!
 //! This module contains activation functions commonly used in neural networks.
+//!
+//! # Performance
+//!
+//! This module uses scirs2-core's SIMD-optimized activation functions for larger tensors:
+//! - `simd_gelu` - GELU activation (used in BERT, GPT, etc.)
+//! - `simd_swish` - Swish/SiLU activation (used in EfficientNet, GPT-NeoX)
+//! - `simd_sigmoid` - Sigmoid activation
+//! - `simd_tanh` - Tanh activation
+//!
+//! For tensors with <256 elements, uses scalar operations to avoid SIMD overhead.
 
 #![allow(deprecated)] // Using rand legacy API, will migrate to scirs2_core
 
 use super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use scirs2_core::ndarray::Axis;
+use scirs2_core::ndarray::{Axis, IxDyn};
+use scirs2_core::simd_ops::SimdUnifiedOps;
+
+/// Minimum tensor size to use SIMD operations (avoids overhead for small tensors)
+const MIN_SIZE_FOR_SIMD: usize = 256;
 
 impl Tensor {
     /// ReLU activation function.
@@ -33,42 +47,72 @@ impl Tensor {
 
     /// Sigmoid activation function.
     ///
+    /// # Performance
+    ///
+    /// Uses scirs2-core's SIMD-accelerated sigmoid for tensors with ≥256 elements.
+    ///
     /// # Returns
     ///
     /// A tensor with sigmoid applied element-wise.
     pub fn sigmoid(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                // Numerically stable sigmoid implementation
-                let result = a.mapv(|x| {
-                    if x >= 0.0 {
-                        // For positive x: sigmoid(x) = 1 / (1 + exp(-x))
-                        let exp_neg_x = (-x).exp();
-                        1.0 / (1.0 + exp_neg_x)
-                    } else {
-                        // For negative x: sigmoid(x) = exp(x) / (1 + exp(x))
-                        // This avoids overflow from exp(-x) when x is very negative
-                        let exp_x = x.exp();
-                        exp_x / (1.0 + exp_x)
-                    }
-                });
-                Ok(Tensor::F32(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated sigmoid for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f32::simd_sigmoid(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F32(result))
+                } else {
+                    // Numerically stable sigmoid implementation for small tensors
+                    let result = a.mapv(|x| {
+                        if x >= 0.0 {
+                            let exp_neg_x = (-x).exp();
+                            1.0 / (1.0 + exp_neg_x)
+                        } else {
+                            let exp_x = x.exp();
+                            exp_x / (1.0 + exp_x)
+                        }
+                    });
+                    Ok(Tensor::F32(result))
+                }
             },
             Tensor::F64(a) => {
-                // Numerically stable sigmoid implementation
-                let result = a.mapv(|x| {
-                    if x >= 0.0 {
-                        // For positive x: sigmoid(x) = 1 / (1 + exp(-x))
-                        let exp_neg_x = (-x).exp();
-                        1.0 / (1.0 + exp_neg_x)
-                    } else {
-                        // For negative x: sigmoid(x) = exp(x) / (1 + exp(x))
-                        // This avoids overflow from exp(-x) when x is very negative
-                        let exp_x = x.exp();
-                        exp_x / (1.0 + exp_x)
-                    }
-                });
-                Ok(Tensor::F64(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated sigmoid for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f64::simd_sigmoid(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F64(result))
+                } else {
+                    // Numerically stable sigmoid implementation for small tensors
+                    let result = a.mapv(|x| {
+                        if x >= 0.0 {
+                            let exp_neg_x = (-x).exp();
+                            1.0 / (1.0 + exp_neg_x)
+                        } else {
+                            let exp_x = x.exp();
+                            exp_x / (1.0 + exp_x)
+                        }
+                    });
+                    Ok(Tensor::F64(result))
+                }
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Sigmoid not supported for this tensor type",
@@ -79,18 +123,54 @@ impl Tensor {
 
     /// Tanh activation function.
     ///
+    /// # Performance
+    ///
+    /// Uses scirs2-core's SIMD-accelerated tanh for tensors with ≥256 elements.
+    ///
     /// # Returns
     ///
     /// A tensor with tanh applied element-wise.
     pub fn tanh(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                let result = a.mapv(|x| x.tanh());
-                Ok(Tensor::F32(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated tanh for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f32::simd_tanh(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F32(result))
+                } else {
+                    let result = a.mapv(|x| x.tanh());
+                    Ok(Tensor::F32(result))
+                }
             },
             Tensor::F64(a) => {
-                let result = a.mapv(|x| x.tanh());
-                Ok(Tensor::F64(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated tanh for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f64::simd_tanh(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F64(result))
+                } else {
+                    let result = a.mapv(|x| x.tanh());
+                    Ok(Tensor::F64(result))
+                }
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Tanh not supported for this tensor type",
@@ -250,6 +330,11 @@ impl Tensor {
 
     /// GELU (Gaussian Error Linear Unit) activation function.
     ///
+    /// # Performance
+    ///
+    /// Uses scirs2-core's SIMD-accelerated GELU for tensors with ≥256 elements.
+    /// GELU is widely used in Transformer models (BERT, GPT, etc.).
+    ///
     /// # Returns
     ///
     /// A tensor with GELU applied element-wise.
@@ -260,8 +345,6 @@ impl Tensor {
             Tensor::Metal(metal_data) => {
                 use crate::gpu_ops::metal::get_metal_backend;
                 use crate::tensor::MetalTensorData;
-
-                // eprintln!("✅ GELU: GPU-to-GPU path (Metal→Metal)");
 
                 let backend = get_metal_backend()?;
                 let size = metal_data.shape.iter().product();
@@ -275,15 +358,50 @@ impl Tensor {
                 }))
             },
             Tensor::F32(a) => {
-                let result = a
-                    .mapv(|x| 0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x.powi(3))).tanh()));
-                Ok(Tensor::F32(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated GELU for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f32::simd_gelu(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F32(result))
+                } else {
+                    // Scalar path for small tensors
+                    let result = a.mapv(|x| {
+                        0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x.powi(3))).tanh())
+                    });
+                    Ok(Tensor::F32(result))
+                }
             },
             Tensor::F64(a) => {
-                let result = a.mapv(|x| {
-                    0.5 * x * (1.0 + (0.7978845608028654 * (x + 0.044715 * x.powi(3))).tanh())
-                });
-                Ok(Tensor::F64(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated GELU for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f64::simd_gelu(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F64(result))
+                } else {
+                    // Scalar path for small tensors
+                    let result = a.mapv(|x| {
+                        0.5 * x * (1.0 + (0.7978845608028654 * (x + 0.044715 * x.powi(3))).tanh())
+                    });
+                    Ok(Tensor::F64(result))
+                }
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "GELU not supported for this tensor type",
@@ -323,18 +441,57 @@ impl Tensor {
     ///
     /// Also known as Swish activation: f(x) = x * sigmoid(x)
     ///
+    /// # Performance
+    ///
+    /// Uses scirs2-core's SIMD-accelerated Swish for tensors with ≥256 elements.
+    /// SiLU/Swish is used in EfficientNet, GPT-NeoX, and many modern architectures.
+    ///
     /// # Returns
     ///
     /// A tensor with SiLU applied element-wise.
     pub fn silu(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                let result = a.mapv(|x| x * (1.0 / (1.0 + (-x).exp())));
-                Ok(Tensor::F32(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated Swish for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f32::simd_swish(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F32(result))
+                } else {
+                    // Scalar path for small tensors
+                    let result = a.mapv(|x| x * (1.0 / (1.0 + (-x).exp())));
+                    Ok(Tensor::F32(result))
+                }
             },
             Tensor::F64(a) => {
-                let result = a.mapv(|x| x * (1.0 / (1.0 + (-x).exp())));
-                Ok(Tensor::F64(result))
+                let size = a.len();
+                if size >= MIN_SIZE_FOR_SIMD {
+                    // Use SIMD-accelerated Swish for larger tensors
+                    let shape = a.shape().to_vec();
+                    let flat = a.as_standard_layout();
+                    let flat_view = flat
+                        .view()
+                        .into_shape_with_order(size)
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    let result_1d = f64::simd_swish(&flat_view);
+                    let result = result_1d
+                        .into_shape_with_order(IxDyn(&shape))
+                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                    Ok(Tensor::F64(result))
+                } else {
+                    // Scalar path for small tensors
+                    let result = a.mapv(|x| x * (1.0 / (1.0 + (-x).exp())));
+                    Ok(Tensor::F64(result))
+                }
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "SiLU not supported for this tensor type",

@@ -1,6 +1,23 @@
+//! SIMD-optimized matrix operations.
+//!
+//! This module provides SIMD-optimized matrix operations using scirs2-core's
+//! `SimdUnifiedOps` trait. The trait automatically selects the best implementation
+//! (AVX512, AVX2, NEON, etc.) based on platform capabilities.
+//!
+//! # Performance
+//!
+//! Uses scirs2-core's BLAS-accelerated GEMM which leverages:
+//! - Accelerate framework on macOS
+//! - Intel MKL on Intel systems
+//! - OpenBLAS as fallback
+//! - Platform-specific SIMD (AVX2/AVX-512/NEON) for smaller matrices
+
 use super::cpu_features::CpuFeatures;
 use crate::{Result, Tensor, TrustformersError};
+use scirs2_core::ndarray::Array2;
+use scirs2_core::simd_ops::SimdUnifiedOps;
 
+// Keep legacy intrinsics for specialized low-level operations
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::{vdupq_n_f32, vfmaq_f32, vld1q_f32, vst1q_f32};
 
@@ -28,13 +45,88 @@ impl SIMDMatrixOps {
         }
     }
 
-    /// SIMD-optimized matrix multiplication for small to medium matrices
-    /// Optimized for transformer feed-forward layers and attention projections
+    /// SIMD-optimized matrix multiplication using scirs2-core's BLAS-accelerated GEMM.
+    ///
+    /// This function uses scirs2-core's `SimdUnifiedOps::simd_gemm` which provides:
+    /// - BLAS acceleration (Accelerate/MKL/OpenBLAS) for larger matrices
+    /// - SIMD optimization (AVX2/AVX-512/NEON) for smaller matrices
+    /// - Automatic platform detection and optimal backend selection
+    ///
+    /// Optimized for transformer feed-forward layers and attention projections.
     pub fn matmul(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let a_shape = a.shape();
         let b_shape = b.shape();
 
         // Support 2D matrix multiplication (M, K) x (K, N) -> (M, N)
+        if a_shape.len() != 2 || b_shape.len() != 2 {
+            return Err(TrustformersError::tensor_op_error(
+                "Only 2D matrix multiplication supported",
+                "matmul",
+            ));
+        }
+
+        let m = a_shape[0];
+        let k = a_shape[1];
+        let n = b_shape[1];
+
+        if b_shape[0] != k {
+            return Err(TrustformersError::tensor_op_error(
+                "Matrix dimensions don't match for multiplication",
+                "matmul",
+            ));
+        }
+
+        // Use scirs2-core's BLAS-accelerated GEMM
+        self.matmul_blas(a, b, m, k, n)
+    }
+
+    /// BLAS-accelerated matrix multiplication via scirs2-core's SimdUnifiedOps.
+    ///
+    /// This is the preferred implementation as it leverages:
+    /// - Accelerate framework on macOS for optimal Apple Silicon/Intel performance
+    /// - Intel MKL on Intel systems
+    /// - OpenBLAS as fallback
+    /// - For small matrices (<16 in any dimension), uses ndarray's optimized dot()
+    fn matmul_blas(&self, a: &Tensor, b: &Tensor, m: usize, k: usize, n: usize) -> Result<Tensor> {
+        let a_data = a.data()?;
+        let b_data = b.data()?;
+
+        // Create Array2 views for scirs2-core's simd_gemm
+        let a_arr = Array2::from_shape_vec((a.shape()[0], a.shape()[1]), a_data.to_vec())
+            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+        let b_arr = Array2::from_shape_vec((b.shape()[0], b.shape()[1]), b_data.to_vec())
+            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+
+        // For small matrices, use ndarray's optimized dot() method
+        // simd_gemm has edge cases for very small matrices
+        // Note: scirs2-core has bugs with matrices of size <64, use 64 as threshold
+        const MIN_SIZE_FOR_SIMD_GEMM: usize = 64;
+        let c_arr = if m < MIN_SIZE_FOR_SIMD_GEMM
+            || n < MIN_SIZE_FOR_SIMD_GEMM
+            || k < MIN_SIZE_FOR_SIMD_GEMM
+        {
+            a_arr.dot(&b_arr)
+        } else {
+            // Use BLAS-accelerated GEMM: C = alpha * A * B + beta * C
+            let mut result = Array2::<f32>::zeros((m, n));
+            f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut result);
+            result
+        };
+
+        // Convert back to Tensor
+        let c_data: Vec<f32> = c_arr.into_raw_vec_and_offset().0;
+        Tensor::from_vec(c_data, &[m, n])
+    }
+
+    /// Legacy SIMD-optimized matmul with manual platform dispatch.
+    ///
+    /// This is kept for cases where manual SIMD control is needed.
+    /// For most use cases, prefer `matmul()` which uses BLAS acceleration.
+    #[allow(dead_code)]
+    pub fn matmul_legacy(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
+        let a_shape = a.shape();
+        let b_shape = b.shape();
+
         if a_shape.len() != 2 || b_shape.len() != 2 {
             return Err(TrustformersError::tensor_op_error(
                 "Only 2D matrix multiplication supported",

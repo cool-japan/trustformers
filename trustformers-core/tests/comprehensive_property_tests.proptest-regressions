@@ -8,3 +8,4 @@ cc 1971bad810efbb292cc47b7ae660f2fe97d149869f1b586520309b0037b0e5a3 # shrinks to
 cc 53fb017b1e7b5cc0e766e8d2db2be8dbfaf5fe7b1f1be7d365deb08529a74daa # shrinks to shape1 = [1], shape2 = [2]
 cc 6f3938d76cae9b5a7a5f78fe284f7127227fe100544940d706bf417475360026 # shrinks to (shape_a, shape_b) = ([2, 10], [10, 2]), scale = 141.02596
 cc bade2d58ffceb7d3ea3325d14dc4d93914e76969268dcbe80bad381b853df004 # shrinks to shape = [1, 1, 2], values = [0.0, 0.0]
+cc b156b48ddb972578fc9f44feac30215d7ee2b46831c00981da77cc7fd2b2d49a # shrinks to (shape_a, shape_b) = ([16, 16], [16, 16]), scale = 0.0
