@@ -907,7 +907,7 @@ impl OpenApiGenerator {
         let mut functions_by_tag: HashMap<String, Vec<&FfiFunction>> = HashMap::new();
         for func in &interface.functions {
             let tag = self.extract_tag_from_function(&func.name);
-            functions_by_tag.entry(tag).or_insert_with(Vec::new).push(func);
+            functions_by_tag.entry(tag).or_default().push(func);
         }
 
         for (tag, functions) in &functions_by_tag {

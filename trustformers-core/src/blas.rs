@@ -537,7 +537,7 @@ impl BlasOptimizer {
 
         if self.config.use_parallel && n > 1000 {
             let indices: Vec<usize> = (0..n).collect();
-            let chunk_size = (n + 3) / 4; // 4 threads
+            let chunk_size = n.div_ceil(4); // 4 threads
 
             let chunks: Vec<Vec<usize>> =
                 indices.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect();
@@ -566,7 +566,7 @@ impl BlasOptimizer {
 
         if self.config.use_parallel && n > 1000 {
             let indices: Vec<usize> = (0..n).collect();
-            let chunk_size = (n + 3) / 4;
+            let chunk_size = n.div_ceil(4);
 
             let chunks: Vec<Vec<usize>> =
                 indices.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect();

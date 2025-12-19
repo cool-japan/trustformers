@@ -288,7 +288,7 @@ impl MemoryCoalescingOptimizer {
 
         let total_elements_accessed = indices.len();
         let theoretical_min_cache_lines =
-            (total_elements_accessed + cache_line_size - 1) / cache_line_size;
+            total_elements_accessed.div_ceil(cache_line_size);
 
         theoretical_min_cache_lines as f32 / unique_cache_lines.len() as f32
     }
@@ -342,7 +342,7 @@ impl MemoryCoalescingOptimizer {
     fn compute_optimal_alignment(&self, size: usize) -> usize {
         let align = self.bank_config.alignment_requirement;
         let size_bytes = size * 4; // f32 size
-        ((size_bytes + align - 1) / align) * align
+        size_bytes.div_ceil(align) * align
     }
 
     fn compute_optimal_strides(&self, shape: &[usize]) -> Vec<usize> {

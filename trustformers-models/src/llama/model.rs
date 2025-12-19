@@ -336,7 +336,7 @@ impl Layer for LlamaAttention {
         } else {
             return Err(tensor_op_error(
                 "LlamaAttention::forward",
-                &format!("Unexpected input shape: {:?}", shape),
+                format!("Unexpected input shape: {:?}", shape),
             ));
         };
 

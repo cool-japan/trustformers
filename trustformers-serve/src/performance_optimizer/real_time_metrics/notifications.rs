@@ -3100,6 +3100,12 @@ impl GlobalRateLimiter {
     }
 }
 
+impl Default for PriorityQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PriorityQueue {
     pub fn new() -> Self {
         Self {
@@ -3154,7 +3160,7 @@ impl AdaptiveRateController {
 
         // TODO: Added f64 type annotation to fix E0689 ambiguous numeric type
         let clamped_rate =
-            target_rate.clamp(self.config.min_rate as f64, self.config.max_rate as f64);
+            target_rate.clamp(self.config.min_rate, self.config.max_rate);
 
         if (clamped_rate - current_rate).abs() > current_rate * self.config.sensitivity as f64 {
             Some(RateAdjustment {
@@ -3322,7 +3328,7 @@ impl AlertProcessor for DefaultAlertProcessor {
                 SeverityLevel::Medium => NotificationPriority::Normal,
                 _ => NotificationPriority::Low,
             },
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::BestEffort,
             created_at: Utc::now(),
             deadline: None,
@@ -3383,7 +3389,7 @@ impl AlertProcessor for PerformanceAlertProcessor {
             subject: format!("Performance Alert: {}", alert.threshold.name),
             content: format!("Performance issue detected: {}", alert.message),
             priority: NotificationPriority::High,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::AtLeastOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(15)),
@@ -3457,7 +3463,7 @@ impl AlertProcessor for ResourceAlertProcessor {
             subject: format!("Resource Alert: {}", alert.threshold.name),
             content: format!("Resource issue detected: {}", alert.message),
             priority: NotificationPriority::High,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::AtLeastOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(10)),
@@ -3549,7 +3555,7 @@ impl AlertProcessor for CriticalAlertProcessor {
                 alert.message
             ),
             priority: NotificationPriority::Emergency,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::ExactlyOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(5)),
@@ -3599,7 +3605,7 @@ impl AlertProcessor for CriticalAlertProcessor {
                 alert.message
             ),
             priority: NotificationPriority::Emergency,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::ExactlyOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(2)),

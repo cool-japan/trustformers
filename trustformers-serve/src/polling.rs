@@ -458,13 +458,12 @@ impl LongPollingService {
             let mut missed_events = Vec::new();
 
             for event in history.iter() {
-                if found_last {
-                    if connection.event_types.contains(&event.event_type)
-                        || connection.event_types.contains(&"*".to_string())
+                if found_last
+                    && (connection.event_types.contains(&event.event_type)
+                        || connection.event_types.contains(&"*".to_string()))
                     {
                         missed_events.push(event.clone());
                     }
-                }
 
                 if event.id == *last_event_id {
                     found_last = true;

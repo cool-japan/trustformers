@@ -70,7 +70,7 @@ pub struct ContainerMetrics {
 impl ContainerOptimizer {
     /// Create a new container optimizer
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
 
     /// Optimize container configuration with detailed recommendations

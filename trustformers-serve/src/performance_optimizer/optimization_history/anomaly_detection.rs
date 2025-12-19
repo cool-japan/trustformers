@@ -395,6 +395,12 @@ pub struct StatisticalAnomalyDetector {
     threshold_multiplier: f64,
 }
 
+impl Default for StatisticalAnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatisticalAnomalyDetector {
     pub fn new() -> Self {
         Self {
@@ -486,6 +492,12 @@ impl AnomalyDetector for StatisticalAnomalyDetector {
 pub struct ZScoreAnomalyDetector {
     threshold: f64,
     window_size: usize,
+}
+
+impl Default for ZScoreAnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ZScoreAnomalyDetector {
@@ -580,6 +592,12 @@ impl AnomalyDetector for ZScoreAnomalyDetector {
 /// Interquartile Range (IQR) based anomaly detector
 pub struct IQRAnomalyDetector {
     iqr_multiplier: f64,
+}
+
+impl Default for IQRAnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IQRAnomalyDetector {
@@ -685,6 +703,12 @@ pub struct MovingAverageAnomalyDetector {
     threshold_multiplier: f64,
 }
 
+impl Default for MovingAverageAnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MovingAverageAnomalyDetector {
     pub fn new() -> Self {
         Self {
@@ -781,6 +805,12 @@ pub struct ThresholdAnomalyDetector {
     thresholds: HashMap<String, (f64, f64)>, // (min, max) thresholds
 }
 
+impl Default for ThresholdAnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThresholdAnomalyDetector {
     pub fn new() -> Self {
         let mut thresholds = HashMap::new();
@@ -864,6 +894,12 @@ pub struct SimpleAnomalyLearner {
     learning_rate: f32,
 }
 
+impl Default for SimpleAnomalyLearner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleAnomalyLearner {
     pub fn new() -> Self {
         Self {
@@ -937,6 +973,12 @@ impl AnomalyLearningModel for SimpleAnomalyLearner {
 /// Historical anomaly predictor
 pub struct HistoricalAnomalyPredictor {
     historical_intervals: HashMap<AnomalyType, Vec<Duration>>,
+}
+
+impl Default for HistoricalAnomalyPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HistoricalAnomalyPredictor {
@@ -1016,6 +1058,12 @@ impl AnomalyLearningModel for HistoricalAnomalyPredictor {
 /// Pattern-based anomaly predictor
 pub struct PatternBasedAnomalyPredictor {
     context_anomaly_map: HashMap<String, Vec<DetectedAnomaly>>,
+}
+
+impl Default for PatternBasedAnomalyPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PatternBasedAnomalyPredictor {

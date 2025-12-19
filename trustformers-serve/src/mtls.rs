@@ -373,8 +373,7 @@ impl MTlsService {
         let acceptor = self.tls_acceptor.read().await;
         acceptor
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("TLS acceptor not initialized"))
-            .map(|a| a.clone())
+            .ok_or_else(|| anyhow::anyhow!("TLS acceptor not initialized")).cloned()
     }
 
     /// Validate client certificate
@@ -560,8 +559,8 @@ impl MTlsService {
     fn parse_private_key(&self, pem_data: &str) -> Result<PrivateKeyDer<'static>> {
         // Parse PEM private key
         // This is simplified - in practice would use rustls-pemfile or similar
-        Ok(PrivateKeyDer::try_from(pem_data.as_bytes().to_vec())
-            .map_err(|_| anyhow::anyhow!("Failed to parse private key"))?)
+        PrivateKeyDer::try_from(pem_data.as_bytes().to_vec())
+            .map_err(|_| anyhow::anyhow!("Failed to parse private key"))
     }
 
     async fn create_client_cert_verifier(
@@ -667,8 +666,8 @@ impl MTlsService {
         }
 
         // Check certificate pinning
-        if self.config.enable_cert_pinning {
-            if !self.is_certificate_pinned(cert_info).await? {
+        if self.config.enable_cert_pinning
+            && !self.is_certificate_pinned(cert_info).await? {
                 return Ok(CertValidationResult {
                     valid: false,
                     status: CertValidationStatus::NotPinned,
@@ -676,7 +675,6 @@ impl MTlsService {
                     validation_details,
                 });
             }
-        }
 
         // Validate against client certificate policy
         match &self.config.client_cert_validation {

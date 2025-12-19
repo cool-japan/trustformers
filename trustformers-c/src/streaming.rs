@@ -370,7 +370,7 @@ fn simulate_streaming_generation(
     prompt: String,
 ) {
     // Clone config to avoid borrow conflicts
-    let config = state.read().config.clone();
+    let config = state.read().config;
     let start_time = state.read().start_time;
 
     // Simulate token-by-token generation

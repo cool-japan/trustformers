@@ -94,8 +94,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (n as u64 + 15) / 16,
-            height: (m as u64 + 15) / 16,
+            width: (n as u64).div_ceil(16),
+            height: (m as u64).div_ceil(16),
             depth: 1,
         };
 
@@ -199,8 +199,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (n as u64 + 15) / 16,
-            height: (m as u64 + 15) / 16,
+            width: (n as u64).div_ceil(16),
+            height: (m as u64).div_ceil(16),
             depth: 1,
         };
 

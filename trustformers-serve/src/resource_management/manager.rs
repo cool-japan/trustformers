@@ -362,7 +362,7 @@ impl ResourceManagementSystem {
         // Calculate average GPU utilization based on currently allocated vs peak usage
         let average_utilization = if gpu_manager_stats.peak_usage > 0 {
             ((gpu_manager_stats.currently_allocated as f32 / gpu_manager_stats.peak_usage as f32)
-                * 100.0) as f32
+                * 100.0)
         } else {
             0.0_f32
         };
@@ -371,7 +371,7 @@ impl ResourceManagementSystem {
         // Higher efficiency and lower memory usage percentage indicate better performance
         let performance_index = if gpu_manager_stats.peak_memory_usage_percent > 0.0 {
             let memory_efficiency = 1.0 - (gpu_manager_stats.peak_memory_usage_percent / 100.0);
-            (gpu_manager_stats.efficiency * 0.6 + memory_efficiency * 0.4).min(1.0) as f32
+            (gpu_manager_stats.efficiency * 0.6 + memory_efficiency * 0.4).min(1.0)
         } else {
             gpu_manager_stats.efficiency
         };
@@ -408,7 +408,7 @@ impl ResourceManagementSystem {
             let total_memory = system.total_memory();
             let used_memory = system.used_memory();
             if total_memory > 0 {
-                ((used_memory as f32 / total_memory as f32) * 100.0) as f32
+                ((used_memory as f32 / total_memory as f32) * 100.0)
             } else {
                 0.0_f32
             }

@@ -195,7 +195,7 @@ impl StreamingLoader {
 
         // Calculate chunk information
         let chunk_size = (self.config.chunk_size_kb as usize) * 1024;
-        let total_chunks = (total_size + chunk_size - 1) / chunk_size;
+        let total_chunks = total_size.div_ceil(chunk_size);
 
         web_sys::console::log_1(
             &format!(
@@ -226,7 +226,7 @@ impl StreamingLoader {
         self.loaded_size = 0;
 
         let chunk_size = (self.config.chunk_size_kb as usize) * 1024;
-        let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
+        let total_chunks = data.len().div_ceil(chunk_size);
 
         web_sys::console::log_1(
             &format!(

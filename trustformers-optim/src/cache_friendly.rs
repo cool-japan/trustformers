@@ -370,7 +370,7 @@ impl CacheFriendlyAdam {
             }
         } else {
             // Use block processing for larger tensors where cache benefits matter
-            let num_blocks = (size + block_size - 1) / block_size;
+            let num_blocks = size.div_ceil(block_size);
 
             for block_idx in 0..num_blocks {
                 let start = block_idx * block_size;

@@ -1365,7 +1365,7 @@ impl AlertManager {
                     println!(
                         "[ALERT] {} - {} ({}): {}",
                         alert_event.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                        alert_event.severity.to_string(),
+                        alert_event.severity,
                         alert_event.rule_name,
                         alert_event.message
                     );

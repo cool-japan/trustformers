@@ -79,9 +79,9 @@ impl MetalBackend {
             depth: 4,
         };
         let threadgroups = metal::MTLSize {
-            width: ((rotary_ndims / 2) as u64 + 7) / 8,
-            height: (num_heads as u64 + 3) / 4,
-            depth: (seq_len as u64 + 3) / 4,
+            width: ((rotary_ndims / 2) as u64).div_ceil(8),
+            height: (num_heads as u64).div_ceil(4),
+            depth: (seq_len as u64).div_ceil(4),
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();

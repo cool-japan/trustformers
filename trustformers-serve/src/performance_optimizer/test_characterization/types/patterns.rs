@@ -193,6 +193,12 @@ pub struct ConcurrencyAnalysisHistory {
     pub performance_trends: HashMap<String, Vec<f64>>,
 }
 
+impl Default for ConcurrencyAnalysisHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConcurrencyAnalysisHistory {
     pub fn new() -> Self {
         Self {
@@ -1420,6 +1426,12 @@ pub struct SharingPerformanceHistory {
     pub performance_records: Vec<(chrono::DateTime<chrono::Utc>, f64)>,
     pub sharing_patterns: HashMap<String, usize>,
     pub average_performance: f64,
+}
+
+impl Default for SharingPerformanceHistory {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SharingPerformanceHistory {

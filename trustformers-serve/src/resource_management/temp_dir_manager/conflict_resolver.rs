@@ -171,14 +171,11 @@ impl DirectoryConflictResolver {
         {
             let active_conflicts = self.active_conflicts.lock();
             for (_, conflict) in active_conflicts.iter() {
-                match &conflict.conflict_type {
-                    ConflictType::MultipleTestAccess { test_ids } => {
-                        if test_ids.contains(&test_id.to_string()) {
-                            debug!("Found existing conflict for test: {}", test_id);
-                            return Some(conflict.clone());
-                        }
-                    },
-                    _ => {},
+                if let ConflictType::MultipleTestAccess { test_ids } = &conflict.conflict_type {
+                    if test_ids.contains(&test_id.to_string()) {
+                        debug!("Found existing conflict for test: {}", test_id);
+                        return Some(conflict.clone());
+                    }
                 }
             }
         }

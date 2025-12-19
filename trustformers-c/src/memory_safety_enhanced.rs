@@ -322,7 +322,7 @@ impl MemoryPatternAnalyzer {
     fn identify_risk_factors(&self, features: &[f32]) -> Vec<String> {
         let mut factors = Vec::new();
 
-        if features.len() > 0 && features[0] > 0.8 {
+        if !features.is_empty() && features[0] > 0.8 {
             factors.push("Large allocation size".to_string());
         }
         if features.len() > 1 && features[1] > 0.9 {

@@ -427,6 +427,12 @@ pub struct StreamingStats {
     pub errors: usize,
 }
 
+impl Default for StreamingStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamingStats {
     pub fn new() -> Self {
         Self {

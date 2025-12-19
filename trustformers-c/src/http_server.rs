@@ -6,7 +6,6 @@
 use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};

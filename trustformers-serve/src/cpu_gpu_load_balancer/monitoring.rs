@@ -222,7 +222,7 @@ impl PerformanceMonitor for DefaultPerformanceMonitor {
             .stats
             .processor_stats
             .entry(processor_type)
-            .or_insert_with(ProcessorStats::default);
+            .or_default();
 
         proc_stats.tasks_executed += 1;
 

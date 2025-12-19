@@ -259,6 +259,12 @@ pub struct CacheAnalyzer {
 #[derive(Debug, Clone)]
 pub struct MemoryHierarchyAnalyzer;
 
+impl Default for MemoryHierarchyAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryHierarchyAnalyzer {
     pub fn new() -> Self {
         Self
@@ -276,6 +282,12 @@ impl MemoryHierarchyAnalyzer {
 /// Memory bandwidth tester (stub implementation)
 #[derive(Debug, Clone)]
 pub struct MemoryBandwidthTester;
+
+impl Default for MemoryBandwidthTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MemoryBandwidthTester {
     pub fn new() -> Self {
@@ -295,6 +307,12 @@ impl MemoryBandwidthTester {
 /// Memory latency tester (stub implementation)
 #[derive(Debug, Clone)]
 pub struct MemoryLatencyTester;
+
+impl Default for MemoryLatencyTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl MemoryLatencyTester {
     pub fn new() -> Self {
@@ -316,6 +334,12 @@ impl MemoryLatencyTester {
 #[derive(Debug, Clone)]
 pub struct NumaTopologyAnalyzer;
 
+impl Default for NumaTopologyAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NumaTopologyAnalyzer {
     pub fn new() -> Self {
         Self
@@ -329,6 +353,12 @@ impl NumaTopologyAnalyzer {
 /// Storage device analyzer (stub implementation)
 #[derive(Debug, Clone)]
 pub struct StorageDeviceAnalyzer;
+
+impl Default for StorageDeviceAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl StorageDeviceAnalyzer {
     pub fn new() -> Self {
@@ -349,6 +379,12 @@ impl StorageDeviceAnalyzer {
 #[derive(Debug, Clone)]
 pub struct IoLatencyAnalyzer;
 
+impl Default for IoLatencyAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IoLatencyAnalyzer {
     pub fn new() -> Self {
         Self
@@ -366,6 +402,12 @@ impl IoLatencyAnalyzer {
 /// Queue depth optimizer (stub implementation)
 #[derive(Debug, Clone)]
 pub struct QueueDepthOptimizer;
+
+impl Default for QueueDepthOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl QueueDepthOptimizer {
     pub fn new() -> Self {
@@ -394,6 +436,12 @@ impl QueueDepthOptimizer {
 #[derive(Debug, Clone)]
 pub struct IoPatternAnalyzer;
 
+impl Default for IoPatternAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IoPatternAnalyzer {
     pub fn new() -> Self {
         Self
@@ -411,6 +459,12 @@ impl IoPatternAnalyzer {
 /// Network interface analyzer (stub implementation)
 #[derive(Debug, Clone)]
 pub struct NetworkInterfaceAnalyzer;
+
+impl Default for NetworkInterfaceAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl NetworkInterfaceAnalyzer {
     pub fn new() -> Self {
@@ -433,6 +487,12 @@ impl NetworkInterfaceAnalyzer {
 #[derive(Debug, Clone)]
 pub struct NetworkBandwidthTester;
 
+impl Default for NetworkBandwidthTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetworkBandwidthTester {
     pub fn new() -> Self {
         Self
@@ -450,6 +510,12 @@ impl NetworkBandwidthTester {
 /// Network latency tester (stub implementation)
 #[derive(Debug, Clone)]
 pub struct NetworkLatencyTester;
+
+impl Default for NetworkLatencyTester {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl NetworkLatencyTester {
     pub fn new() -> Self {
@@ -469,6 +535,12 @@ impl NetworkLatencyTester {
 /// CPU vendor detector (stub implementation)
 #[derive(Debug, Clone)]
 pub struct CpuVendorDetector;
+
+impl Default for CpuVendorDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl CpuVendorDetector {
     pub fn new() -> Self {
@@ -490,6 +562,12 @@ impl CpuVendorDetector {
 #[derive(Debug, Clone)]
 pub struct CpuBenchmarkSuite;
 
+impl Default for CpuBenchmarkSuite {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuBenchmarkSuite {
     pub fn new() -> Self {
         Self
@@ -510,6 +588,12 @@ impl CpuBenchmarkSuite {
 /// GPU vendor detector (stub implementation)
 #[derive(Debug, Clone)]
 pub struct GpuVendorDetector;
+
+impl Default for GpuVendorDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl GpuVendorDetector {
     pub fn new() -> Self {
@@ -1682,7 +1766,7 @@ impl NetworkProfiler {
                 + udp_performance.packet_loss
                 + http_performance.packet_loss
                 + websocket_performance.packet_loss)
-                / 4.0) as f64;
+                / 4.0);
 
         Ok(ProtocolPerformanceAnalysis {
             protocol_name: "mixed".to_string(),
@@ -2342,9 +2426,7 @@ impl ProfileResultsProcessor {
         let bottlenecks = self.identify_system_bottlenecks(results).await?;
 
         // Extract results as numeric data (placeholder implementation)
-        let results_map: HashMap<String, Vec<f64>> = results
-            .iter()
-            .map(|(k, _v)| (k.clone(), vec![1.0, 2.0, 3.0])) // TODO: Extract actual numeric data from ProfileResult
+        let results_map: HashMap<String, Vec<f64>> = results.keys().map(|k| (k.clone(), vec![1.0, 2.0, 3.0])) // TODO: Extract actual numeric data from ProfileResult
             .collect();
 
         // Extract basic statistics from results
@@ -2813,6 +2895,12 @@ pub struct ProfilingSessionState {
     pub last_update: DateTime<Utc>,
 }
 
+impl Default for ProfilingSessionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ProfilingSessionState {
     pub fn new() -> Self {
         let now = Utc::now();
@@ -2945,7 +3033,7 @@ impl EnhancedCpuProfile {
                 }),
                 cache_line_size: 64,
             },
-            branch_prediction_accuracy: self.instruction_profile.branch_prediction_accuracy as f32,
+            branch_prediction_accuracy: self.instruction_profile.branch_prediction_accuracy,
             // TODO: CpuBenchmarkResults no longer has single_threaded_performance field, using single_thread_score
             floating_point_performance: self.benchmark_results.single_thread_score * 0.8, // Estimate FP performance
             profiling_duration: Duration::from_secs(1), // Default profiling duration

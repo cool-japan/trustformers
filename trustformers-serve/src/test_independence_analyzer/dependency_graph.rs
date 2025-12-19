@@ -235,8 +235,7 @@ impl DependencyGraph {
     pub fn get_dependencies(&self, test_id: &str) -> Vec<DependencyEdge> {
         self.adjacency_list
             .read()
-            .get(test_id)
-            .map(|edges| edges.clone())
+            .get(test_id).cloned()
             .unwrap_or_default()
     }
 
@@ -244,8 +243,7 @@ impl DependencyGraph {
     pub fn get_dependents(&self, test_id: &str) -> Vec<DependencyEdge> {
         self.reverse_adjacency_list
             .read()
-            .get(test_id)
-            .map(|edges| edges.clone())
+            .get(test_id).cloned()
             .unwrap_or_default()
     }
 
@@ -454,7 +452,7 @@ impl DependencyGraph {
         }
 
         // Validate weight
-        if weight < 0.0 || weight > 1.0 {
+        if !(0.0..=1.0).contains(&weight) {
             return Err(AnalysisError::GraphError {
                 message: format!("Edge weight {} is out of range [0.0, 1.0]", weight),
             });
@@ -482,6 +480,12 @@ impl Default for DependencyGraph {
 /// Graph algorithms for dependency analysis
 #[derive(Debug)]
 pub struct GraphAlgorithms;
+
+impl Default for GraphAlgorithms {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl GraphAlgorithms {
     /// Create new graph algorithms instance
@@ -746,7 +750,7 @@ impl GraphAlgorithms {
         let mut total_coefficient = 0.0;
         let mut node_count = 0;
 
-        for (_node, edges) in adj_list {
+        for edges in adj_list.values() {
             if edges.len() < 2 {
                 continue;
             }
@@ -931,7 +935,7 @@ impl GraphValidationRule {
         Self {
             name: "weight_validation".to_string(),
             validator: Box::new(|_source, _target, weight| {
-                if weight < 0.0 || weight > 1.0 {
+                if !(0.0..=1.0).contains(&weight) {
                     Err(AnalysisError::GraphError {
                         message: format!(
                             "Invalid weight: {} (must be between 0.0 and 1.0)",

@@ -278,7 +278,7 @@ impl AsyncRuntimeChaosFramework {
                 // Wait for graceful shutdown or timeout
                 let shutdown_start = Instant::now();
                 let graceful_shutdown = timeout(config.graceful_shutdown_timeout, async {
-                    while join_set.len() > 0 {
+                    while !join_set.is_empty() {
                         if let Some(result) = join_set.join_next().await {
                             if let Err(e) = result {
                                 if e.is_cancelled() {
@@ -1339,6 +1339,12 @@ pub struct AsyncTestSuiteResult {
     pub success_rate: f64,
     pub total_duration: Duration,
     pub timestamp: DateTime<Utc>,
+}
+
+impl Default for AsyncTestSuiteResult {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AsyncTestSuiteResult {

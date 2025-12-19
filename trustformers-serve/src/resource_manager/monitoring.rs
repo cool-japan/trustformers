@@ -174,6 +174,12 @@ pub struct HealthChecker {
     checks: Arc<Mutex<Vec<HealthCheck>>>,
 }
 
+impl Default for HealthChecker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthChecker {
     pub fn new() -> Self {
         Self {
@@ -194,6 +200,12 @@ pub struct HealthCheck {
 #[derive(Debug)]
 pub struct AlertSystem {
     alerts: Arc<Mutex<Vec<Alert>>>,
+}
+
+impl Default for AlertSystem {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AlertSystem {
@@ -220,6 +232,12 @@ pub struct PerformanceAnalyzer {
     analysis_history: Arc<Mutex<Vec<PerformanceAnalysis>>>,
     /// Optimization recommendations
     recommendations: Arc<Mutex<Vec<OptimizationRecommendation>>>,
+}
+
+impl Default for PerformanceAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PerformanceAnalyzer {
@@ -387,6 +405,12 @@ impl ResourceMonitor {
         *alert_thresholds = thresholds;
         info!("Updated alert thresholds");
         Ok(())
+    }
+}
+
+impl Default for SystemStatistics {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

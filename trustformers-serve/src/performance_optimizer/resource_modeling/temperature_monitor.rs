@@ -1126,7 +1126,7 @@ impl CoolingStrategy {
         _readings: &SensorReadings,
         _state: ThermalState,
     ) -> Result<CoolingTarget> {
-        Ok(CoolingTarget::default())
+        Ok(CoolingTarget)
     }
 }
 
@@ -1160,7 +1160,7 @@ impl ThermalAnalyzer {
     }
 
     pub async fn generate_analysis(&self) -> Result<ThermalAnalysisReport> {
-        Ok(ThermalAnalysisReport::default())
+        Ok(ThermalAnalysisReport)
     }
 }
 
@@ -1217,12 +1217,18 @@ impl ThermalReporting {
     }
 
     pub async fn generate_report(&self, _report_type: ReportType) -> Result<ThermalReport> {
-        Ok(ThermalReport::default())
+        Ok(ThermalReport)
     }
 }
 
 // Additional placeholder types
 pub struct AlertRulesEngine;
+impl Default for AlertRulesEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AlertRulesEngine {
     pub fn new() -> Self {
         Self
@@ -1230,6 +1236,12 @@ impl AlertRulesEngine {
 }
 
 pub struct DissipationCalculator;
+impl Default for DissipationCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DissipationCalculator {
     pub fn new() -> Self {
         Self
@@ -1237,6 +1249,12 @@ impl DissipationCalculator {
 }
 
 pub struct ThermalDesignAnalyzer;
+impl Default for ThermalDesignAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThermalDesignAnalyzer {
     pub fn new() -> Self {
         Self

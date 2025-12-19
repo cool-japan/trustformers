@@ -537,14 +537,12 @@ impl DirectoryQuotaManager {
         let mut bytes_cleaned = 0u64;
 
         if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries {
-                if let Ok(entry) = entry {
-                    if let Ok(metadata) = entry.metadata() {
-                        if let Ok(modified) = metadata.modified() {
-                            if modified < cutoff_time && metadata.is_file() {
-                                if let Ok(()) = fs::remove_file(entry.path()) {
-                                    bytes_cleaned += metadata.len();
-                                }
+            for entry in entries.flatten() {
+                if let Ok(metadata) = entry.metadata() {
+                    if let Ok(modified) = metadata.modified() {
+                        if modified < cutoff_time && metadata.is_file() {
+                            if let Ok(()) = fs::remove_file(entry.path()) {
+                                bytes_cleaned += metadata.len();
                             }
                         }
                     }

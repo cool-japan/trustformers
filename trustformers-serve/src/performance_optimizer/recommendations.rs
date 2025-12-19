@@ -876,7 +876,7 @@ impl RecommendationEngine {
         }
 
         // Add resource optimization steps
-        for (_i, resource_rec) in recommendations.resource_optimization.iter().enumerate() {
+        for resource_rec in recommendations.resource_optimization.iter() {
             steps.push(ImplementationStep {
                 step_number: steps.len() + 1,
                 description: format!(

@@ -568,6 +568,12 @@ impl StatisticsCollector {
     }
 }
 
+impl Default for AnalyticsEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AnalyticsEngine {
     /// Create new analytics engine
     pub fn new() -> Self {
@@ -603,6 +609,12 @@ impl AnalyticsEngine {
         snapshots: &Arc<Mutex<Vec<SystemPerformanceSnapshot>>>,
     ) -> Result<Vec<PerformanceBottleneck>> {
         self.bottleneck_analyzer.analyze_bottlenecks(snapshots).await
+    }
+}
+
+impl Default for ReportGenerator {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -731,12 +743,24 @@ impl MetricsAggregator {
     }
 }
 
+impl Default for TrendAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrendAnalyzer {
     /// Create new trend analyzer
     pub fn new() -> Self {
         Self {
             historical_trends: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+}
+
+impl Default for AnomalyDetector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -756,6 +780,12 @@ impl AnomalyDetector {
     ) -> Result<Vec<PerformanceAnomaly>> {
         // Anomaly detection logic would be implemented here
         Ok(vec![])
+    }
+}
+
+impl Default for PerformancePredictor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -786,6 +816,12 @@ impl PerformancePredictor {
             confidence_interval: (70.0, 80.0),
             confidence: 0.85,
         })
+    }
+}
+
+impl Default for BottleneckAnalyzer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -633,12 +633,12 @@ impl MemoryMonitor {
         #[cfg(target_os = "macos")]
         {
             // macOS-specific insights
-            if let Ok(output) = Command::new("sysctl").args(&["hw.memsize"]).output() {
+            if let Ok(output) = Command::new("sysctl").args(["hw.memsize"]).output() {
                 let output_str = String::from_utf8_lossy(&output.stdout);
                 insights.insert("physical_memory".to_string(), output_str.trim().to_string());
             }
 
-            if let Ok(output) = Command::new("sysctl").args(&["vm.swapusage"]).output() {
+            if let Ok(output) = Command::new("sysctl").args(["vm.swapusage"]).output() {
                 let output_str = String::from_utf8_lossy(&output.stdout);
                 insights.insert("swap_usage".to_string(), output_str.trim().to_string());
             }

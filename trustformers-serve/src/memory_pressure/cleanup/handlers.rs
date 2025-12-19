@@ -488,7 +488,7 @@ impl ModelUnloadingHandler {
         }
 
         // Simulate model unloading time
-        let unload_time = Duration::from_millis(50 + (model_size / (1024 * 1024)) as u64);
+        let unload_time = Duration::from_millis(50 + (model_size / (1024 * 1024)));
         std::thread::sleep(unload_time);
 
         info!(

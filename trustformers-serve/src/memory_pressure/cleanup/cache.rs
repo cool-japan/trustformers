@@ -559,6 +559,12 @@ pub struct ModelCacheManager {
     model_priorities: Arc<Mutex<HashMap<String, u32>>>,
 }
 
+impl Default for ModelCacheManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelCacheManager {
     /// Create a new model cache manager
     pub fn new() -> Self {

@@ -315,10 +315,7 @@ pub extern "C" fn trustformers_format_number(value: f64, precision: u8) -> *mut 
 /// Get CPU usage percentage
 #[no_mangle]
 pub extern "C" fn trustformers_get_cpu_usage() -> f64 {
-    match get_cpu_usage() {
-        Ok(usage) => usage,
-        Err(_) => -1.0,
-    }
+    get_cpu_usage().unwrap_or(-1.0)
 }
 
 /// Get memory usage information

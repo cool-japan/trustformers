@@ -787,7 +787,7 @@ impl SafeConcurrencyEstimator {
                         algorithm: algorithm_name.clone(),
                         concurrency: estimation,
                         confidence: self
-                            .calculate_algorithm_confidence(&algorithm_name, &test_data)
+                            .calculate_algorithm_confidence(&algorithm_name, test_data)
                             .await? as f64,
                         duration,
                     });
@@ -915,7 +915,7 @@ impl SafeConcurrencyEstimator {
             return 0.0;
         }
 
-        let avg_confidence: f32 = estimations.iter().map(|e| e.confidence as f64).sum::<f64>()
+        let avg_confidence: f32 = estimations.iter().map(|e| e.confidence).sum::<f64>()
             as f32
             / estimations.len() as f32;
         let consensus_factor = self.calculate_consensus_factor(estimations);
@@ -971,7 +971,7 @@ impl SafeConcurrencyEstimator {
         let mut performance = self.algorithm_performance.lock();
         let entry = performance
             .entry(algorithm_name.to_string())
-            .or_insert_with(AlgorithmPerformance::default);
+            .or_default();
 
         entry.total_runs += 1;
         if success {
@@ -1219,7 +1219,7 @@ impl ResourceConflictDetector {
             return 1.0;
         }
 
-        let avg_probability = conflicts.iter().map(|c| c.probability as f64).sum::<f64>() as f32
+        let avg_probability = conflicts.iter().map(|c| c.probability).sum::<f64>() as f32
             / conflicts.len() as f32;
         let severity_factor = conflicts
             .iter()
@@ -1471,7 +1471,7 @@ impl ResourceConflictDetector {
             return 1.0;
         }
 
-        let avg_probability = conflicts.iter().map(|c| c.probability as f64).sum::<f64>() as f32
+        let avg_probability = conflicts.iter().map(|c| c.probability).sum::<f64>() as f32
             / conflicts.len() as f32;
         let consistency_factor = self.calculate_conflict_consistency(conflicts);
 
@@ -1846,7 +1846,7 @@ impl SharingCapabilityAnalyzer {
         let _base_latency = Duration::from_millis(base_latency_ms as u64);
 
         // Calculate predictions based on capabilities
-        let avg_overhead = capabilities.iter().map(|c| c.performance_overhead as f64).sum::<f64>()
+        let avg_overhead = capabilities.iter().map(|c| c.performance_overhead).sum::<f64>()
             / capabilities.len() as f64;
 
         let predicted_throughput = base_throughput * (1.0 - avg_overhead);
@@ -2221,7 +2221,7 @@ impl DeadlockAnalyzer {
                     "LockAcquire" => {
                         // TODO: add_lock_acquisition signature changed - needs thread_id, lock_id, and stack trace
                         graph.add_lock_acquisition(
-                            trace.thread_id.clone(),
+                            trace.thread_id,
                             trace.resource.clone(),
                             Vec::new(), // Stack trace not available from execution trace
                         );
@@ -2670,10 +2670,10 @@ impl ConcurrencyRiskAssessment {
                     "Low"
                 }
                 .to_string(),
-                risk_score: risk_score as f64,
+                risk_score: risk_score,
                 risk_factors: Vec::new(),
                 primary_risk_factor: "Concurrency".to_string(),
-                potential_impact: risk_score as f64,
+                potential_impact: risk_score,
             };
 
             algorithm_results.push(RiskAlgorithmResult {
@@ -3242,7 +3242,7 @@ impl ThreadInteractionAnalyzer {
             0.8
         };
 
-        ((pattern_confidence + metrics_confidence as f64) / 2.0) as f32
+        ((pattern_confidence + metrics_confidence) / 2.0) as f32
     }
 
     /// Synthesizes throughput analysis from multiple thread analyses
@@ -3687,7 +3687,7 @@ impl LockContentionAnalyzer {
             if analysis.average_contention_level > 0.7 {
                 hotspots.push(ContentionHotspot {
                     resource_id: analysis.lock_id.clone(),
-                    contention_frequency: analysis.average_contention_level as f64,
+                    contention_frequency: analysis.average_contention_level,
                     average_wait_time: analysis.max_wait_time,
                     affected_threads: Vec::new(),
                 });

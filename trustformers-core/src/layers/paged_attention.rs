@@ -151,7 +151,7 @@ impl PagedAttention {
 
     /// Allocate pages for a new sequence
     pub fn allocate_sequence(&self, sequence_id: usize, estimated_length: usize) -> Result<()> {
-        let pages_needed = (estimated_length + self.page_size - 1) / self.page_size;
+        let pages_needed = estimated_length.div_ceil(self.page_size);
         let mut allocated_pages = Vec::new();
 
         for _ in 0..pages_needed {

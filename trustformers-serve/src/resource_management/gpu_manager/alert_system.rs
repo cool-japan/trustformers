@@ -1224,7 +1224,7 @@ impl GpuAlertSystem {
         let mut counts = HashMap::new();
 
         for alert in alerts.values() {
-            *counts.entry(alert.severity.clone()).or_insert(0) += 1;
+            *counts.entry(alert.severity).or_insert(0) += 1;
         }
 
         counts

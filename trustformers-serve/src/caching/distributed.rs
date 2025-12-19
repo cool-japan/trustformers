@@ -467,7 +467,7 @@ impl DistributedCache {
             node_count: cluster.nodes.len(),
             healthy_nodes,
             replication_factor,
-            consistency_level: cluster.config.consistency_level.clone(),
+            consistency_level: cluster.config.consistency_level,
         })
     }
 }

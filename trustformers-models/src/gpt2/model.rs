@@ -210,10 +210,10 @@ impl Gpt2Model {
         let position_offset = if let Some(ref cache) = past_key_values {
             eprintln!("🔍 Cache exists: {} layers", cache.layers.len());
             // If cache exists and has keys, start from past sequence length
-            if let Some(ref first_layer_cache) = cache.layers.first() {
+            if let Some(first_layer_cache) = cache.layers.first() {
                 eprintln!(
                     "🔍 First layer cache - key type: {:?}",
-                    first_layer_cache.key.as_ref().map(|k| std::mem::discriminant(k))
+                    first_layer_cache.key.as_ref().map(std::mem::discriminant)
                 );
                 match &first_layer_cache.key {
                     Some(Tensor::F32(ref past_k)) => {

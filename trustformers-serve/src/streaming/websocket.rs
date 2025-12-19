@@ -404,6 +404,12 @@ pub struct WsMetrics {
     connection_durations: Arc<RwLock<Vec<Duration>>>,
 }
 
+impl Default for WsMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WsMetrics {
     pub fn new() -> Self {
         Self {

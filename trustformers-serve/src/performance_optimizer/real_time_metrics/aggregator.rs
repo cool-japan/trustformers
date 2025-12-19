@@ -645,7 +645,7 @@ impl RealTimeDataAggregator {
                     confidence: 0.7,
                     supporting_data: {
                         let mut data = HashMap::new();
-                        data.insert("slope".to_string(), slope as f64);
+                        data.insert("slope".to_string(), slope);
                         data
                     },
                     actions: Vec::new(),
@@ -1822,6 +1822,12 @@ impl AggregatorMetrics {
 // Basic Statistical Processor Implementation
 pub struct BasicStatisticalProcessor;
 
+impl Default for BasicStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BasicStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1854,6 +1860,12 @@ impl std::fmt::Debug for BasicStatisticalProcessor {
 
 // Additional placeholder processor implementations
 pub struct AdvancedStatisticalProcessor;
+impl Default for AdvancedStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdvancedStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1880,6 +1892,12 @@ impl std::fmt::Debug for AdvancedStatisticalProcessor {
 }
 
 pub struct TrendStatisticalProcessor;
+impl Default for TrendStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrendStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1906,6 +1924,12 @@ impl std::fmt::Debug for TrendStatisticalProcessor {
 }
 
 pub struct DistributionStatisticalProcessor;
+impl Default for DistributionStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DistributionStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1932,6 +1956,12 @@ impl std::fmt::Debug for DistributionStatisticalProcessor {
 }
 
 pub struct EfficiencyStatisticalProcessor;
+impl Default for EfficiencyStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EfficiencyStatisticalProcessor {
     pub fn new() -> Self {
         Self

@@ -864,7 +864,7 @@ impl IntensityCalculationEngine {
         let mut metrics = self.algorithm_metrics.lock();
         let entry = metrics
             .entry(algorithm_id.to_string())
-            .or_insert_with(AlgorithmMetrics::default);
+            .or_default();
 
         entry.total_calculations += 1;
         entry.total_duration += duration;
@@ -948,6 +948,12 @@ pub trait IntensityCalculationAlgorithm: std::fmt::Debug {
 #[derive(Debug)]
 pub struct MeanIntensityAlgorithm;
 
+impl Default for MeanIntensityAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MeanIntensityAlgorithm {
     pub fn new() -> Self {
         Self
@@ -1027,6 +1033,12 @@ impl IntensityCalculationAlgorithm for MeanIntensityAlgorithm {
 /// Best suited for workloads with temporal patterns.
 #[derive(Debug)]
 pub struct WeightedIntensityAlgorithm;
+
+impl Default for WeightedIntensityAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl WeightedIntensityAlgorithm {
     pub fn new() -> Self {
@@ -1128,6 +1140,12 @@ pub struct ExponentialIntensityAlgorithm {
     decay_factor: f64,
 }
 
+impl Default for ExponentialIntensityAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExponentialIntensityAlgorithm {
     pub fn new() -> Self {
         Self { decay_factor: 0.1 }
@@ -1214,6 +1232,12 @@ impl IntensityCalculationAlgorithm for ExponentialIntensityAlgorithm {
 /// Best suited for capacity planning and worst-case analysis.
 #[derive(Debug)]
 pub struct PeakIntensityAlgorithm;
+
+impl Default for PeakIntensityAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PeakIntensityAlgorithm {
     pub fn new() -> Self {
@@ -1311,6 +1335,12 @@ pub struct AdaptiveIntensityAlgorithm {
     weighted_algorithm: WeightedIntensityAlgorithm,
     exponential_algorithm: ExponentialIntensityAlgorithm,
     peak_algorithm: PeakIntensityAlgorithm,
+}
+
+impl Default for AdaptiveIntensityAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AdaptiveIntensityAlgorithm {
@@ -1579,7 +1609,7 @@ impl AlgorithmSelector {
         performance: AlgorithmPerformanceRecord,
     ) -> Result<()> {
         let mut history = self.performance_history.lock();
-        let records = history.entry(algorithm_id.to_string()).or_insert_with(VecDeque::new);
+        let records = history.entry(algorithm_id.to_string()).or_default();
 
         records.push_back(performance);
 
@@ -1645,6 +1675,12 @@ pub trait SelectionStrategy: std::fmt::Debug {
 #[derive(Debug)]
 pub struct CharacteristicBasedStrategy;
 
+impl Default for CharacteristicBasedStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CharacteristicBasedStrategy {
     pub fn new() -> Self {
         Self
@@ -1686,6 +1722,12 @@ impl SelectionStrategy for CharacteristicBasedStrategy {
 /// Selects algorithms based on historical performance data
 #[derive(Debug)]
 pub struct PerformanceBasedStrategy;
+
+impl Default for PerformanceBasedStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PerformanceBasedStrategy {
     pub fn new() -> Self {
@@ -1742,6 +1784,12 @@ impl SelectionStrategy for PerformanceBasedStrategy {
 pub struct HybridSelectionStrategy {
     characteristic_strategy: CharacteristicBasedStrategy,
     performance_strategy: PerformanceBasedStrategy,
+}
+
+impl Default for HybridSelectionStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HybridSelectionStrategy {
@@ -2167,6 +2215,12 @@ impl Clone for CollectionStatistics {
     }
 }
 
+impl Default for CollectionStatistics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CollectionStatistics {
     pub fn new() -> Self {
         Self {
@@ -2195,6 +2249,12 @@ pub struct AnalysisStatistics {
     pub cache_hits: AtomicU64,
     /// Cache misses
     pub cache_misses: AtomicU64,
+}
+
+impl Default for AnalysisStatistics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AnalysisStatistics {

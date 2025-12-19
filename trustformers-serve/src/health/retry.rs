@@ -305,6 +305,12 @@ pub struct RetryStats {
     pub created_at: u64, // Unix timestamp in seconds
 }
 
+impl Default for RetryStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RetryStats {
     pub fn new() -> Self {
         Self {

@@ -32,7 +32,7 @@ impl T5Model {
 
         // Shared embeddings between encoder and decoder
         let shared =
-            Embedding::new_with_device(config.vocab_size, config.d_model, None, device.clone())?;
+            Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
 
         let encoder_config = config.clone();
         let decoder_config = config.clone();
@@ -40,8 +40,8 @@ impl T5Model {
         Ok(Self {
             config,
             shared,
-            encoder: T5Stack::new_with_device(encoder_config, true, device.clone())?,
-            decoder: T5Stack::new_with_device(decoder_config, false, device.clone())?,
+            encoder: T5Stack::new_with_device(encoder_config, true, device)?,
+            decoder: T5Stack::new_with_device(decoder_config, false, device)?,
             device,
         })
     }
@@ -128,10 +128,10 @@ impl T5ForConditionalGeneration {
     }
 
     pub fn new_with_device(config: T5Config, device: Device) -> Result<Self> {
-        let transformer = T5Model::new_with_device(config.clone(), device.clone())?;
+        let transformer = T5Model::new_with_device(config.clone(), device)?;
         // T5 uses shared embeddings as lm_head
         let lm_head =
-            Linear::new_with_device(config.d_model, config.vocab_size, false, device.clone());
+            Linear::new_with_device(config.d_model, config.vocab_size, false, device);
 
         Ok(Self {
             transformer,
@@ -479,7 +479,7 @@ impl T5Stack {
             block.push(T5Block::new_with_device(
                 &config,
                 is_encoder,
-                device.clone(),
+                device,
             )?);
         }
 
@@ -491,7 +491,7 @@ impl T5Stack {
             final_layer_norm: T5LayerNorm::new_with_device(
                 config.d_model,
                 config.layer_norm_epsilon,
-                device.clone(),
+                device,
             ),
             dropout: config.dropout_rate,
             device,
@@ -576,16 +576,16 @@ impl T5Block {
 
     fn new_with_device(config: &T5Config, is_encoder: bool, device: Device) -> Result<Self> {
         let cross_attention = if !is_encoder {
-            Some(T5Attention::new_with_device(config, true, device.clone())?)
+            Some(T5Attention::new_with_device(config, true, device)?)
         } else {
             None
         };
 
         Ok(Self {
             is_encoder,
-            self_attention: T5Attention::new_with_device(config, false, device.clone())?,
+            self_attention: T5Attention::new_with_device(config, false, device)?,
             cross_attention,
-            feed_forward: T5DenseReluDense::new_with_device(config, device.clone())?,
+            feed_forward: T5DenseReluDense::new_with_device(config, device)?,
             device,
         })
     }
@@ -687,7 +687,7 @@ impl T5Attention {
                 config.relative_attention_num_buckets,
                 config.num_heads,
                 None,
-                device.clone(),
+                device,
             )?)
         } else {
             None
@@ -698,31 +698,31 @@ impl T5Attention {
             layer_norm: T5LayerNorm::new_with_device(
                 config.d_model,
                 config.layer_norm_epsilon,
-                device.clone(),
+                device,
             ),
             q: Linear::new_with_device(
                 config.d_model,
                 config.num_heads * config.d_kv,
                 false,
-                device.clone(),
+                device,
             ),
             k: Linear::new_with_device(
                 config.d_model,
                 config.num_heads * config.d_kv,
                 false,
-                device.clone(),
+                device,
             ),
             v: Linear::new_with_device(
                 config.d_model,
                 config.num_heads * config.d_kv,
                 false,
-                device.clone(),
+                device,
             ),
             o: Linear::new_with_device(
                 config.num_heads * config.d_kv,
                 config.d_model,
                 false,
-                device.clone(),
+                device,
             ),
             n_heads: config.num_heads,
             d_kv: config.d_kv,
@@ -1118,10 +1118,10 @@ impl T5DenseReluDense {
             layer_norm: T5LayerNorm::new_with_device(
                 config.d_model,
                 config.layer_norm_epsilon,
-                device.clone(),
+                device,
             ),
-            wi: Linear::new_with_device(config.d_model, config.d_ff, false, device.clone()),
-            wo: Linear::new_with_device(config.d_ff, config.d_model, false, device.clone()),
+            wi: Linear::new_with_device(config.d_model, config.d_ff, false, device),
+            wo: Linear::new_with_device(config.d_ff, config.d_model, false, device),
             dropout: config.dropout_rate,
             device,
         })

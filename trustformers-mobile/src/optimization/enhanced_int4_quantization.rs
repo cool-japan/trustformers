@@ -105,7 +105,7 @@ pub struct Int4Block {
 impl Int4Block {
     /// Create new INT4 block
     pub fn new(capacity: usize) -> Self {
-        let packed_capacity = (capacity + 1) / 2; // 2 INT4s per byte
+        let packed_capacity = capacity.div_ceil(2); // 2 INT4s per byte
         Self {
             data: Vec::with_capacity(packed_capacity),
             scale: 1.0,
@@ -250,7 +250,7 @@ impl EnhancedInt4Quantizer {
         };
 
         // Calculate number of blocks
-        let num_blocks = (data.len() + actual_block_size - 1) / actual_block_size;
+        let num_blocks = data.len().div_ceil(actual_block_size);
         let mut blocks = Vec::with_capacity(num_blocks);
 
         // Quantize each block
@@ -292,7 +292,7 @@ impl EnhancedInt4Quantizer {
 
     /// Pack INT4 values into bytes (2 per byte)
     fn pack_int4_values(&self, values: &[i8]) -> Vec<u8> {
-        let mut packed = Vec::with_capacity((values.len() + 1) / 2);
+        let mut packed = Vec::with_capacity(values.len().div_ceil(2));
 
         for chunk in values.chunks(2) {
             let a = chunk[0];
@@ -324,7 +324,7 @@ impl EnhancedInt4Quantizer {
         let original_bytes = original_elements * 4; // FP32 = 4 bytes
         let quantized_bytes = if self.config.packed_storage {
             // 2 INT4 values per byte + overhead for scales
-            (original_elements + 1) / 2
+            original_elements.div_ceil(2)
         } else {
             // 1 INT4 value per byte
             original_elements
@@ -332,7 +332,7 @@ impl EnhancedInt4Quantizer {
 
         // Add overhead for scale/zero-point per block
         let block_size = self.config.block_size.as_usize();
-        let num_blocks = (original_elements + block_size - 1) / block_size;
+        let num_blocks = original_elements.div_ceil(block_size);
         let overhead_bytes = num_blocks * (4 + 1); // scale (f32) + zero_point (i8)
 
         let total_quantized = quantized_bytes + overhead_bytes;

@@ -423,7 +423,7 @@ echo "Deployment completed successfully!"
         config: &DockerSwarmConfig,
     ) -> TrustformersResult<String> {
         // Generate service configuration
-        Ok(serde_yaml::to_string(config).map_err(|_| TrustformersError::SerializationError)?)
+        serde_yaml::to_string(config).map_err(|_| TrustformersError::SerializationError)
     }
 
     fn generate_ecs_task_definition(&self, config: &ECSConfig) -> TrustformersResult<String> {

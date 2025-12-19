@@ -577,6 +577,12 @@ pub struct MetricsCollector {
     pub start_time: Instant,
 }
 
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsCollector {
     pub fn new() -> Self {
         Self {
@@ -861,7 +867,7 @@ impl LoadTestService {
 
             // Execute request
             let request_start = Instant::now();
-            match Self::execute_request(&client, &config, &scenario).await {
+            match Self::execute_request(&client, &config, scenario).await {
                 Ok(response_time) => {
                     metrics_collector.record_success(response_time).await;
                 },
@@ -1126,6 +1132,12 @@ impl LoadTestService {
 /// Load test configuration builder
 pub struct LoadTestConfigBuilder {
     config: LoadTestConfig,
+}
+
+impl Default for LoadTestConfigBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LoadTestConfigBuilder {

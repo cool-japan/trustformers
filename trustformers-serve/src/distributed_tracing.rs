@@ -463,10 +463,10 @@ impl ActiveSpan {
             span.end_time.unwrap().signed_duration_since(span.start_time).num_milliseconds() as f64;
 
         // Emit event
-        if let Ok(_) = self.manager.event_sender.send(TracingEvent::SpanFinished {
+        if self.manager.event_sender.send(TracingEvent::SpanFinished {
             span_id: span.span_id.clone(),
             duration_ms: duration,
-        }) {
+        }).is_ok() {
             debug!("Span finished: {} ({}ms)", span.span_id, duration);
         }
 
@@ -677,7 +677,7 @@ impl TracingManager {
             parent_span_id: builder.parent_context.as_ref().map(|c| c.span_id.clone()),
             operation_name: builder.operation_name,
             kind: builder.kind,
-            start_time: builder.start_time.unwrap_or_else(|| Utc::now()),
+            start_time: builder.start_time.unwrap_or_else(Utc::now),
             end_time: None,
             status: SpanStatus::Unset,
             attributes: builder.attributes,
@@ -707,10 +707,10 @@ impl TracingManager {
         }
 
         // Emit event
-        if let Ok(_) = self.event_sender.send(TracingEvent::SpanStarted {
+        if self.event_sender.send(TracingEvent::SpanStarted {
             span_id: span_id.clone(),
             trace_id: trace_id.clone(),
-        }) {
+        }).is_ok() {
             debug!("Span started: {} (trace: {})", span_id, trace_id);
         }
 

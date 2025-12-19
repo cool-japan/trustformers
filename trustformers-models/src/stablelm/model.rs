@@ -227,25 +227,25 @@ impl StableLMAttention {
             hidden_size,
             hidden_size,
             config.attention_bias,
-            device.clone(),
+            device,
         );
         let k_proj = Linear::new_with_device(
             hidden_size,
             num_kv_heads * head_dim,
             config.attention_bias,
-            device.clone(),
+            device,
         );
         let v_proj = Linear::new_with_device(
             hidden_size,
             num_kv_heads * head_dim,
             config.attention_bias,
-            device.clone(),
+            device,
         );
         let o_proj = Linear::new_with_device(
             hidden_size,
             hidden_size,
             config.attention_bias,
-            device.clone(),
+            device,
         );
 
         let rotary_emb = RotaryEmbedding::new_with_device(
@@ -253,7 +253,7 @@ impl StableLMAttention {
             config.max_position_embeddings,
             config.rope_theta,
             config.partial_rotary_factor,
-            device.clone(),
+            device,
         );
 
         Self {
@@ -373,19 +373,19 @@ impl StableLMMLP {
                 hidden_size,
                 intermediate_size,
                 config.mlp_bias,
-                device.clone(),
+                device,
             ),
             up_proj: Linear::new_with_device(
                 hidden_size,
                 intermediate_size,
                 config.mlp_bias,
-                device.clone(),
+                device,
             ),
             down_proj: Linear::new_with_device(
                 intermediate_size,
                 hidden_size,
                 config.mlp_bias,
-                device.clone(),
+                device,
             ),
             device,
         }
@@ -451,17 +451,17 @@ impl StableLMDecoderLayer {
     pub fn new_with_device(config: &StableLMConfig, device: Device) -> Self {
         Self {
             config: config.clone(),
-            self_attn: StableLMAttention::new_with_device(config, device.clone()),
-            mlp: StableLMMLP::new_with_device(config, device.clone()),
+            self_attn: StableLMAttention::new_with_device(config, device),
+            mlp: StableLMMLP::new_with_device(config, device),
             input_layernorm: RMSNorm::new_with_device(
                 config.hidden_size,
                 config.rms_norm_eps,
-                device.clone(),
+                device,
             ),
             post_attention_layernorm: RMSNorm::new_with_device(
                 config.hidden_size,
                 config.rms_norm_eps,
-                device.clone(),
+                device,
             ),
             device,
         }
@@ -533,7 +533,7 @@ impl StableLMEmbeddings {
                 config.vocab_size,
                 config.hidden_size,
                 config.pad_token_id.map(|x| x as usize),
-                device.clone(),
+                device,
             )?,
             device,
         })
@@ -578,18 +578,18 @@ impl StableLMModel {
     }
 
     pub fn new_with_device(config: StableLMConfig, device: Device) -> Result<Self> {
-        let embeddings = StableLMEmbeddings::new_with_device(&config, device.clone())?;
+        let embeddings = StableLMEmbeddings::new_with_device(&config, device)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
             layers.push(StableLMDecoderLayer::new_with_device(
                 &config,
-                device.clone(),
+                device,
             ));
         }
 
         let norm =
-            RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device.clone());
+            RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device);
 
         Ok(Self {
             config,
@@ -680,9 +680,9 @@ impl StableLMForCausalLM {
     }
 
     pub fn new_with_device(config: StableLMConfig, device: Device) -> Result<Self> {
-        let model = StableLMModel::new_with_device(config.clone(), device.clone())?;
+        let model = StableLMModel::new_with_device(config.clone(), device)?;
         let lm_head =
-            Linear::new_with_device(config.hidden_size, config.vocab_size, false, device.clone());
+            Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self {
             model,

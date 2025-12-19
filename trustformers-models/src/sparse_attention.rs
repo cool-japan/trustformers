@@ -383,7 +383,7 @@ impl SparseAttention {
         random_blocks: usize,
     ) -> Result<SparseAttentionMask> {
         let mut mask = SparseAttentionMask::new((seq_len, seq_len));
-        let num_blocks = (seq_len + block_size - 1) / block_size;
+        let num_blocks = seq_len.div_ceil(block_size);
 
         for block_i in 0..num_blocks {
             let start_i = block_i * block_size;
@@ -481,7 +481,7 @@ impl SparseAttention {
         bucket_size: usize,
     ) -> Result<SparseAttentionMask> {
         let mut mask = SparseAttentionMask::new((seq_len, seq_len));
-        let num_buckets = (seq_len + bucket_size - 1) / bucket_size;
+        let num_buckets = seq_len.div_ceil(bucket_size);
 
         // Simplified LSH bucketing (in real implementation, use proper hash functions)
         for hash_idx in 0..num_hashes {

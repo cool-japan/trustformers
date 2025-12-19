@@ -12,6 +12,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct RequestId(pub Uuid);
 
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequestId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -212,6 +218,12 @@ impl BatchingStrategy for PriorityStrategy {
 /// Continuous batching strategy for LLM serving
 pub struct ContinuousBatchingStrategy {
     active_sequences: Arc<Mutex<HashMap<RequestId, SequenceState>>>,
+}
+
+impl Default for ContinuousBatchingStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ContinuousBatchingStrategy {
@@ -878,6 +890,12 @@ impl BatchingStrategy for LoadAwareBatchingStrategy {
 pub struct PredictiveBatchingStrategy {
     predictor: Arc<Mutex<SimplePredictor>>,
     performance_history: Arc<Mutex<VecDeque<PerformanceMetric>>>,
+}
+
+impl Default for PredictiveBatchingStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PredictiveBatchingStrategy {

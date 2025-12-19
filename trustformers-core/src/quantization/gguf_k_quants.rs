@@ -241,7 +241,7 @@ impl KQuantizer {
         let shape = tensor.shape().to_vec();
 
         let superblock_size = self.config.quant_type.superblock_size();
-        let num_blocks = (data.len() + superblock_size - 1) / superblock_size;
+        let num_blocks = data.len().div_ceil(superblock_size);
         let bytes_per_block = self.config.quant_type.bytes_per_superblock();
 
         let mut blocks = Vec::with_capacity(num_blocks * bytes_per_block);

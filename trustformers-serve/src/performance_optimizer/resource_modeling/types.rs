@@ -272,6 +272,12 @@ pub struct TopologyAnalyzer {
     pub io_topology: Arc<Mutex<IoTopology>>,
 }
 
+impl Default for TopologyAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TopologyAnalyzer {
     /// Create a new TopologyAnalyzer with default values
     pub fn new() -> Self {
@@ -2191,6 +2197,12 @@ impl Default for HardwareDetectionConfig {
     }
 }
 
+impl Default for IntelDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IntelDetector {
     /// Create new Intel detector
     pub fn new() -> Self {
@@ -2198,10 +2210,22 @@ impl IntelDetector {
     }
 }
 
+impl Default for AmdDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AmdDetector {
     /// Create new AMD detector
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for NvidiaDetector {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -649,7 +649,7 @@ impl CpuDetector {
     async fn detect_macos_cpu_frequencies(&self) -> Result<(u32, u32)> {
         // Try using sysctl
         if let Ok(output) =
-            Command::new("sysctl").args(&["-n", "hw.cpufrequency_max"]).output().await
+            Command::new("sysctl").args(["-n", "hw.cpufrequency_max"]).output().await
         {
             if let Ok(freq_str) = String::from_utf8(output.stdout) {
                 if let Ok(freq_hz) = freq_str.trim().parse::<u64>() {
@@ -723,7 +723,7 @@ impl CpuDetector {
         let mut l3_cache_kb = Some(8192);
 
         // Try to get cache sizes from sysctl
-        if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.l1dcachesize"]).output().await {
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.l1dcachesize"]).output().await {
             if let Ok(size_str) = String::from_utf8(output.stdout) {
                 if let Ok(size_bytes) = size_str.trim().parse::<u32>() {
                     l1_cache_kb = size_bytes / 1024;
@@ -731,7 +731,7 @@ impl CpuDetector {
             }
         }
 
-        if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.l2cachesize"]).output().await {
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.l2cachesize"]).output().await {
             if let Ok(size_str) = String::from_utf8(output.stdout) {
                 if let Ok(size_bytes) = size_str.trim().parse::<u32>() {
                     l2_cache_kb = size_bytes / 1024;
@@ -739,7 +739,7 @@ impl CpuDetector {
             }
         }
 
-        if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.l3cachesize"]).output().await {
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.l3cachesize"]).output().await {
             if let Ok(size_str) = String::from_utf8(output.stdout) {
                 if let Ok(size_bytes) = size_str.trim().parse::<u32>() {
                     l3_cache_kb = Some(size_bytes / 1024);
@@ -1247,6 +1247,12 @@ impl HardwareValidator {
 
 // Vendor detector implementations
 pub struct IntelCpuDetector;
+impl Default for IntelCpuDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IntelCpuDetector {
     pub fn new() -> Self {
         Self
@@ -1264,6 +1270,12 @@ impl CpuVendorDetector for IntelCpuDetector {
 }
 
 pub struct AmdCpuDetector;
+impl Default for AmdCpuDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AmdCpuDetector {
     pub fn new() -> Self {
         Self
@@ -1281,6 +1293,12 @@ impl CpuVendorDetector for AmdCpuDetector {
 }
 
 pub struct ArmCpuDetector;
+impl Default for ArmCpuDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArmCpuDetector {
     pub fn new() -> Self {
         Self

@@ -402,9 +402,7 @@ impl LanguageGenerator for JavaGenerator {
         // Package declaration
         let package_name = self
             .config
-            .package_name
-            .as_ref()
-            .map(|s| s.as_str())
+            .package_name.as_deref()
             .unwrap_or("com.trustformers.ffi");
         main_content.push(format!("package {};", package_name));
         main_content.push("".to_string());

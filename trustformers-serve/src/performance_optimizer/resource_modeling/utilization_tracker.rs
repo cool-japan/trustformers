@@ -897,14 +897,14 @@ impl ResourceUtilizationTracker {
         let gpu_monitor = Arc::new(GpuUtilizationMonitor::new(config.gpu_config.clone()).await?);
 
         let history_manager =
-            Arc::new(UtilizationHistoryManager::new(HistoryManagerConfig::default()).await?);
+            Arc::new(UtilizationHistoryManager::new(HistoryManagerConfig).await?);
 
-        let trend_analyzer = Arc::new(TrendAnalyzer::new(TrendAnalyzerConfig::default()).await?);
+        let trend_analyzer = Arc::new(TrendAnalyzer::new(TrendAnalyzerConfig).await?);
 
-        let alerting_system = Arc::new(AlertingSystem::new(AlertingConfig::default()).await?);
+        let alerting_system = Arc::new(AlertingSystem::new(AlertingConfig).await?);
 
         let report_generator =
-            Arc::new(ReportGenerator::new(ReportGeneratorConfig::default()).await?);
+            Arc::new(ReportGenerator::new(ReportGeneratorConfig).await?);
 
         Ok(Self {
             cpu_monitor,
@@ -1782,7 +1782,7 @@ impl UtilizationHistoryManager {
         Ok(Self {
             storage_backend: Arc::new(StubStorageBackend),
             retention_policies: HashMap::new(),
-            compression_config: CompressionConfig::default(),
+            compression_config: CompressionConfig,
             cleanup_handle: Arc::new(Mutex::new(None)),
             config,
         })
@@ -1799,8 +1799,8 @@ impl TrendAnalyzer {
             analysis_algorithms: Vec::new(),
             prediction_models: Arc::new(RwLock::new(HashMap::new())),
             analysis_cache: Arc::new(RwLock::new(HashMap::new())),
-            seasonal_detector: Arc::new(SeasonalPatternDetector::default()),
-            anomaly_detector: Arc::new(AnomalyDetector::default()),
+            seasonal_detector: Arc::new(SeasonalPatternDetector),
+            anomaly_detector: Arc::new(AnomalyDetector),
             config,
         })
     }

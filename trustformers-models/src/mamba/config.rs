@@ -146,7 +146,7 @@ impl MambaConfig {
     pub fn get_dt_rank(&self) -> usize {
         self.dt_rank.unwrap_or_else(|| {
             // Standard computation: ceil(d_model / 16)
-            (self.d_model + 15) / 16
+            self.d_model.div_ceil(16)
         })
     }
 

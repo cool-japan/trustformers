@@ -556,15 +556,14 @@ impl TestConfigManager {
         }
 
         // Validate early termination settings
-        if self.config.early_termination.enabled {
-            if self.config.early_termination.min_progress_rate < 0.0 {
+        if self.config.early_termination.enabled
+            && self.config.early_termination.min_progress_rate < 0.0 {
                 result.errors.push("Minimum progress rate cannot be negative".to_string());
                 result
                     .suggested_fixes
                     .push("Set min_progress_rate to a positive value".to_string());
                 result.is_valid = false;
             }
-        }
 
         result
     }

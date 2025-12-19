@@ -192,7 +192,7 @@ impl super::optimization::OptimizationStrategy for AnalysisWindowOptimizer {
         _effectiveness: &std::collections::HashMap<String, f64>,
     ) -> TestCharacterizationResult<super::optimization::OptimizationRecommendation> {
         let optimal_window = 500; // Default optimal window size
-        let diff = (self.window_size as i64 - optimal_window).abs() as usize;
+        let diff = (self.window_size as i64 - optimal_window).unsigned_abs() as usize;
         let relative_diff = diff as f64 / optimal_window as f64;
 
         let urgency = if relative_diff > 1.0 {

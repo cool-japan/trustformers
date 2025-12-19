@@ -200,7 +200,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (size as u64 + 255) / 256,
+            width: (size as u64).div_ceil(256),
             height: 1,
             depth: 1,
         };
@@ -249,7 +249,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (size as u64 + 255) / 256,
+            width: (size as u64).div_ceil(256),
             height: 1,
             depth: 1,
         };
@@ -315,7 +315,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (seq_len as u64 + 63) / 64,
+            width: (seq_len as u64).div_ceil(64),
             height: 1,
             depth: 1,
         };
@@ -382,8 +382,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (n as u64 + 15) / 16,
-            height: (m as u64 + 15) / 16,
+            width: (n as u64).div_ceil(16),
+            height: (m as u64).div_ceil(16),
             depth: 1,
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
@@ -438,8 +438,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (n as u64 + 15) / 16,
-            height: (m as u64 + 15) / 16,
+            width: (n as u64).div_ceil(16),
+            height: (m as u64).div_ceil(16),
             depth: 1,
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
@@ -499,7 +499,7 @@ impl MetalBackend {
                 depth: 1,
             };
             let threadgroups = metal::MTLSize {
-                width: (elements_per_tensor as u64 + 255) / 256,
+                width: (elements_per_tensor as u64).div_ceil(256),
                 height: 1,
                 depth: 1,
             };
@@ -578,9 +578,9 @@ impl MetalBackend {
             depth: 8,
         };
         let threadgroups = metal::MTLSize {
-            width: (batch_size as u64 + 7) / 8,
-            height: (seq_len as u64 + 7) / 8,
-            depth: (hidden_size as u64 + 7) / 8,
+            width: (batch_size as u64).div_ceil(8),
+            height: (seq_len as u64).div_ceil(8),
+            depth: (hidden_size as u64).div_ceil(8),
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
@@ -629,7 +629,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (seq_len as u64 + 63) / 64,
+            width: (seq_len as u64).div_ceil(64),
             height: 1,
             depth: 1,
         };
@@ -706,7 +706,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (size as u64 + 255) / 256,
+            width: (size as u64).div_ceil(256),
             height: 1,
             depth: 1,
         };
@@ -770,9 +770,9 @@ impl MetalBackend {
             depth: 8,
         };
         let threadgroups = metal::MTLSize {
-            width: (num_heads as u64 + 7) / 8,
-            height: (seq_len as u64 + 7) / 8,
-            depth: (head_dim as u64 + 7) / 8,
+            width: (num_heads as u64).div_ceil(8),
+            height: (seq_len as u64).div_ceil(8),
+            depth: (head_dim as u64).div_ceil(8),
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
@@ -831,9 +831,9 @@ impl MetalBackend {
             depth: 8,
         };
         let threadgroups = metal::MTLSize {
-            width: (num_heads as u64 + 7) / 8,
-            height: (seq_len as u64 + 7) / 8,
-            depth: (head_dim as u64 + 7) / 8,
+            width: (num_heads as u64).div_ceil(8),
+            height: (seq_len as u64).div_ceil(8),
+            depth: (head_dim as u64).div_ceil(8),
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
@@ -924,8 +924,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (cols as u64 + 15) / 16,
-            height: (rows as u64 + 15) / 16,
+            width: (cols as u64).div_ceil(16),
+            height: (rows as u64).div_ceil(16),
             depth: 1,
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
@@ -984,8 +984,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (cols as u64 + 15) / 16,
-            height: (rows as u64 + 15) / 16,
+            width: (cols as u64).div_ceil(16),
+            height: (rows as u64).div_ceil(16),
             depth: num_heads as u64,
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
@@ -1042,7 +1042,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (seq_len as u64 + 63) / 64,
+            width: (seq_len as u64).div_ceil(64),
             height: num_heads as u64,
             depth: 1,
         };
@@ -1116,8 +1116,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (n as u64 + 15) / 16,
-            height: (m as u64 + 15) / 16,
+            width: (n as u64).div_ceil(16),
+            height: (m as u64).div_ceil(16),
             depth: num_heads as u64,
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
@@ -1196,8 +1196,8 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (n as u64 + 15) / 16,
-            height: (m as u64 + 15) / 16,
+            width: (n as u64).div_ceil(16),
+            height: (m as u64).div_ceil(16),
             depth: num_heads as u64,
         };
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
@@ -1269,7 +1269,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (seq_len as u64 + 63) / 64,
+            width: (seq_len as u64).div_ceil(64),
             height: num_heads as u64,
             depth: 1,
         };
@@ -1375,7 +1375,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (q_seq_len as u64 + 63) / 64,
+            width: (q_seq_len as u64).div_ceil(64),
             height: num_heads as u64,
             depth: 1,
         };
@@ -1479,10 +1479,8 @@ impl MetalBackend {
         let threads_per_threadgroup =
             metal::MTLSize::new((head_dim as u64).min(256), (num_heads as u64).min(4), 1);
         let threadgroups = metal::MTLSize::new(
-            ((head_dim + threads_per_threadgroup.width as usize - 1)
-                / threads_per_threadgroup.width as usize) as u64,
-            ((num_heads + threads_per_threadgroup.height as usize - 1)
-                / threads_per_threadgroup.height as usize) as u64,
+            head_dim.div_ceil(threads_per_threadgroup.width as usize) as u64,
+            num_heads.div_ceil(threads_per_threadgroup.height as usize) as u64,
             batch_size as u64,
         );
         encoder.dispatch_thread_groups(threadgroups, threads_per_threadgroup);
@@ -1575,8 +1573,8 @@ impl MetalBackend {
                 depth: 1,
             };
             let threadgroups = metal::MTLSize {
-                width: (head_dim as u64 + 15) / 16,
-                height: (seq_len as u64 + 15) / 16,
+                width: (head_dim as u64).div_ceil(16),
+                height: (seq_len as u64).div_ceil(16),
                 depth: num_heads as u64,
             };
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
@@ -1622,7 +1620,7 @@ impl MetalBackend {
                 depth: 1,
             };
             let threadgroups = metal::MTLSize {
-                width: (seq_len as u64 + 63) / 64,
+                width: (seq_len as u64).div_ceil(64),
                 height: num_heads as u64,
                 depth: 1,
             };
@@ -1669,8 +1667,8 @@ impl MetalBackend {
                 depth: 1,
             };
             let threadgroups = metal::MTLSize {
-                width: (head_dim as u64 + 15) / 16,
-                height: (seq_len as u64 + 15) / 16,
+                width: (head_dim as u64).div_ceil(16),
+                height: (seq_len as u64).div_ceil(16),
                 depth: num_heads as u64,
             };
             encoder.dispatch_thread_groups(threadgroups, threadgroup_size);

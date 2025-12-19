@@ -70,6 +70,12 @@ impl Default for ParserConfig {
     }
 }
 
+impl Default for FfiParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FfiParser {
     /// Create a new FFI parser with default configuration
     pub fn new() -> Self {
@@ -199,7 +205,7 @@ impl FfiParser {
                             }
                         }
                         visit_dir(&path, rust_files)?;
-                    } else if path.extension().map_or(false, |ext| ext == "rs") {
+                    } else if path.extension().is_some_and(|ext| ext == "rs") {
                         rust_files.push(path);
                     }
                 }

@@ -191,7 +191,7 @@ impl Layer for GPTNeoXAttention {
                 if shape.len() != 2 {
                     return Err(tensor_op_error(
                         "GPTNeoXAttention::forward",
-                        &format!("Expected 2D tensor, got shape: {:?}", shape),
+                        format!("Expected 2D tensor, got shape: {:?}", shape),
                     ));
                 }
 

@@ -23,6 +23,12 @@ pub struct LinearRegressionEstimator {
     name: String,
 }
 
+impl Default for LinearRegressionEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LinearRegressionEstimator {
     pub fn new() -> Self {
         Self {
@@ -107,6 +113,12 @@ pub struct ResourceBasedEstimator {
     name: String,
 }
 
+impl Default for ResourceBasedEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceBasedEstimator {
     pub fn new() -> Self {
         Self {
@@ -164,6 +176,12 @@ impl EstimationAlgorithm for ResourceBasedEstimator {
 /// Historical average estimation algorithm
 pub struct HistoricalAverageEstimator {
     name: String,
+}
+
+impl Default for HistoricalAverageEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl HistoricalAverageEstimator {
@@ -239,6 +257,12 @@ impl EstimationAlgorithm for HistoricalAverageEstimator {
 /// CPU affinity-based estimation algorithm
 pub struct CpuAffinityEstimator {
     name: String,
+}
+
+impl Default for CpuAffinityEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CpuAffinityEstimator {

@@ -318,7 +318,7 @@ impl GGMLExporter {
                 // Realistic Q8_0 quantization with proper scaling
                 // Q8_0 format: 32 float values -> 1 scale + 32 quantized values
                 let block_size = 32;
-                let num_blocks = (size + block_size - 1) / block_size;
+                let num_blocks = size.div_ceil(block_size);
 
                 for _ in 0..num_blocks {
                     // Generate a realistic scale factor for this block

@@ -711,7 +711,7 @@ impl Quantizer {
                 let shape = arr.shape();
                 let total_elements = arr.len();
                 let group_size = group_size.unwrap_or(128);
-                let num_groups = (total_elements + group_size - 1) / group_size;
+                let num_groups = total_elements.div_ceil(group_size);
 
                 let mut scales = Vec::with_capacity(num_groups);
                 let mut zero_points = Vec::with_capacity(num_groups);
@@ -794,7 +794,7 @@ impl Quantizer {
 
     /// Pack float values into 4-bit representation
     fn pack_int4_values(data: &[f32], scale: f32, zero_point: i32) -> Result<Vec<u8>> {
-        let mut packed = Vec::with_capacity((data.len() + 1) / 2);
+        let mut packed = Vec::with_capacity(data.len().div_ceil(2));
 
         for chunk in data.chunks(2) {
             let val1 = Self::quantize_value_int4(chunk[0], scale, zero_point);

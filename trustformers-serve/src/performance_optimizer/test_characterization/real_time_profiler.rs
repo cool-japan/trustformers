@@ -1304,6 +1304,12 @@ pub struct RealTimePerformanceCounters {
     last_reset: AtomicU64,
 }
 
+impl Default for RealTimePerformanceCounters {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RealTimePerformanceCounters {
     pub fn new() -> Self {
         Self {

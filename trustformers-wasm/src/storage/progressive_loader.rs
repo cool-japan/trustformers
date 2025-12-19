@@ -434,7 +434,7 @@ impl ChunkLoader {
 
     /// Split data into chunks
     pub fn split_into_chunks(&mut self, total_size: usize) -> Vec<ChunkMetadata> {
-        let num_chunks = (total_size + self.chunk_size - 1) / self.chunk_size;
+        let num_chunks = total_size.div_ceil(self.chunk_size);
         let mut chunks = Vec::new();
 
         for i in 0..num_chunks {

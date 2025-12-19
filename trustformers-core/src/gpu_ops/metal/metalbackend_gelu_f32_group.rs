@@ -38,7 +38,7 @@ impl MetalBackend {
             depth: 1,
         };
         let threadgroups = metal::MTLSize {
-            width: (size as u64 + 255) / 256,
+            width: (size as u64).div_ceil(256),
             height: 1,
             depth: 1,
         };

@@ -176,7 +176,7 @@ impl ModelParallelContext {
         }
 
         let dim_size = shape[split_dim];
-        let chunk_size = (dim_size + self.world_size - 1) / self.world_size;
+        let chunk_size = dim_size.div_ceil(self.world_size);
         let start_idx = self.rank * chunk_size;
         let end_idx = ((self.rank + 1) * chunk_size).min(dim_size);
 
@@ -253,7 +253,7 @@ impl DeviceMesh {
                 // For tensor parallel, try to create a balanced 2D grid
                 let n = device_ids.len();
                 let rows = (n as f64).sqrt().ceil() as usize;
-                let cols = (n + rows - 1) / rows;
+                let cols = n.div_ceil(rows);
                 MeshTopology::Grid2D { rows, cols }
             },
             ModelParallelStrategy::Hybrid => {

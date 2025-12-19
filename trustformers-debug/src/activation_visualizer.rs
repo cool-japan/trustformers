@@ -325,7 +325,7 @@ impl ActivationVisualizer {
                 // Fallback: make it as square as possible
                 let total = activation.values.len();
                 let cols = (total as f64).sqrt().ceil() as usize;
-                let rows = (total + cols - 1) / cols;
+                let rows = total.div_ceil(cols);
                 (rows, cols)
             }
         };

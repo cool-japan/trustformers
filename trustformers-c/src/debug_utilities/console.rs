@@ -516,7 +516,7 @@ impl InteractiveDebugConsole {
 
     /// Handle memory info command
     fn handle_memory_info(&self, args: &[&str]) -> ConsoleResult {
-        let command = args.get(0).unwrap_or(&"info");
+        let command = args.first().unwrap_or(&"info");
 
         match *command {
             "audit" => {

@@ -271,8 +271,8 @@ impl MultiHeadAttention {
         let output = Tensor::zeros(&[batch_size, num_heads, seq_q, head_dim])?;
 
         // Tile over the sequence dimension
-        let num_blocks_q = (seq_q + block_size - 1) / block_size;
-        let num_blocks_k = (seq_k + block_size - 1) / block_size;
+        let num_blocks_q = seq_q.div_ceil(block_size);
+        let num_blocks_k = seq_k.div_ceil(block_size);
 
         for q_block_idx in 0..num_blocks_q {
             let q_start = q_block_idx * block_size;

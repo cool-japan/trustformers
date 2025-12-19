@@ -42,6 +42,12 @@ pub struct FeedbackValidationEngine {
     validation_history: Arc<Mutex<Vec<FeedbackValidationResult>>>,
 }
 
+impl Default for FeedbackValidationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FeedbackValidationEngine {
     /// Create new feedback validation engine
     pub fn new() -> Self {

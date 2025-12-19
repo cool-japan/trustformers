@@ -117,7 +117,7 @@ pub fn get_available_disk_space(path: &Path) -> TempDirResult<u64> {
         let result = unsafe { libc::statvfs(path_cstring.as_ptr(), &mut statvfs_buf) };
 
         if result == 0 {
-            let available_bytes = statvfs_buf.f_bavail as u64 * statvfs_buf.f_frsize as u64;
+            let available_bytes = statvfs_buf.f_bavail as u64 * statvfs_buf.f_frsize;
             Ok(available_bytes)
         } else {
             // Fallback to a simple check

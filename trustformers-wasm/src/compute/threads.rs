@@ -420,7 +420,7 @@ impl ThreadPool {
         }
 
         // Divide work among threads
-        let rows_per_thread = (a_rows + self.max_threads - 1) / self.max_threads;
+        let rows_per_thread = a_rows.div_ceil(self.max_threads);
         let _tasks: Vec<js_sys::Object> = Vec::new();
 
         for (thread_id, worker) in self.workers.iter().enumerate() {

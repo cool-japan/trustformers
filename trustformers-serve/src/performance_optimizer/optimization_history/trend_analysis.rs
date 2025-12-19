@@ -298,7 +298,7 @@ impl EnhancedTrendAnalysisEngine {
         // Determine consensus direction
         let direction_votes: HashMap<TrendDirection, usize> = results
             .iter()
-            .map(|r| r.direction.clone())
+            .map(|r| r.direction)
             .fold(HashMap::new(), |mut acc, direction| {
                 *acc.entry(direction).or_insert(0) += 1;
                 acc
@@ -345,7 +345,7 @@ impl EnhancedTrendAnalysisEngine {
         // Determine consensus direction
         let direction_votes: HashMap<TrendDirection, usize> = predictions
             .iter()
-            .map(|p| p.predicted_direction.clone())
+            .map(|p| p.predicted_direction)
             .fold(HashMap::new(), |mut acc, direction| {
                 *acc.entry(direction).or_insert(0) += 1;
                 acc
@@ -414,6 +414,12 @@ impl Default for EnhancedTrendAnalysisEngine {
 
 /// Linear regression trend detector
 pub struct LinearRegressionTrendDetector;
+
+impl Default for LinearRegressionTrendDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LinearRegressionTrendDetector {
     pub fn new() -> Self {
@@ -487,6 +493,12 @@ impl TrendDetectionAlgorithm for LinearRegressionTrendDetector {
 /// Moving average trend detector
 pub struct MovingAverageTrendDetector {
     window_size: usize,
+}
+
+impl Default for MovingAverageTrendDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MovingAverageTrendDetector {
@@ -565,6 +577,12 @@ pub struct ExponentialSmoothingTrendDetector {
     alpha: f64,
 }
 
+impl Default for ExponentialSmoothingTrendDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExponentialSmoothingTrendDetector {
     pub fn new() -> Self {
         Self { alpha: 0.3 }
@@ -635,6 +653,12 @@ impl TrendDetectionAlgorithm for ExponentialSmoothingTrendDetector {
 
 /// Statistical trend detector using correlation analysis
 pub struct StatisticalTrendDetector;
+
+impl Default for StatisticalTrendDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl StatisticalTrendDetector {
     pub fn new() -> Self {
@@ -716,6 +740,12 @@ impl TrendDetectionAlgorithm for StatisticalTrendDetector {
 /// Linear regression predictor
 pub struct LinearRegressionPredictor;
 
+impl Default for LinearRegressionPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LinearRegressionPredictor {
     pub fn new() -> Self {
         Self
@@ -752,7 +782,7 @@ impl TrendPredictionModel for LinearRegressionPredictor {
         }
 
         Ok(TrendPrediction {
-            predicted_direction: current_trend.direction.clone(),
+            predicted_direction: current_trend.direction,
             confidence: current_trend.confidence * 0.8,
             horizon,
             expected_values,
@@ -773,6 +803,12 @@ impl TrendPredictionModel for LinearRegressionPredictor {
 /// Moving average predictor
 pub struct MovingAveragePredictor {
     window_size: usize,
+}
+
+impl Default for MovingAveragePredictor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MovingAveragePredictor {
@@ -828,6 +864,12 @@ pub struct ExponentialSmoothingPredictor {
     alpha: f64,
 }
 
+impl Default for ExponentialSmoothingPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ExponentialSmoothingPredictor {
     pub fn new() -> Self {
         Self { alpha: 0.3 }
@@ -859,7 +901,7 @@ impl TrendPredictionModel for ExponentialSmoothingPredictor {
         }
 
         Ok(TrendPrediction {
-            predicted_direction: current_trend.direction.clone(),
+            predicted_direction: current_trend.direction,
             confidence: current_trend.confidence * 0.75,
             horizon,
             expected_values,

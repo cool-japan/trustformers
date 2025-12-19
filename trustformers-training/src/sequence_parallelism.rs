@@ -359,7 +359,7 @@ impl SequenceParallelism {
 
         // Simulate attention pattern analysis
         let window_size = 512; // Analysis window size
-        let num_windows = (total_length + window_size - 1) / window_size;
+        let num_windows = total_length.div_ceil(window_size);
 
         for window_idx in 0..num_windows {
             let start_pos = window_idx * window_size;
@@ -1058,11 +1058,11 @@ pub mod utils {
         }
 
         let required_devices =
-            (total_sequence_length + max_tokens_per_device - 1) / max_tokens_per_device;
+            total_sequence_length.div_ceil(max_tokens_per_device);
         let sequence_parallel_size = std::cmp::min(required_devices, world_size);
 
         let tokens_per_device =
-            (total_sequence_length + sequence_parallel_size - 1) / sequence_parallel_size;
+            total_sequence_length.div_ceil(sequence_parallel_size);
         let overlap_size = std::cmp::min(128, tokens_per_device / 10); // 10% overlap
 
         Ok(SequenceParallelismConfig {

@@ -153,7 +153,7 @@ impl MetalBackend {
 
         // Calculate grid dimensions
         // Each threadgroup processes BLOCK_Q query tokens for one (batch, head) pair
-        let num_q_blocks = (q_seq_len + BLOCK_Q - 1) / BLOCK_Q;
+        let num_q_blocks = q_seq_len.div_ceil(BLOCK_Q);
         let grid_size = MTLSize {
             width: num_q_blocks as u64,
             height: num_heads as u64,

@@ -356,7 +356,7 @@ impl ChunkedResponse {
             .header(header::CONTENT_TYPE, self.content_type)
             .header(header::TRANSFER_ENCODING, "chunked")
             .header(header::CACHE_CONTROL, "no-cache")
-            .body(body.into())?)
+            .body(body)?)
     }
 }
 
@@ -380,6 +380,12 @@ pub struct ChunkStats {
     pub avg_chunk_size: f64,
     pub total_duration_ms: Option<f64>,
     pub throughput_mbps: Option<f64>,
+}
+
+impl Default for ChunkStats {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ChunkStats {
@@ -431,7 +437,7 @@ pub async fn create_streaming_response(
         .header(header::CONTENT_TYPE, content_type)
         .header(header::TRANSFER_ENCODING, "chunked")
         .header(header::CACHE_CONTROL, "no-cache")
-        .body(body.into())?)
+        .body(body)?)
 }
 
 #[cfg(test)]

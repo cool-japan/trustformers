@@ -976,7 +976,7 @@ impl RingAttentionManager {
         let output = Tensor::zeros(&[batch_size, seq_len, hidden_dim])?;
 
         // Process attention in blocks to reduce memory usage
-        let num_blocks = (seq_len + block_size - 1) / block_size;
+        let num_blocks = seq_len.div_ceil(block_size);
 
         for block_i in 0..num_blocks {
             for block_j in 0..num_blocks {

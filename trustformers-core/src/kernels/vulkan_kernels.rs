@@ -598,10 +598,8 @@ impl VulkanKernel {
 
         // Dispatch compute work
         let workgroup_count = [
-            ((b_shape[1] + config.workgroup_size[0] as usize - 1)
-                / config.workgroup_size[0] as usize) as u32,
-            ((a_shape[0] + config.workgroup_size[1] as usize - 1)
-                / config.workgroup_size[1] as usize) as u32,
+            b_shape[1].div_ceil(config.workgroup_size[0] as usize) as u32,
+            a_shape[0].div_ceil(config.workgroup_size[1] as usize) as u32,
             1,
         ];
 

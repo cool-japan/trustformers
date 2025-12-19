@@ -216,7 +216,7 @@ pub mod path_validation {
         // Directories should end with separator or not contain file extensions
         if dir_path.contains('.') && !dir_path.ends_with('/') && !dir_path.ends_with('\\') {
             // Might be a file, check if it has a suspicious extension
-            if let Some(extension) = dir_path.split('.').last() {
+            if let Some(extension) = dir_path.split('.').next_back() {
                 if is_executable_extension(extension) {
                     return Err(TrustformersError::ValidationError);
                 }

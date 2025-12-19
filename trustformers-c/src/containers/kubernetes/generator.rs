@@ -187,7 +187,7 @@ spec:
               number: 80"#,
             self.config.metadata.name,
             self.config.metadata.namespace,
-            ingress.rules.get(0).map(|r| &r.host).unwrap_or(&"example.com".to_string()),
+            ingress.rules.first().map(|r| &r.host).unwrap_or(&"example.com".to_string()),
             self.config.metadata.name,
         );
 

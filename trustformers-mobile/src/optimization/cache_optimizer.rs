@@ -310,14 +310,14 @@ impl CacheOptimizer {
             tensor.shape()[2],
             tensor.shape()[3],
         ];
-        let c_padded = (c + 3) / 4 * 4; // Round up to multiple of 4
+        let c_padded = c.div_ceil(4) * 4; // Round up to multiple of 4
 
         let mut packed_data = vec![0.0f32; n * c_padded * h * w];
         let src_data = tensor.data()?;
 
         // Pack channels in groups of 4 for SIMD
         for batch in 0..n {
-            for c_group in 0..(c + 3) / 4 {
+            for c_group in 0..c.div_ceil(4) {
                 for row in 0..h {
                     for col in 0..w {
                         for c_offset in 0..4 {

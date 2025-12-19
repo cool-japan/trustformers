@@ -244,7 +244,7 @@ impl FlashAttention {
                 let mut m =
                     ArrayD::from_elem(IxDyn(&[batch_size, num_heads, seq_len]), f32::NEG_INFINITY); // row maxes
 
-                let num_blocks = (seq_len + self.block_size - 1) / self.block_size;
+                let num_blocks = seq_len.div_ceil(self.block_size);
 
                 // Iterate over blocks of Q (queries)
                 for i in 0..num_blocks {
@@ -492,7 +492,7 @@ impl FlashAttention {
 
                 // FlashAttention-2: Better work partitioning
                 // Process multiple query blocks in parallel (conceptually)
-                let num_blocks = (seq_len + self.block_size - 1) / self.block_size;
+                let num_blocks = seq_len.div_ceil(self.block_size);
 
                 // For each batch and head
                 for b in 0..batch_size {

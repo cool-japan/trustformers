@@ -462,7 +462,7 @@ impl FP8Quantizer {
         shape: &[usize],
         block_size: usize,
     ) -> Result<FP8Tensor> {
-        let num_blocks = (data.len() + block_size - 1) / block_size;
+        let num_blocks = data.len().div_ceil(block_size);
 
         self.init_stats(num_blocks);
 

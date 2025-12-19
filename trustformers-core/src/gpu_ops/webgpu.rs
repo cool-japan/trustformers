@@ -402,8 +402,8 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             compute_pass.set_bind_group(0, &bind_group, &[]);
 
             // Dispatch workgroups (16x16 workgroup size)
-            let workgroups_x = (n as u32 + 15) / 16;
-            let workgroups_y = (m as u32 + 15) / 16;
+            let workgroups_x = (n as u32).div_ceil(16);
+            let workgroups_y = (m as u32).div_ceil(16);
             compute_pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
         }
 
@@ -603,7 +603,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
 
-            let workgroups = (size as u32 + 255) / 256;
+            let workgroups = (size as u32).div_ceil(256);
             compute_pass.dispatch_workgroups(workgroups, 1, 1);
         }
 
@@ -875,7 +875,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             compute_pass.set_pipeline(&pipeline);
             compute_pass.set_bind_group(0, &bind_group, &[]);
 
-            let workgroups = (seq_len as u32 + 63) / 64;
+            let workgroups = (seq_len as u32).div_ceil(64);
             compute_pass.dispatch_workgroups(workgroups, 1, 1);
         }
 

@@ -356,6 +356,12 @@ pub struct SseMetrics {
     connection_durations: Arc<RwLock<Vec<Duration>>>,
 }
 
+impl Default for SseMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SseMetrics {
     pub fn new() -> Self {
         Self {

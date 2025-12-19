@@ -480,8 +480,8 @@ impl KernelTuner {
         n: usize,
         block_size: (usize, usize, usize),
     ) -> (usize, usize, usize) {
-        let grid_x = (m + block_size.0 - 1) / block_size.0;
-        let grid_y = (n + block_size.1 - 1) / block_size.1;
+        let grid_x = m.div_ceil(block_size.0);
+        let grid_y = n.div_ceil(block_size.1);
         (grid_x, grid_y, 1)
     }
 

@@ -68,7 +68,7 @@ fn main() -> Result<()> {
         println!("  [{:.1}, {:.1}]\n", c_data[2], c_data[3]);
 
         // Verify
-        let expected = vec![58.0, 64.0, 139.0, 154.0];
+        let expected = [58.0, 64.0, 139.0, 154.0];
         let mut all_correct = true;
         for i in 0..4 {
             let diff = (c_data[i] - expected[i]).abs();

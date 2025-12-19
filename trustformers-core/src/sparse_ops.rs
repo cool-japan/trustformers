@@ -175,8 +175,8 @@ impl BlockSparsity {
         let rows = shape[0];
         let cols = shape[1];
 
-        let num_block_rows = (rows + self.block_height - 1) / self.block_height;
-        let num_block_cols = (cols + self.block_width - 1) / self.block_width;
+        let num_block_rows = rows.div_ceil(self.block_height);
+        let num_block_cols = cols.div_ceil(self.block_width);
 
         // Compute importance score for each block
         let mut block_scores = Vec::new();
@@ -356,7 +356,7 @@ pub mod sparse_attention {
 
         /// Generate attention mask for block-sparse pattern
         pub fn generate_mask(&self, seq_len: usize) -> Result<SparseTensor> {
-            let num_blocks = (seq_len + self.block_size - 1) / self.block_size;
+            let num_blocks = seq_len.div_ceil(self.block_size);
 
             let mut row_indices = Vec::new();
             let mut col_indices = Vec::new();

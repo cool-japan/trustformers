@@ -427,7 +427,7 @@ impl BatchProcessor {
             PaddingStrategy::Fixed(len) => Ok(len),
             PaddingStrategy::Multiple(multiple) => {
                 // Round up to nearest multiple
-                Ok(((max_len + multiple - 1) / multiple) * multiple)
+                Ok(max_len.div_ceil(multiple) * multiple)
             },
             PaddingStrategy::None => Ok(max_len),
         }

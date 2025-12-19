@@ -680,7 +680,7 @@ async fn sse_stream_endpoint(
         .sse_handler
         .handle_connection(request_id)
         .await
-        .map_err(|e| ServerError::Internal(e))
+        .map_err(ServerError::Internal)
 }
 
 /// WebSocket endpoint
@@ -894,7 +894,7 @@ async fn long_poll_endpoint(
         .polling_service
         .poll(request)
         .await
-        .map_err(|e| ServerError::Internal(e))?;
+        .map_err(ServerError::Internal)?;
 
     Ok(Json(response))
 }

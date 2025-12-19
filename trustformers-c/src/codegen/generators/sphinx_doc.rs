@@ -350,7 +350,7 @@ todo_include_todos = True
 
         for func in &interface.functions {
             let category = self.categorize_function(&func.name);
-            categories.entry(category).or_insert_with(Vec::new).push(func);
+            categories.entry(category).or_default().push(func);
         }
 
         // Sort categories

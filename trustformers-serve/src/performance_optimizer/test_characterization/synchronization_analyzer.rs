@@ -2130,6 +2130,12 @@ pub struct RecommendationInput {
 // Additional Supporting Types (Simplified implementations)
 // ================================================================================================
 
+impl Default for LockDependencyGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LockDependencyGraph {
     pub fn new() -> Self {
         Self {
@@ -2311,9 +2317,21 @@ pub struct AntiPatternFixAdvisor;
 pub struct TopologicalOrderingAlgorithm;
 pub struct PriorityBasedOrderingAlgorithm;
 
+impl Default for TopologicalOrderingAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TopologicalOrderingAlgorithm {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for PriorityBasedOrderingAlgorithm {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2403,6 +2421,12 @@ impl std::fmt::Debug for SynchronizationPatternLibrary {
     }
 }
 
+impl Default for SynchronizationPatternLibrary {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SynchronizationPatternLibrary {
     pub fn new() -> Self {
         Self {
@@ -2414,6 +2438,12 @@ impl SynchronizationPatternLibrary {
 #[derive(Debug)]
 pub struct SynchronizationMetricsDatabase {
     metrics: Vec<SynchronizationMetrics>,
+}
+
+impl Default for SynchronizationMetricsDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SynchronizationMetricsDatabase {

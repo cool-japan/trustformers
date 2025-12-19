@@ -423,6 +423,12 @@ pub struct ModelMigrationStats {
     pub validation_results: Vec<ValidationResult>,
 }
 
+impl Default for ModelMigrationStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ModelMigrationStats {
     pub fn new() -> Self {
         Self {

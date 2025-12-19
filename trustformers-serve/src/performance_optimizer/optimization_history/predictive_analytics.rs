@@ -416,6 +416,12 @@ pub struct LinearRegressionModel {
     trained: bool,
 }
 
+impl Default for LinearRegressionModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LinearRegressionModel {
     pub fn new() -> Self {
         Self {
@@ -501,6 +507,12 @@ pub struct MovingAverageModel {
     recent_values: Vec<f64>,
     average: f64,
     trained: bool,
+}
+
+impl Default for MovingAverageModel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MovingAverageModel {
@@ -591,6 +603,12 @@ pub struct ExponentialSmoothingModel {
     smoothed_value: f64,
     trend: f64,
     trained: bool,
+}
+
+impl Default for ExponentialSmoothingModel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ExponentialSmoothingModel {
@@ -698,6 +716,12 @@ pub struct ARIMAModel {
     trained: bool,
 }
 
+impl Default for ARIMAModel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ARIMAModel {
     pub fn new() -> Self {
         Self {
@@ -760,7 +784,7 @@ impl PredictiveModel for ARIMAModel {
 
         for i in 1..=horizon_minutes {
             // Simple ARIMA(1,1,0) prediction
-            current_diff = self.ar_coefficients[0] * current_diff;
+            current_diff *= self.ar_coefficients[0];
 
             // Convert back to level (reverse differencing)
             // This is a simplified approach

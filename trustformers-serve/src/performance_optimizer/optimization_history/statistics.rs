@@ -422,7 +422,7 @@ impl AdvancedStatisticsComputer {
         let mut trend = Vec::new();
 
         for i in 0..values.len() {
-            let start = if i >= window_size / 2 { i - window_size / 2 } else { 0 };
+            let start = i.saturating_sub(window_size / 2);
             let end = (i + window_size / 2 + 1).min(values.len());
             let window_mean = values[start..end].iter().sum::<f64>() / (end - start) as f64;
             trend.push(window_mean);
@@ -613,7 +613,7 @@ impl AdvancedStatisticsComputer {
         let f_statistic = if var2 > 0.0 { var1 / var2 } else { f64::INFINITY };
 
         // Approximate p-value (simplified)
-        let p_value = if f_statistic > 2.0 || f_statistic < 0.5 { 0.05 } else { 0.5 };
+        let p_value = if !(0.5..=2.0).contains(&f_statistic) { 0.05 } else { 0.5 };
 
         Ok((f_statistic, p_value))
     }
@@ -790,7 +790,7 @@ pub fn calculate_percentiles(
     let mut results = std::collections::BTreeMap::new();
 
     for &percentile in percentiles {
-        if percentile < 0.0 || percentile > 100.0 {
+        if !(0.0..=100.0).contains(&percentile) {
             return Err(anyhow::anyhow!("Percentile must be between 0 and 100"));
         }
 

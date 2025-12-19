@@ -674,7 +674,7 @@ end
 
 /// Convert snake_case or kebab-case to PascalCase
 fn to_pascal_case(s: &str) -> String {
-    s.split(|c| c == '_' || c == '-')
+    s.split(['_', '-'])
         .filter(|s| !s.is_empty())
         .map(|s| {
             let mut chars = s.chars();

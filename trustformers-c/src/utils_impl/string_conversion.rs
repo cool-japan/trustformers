@@ -172,10 +172,7 @@ pub mod conversion_utils {
         }
 
         unsafe {
-            match CStr::from_ptr(c_str).to_str() {
-                Ok(_) => true,
-                Err(_) => false,
-            }
+            CStr::from_ptr(c_str).to_str().is_ok()
         }
     }
 

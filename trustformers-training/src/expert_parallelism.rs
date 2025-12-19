@@ -539,7 +539,7 @@ pub mod utils {
             return Err(anyhow!("Insufficient memory for expert parallelism"));
         }
 
-        let expert_parallel_size = (num_experts + experts_per_device - 1) / experts_per_device;
+        let expert_parallel_size = num_experts.div_ceil(experts_per_device);
 
         Ok(ExpertParallelismConfig {
             num_experts,

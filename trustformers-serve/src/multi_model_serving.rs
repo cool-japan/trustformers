@@ -780,13 +780,13 @@ impl MultiModelServer {
 
         match strategy {
             RoutingStrategy::ContentBased { rules } => {
-                self.select_content_based(request, &rules, state).await
+                self.select_content_based(request, rules, state).await
             },
             RoutingStrategy::PerformanceBased { metrics, weights } => {
-                self.select_performance_based(&metrics, &weights, state).await
+                self.select_performance_based(metrics, weights, state).await
             },
             RoutingStrategy::CapabilityBased { capability_map } => {
-                self.select_capability_based(request, &capability_map, state).await
+                self.select_capability_based(request, capability_map, state).await
             },
             RoutingStrategy::ResourceBased {
                 cpu_threshold,
@@ -799,17 +799,17 @@ impl MultiModelServer {
             RoutingStrategy::UserBased {
                 user_model_map,
                 default_model,
-            } => self.select_user_based(request, &user_model_map, &default_model, state).await,
+            } => self.select_user_based(request, user_model_map, default_model, state).await,
             RoutingStrategy::SizeBased { size_thresholds } => {
-                self.select_size_based(request, &size_thresholds, state).await
+                self.select_size_based(request, size_thresholds, state).await
             },
             RoutingStrategy::RoundRobin => self.select_round_robin(state).await,
             RoutingStrategy::WeightedRoundRobin { weights } => {
-                self.select_weighted_round_robin(&weights, state).await
+                self.select_weighted_round_robin(weights, state).await
             },
             RoutingStrategy::Random => self.select_random(state).await,
             RoutingStrategy::Custom { name, parameters } => {
-                self.select_custom(request, &name, &parameters, state).await
+                self.select_custom(request, name, parameters, state).await
             },
         }
     }
@@ -884,11 +884,10 @@ impl MultiModelServer {
         sorted_rules.sort_by(|a, b| b.priority.cmp(&a.priority));
 
         for rule in sorted_rules {
-            if self.matches_condition(request, &rule.condition).await {
-                if state.models.contains_key(&rule.target_model) {
+            if self.matches_condition(request, &rule.condition).await
+                && state.models.contains_key(&rule.target_model) {
                     return Ok(rule.target_model.clone());
                 }
-            }
         }
 
         // Fallback
@@ -930,11 +929,9 @@ impl MultiModelServer {
         for (model_id, capabilities) in capability_map {
             if state.models.contains_key(model_id)
                 && matches!(state.models[model_id].status, ModelStatus::Available)
-            {
-                if required_capabilities.iter().all(|req| capabilities.contains(req)) {
+                && required_capabilities.iter().all(|req| capabilities.contains(req)) {
                     return Ok(model_id.clone());
                 }
-            }
         }
 
         self.get_fallback_model(state).await
@@ -997,8 +994,8 @@ impl MultiModelServer {
         let request_size = request.input_text.len();
 
         for threshold in size_thresholds {
-            if request_size <= threshold.max_size {
-                if state.models.contains_key(&threshold.target_model)
+            if request_size <= threshold.max_size
+                && state.models.contains_key(&threshold.target_model)
                     && matches!(
                         state.models[&threshold.target_model].status,
                         ModelStatus::Available
@@ -1006,7 +1003,6 @@ impl MultiModelServer {
                 {
                     return Ok(threshold.target_model.clone());
                 }
-            }
         }
 
         self.get_fallback_model(state).await
@@ -1390,7 +1386,7 @@ impl MultiModelServer {
             if !success {
                 perf_stats.error_rate = (perf_stats.error_rate * 0.9) + 0.1;
             } else {
-                perf_stats.error_rate = perf_stats.error_rate * 0.9;
+                perf_stats.error_rate *= 0.9;
             }
 
             // Update accuracy if quality score provided
@@ -1473,7 +1469,7 @@ impl MultiModelServer {
 
                 // Determine winner based on primary success metric (use first one)
                 let primary_metric =
-                    experiment.success_metrics.get(0).unwrap_or(&SuccessMetric::Accuracy);
+                    experiment.success_metrics.first().unwrap_or(&SuccessMetric::Accuracy);
                 let is_better = match primary_metric {
                     SuccessMetric::Accuracy => {
                         let variant_acc = variant_perf.accuracy.unwrap_or(0.0);

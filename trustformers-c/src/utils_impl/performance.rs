@@ -329,7 +329,7 @@ pub mod monitoring {
         /// Start timing an operation by name
         pub fn start_timer(&self, name: &str) {
             let mut timers = self.timers.lock().unwrap();
-            let timer = timers.entry(name.to_string()).or_insert_with(PerformanceTimer::new);
+            let timer = timers.entry(name.to_string()).or_default();
             timer.start();
         }
 
@@ -421,7 +421,7 @@ pub mod monitoring {
         fn drop(&mut self) {
             let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
             let mut timers = self.monitor.timers.lock().unwrap();
-            let timer = timers.entry(self.name.clone()).or_insert_with(PerformanceTimer::new);
+            let timer = timers.entry(self.name.clone()).or_default();
             timer.add_measurement(elapsed);
         }
     }

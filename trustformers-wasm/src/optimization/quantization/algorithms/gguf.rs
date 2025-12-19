@@ -188,7 +188,7 @@ impl GGUFBlockQuantizer {
     /// Quantize data using GGUF format
     pub fn quantize(&self, data: &[f32]) -> Result<GGUFQuantizedData, JsValue> {
         let block_size = self.config.quant_type.block_size();
-        let num_blocks = (data.len() + block_size - 1) / block_size;
+        let num_blocks = data.len().div_ceil(block_size);
 
         match self.config.quant_type {
             GGUFQuantType::Q4_0 => self.quantize_q4_0(data, block_size, num_blocks),
@@ -435,7 +435,7 @@ impl GGUFBlockQuantizer {
     fn quantize_qk(&self, data: &[f32], _bits: u32) -> Result<GGUFQuantizedData, JsValue> {
         // K-means quantization with superblocks (simplified implementation)
         // Full implementation would use actual K-means clustering
-        self.quantize_q4_0(data, 256, (data.len() + 255) / 256)
+        self.quantize_q4_0(data, 256, data.len().div_ceil(256))
     }
 
     /// Quantize to F16

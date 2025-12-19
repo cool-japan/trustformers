@@ -580,7 +580,7 @@ impl DebugUtilities {
         if profiling_data
             .memory_snapshots
             .last()
-            .map_or(false, |s| s.fragmentation_ratio > 0.2)
+            .is_some_and(|s| s.fragmentation_ratio > 0.2)
         {
             recommendations.push_str("- Implement memory pooling to reduce fragmentation\n");
         }

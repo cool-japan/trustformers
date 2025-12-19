@@ -518,6 +518,12 @@ struct ModelPerformanceInfo {
     last_updated: DateTime<Utc>,
 }
 
+impl Default for PredictionModelRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PredictionModelRegistry {
     /// Create new model registry
     pub fn new() -> Self {
@@ -534,7 +540,7 @@ impl PredictionModelRegistry {
         model: Box<dyn PerformancePredictor>,
         weight: f32,
     ) -> Result<()> {
-        if weight < 0.0 || weight > 1.0 {
+        if !(0.0..=1.0).contains(&weight) {
             return Err(anyhow!("Model weight must be between 0.0 and 1.0"));
         }
 
@@ -1004,6 +1010,12 @@ pub struct UncertaintyInfo {
     pub method_contributions: HashMap<String, f32>,
 }
 
+impl Default for UncertaintyEstimator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UncertaintyEstimator {
     /// Create new uncertainty estimator
     pub fn new() -> Self {
@@ -1112,6 +1124,12 @@ pub struct PredictionPerformanceTracker {
     batch_predictions: u64,
     /// Last updated
     last_updated: DateTime<Utc>,
+}
+
+impl Default for PredictionPerformanceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PredictionPerformanceTracker {

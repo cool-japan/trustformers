@@ -626,7 +626,7 @@ impl AuditLogger {
         }
 
         // Send event for async processing
-        if let Err(_) = self.event_sender.send(event) {
+        if self.event_sender.send(event).is_err() {
             return Err(AuditError::WriteError(
                 "Failed to send event to background processor".to_string(),
             ));

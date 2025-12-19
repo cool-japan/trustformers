@@ -272,7 +272,7 @@ impl GANOptimizer {
         // Power iteration method for spectral norm (largest singular value)
         let sqrt_len = (len as f32).sqrt() as usize;
         let rows = sqrt_len.max(1);
-        let cols = (len + rows - 1) / rows; // Ceiling division
+        let cols = len.div_ceil(rows); // Ceiling division
 
         // Initialize random vector
         let mut v: Vec<f32> = (0..cols).map(|i| ((i % 7) as f32) / 7.0 - 0.5).collect();

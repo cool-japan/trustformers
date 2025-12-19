@@ -121,7 +121,7 @@ impl ModelRegistry {
             let mut by_name_version = self.by_name_version.write().unwrap();
             by_name_version
                 .entry(metadata.name.clone())
-                .or_insert_with(BTreeMap::new)
+                .or_default()
                 .insert(metadata.version.clone(), model_id.to_string());
         }
 
@@ -313,7 +313,7 @@ impl ModelRegistry {
             .unwrap()
             .values()
             .filter(|m| {
-                tags.iter().all(|(key, value)| m.tags.get(key).map_or(false, |v| v == value))
+                tags.iter().all(|(key, value)| m.tags.get(key) == Some(value))
             })
             .cloned()
             .collect()
@@ -330,7 +330,7 @@ impl ModelRegistry {
             let mut by_name_version = self.by_name_version.write().unwrap();
             by_name_version
                 .entry(metadata.name.clone())
-                .or_insert_with(BTreeMap::new)
+                .or_default()
                 .insert(metadata.version.clone(), metadata.id.clone());
         }
 

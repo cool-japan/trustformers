@@ -190,7 +190,7 @@ impl CompressedGradient {
     /// Block-wise compression with local optimization
     fn compress_blockwise(gradient: &[f32], config: &MicroAdamConfig) -> Self {
         let block_size = config.min_block_size;
-        let num_blocks = (gradient.len() + block_size - 1) / block_size;
+        let num_blocks = gradient.len().div_ceil(block_size);
         let target_elements_per_block =
             ((block_size as f32 * config.compression_ratio) as usize).max(1);
 

@@ -504,6 +504,12 @@ pub struct ImplementationExecutor;
 #[derive(Debug, Clone)]
 pub struct DistributedSystemMonitor;
 
+impl Default for AdvancedPerformanceAnalytics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdvancedPerformanceAnalytics {
     /// Create new advanced performance analytics engine
     pub fn new() -> Self {
@@ -743,7 +749,7 @@ impl AIPerformancePredictor {
                     trend_smoothing: 0.3,
                     seasonal_smoothing: 0.1,
                 },
-                forecast_horizon: Duration::from_secs(1 * 3600),
+                forecast_horizon: Duration::from_secs(3600),
             },
             load_predictor: LoadPredictor {
                 load_patterns: Arc::new(DashMap::new()),

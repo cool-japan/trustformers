@@ -75,7 +75,7 @@ pub fn quantize_int8(tensor: &Tensor, config: &BitsAndBytesConfig) -> Result<Qua
     let num_elements = flattened.shape()[0];
 
     // Calculate block-wise statistics
-    let num_blocks = (num_elements + config.block_size - 1) / config.block_size;
+    let num_blocks = num_elements.div_ceil(config.block_size);
     let mut scales = Vec::with_capacity(num_blocks);
     let mut zero_points = Vec::with_capacity(num_blocks);
     let mut quantized_blocks = Vec::new();
@@ -156,7 +156,7 @@ pub fn quantize_4bit(tensor: &Tensor, config: &BitsAndBytesConfig) -> Result<Qua
     let total_elements = tensor.shape().iter().product::<usize>();
     let flattened = tensor.reshape(&[total_elements])?;
     let num_elements = flattened.shape()[0];
-    let num_blocks = (num_elements + block_size - 1) / block_size;
+    let num_blocks = num_elements.div_ceil(block_size);
 
     let mut scales = Vec::with_capacity(num_blocks);
     let mut quantized_blocks = Vec::new();
@@ -256,7 +256,7 @@ fn dequantize_int8(state: &QuantState) -> Result<Tensor> {
 
     // Get block size from state
     let block_size = state.block_sizes.first().copied().unwrap_or(256);
-    let num_blocks = (num_elements + block_size - 1) / block_size;
+    let num_blocks = num_elements.div_ceil(block_size);
 
     let mut dequantized_blocks = Vec::new();
 
@@ -295,7 +295,7 @@ fn dequantize_4bit(state: &QuantState) -> Result<Tensor> {
     let original_shape = &state.original_shape;
     let block_size = state.block_sizes.first().copied().unwrap_or(128);
     let num_elements = unpacked.shape()[0];
-    let num_blocks = (num_elements + block_size - 1) / block_size;
+    let num_blocks = num_elements.div_ceil(block_size);
 
     let mut dequantized_blocks = Vec::new();
 
@@ -364,7 +364,7 @@ fn find_nearest_nf4_level(value: f32, levels: &[f32]) -> usize {
 /// Pack 4-bit values into bytes
 fn pack_4bit_tensor(tensor: &Tensor) -> Result<Tensor> {
     let data = tensor.to_vec_f32()?;
-    let mut packed = Vec::with_capacity((data.len() + 1) / 2);
+    let mut packed = Vec::with_capacity(data.len().div_ceil(2));
 
     for i in (0..data.len()).step_by(2) {
         let low = data[i] as u8 & 0x0F;

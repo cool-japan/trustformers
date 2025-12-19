@@ -108,6 +108,12 @@ pub struct DefaultBatchExecutor {
     model: Option<Arc<dyn BatchModel>>,
 }
 
+impl Default for DefaultBatchExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefaultBatchExecutor {
     pub fn new() -> Self {
         Self { model: None }

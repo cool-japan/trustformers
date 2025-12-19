@@ -271,7 +271,7 @@ impl RingAttention {
 
     /// Partition the sequence into blocks for ring processing
     pub fn partition_sequence(&mut self, sequence_length: usize) -> Result<Vec<AttentionBlock>> {
-        let num_blocks = (sequence_length + self.config.block_size - 1) / self.config.block_size;
+        let num_blocks = sequence_length.div_ceil(self.config.block_size);
         let mut blocks = Vec::new();
 
         for block_id in 0..num_blocks {

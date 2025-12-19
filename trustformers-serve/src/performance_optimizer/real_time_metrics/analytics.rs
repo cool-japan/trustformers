@@ -2547,7 +2547,7 @@ impl StatisticalAnalyzer {
 
             // Extract resource usage (convert f32 to f64)
             values.push(metrics.metrics.resource_usage.cpu_usage as f64);
-            values.push(metrics.metrics.resource_usage.memory_usage as f64);
+            values.push(metrics.metrics.resource_usage.memory_usage);
             values.push(metrics.metrics.resource_usage.io_usage as f64);
             values.push(metrics.metrics.resource_usage.network_usage as f64);
 

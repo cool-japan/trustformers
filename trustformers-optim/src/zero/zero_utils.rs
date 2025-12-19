@@ -302,7 +302,7 @@ pub fn partition_parameters(
         let total_elements = shape.iter().product::<usize>();
 
         // Calculate partition size
-        let elements_per_rank = (total_elements + world_size - 1) / world_size;
+        let elements_per_rank = total_elements.div_ceil(world_size);
         let start_idx = rank * elements_per_rank;
         let end_idx = ((rank + 1) * elements_per_rank).min(total_elements);
 
@@ -366,7 +366,7 @@ pub fn partition_gradients(
         let total_elements = shape.iter().product::<usize>();
 
         // Calculate partition size
-        let elements_per_rank = (total_elements + world_size - 1) / world_size;
+        let elements_per_rank = total_elements.div_ceil(world_size);
         let start_idx = rank * elements_per_rank;
         let end_idx = ((rank + 1) * elements_per_rank).min(total_elements);
 

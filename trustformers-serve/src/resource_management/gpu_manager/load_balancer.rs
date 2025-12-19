@@ -376,6 +376,12 @@ pub enum LoadBalancingEvent {
 // LOAD BALANCER IMPLEMENTATION
 // ================================================================================================
 
+impl Default for GpuLoadBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GpuLoadBalancer {
     /// Create a new GPU load balancer with default configuration
     ///
@@ -956,7 +962,7 @@ impl GpuLoadBalancer {
                 },
                 _ => {
                     // For other strategies, give equal scores
-                    devices.iter().map(|(id, _)| (*id, 1.0)).collect::<HashMap<_, _>>()
+                    devices.keys().map(|id| (*id, 1.0)).collect::<HashMap<_, _>>()
                 },
             };
 

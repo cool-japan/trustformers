@@ -27,6 +27,12 @@ pub struct PreloadService {
     prediction_model: Option<Box<dyn PredictionModel>>,
 }
 
+impl Default for PreloadService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PreloadService {
     pub fn new() -> Self {
         Self {

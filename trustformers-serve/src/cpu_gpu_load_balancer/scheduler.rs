@@ -388,7 +388,7 @@ impl TaskQueueManager {
         let priority = task.priority.clone();
         self.priority_queues
             .entry(priority)
-            .or_insert_with(VecDeque::new)
+            .or_default()
             .push_back(task);
 
         self.total_tasks += 1;

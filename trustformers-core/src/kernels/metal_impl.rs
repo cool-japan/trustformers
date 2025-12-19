@@ -385,8 +385,8 @@ impl MetalImpl {
         // Use 2D grid: (N columns, M rows) for output matrix
         let thread_group_size = metal::MTLSize::new(16, 16, 1); // 16x16 thread block
         let thread_groups = metal::MTLSize::new(
-            ((b_cols + 15) / 16) as u64, // Number of column blocks
-            ((a_rows + 15) / 16) as u64, // Number of row blocks
+            b_cols.div_ceil(16) as u64, // Number of column blocks
+            a_rows.div_ceil(16) as u64, // Number of row blocks
             1,
         );
 
@@ -455,7 +455,7 @@ impl MetalImpl {
         );
 
         let thread_group_size = metal::MTLSize::new(256, 1, 1);
-        let thread_groups = metal::MTLSize::new(((size + 255) / 256) as u64, 1, 1);
+        let thread_groups = metal::MTLSize::new(size.div_ceil(256) as u64, 1, 1);
 
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
         encoder.end_encoding();
@@ -514,7 +514,7 @@ impl MetalImpl {
         );
 
         let thread_group_size = metal::MTLSize::new(256, 1, 1);
-        let thread_groups = metal::MTLSize::new(((size + 255) / 256) as u64, 1, 1);
+        let thread_groups = metal::MTLSize::new(size.div_ceil(256) as u64, 1, 1);
 
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
         encoder.end_encoding();
@@ -671,8 +671,8 @@ impl MetalImpl {
         // 3D grid: (dim_v, seq_q, batch)
         let thread_group_size = metal::MTLSize::new(8, 8, 1); // 8x8x1 thread block
         let thread_groups = metal::MTLSize::new(
-            ((dim_v + 7) / 8) as u64,     // dim_v blocks
-            ((seq_len_q + 7) / 8) as u64, // seq_q blocks
+            dim_v.div_ceil(8) as u64,     // dim_v blocks
+            seq_len_q.div_ceil(8) as u64, // seq_q blocks
             batch_size as u64,            // batch blocks
         );
 

@@ -336,6 +336,12 @@ pub struct ErrorContext {
     pub additional_context: HashMap<String, serde_json::Value>,
 }
 
+impl Default for ErrorContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ErrorContext {
     pub fn new() -> Self {
         Self {

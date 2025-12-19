@@ -541,6 +541,12 @@ impl Default for EffectivenessAnalyzer {
 /// Throughput-based effectiveness calculator
 pub struct ThroughputEffectivenessCalculator;
 
+impl Default for ThroughputEffectivenessCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThroughputEffectivenessCalculator {
     pub fn new() -> Self {
         Self
@@ -605,6 +611,12 @@ impl EffectivenessCalculator for ThroughputEffectivenessCalculator {
 
 /// Latency-based effectiveness calculator
 pub struct LatencyEffectivenessCalculator;
+
+impl Default for LatencyEffectivenessCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl LatencyEffectivenessCalculator {
     pub fn new() -> Self {
@@ -675,6 +687,12 @@ impl EffectivenessCalculator for LatencyEffectivenessCalculator {
 pub struct CompositeEffectivenessCalculator {
     throughput_weight: f32,
     latency_weight: f32,
+}
+
+impl Default for CompositeEffectivenessCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CompositeEffectivenessCalculator {
@@ -774,6 +792,12 @@ pub struct ResourceBasedCostCalculator {
     io_cost_per_gb: f64,
 }
 
+impl Default for ResourceBasedCostCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceBasedCostCalculator {
     pub fn new() -> Self {
         Self {
@@ -839,6 +863,12 @@ pub struct TimeBasedCostCalculator {
     hourly_rate: f64,
 }
 
+impl Default for TimeBasedCostCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeBasedCostCalculator {
     pub fn new() -> Self {
         Self {
@@ -879,6 +909,12 @@ impl CostCalculator for TimeBasedCostCalculator {
 pub struct ComplexityBasedCostCalculator {
     base_cost: f64,
     complexity_factors: HashMap<String, f64>,
+}
+
+impl Default for ComplexityBasedCostCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ComplexityBasedCostCalculator {

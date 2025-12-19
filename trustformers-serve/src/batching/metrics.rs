@@ -18,6 +18,12 @@ pub struct MetricsCollector {
     history_window: Duration,
 }
 
+impl Default for MetricsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MetricsCollector {
     pub fn new() -> Self {
         Self {
@@ -182,6 +188,12 @@ pub struct LatencyTracker {
     window_size: usize,
 }
 
+impl Default for LatencyTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LatencyTracker {
     pub fn new() -> Self {
         Self {
@@ -228,6 +240,12 @@ impl LatencyTracker {
 pub struct ThroughputMonitor {
     request_times: Arc<RwLock<VecDeque<Instant>>>,
     window: Duration,
+}
+
+impl Default for ThroughputMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ThroughputMonitor {
@@ -292,6 +310,12 @@ struct BatchPerformance {
     avg_latency: f32,
     gpu_utilization: f32,
     timestamp: Instant,
+}
+
+impl Default for BatchSizeOptimizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BatchSizeOptimizer {
@@ -376,6 +400,12 @@ impl BatchSizeOptimizer {
 pub struct MemoryTracker {
     allocations: Arc<RwLock<HashMap<uuid::Uuid, usize>>>,
     peak_usage: Arc<RwLock<usize>>,
+}
+
+impl Default for MemoryTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MemoryTracker {

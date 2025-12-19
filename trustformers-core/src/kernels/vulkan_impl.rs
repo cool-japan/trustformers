@@ -426,8 +426,8 @@ impl VulkanImpl {
             unsafe {
                 command_buffer_builder
                     .dispatch([
-                        ((n + 15) / 16) as u32, // Workgroup size of 16x16
-                        ((m + 15) / 16) as u32,
+                        n.div_ceil(16) as u32, // Workgroup size of 16x16
+                        m.div_ceil(16) as u32,
                         1,
                     ])
                     .map_err(|e| {

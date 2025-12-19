@@ -808,7 +808,7 @@ impl AlertManager {
                     rule_id: rule.rule_id.clone(),
                     test_id: metrics.test_id.clone(),
                     alert_type: AlertType::Threshold,
-                    severity: rule.severity.clone(),
+                    severity: rule.severity,
                     status: AlertStatus::Active,
                     title: format!("Alert: {}", rule.rule_name),
                     description: rule.description.clone(),
@@ -995,7 +995,7 @@ impl AlertStatistics {
 
         {
             let mut by_severity = self.alerts_by_severity.write().await;
-            *by_severity.entry(alert.severity.clone()).or_insert(0) += 1;
+            *by_severity.entry(alert.severity).or_insert(0) += 1;
         }
 
         {
@@ -1007,13 +1007,19 @@ impl AlertStatistics {
     async fn record_alert_resolved(&self, alert: &ActiveAlert, resolution_time: Duration) {
         let mut avg_times = self.average_resolution_time.write().await;
         // Simplified average calculation - would implement proper statistical tracking
-        avg_times.insert(alert.severity.clone(), resolution_time);
+        avg_times.insert(alert.severity, resolution_time);
     }
 }
 
 // Additional implementations for other components would follow similar patterns...
 
 // TODO: Stub implementations to satisfy compiler - full implementations needed
+impl Default for AlertStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AlertStore {
     pub fn new() -> Self {
         Self {
@@ -1057,6 +1063,12 @@ impl AlertStore {
     }
 }
 
+impl Default for SuppressionManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SuppressionManager {
     pub fn new() -> Self {
         Self {
@@ -1075,6 +1087,12 @@ impl SuppressionManager {
     pub async fn is_suppressed(&self, _alert: &ActiveAlert) -> Result<bool, AlertError> {
         // Stub: always return false (not suppressed)
         Ok(false)
+    }
+}
+
+impl Default for NotificationDispatcher {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1104,6 +1122,12 @@ impl NotificationDispatcher {
     ) -> Result<(), AlertError> {
         // Stub: no-op for now
         Ok(())
+    }
+}
+
+impl Default for EscalationManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1139,6 +1163,12 @@ impl EscalationManager {
     }
 }
 
+impl Default for AlertCorrelator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AlertCorrelator {
     pub fn new() -> Self {
         Self {
@@ -1168,6 +1198,12 @@ impl AlertCorrelator {
     }
 }
 
+impl Default for ThresholdMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThresholdMonitor {
     pub fn new() -> Self {
         Self {
@@ -1194,6 +1230,12 @@ impl ThresholdMonitor {
     ) -> Result<bool, AlertError> {
         // Stub: always return false (condition not met)
         Ok(false)
+    }
+}
+
+impl Default for RecoveryManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

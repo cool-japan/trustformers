@@ -66,7 +66,7 @@ fn average_pool_sequence(tensor: Tensor, reduction_factor: usize) -> Result<Tens
     let seq_len = shape[1];
     let hidden_size = shape[2];
 
-    let new_seq_len = (seq_len + reduction_factor - 1) / reduction_factor;
+    let new_seq_len = seq_len.div_ceil(reduction_factor);
     let mut pooled_data = Vec::new();
 
     // Simplified average pooling implementation
@@ -103,7 +103,7 @@ fn max_pool_sequence(tensor: Tensor, reduction_factor: usize) -> Result<Tensor> 
     let seq_len = shape[1];
     let hidden_size = shape[2];
 
-    let new_seq_len = (seq_len + reduction_factor - 1) / reduction_factor;
+    let new_seq_len = seq_len.div_ceil(reduction_factor);
 
     // Simplified max pooling implementation
     let pooled_data = vec![0.0f32; batch_size * new_seq_len * hidden_size];
@@ -196,7 +196,7 @@ pub fn compute_hierarchical_positions(
 
     for level in 0..num_levels {
         let level_reduction = reduction_factor.pow(level as u32);
-        let level_seq_len = (seq_len + level_reduction - 1) / level_reduction;
+        let level_seq_len = seq_len.div_ceil(level_reduction);
 
         let level_positions: Vec<usize> = (0..level_seq_len).map(|i| i * level_reduction).collect();
 

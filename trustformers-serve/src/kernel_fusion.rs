@@ -613,14 +613,13 @@ impl KernelFusionService {
         // Check memory compatibility
         for kernel in kernels {
             for other in kernels {
-                if kernel.id != other.id {
-                    if !self.are_memory_patterns_compatible(
+                if kernel.id != other.id
+                    && !self.are_memory_patterns_compatible(
                         &kernel.memory_pattern,
                         &other.memory_pattern,
                     ) {
                         return Ok(false);
                     }
-                }
             }
         }
 

@@ -343,6 +343,12 @@ impl Default for EvaluatorStats {
     }
 }
 
+impl Default for SimpleThresholdEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SimpleThresholdEvaluator {
     /// Create a new simple threshold evaluator
     pub fn new() -> Self {
@@ -510,6 +516,12 @@ pub struct StatisticalDataPoint {
 
     /// Quality score
     pub quality: f32,
+}
+
+impl Default for StatisticalThresholdEvaluator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StatisticalThresholdEvaluator {
@@ -1364,6 +1376,12 @@ impl AdaptiveThresholdEvaluator {
     }
 }
 
+impl Default for AdaptationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdaptationEngine {
     /// Create a new adaptation engine
     pub fn new() -> Self {
@@ -1376,6 +1394,12 @@ impl AdaptationEngine {
     }
 }
 
+impl Default for PatternDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PatternDetector {
     /// Create a new pattern detector
     pub fn new() -> Self {
@@ -1383,6 +1407,12 @@ impl PatternDetector {
             patterns: HashMap::new(),
             pattern_history: VecDeque::new(),
         }
+    }
+}
+
+impl Default for SeasonalAnalyzer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -1754,13 +1784,12 @@ impl AlertManager {
                 let start_time = Instant::now();
 
                 // Apply suppression
-                if enable_suppression {
-                    if suppressor.should_suppress(&alert).await {
+                if enable_suppression
+                    && suppressor.should_suppress(&alert).await {
                         suppressor.suppress_alert(&mut alert).await;
                         stats.alerts_suppressed.fetch_add(1, Ordering::Relaxed);
                         continue;
                     }
-                }
 
                 // Apply correlation
                 if enable_correlation {
@@ -2066,6 +2095,12 @@ pub struct SuppressionConfig {
     pub enable_adaptive_suppression: bool,
 }
 
+impl Default for AlertSuppressor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AlertSuppressor {
     /// Create a new alert suppressor
     pub fn new() -> Self {
@@ -2090,14 +2125,13 @@ impl AlertSuppressor {
                     continue;
                 }
 
-                if self.matches_criteria(&rule.criteria, alert) {
-                    if matches!(rule.action, SuppressionAction::Suppress) {
+                if self.matches_criteria(&rule.criteria, alert)
+                    && matches!(rule.action, SuppressionAction::Suppress) {
                         self.stats.total_suppressed.fetch_add(1, Ordering::Relaxed);
                         self.update_rule_stats(&rule.id);
                         suppressed = true;
                         break;
                     }
-                }
             }
 
             suppressed
@@ -2113,12 +2147,11 @@ impl AlertSuppressor {
             config.enable_deduplication
         };
 
-        if enable_deduplication {
-            if self.is_duplicate(alert).await {
+        if enable_deduplication
+            && self.is_duplicate(alert).await {
                 self.stats.total_suppressed.fetch_add(1, Ordering::Relaxed);
                 return true;
             }
-        }
 
         false
     }
@@ -2157,11 +2190,10 @@ impl AlertSuppressor {
         }
 
         // Check severity levels
-        if !criteria.severity_levels.is_empty() {
-            if !criteria.severity_levels.contains(&alert.severity) {
+        if !criteria.severity_levels.is_empty()
+            && !criteria.severity_levels.contains(&alert.severity) {
                 return false;
             }
-        }
 
         // Check threshold patterns
         if !criteria.threshold_patterns.is_empty() {
@@ -2501,6 +2533,12 @@ pub struct CorrelationConfig {
 
     /// Maximum correlations per alert
     pub max_correlations_per_alert: usize,
+}
+
+impl Default for AlertCorrelator {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AlertCorrelator {
@@ -3819,6 +3857,12 @@ impl Default for ProcessorStats {
     }
 }
 
+impl Default for DefaultAlertProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefaultAlertProcessor {
     pub fn new() -> Self {
         Self {
@@ -3913,6 +3957,12 @@ pub struct PerformanceProcessorConfig {
     pub priority: u8,
     pub performance_threshold: f64,
     pub enable_auto_scaling_recommendations: bool,
+}
+
+impl Default for PerformanceAlertProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PerformanceAlertProcessor {
@@ -4038,6 +4088,12 @@ pub struct ResourceProcessorConfig {
     pub enable_resource_optimization: bool,
 }
 
+impl Default for ResourceAlertProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceAlertProcessor {
     pub fn new() -> Self {
         Self {
@@ -4142,6 +4198,12 @@ pub struct CriticalProcessorConfig {
     pub priority: u8,
     pub enable_immediate_escalation: bool,
     pub escalation_channels: Vec<String>,
+}
+
+impl Default for CriticalAlertProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CriticalAlertProcessor {
@@ -4266,6 +4328,12 @@ pub struct ChannelStats {
     pub last_send_time: Option<Instant>,
 }
 
+impl Default for LogNotificationChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LogNotificationChannel {
     pub fn new() -> Self {
         Self {
@@ -4358,6 +4426,12 @@ pub struct EmailChannelConfig {
     pub from_address: String,
     pub use_tls: bool,
     pub max_recipients: usize,
+}
+
+impl Default for EmailNotificationChannel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EmailNotificationChannel {
@@ -4453,6 +4527,12 @@ pub struct WebhookChannelConfig {
     pub custom_headers: HashMap<String, String>,
 }
 
+impl Default for WebhookNotificationChannel {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WebhookNotificationChannel {
     pub fn new() -> Self {
         Self {
@@ -4531,6 +4611,12 @@ pub struct SlackChannelConfig {
     pub username: String,
     pub icon_emoji: String,
     pub timeout_seconds: u64,
+}
+
+impl Default for SlackNotificationChannel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SlackNotificationChannel {
@@ -4872,12 +4958,11 @@ impl ThresholdMonitor {
                                     .await?;
 
                                 // Apply suppression if enabled
-                                if self.config.read().unwrap().enable_alert_suppression {
-                                    if self.alert_suppressor.should_suppress(&alert).await {
+                                if self.config.read().unwrap().enable_alert_suppression
+                                    && self.alert_suppressor.should_suppress(&alert).await {
                                         self.alert_suppressor.suppress_alert(&mut alert).await;
                                         continue;
                                     }
-                                }
 
                                 // Apply correlation if enabled
                                 if self.config.read().unwrap().enable_alert_correlation {
@@ -5251,7 +5336,7 @@ impl ThresholdMonitor {
 
         // Update alert counts by severity
         for alert in alerts {
-            *state.alert_counts.entry(alert.severity.clone()).or_insert(0) += 1;
+            *state.alert_counts.entry(alert.severity).or_insert(0) += 1;
         }
 
         // Update active alerts
@@ -5383,6 +5468,12 @@ pub struct AlgorithmStats {
     pub success_rate: f32,
 }
 
+impl Default for StatisticalAdaptationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatisticalAdaptationAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -5475,6 +5566,12 @@ pub struct MLModelState {
     pub bias: f64,
     pub training_iterations: u64,
     pub model_accuracy: f32,
+}
+
+impl Default for MachineLearningAdaptationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MachineLearningAdaptationAlgorithm {
@@ -5679,6 +5776,12 @@ pub enum SeasonalPatternType {
     Weekly,
     Monthly,
     Custom(Duration),
+}
+
+impl Default for TrendAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TrendAnalysisAlgorithm {
@@ -6002,6 +6105,12 @@ pub struct ThroughputAnalysis {
     pub average_throughput: f32,
     pub throughput_variance: f32,
     pub bottleneck_indicators: Vec<String>,
+}
+
+impl Default for PerformanceAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PerformanceAnalyzer {

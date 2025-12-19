@@ -397,20 +397,18 @@ impl VersionMigrator {
                     let path = entry.path();
                     if path.is_dir() {
                         stack.push(path);
-                    } else {
-                        if let Some(ext) = path.extension() {
-                            if ext == "toml" || ext == "json" {
-                                // Check if it's a config file
-                                if path.file_name().unwrap().to_str().unwrap().contains("config")
-                                    || path
-                                        .file_name()
-                                        .unwrap()
-                                        .to_str()
-                                        .unwrap()
-                                        .contains("server")
-                                {
-                                    config_files.push(path);
-                                }
+                    } else if let Some(ext) = path.extension() {
+                        if ext == "toml" || ext == "json" {
+                            // Check if it's a config file
+                            if path.file_name().unwrap().to_str().unwrap().contains("config")
+                                || path
+                                    .file_name()
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                                    .contains("server")
+                            {
+                                config_files.push(path);
                             }
                         }
                     }
@@ -672,6 +670,12 @@ impl VersionMigrator {
 pub struct MigrationGraph {
     nodes: Vec<String>,
     edges: HashMap<String, Vec<String>>,
+}
+
+impl Default for MigrationGraph {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MigrationGraph {

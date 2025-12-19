@@ -657,8 +657,7 @@ impl TrainingPipelineOrchestrator {
             // Create a slightly modified version
             let mut augmented_point = original_point.clone();
             augmented_point.throughput *= 1.0 + (thread_rng().random::<f64>() - 0.5) * 0.1; // ±5% variation
-            augmented_point.timestamp = augmented_point.timestamp
-                + chrono::Duration::seconds(thread_rng().gen_range(0..60));
+            augmented_point.timestamp += chrono::Duration::seconds(thread_rng().gen_range(0..60));
 
             augmented_data.push(augmented_point);
         }
@@ -996,7 +995,7 @@ impl TrainingMonitor {
 
             // Update average completion time
             let total_time = self.statistics.average_completion_time.as_secs()
-                * (self.statistics.total_runs_monitored - 1) as u64
+                * ((self.statistics.total_runs_monitored - 1))
                 + completion_duration.as_secs();
             self.statistics.average_completion_time =
                 Duration::from_secs(total_time / self.statistics.total_runs_monitored);
