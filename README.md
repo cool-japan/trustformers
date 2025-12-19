@@ -1,12 +1,12 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha.1-blue.svg)](https://github.com/trustformers/trustformers)
+[![Version](https://img.shields.io/badge/version-0.1.0--alpha.2-blue.svg)](https://github.com/trustformers/trustformers)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **📢 Project Status**: TrustformeRS is production-ready for alpha.1 release with 21+ transformer architectures, comprehensive training infrastructure, and deployment support across web, server, Python, mobile (iOS/Android), and C FFI.
+> **📢 Project Status**: TrustformeRS 0.1.0-alpha.2 brings major performance improvements with 17x CPU BLAS acceleration and comprehensive Metal GPU support. Production-ready with 21+ transformer architectures, full test coverage, and multi-platform deployment (web, server, Python, mobile, C FFI).
 
 ## 🚀 Why TrustformeRS?
 
