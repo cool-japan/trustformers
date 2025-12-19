@@ -7,7 +7,7 @@ The project provides a comprehensive ecosystem for transformer model development
 with support for 21+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.1.0-alpha.1
+- **Current Version:** 0.1.0-alpha.2
 - **Status:** Production-Ready for Alpha Release
 - **License:** Apache 2.0 / MIT dual license
 - **Repository:** https://github.com/cool-japan/trustformers

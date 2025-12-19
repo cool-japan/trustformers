@@ -351,7 +351,7 @@ mod tests {
         let result = backend.matmul_f32(&a, &b, 2, 2, 2)?;
 
         // Expected: [[19, 22], [43, 50]]
-        let expected = vec![19.0, 22.0, 43.0, 50.0];
+        let expected = [19.0, 22.0, 43.0, 50.0];
 
         for (i, (&res, &exp)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(

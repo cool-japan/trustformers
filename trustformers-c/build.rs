@@ -867,15 +867,13 @@ fn parse_parameters(params_str: &str) -> Vec<Parameter> {
 
 /// Extract C function signatures from compiled binary (alternative approach)
 fn extract_c_function_signatures(_src_dir: &Path) -> Vec<FunctionSignature> {
-    let signatures = Vec::new();
-
     // This is a simplified version - in practice, you'd use more sophisticated tools
     // like nm, objdump, or parse debug symbols
 
     // For now, we'll rely on the scanning approach above
     // Note: Using source-based signature extraction (silent mode)
 
-    signatures
+    Vec::new()
 }
 
 /// Check ABI compatibility between versions

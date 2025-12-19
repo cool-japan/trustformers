@@ -2,7 +2,7 @@
 # This file defines the linting rules for the entire workspace
 
 # Set the MSRV (Minimum Supported Rust Version)
-msrv = "1.70"
+msrv = "1.75"
 
 # Maximum cognitive complexity allowed per function
 cognitive-complexity-threshold = 30

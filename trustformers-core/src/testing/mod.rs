@@ -51,6 +51,7 @@ macro_rules! test_with_memory_tracking {
         let detector = MemoryLeakDetector::new();
         let _monitoring = detector.start_monitoring();
 
+        #[allow(clippy::redundant_closure_call)]
         let result = (|| $body)();
 
         let report = detector.generate_report($test_name);

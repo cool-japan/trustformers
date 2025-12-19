@@ -1009,8 +1009,10 @@ mod tests {
         let data = vec![1.0, 2.0, 3.0, 4.0];
         let tensor = Tensor::from_vec(data, &[4]).unwrap();
 
-        let mut config = VisualizationConfig::default();
-        config.output_format = OutputFormat::JSON;
+        let config = VisualizationConfig {
+            output_format: OutputFormat::JSON,
+            ..Default::default()
+        };
         let visualizer = TensorVisualizer::with_config(config);
 
         let result = visualizer.visualize_tensor(&tensor).unwrap();
@@ -1023,8 +1025,10 @@ mod tests {
         let data = vec![1.0, 2.0, 3.0, 4.0];
         let tensor = Tensor::from_vec(data, &[2, 2]).unwrap();
 
-        let mut config = VisualizationConfig::default();
-        config.output_format = OutputFormat::HTML;
+        let config = VisualizationConfig {
+            output_format: OutputFormat::HTML,
+            ..Default::default()
+        };
         let visualizer = TensorVisualizer::with_config(config);
 
         let result = visualizer.visualize_tensor(&tensor).unwrap();

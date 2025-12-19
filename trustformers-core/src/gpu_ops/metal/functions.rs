@@ -152,7 +152,7 @@ mod tests {
         let a = vec![1.0, 2.0, 3.0, 4.0];
         let b = vec![5.0, 6.0, 7.0, 8.0];
         let result = backend.matmul_f32(&a, &b, 2, 2, 2)?;
-        let expected = vec![19.0, 22.0, 43.0, 50.0];
+        let expected = [19.0, 22.0, 43.0, 50.0];
         for (i, (&res, &exp)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (res - exp).abs() < 1e-5,
