@@ -1123,7 +1123,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(threadgroups, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        command_buffer.wait_until_completed(); // Wait for GPU to complete
         let output_id = BufferId::new();
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error(

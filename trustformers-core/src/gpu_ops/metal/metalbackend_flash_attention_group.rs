@@ -171,7 +171,7 @@ impl MetalBackend {
         encoder.dispatch_thread_groups(grid_size, threadgroup_size);
         encoder.end_encoding();
         command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        command_buffer.wait_until_completed(); // Wait for GPU to complete
 
         // Register output buffer in cache
         let output_id = self.register_buffer(output_buffer, output_size)?;
