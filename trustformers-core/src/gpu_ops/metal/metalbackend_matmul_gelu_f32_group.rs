@@ -104,7 +104,7 @@ impl MetalBackend {
 
         // Execute
         command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        command_buffer.wait_until_completed(); // Wait for GPU to complete
 
         // Read result
         let result_ptr = c_buffer.contents() as *const f32;
@@ -209,7 +209,7 @@ impl MetalBackend {
 
         // Execute
         command_buffer.commit();
-        // command_buffer.wait_until_completed(); // Async: Let GPU pipeline operations
+        command_buffer.wait_until_completed(); // Wait for GPU to complete
 
         // Read result
         let result_ptr = c_buffer.contents() as *const f32;
