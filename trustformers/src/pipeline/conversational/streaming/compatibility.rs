@@ -806,6 +806,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Requires network access and model downloads; from_pretrained uses blocking I/O that conflicts with tokio runtime"]
     async fn test_migration_helper() {
         let legacy_config = StreamingConfig::default();
         let result = migration::create_pipeline_from_legacy_config(legacy_config).await;

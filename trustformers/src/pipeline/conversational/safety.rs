@@ -413,7 +413,7 @@ impl SafetyFilter {
         let patterns = [
             r"(?i)\b(self[\s\-]?harm|self[\s\-]?injury)",
             r"(?i)\b(suicide|suicidal|end\s+it\s+all)",
-            r"(?i)\b(cutting|burning|hurting)\s+(myself|yourself)",
+            r"(?i)\b(cut|cutting|burn|burning|hurt|hurting)\s+(myself|yourself)",
             r"(?i)\b(want\s+to\s+die|wish\s+I\s+was\s+dead)",
             r"(?i)\b(harmful|dangerous)\s+(advice|instructions)",
         ];
@@ -687,22 +687,51 @@ impl SafetyFilter {
             + assessment.category_scores.violence)
             / 3.0;
 
-        if overall_safety_score > 0.5 {
-            metadata.confidence *= 1.0 - overall_safety_score * 0.3;
+        // Reduce confidence and quality when there are any violations
+        if !assessment.enhanced_violations.is_empty() || overall_safety_score > 0.1 {
+            // Apply penalty based on the higher of: number of violations or score-based penalty
+            let violation_penalty = (assessment.enhanced_violations.len() as f32 * 0.05).min(0.3);
+            let score_penalty = overall_safety_score * 0.3;
+            let total_penalty = violation_penalty.max(score_penalty).max(0.05); // Minimum 5% penalty
+            metadata.confidence *= 1.0 - total_penalty;
+            metadata.quality_score *= 1.0 - total_penalty;
+        } else {
+            // No violations, only apply minor score-based adjustment to quality
+            metadata.quality_score *= 1.0 - overall_safety_score * 0.5;
         }
-
-        // Adjust quality score based on safety
-        metadata.quality_score *= 1.0 - overall_safety_score * 0.5;
     }
 
     /// Get toxicity score (backward compatibility)
+    /// Note: This method calculates toxicity directly without calling assess_content_safety_enhanced
+    /// to avoid infinite recursion (assess_content_safety_enhanced -> analyze_safety -> get_toxicity_score)
     pub fn get_toxicity_score(&self, content: &str) -> f32 {
         if !self.config.enabled {
             return 0.0;
         }
 
-        let assessment = self.assess_content_safety_enhanced(content);
-        assessment.category_scores.toxicity
+        self.calculate_toxicity_score_direct(content)
+    }
+
+    /// Direct toxicity calculation without triggering recursive assessment
+    fn calculate_toxicity_score_direct(&self, content: &str) -> f32 {
+        let mut toxicity_score: f32 = 0.0;
+        let content_lower = content.to_lowercase();
+
+        // Check banned terms
+        for term in &self.banned_terms {
+            if content_lower.contains(&term.to_lowercase()) {
+                toxicity_score += 0.3;
+            }
+        }
+
+        // Check toxic patterns
+        for pattern in &self.toxic_patterns {
+            if pattern.is_match(content) {
+                toxicity_score += 0.4;
+            }
+        }
+
+        toxicity_score.min(1.0)
     }
 
     // ================================================================================================
