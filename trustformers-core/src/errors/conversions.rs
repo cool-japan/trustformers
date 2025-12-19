@@ -79,7 +79,7 @@ impl From<CoreError> for TrustformersError {
             CoreError::TokenizerError(msg) => TrustformersError::new(ErrorKind::Other(msg)),
             CoreError::RuntimeError(msg) => TrustformersError::new(ErrorKind::Other(msg)),
             CoreError::IoError(msg) => TrustformersError::new(ErrorKind::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, msg),
+                std::io::Error::other(msg),
             )),
             CoreError::ConfigError {
                 message,

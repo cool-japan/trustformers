@@ -59,7 +59,7 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             {
                 let cpu_tensor = Tensor::CUDA(cuda_data.clone()).to_device_enum(&Device::CPU)?;
-                return gelu(&cpu_tensor);
+                gelu(&cpu_tensor)
             }
         },
 

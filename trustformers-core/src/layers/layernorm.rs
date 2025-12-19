@@ -313,7 +313,7 @@ impl Layer for LayerNorm {
                     })?;
 
                 let output = &normalized * &w_broadcast + &b_broadcast;
-                return Ok(Tensor::F32(output));
+                Ok(Tensor::F32(output))
             },
 
             // GPU-resident CUDA tensor - process on GPU
@@ -438,7 +438,7 @@ impl Layer for LayerNorm {
                     })?;
 
                 let output = &normalized * &w_broadcast + &b_broadcast;
-                return Ok(Tensor::F32(output));
+                Ok(Tensor::F32(output))
             },
 
             Tensor::F32(arr) => {

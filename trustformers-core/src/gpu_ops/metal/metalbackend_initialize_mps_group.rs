@@ -185,7 +185,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.gelu_pipeline);
+        encoder.set_compute_pipeline_state(&self.gelu_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&output_buffer), 0);
         let size_u32 = size as u32;
@@ -233,7 +233,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.elementwise_add_pipeline);
+        encoder.set_compute_pipeline_state(&self.elementwise_add_pipeline);
         encoder.set_buffer(0, Some(&*a_buffer), 0);
         encoder.set_buffer(1, Some(&*b_buffer), 0);
         encoder.set_buffer(2, Some(&output_buffer), 0);
@@ -287,7 +287,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.layernorm_pipeline);
+        encoder.set_compute_pipeline_state(&self.layernorm_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&*weight_buffer), 0);
         encoder.set_buffer(2, Some(&*bias_buffer), 0);
@@ -354,7 +354,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.matmul_pipeline);
+        encoder.set_compute_pipeline_state(&self.matmul_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&*weight_buffer), 0);
         encoder.set_buffer(2, Some(&output_buffer), 0);
@@ -416,7 +416,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.add_bias_pipeline);
+        encoder.set_compute_pipeline_state(&self.add_bias_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&*bias_buffer), 0);
         encoder.set_buffer(2, Some(&output_buffer), 0);
@@ -476,7 +476,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.copy_with_offset_pipeline);
+        encoder.set_compute_pipeline_state(&self.copy_with_offset_pipeline);
         for (batch_idx, buffer_id) in input_buffer_ids.iter().enumerate() {
             let input_buffer = self.get_persistent_buffer(buffer_id)?;
             let output_offset = (batch_idx * elements_per_tensor) as u32;
@@ -549,7 +549,7 @@ impl MetalBackend {
             self.device.new_buffer(bytes_per_output, MTLResourceOptions::StorageModePrivate);
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.split_qkv_pipeline);
+        encoder.set_compute_pipeline_state(&self.split_qkv_pipeline);
         encoder.set_buffer(0, Some(&*qkv_buffer), 0);
         encoder.set_buffer(1, Some(&q_buffer), 0);
         encoder.set_buffer(2, Some(&k_buffer), 0);
@@ -614,7 +614,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.softmax_causal_pipeline);
+        encoder.set_compute_pipeline_state(&self.softmax_causal_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&output_buffer), 0);
         let seq_len_u32 = seq_len as u32;
@@ -686,7 +686,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.scale_pipeline);
+        encoder.set_compute_pipeline_state(&self.scale_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&output_buffer), 0);
         encoder.set_bytes(
@@ -743,7 +743,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.reshape_to_heads_pipeline);
+        encoder.set_compute_pipeline_state(&self.reshape_to_heads_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&output_buffer), 0);
         let seq_len_u32 = seq_len as u32;
@@ -804,7 +804,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.reshape_from_heads_pipeline);
+        encoder.set_compute_pipeline_state(&self.reshape_from_heads_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&output_buffer), 0);
         let seq_len_u32 = seq_len as u32;
@@ -870,7 +870,7 @@ impl MetalBackend {
         let command_buffer = self.command_queue.new_command_buffer();
         let blit_encoder = command_buffer.new_blit_command_encoder();
         blit_encoder.copy_from_buffer(
-            &*src_buffer,
+            &src_buffer,
             offset_bytes as u64,
             &dst_buffer,
             0,
@@ -903,7 +903,7 @@ impl MetalBackend {
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.transpose_pipeline);
+        encoder.set_compute_pipeline_state(&self.transpose_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&*output_buffer), 0);
         let rows_u32 = rows as u32;
@@ -957,7 +957,7 @@ impl MetalBackend {
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.batched_transpose_pipeline);
+        encoder.set_compute_pipeline_state(&self.batched_transpose_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&*output_buffer), 0);
         let num_heads_u32 = num_heads as u32;
@@ -1021,7 +1021,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.batched_softmax_causal_pipeline);
+        encoder.set_compute_pipeline_state(&self.batched_softmax_causal_pipeline);
         encoder.set_buffer(0, Some(&*input_buffer), 0);
         encoder.set_buffer(1, Some(&output_buffer), 0);
         let num_heads_u32 = num_heads as u32;
@@ -1082,7 +1082,7 @@ impl MetalBackend {
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.batched_matmul_pipeline);
+        encoder.set_compute_pipeline_state(&self.batched_matmul_pipeline);
         encoder.set_buffer(0, Some(&*a_buffer), 0);
         encoder.set_buffer(1, Some(&*b_buffer), 0);
         encoder.set_buffer(2, Some(&*output_buffer), 0);
@@ -1157,7 +1157,7 @@ impl MetalBackend {
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.batched_matmul_scaled_pipeline);
+        encoder.set_compute_pipeline_state(&self.batched_matmul_scaled_pipeline);
         encoder.set_buffer(0, Some(&*a_buffer), 0);
         encoder.set_buffer(1, Some(&*b_buffer), 0);
         encoder.set_buffer(2, Some(&*output_buffer), 0);
@@ -1236,7 +1236,7 @@ impl MetalBackend {
         ));
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.batched_scaled_matmul_softmax_causal_pipeline);
+        encoder.set_compute_pipeline_state(&self.batched_scaled_matmul_softmax_causal_pipeline);
         encoder.set_buffer(0, Some(&*q_buffer), 0);
         encoder.set_buffer(1, Some(&*k_t_buffer), 0);
         encoder.set_buffer(2, Some(&*output_buffer), 0);
@@ -1332,7 +1332,7 @@ impl MetalBackend {
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
 
-        encoder.set_compute_pipeline_state(&*self.batched_scaled_matmul_softmax_gen_pipeline);
+        encoder.set_compute_pipeline_state(&self.batched_scaled_matmul_softmax_gen_pipeline);
         encoder.set_buffer(0, Some(&*q_buffer), 0);
         encoder.set_buffer(1, Some(&*k_t_buffer), 0);
         encoder.set_buffer(2, Some(&*output_buffer), 0);
@@ -1546,7 +1546,7 @@ impl MetalBackend {
         // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
-            encoder.set_compute_pipeline_state(&*self.batched_transpose_pipeline);
+            encoder.set_compute_pipeline_state(&self.batched_transpose_pipeline);
             encoder.set_buffer(0, Some(&*k_heads_buffer), 0);
             encoder.set_buffer(1, Some(&*k_heads_t_buffer), 0);
             let num_heads_u32 = num_heads as u32;
@@ -1587,7 +1587,7 @@ impl MetalBackend {
         {
             let encoder = command_buffer.new_compute_command_encoder();
             encoder
-                .set_compute_pipeline_state(&*self.batched_scaled_matmul_softmax_causal_pipeline);
+                .set_compute_pipeline_state(&self.batched_scaled_matmul_softmax_causal_pipeline);
             encoder.set_buffer(0, Some(&*q_heads_buffer), 0);
             encoder.set_buffer(1, Some(&*k_heads_t_buffer), 0);
             encoder.set_buffer(2, Some(&*attn_weights_buffer), 0);
@@ -1633,7 +1633,7 @@ impl MetalBackend {
         // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
-            encoder.set_compute_pipeline_state(&*self.batched_matmul_pipeline);
+            encoder.set_compute_pipeline_state(&self.batched_matmul_pipeline);
             encoder.set_buffer(0, Some(&*attn_weights_buffer), 0);
             encoder.set_buffer(1, Some(&*v_heads_buffer), 0);
             encoder.set_buffer(2, Some(&*output_heads_buffer), 0);

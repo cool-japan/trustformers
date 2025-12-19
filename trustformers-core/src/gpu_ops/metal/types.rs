@@ -6,7 +6,6 @@
 use super::common::*;
 
 /// Buffer ID for persistent GPU buffers
-
 #[cfg(all(target_os = "macos", feature = "metal"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BufferId(u64);

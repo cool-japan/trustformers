@@ -70,6 +70,7 @@ pub struct RocmKernel {
 }
 
 /// ROCm memory pool for efficient GPU memory management
+#[derive(Default)]
 pub struct RocmMemoryPool {
     /// Available memory blocks
     available_blocks: Vec<RocmMemoryBlock>,
@@ -1002,16 +1003,6 @@ impl RocmMemoryPool {
 
 // Fallback implementation when ROCm is not available
 #[cfg(not(all(feature = "rocm", target_os = "linux")))]
-impl Default for RocmMemoryPool {
-    fn default() -> Self {
-        Self {
-            available_blocks: Vec::new(),
-            allocated_blocks: HashMap::new(),
-            total_allocated: 0,
-            peak_memory: 0,
-        }
-    }
-}
 
 /// Public API functions for external use
 #[cfg(all(feature = "rocm", target_os = "linux"))]

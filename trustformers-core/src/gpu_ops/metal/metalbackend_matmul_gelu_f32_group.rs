@@ -61,7 +61,7 @@ impl MetalBackend {
         let encoder = command_buffer.new_compute_command_encoder();
 
         // Set pipeline and buffers
-        encoder.set_compute_pipeline_state(&*self.matmul_gelu_pipeline);
+        encoder.set_compute_pipeline_state(&self.matmul_gelu_pipeline);
         encoder.set_buffer(0, Some(&a_buffer), 0);
         encoder.set_buffer(1, Some(&b_buffer), 0);
         encoder.set_buffer(2, Some(&c_buffer), 0);
@@ -165,7 +165,7 @@ impl MetalBackend {
         let encoder = command_buffer.new_compute_command_encoder();
 
         // Set pipeline and buffers
-        encoder.set_compute_pipeline_state(&*self.matmul_bias_gelu_pipeline);
+        encoder.set_compute_pipeline_state(&self.matmul_bias_gelu_pipeline);
         encoder.set_buffer(0, Some(&a_buffer), 0);
         encoder.set_buffer(1, Some(&b_buffer), 0);
         encoder.set_buffer(2, Some(&bias_buffer), 0);

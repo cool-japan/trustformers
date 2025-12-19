@@ -18,12 +18,12 @@ impl MetalBackend {
         let size = input.len();
         let input_buffer = self.create_buffer(input)?;
         let output_buffer = self.device.new_buffer(
-            (size * mem::size_of::<f32>()) as u64,
+            std::mem::size_of_val(input) as u64,
             MTLResourceOptions::StorageModeShared,
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.gelu_pipeline);
+        encoder.set_compute_pipeline_state(&self.gelu_pipeline);
         encoder.set_buffer(0, Some(&input_buffer), 0);
         encoder.set_buffer(1, Some(&output_buffer), 0);
         let size_u32 = size as u32;

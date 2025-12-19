@@ -209,9 +209,7 @@ impl RocmManager {
             }
 
             // Initialize default stream for this device
-            if !self.hip_streams.contains_key(&device_id) {
-                self.hip_streams.insert(device_id, Vec::new());
-            }
+            self.hip_streams.entry(device_id).or_insert_with(|| Vec::new());
         }
 
         Ok(())

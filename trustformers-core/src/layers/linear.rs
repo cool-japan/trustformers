@@ -949,11 +949,11 @@ impl Layer for Linear {
                         inp_2d.dot(&w_2d)
                     } else {
                         // Use direct BLAS GEMM for 10-50x speedup
-                        let inp_slice = inp_2d.as_slice().unwrap_or_else(|| {
+                        let inp_slice = inp_2d.as_slice().unwrap_or({
                             // Fallback if not contiguous
                             &[]
                         });
-                        let w_slice = w_2d.as_slice().unwrap_or_else(|| &[]);
+                        let w_slice = w_2d.as_slice().unwrap_or(&[]);
                         if !inp_slice.is_empty() && !w_slice.is_empty() {
                             let mut result_vec = vec![0.0f32; m * n];
                             blas_sgemm(inp_slice, w_slice, &mut result_vec, m, k, n);
@@ -1014,8 +1014,8 @@ impl Layer for Linear {
                         inp_2d.dot(&w_2d)
                     } else {
                         // Use direct BLAS GEMM for 10-50x speedup
-                        let inp_slice = inp_2d.as_slice().unwrap_or_else(|| &[]);
-                        let w_slice = w_2d.as_slice().unwrap_or_else(|| &[]);
+                        let inp_slice = inp_2d.as_slice().unwrap_or(&[]);
+                        let w_slice = w_2d.as_slice().unwrap_or(&[]);
                         if !inp_slice.is_empty() && !w_slice.is_empty() {
                             let mut result_vec = vec![0.0f64; m * n];
                             blas_dgemm(inp_slice, w_slice, &mut result_vec, m, k, n);

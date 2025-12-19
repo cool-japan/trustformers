@@ -498,7 +498,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Output Buffer"),
-            size: (size * std::mem::size_of::<f32>()) as u64,
+            size: std::mem::size_of_val(input) as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
@@ -511,7 +511,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
         let staging_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Staging Buffer"),
-            size: (size * std::mem::size_of::<f32>()) as u64,
+            size: std::mem::size_of_val(input) as u64,
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -613,7 +613,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             0,
             &staging_buffer,
             0,
-            (size * std::mem::size_of::<f32>()) as u64,
+            std::mem::size_of_val(input) as u64,
         );
 
         // Submit and read result
@@ -1045,11 +1045,11 @@ pub fn dispatch_webgpu_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
                 })?;
 
                 let result_dyn = result_2d.into_dyn();
-                return Ok(Tensor::F32(result_dyn));
+                Ok(Tensor::F32(result_dyn))
             },
             _ => {
                 // Fallback to CPU matmul for non-F32 tensors
-                return a.matmul(b);
+                a.matmul(b)
             },
         }
     }

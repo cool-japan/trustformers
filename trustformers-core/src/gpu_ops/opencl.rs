@@ -828,9 +828,9 @@ pub fn get_opencl_backend(device_id: usize) -> Result<Arc<OpenClBackend>> {
         )
     })?;
 
-    if !cache.contains_key(&device_id) {
+    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(device_id) {
         let backend = OpenClBackend::new(device_id)?;
-        cache.insert(device_id, Arc::new(backend));
+        e.insert(Arc::new(backend));
     }
 
     cache.get(&device_id).cloned().ok_or_else(|| {
@@ -887,10 +887,10 @@ pub fn dispatch_opencl_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Resul
                 })?;
 
                 let result_dyn = result_2d.into_dyn();
-                return Ok(Tensor::F32(result_dyn));
+                Ok(Tensor::F32(result_dyn))
             },
             _ => {
-                return a.matmul(b);
+                a.matmul(b)
             },
         }
     }

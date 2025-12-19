@@ -153,7 +153,6 @@ impl DType {
 /// # Ok(())
 /// # }
 /// ```
-
 /// Metal GPU buffer wrapper for GPU-resident tensors
 #[cfg(all(target_os = "macos", feature = "metal"))]
 #[derive(Debug)]

@@ -25,9 +25,7 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
         .as_ref()
         .ok_or_else(|| {
             TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend")
-        })
-        .and_then(|backend| {
-            Ok(MetalBackend {
+        }).map(|backend| MetalBackend {
                 device: backend.device.clone(),
                 command_queue: backend.command_queue.clone(),
                 buffer_cache: Arc::clone(&backend.buffer_cache),
@@ -62,7 +60,6 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
                 flash_attention_pipeline: Arc::clone(&backend.flash_attention_pipeline),
                 mps_ops: Arc::clone(&backend.mps_ops),
             })
-        })
 }
 /// Dispatch matrix multiplication to appropriate backend based on device
 #[allow(unused_variables)]

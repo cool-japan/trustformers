@@ -50,7 +50,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.matmul_pipeline);
+        encoder.set_compute_pipeline_state(&self.matmul_pipeline);
         encoder.set_buffer(0, Some(&a_buffer), 0);
         encoder.set_buffer(1, Some(&*b_buffer), 0);
         encoder.set_buffer(2, Some(&c_buffer), 0);
@@ -116,9 +116,9 @@ impl MetalBackend {
         let command_buffer = self.command_queue.new_command_buffer();
         let blit_encoder = command_buffer.new_blit_command_encoder();
         blit_encoder.copy_from_buffer(
-            &*src_buffer,
+            &src_buffer,
             0,
-            &*dst_buffer,
+            &dst_buffer,
             offset_bytes as u64,
             (head_size * mem::size_of::<f32>()) as u64,
         );

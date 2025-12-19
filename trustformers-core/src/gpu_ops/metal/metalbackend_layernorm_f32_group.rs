@@ -47,7 +47,7 @@ impl MetalBackend {
         );
         let command_buffer = self.command_queue.new_command_buffer();
         let encoder = command_buffer.new_compute_command_encoder();
-        encoder.set_compute_pipeline_state(&*self.layernorm_pipeline);
+        encoder.set_compute_pipeline_state(&self.layernorm_pipeline);
         encoder.set_buffer(0, Some(&input_buffer), 0);
         encoder.set_buffer(1, Some(&weight_buffer), 0);
         encoder.set_buffer(2, Some(&bias_buffer), 0);
