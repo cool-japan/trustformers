@@ -885,9 +885,10 @@ impl MultiModelServer {
 
         for rule in sorted_rules {
             if self.matches_condition(request, &rule.condition).await
-                && state.models.contains_key(&rule.target_model) {
-                    return Ok(rule.target_model.clone());
-                }
+                && state.models.contains_key(&rule.target_model)
+            {
+                return Ok(rule.target_model.clone());
+            }
         }
 
         // Fallback
@@ -929,9 +930,10 @@ impl MultiModelServer {
         for (model_id, capabilities) in capability_map {
             if state.models.contains_key(model_id)
                 && matches!(state.models[model_id].status, ModelStatus::Available)
-                && required_capabilities.iter().all(|req| capabilities.contains(req)) {
-                    return Ok(model_id.clone());
-                }
+                && required_capabilities.iter().all(|req| capabilities.contains(req))
+            {
+                return Ok(model_id.clone());
+            }
         }
 
         self.get_fallback_model(state).await
@@ -996,13 +998,13 @@ impl MultiModelServer {
         for threshold in size_thresholds {
             if request_size <= threshold.max_size
                 && state.models.contains_key(&threshold.target_model)
-                    && matches!(
-                        state.models[&threshold.target_model].status,
-                        ModelStatus::Available
-                    )
-                {
-                    return Ok(threshold.target_model.clone());
-                }
+                && matches!(
+                    state.models[&threshold.target_model].status,
+                    ModelStatus::Available
+                )
+            {
+                return Ok(threshold.target_model.clone());
+            }
         }
 
         self.get_fallback_model(state).await

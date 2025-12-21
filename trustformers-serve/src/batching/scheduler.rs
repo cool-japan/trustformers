@@ -730,21 +730,20 @@ impl AdvancedQueueManager {
     /// Enqueue a request with comprehensive validation and prioritization
     pub async fn enqueue_request(&mut self, mut request: AdvancedRequest) -> Result<()> {
         // Rate limiting check
-        if self.config.enable_rate_limiting
-            && !self.check_rate_limit(&request.client_id).await {
-                self.stats
-                    .lock()
-                    .await
-                    .client_stats
-                    .entry(request.client_id.clone())
-                    .or_default()
-                    .rate_limit_violations += 1;
+        if self.config.enable_rate_limiting && !self.check_rate_limit(&request.client_id).await {
+            self.stats
+                .lock()
+                .await
+                .client_stats
+                .entry(request.client_id.clone())
+                .or_default()
+                .rate_limit_violations += 1;
 
-                return Err(anyhow::anyhow!(
-                    "Rate limit exceeded for client: {}",
-                    request.client_id
-                ));
-            }
+            return Err(anyhow::anyhow!(
+                "Rate limit exceeded for client: {}",
+                request.client_id
+            ));
+        }
 
         // Apply SLA-based priority adjustments
         if let Some(sla_class) = &request.sla_class {

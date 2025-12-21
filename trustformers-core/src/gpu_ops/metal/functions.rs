@@ -25,41 +25,40 @@ pub fn get_metal_backend() -> Result<MetalBackend> {
         .as_ref()
         .ok_or_else(|| {
             TrustformersError::hardware_error("Metal backend not initialized", "get_metal_backend")
-        }).map(|backend| MetalBackend {
-                device: backend.device.clone(),
-                command_queue: backend.command_queue.clone(),
-                buffer_cache: Arc::clone(&backend.buffer_cache),
-                matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
-                gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
-                matmul_gelu_pipeline: Arc::clone(&backend.matmul_gelu_pipeline),
-                matmul_bias_gelu_pipeline: Arc::clone(&backend.matmul_bias_gelu_pipeline),
-                scale_pipeline: Arc::clone(&backend.scale_pipeline),
-                add_bias_pipeline: Arc::clone(&backend.add_bias_pipeline),
-                layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
-                rope_pipeline: Arc::clone(&backend.rope_pipeline),
-                softmax_causal_pipeline: Arc::clone(&backend.softmax_causal_pipeline),
-                copy_with_offset_pipeline: Arc::clone(&backend.copy_with_offset_pipeline),
-                elementwise_add_pipeline: Arc::clone(&backend.elementwise_add_pipeline),
-                split_qkv_pipeline: Arc::clone(&backend.split_qkv_pipeline),
-                transpose_pipeline: Arc::clone(&backend.transpose_pipeline),
-                reshape_to_heads_pipeline: Arc::clone(&backend.reshape_to_heads_pipeline),
-                reshape_from_heads_pipeline: Arc::clone(&backend.reshape_from_heads_pipeline),
-                batched_transpose_pipeline: Arc::clone(&backend.batched_transpose_pipeline),
-                batched_softmax_causal_pipeline: Arc::clone(
-                    &backend.batched_softmax_causal_pipeline,
-                ),
-                batched_matmul_pipeline: Arc::clone(&backend.batched_matmul_pipeline),
-                batched_matmul_scaled_pipeline: Arc::clone(&backend.batched_matmul_scaled_pipeline),
-                batched_scaled_matmul_softmax_causal_pipeline: Arc::clone(
-                    &backend.batched_scaled_matmul_softmax_causal_pipeline,
-                ),
-                batched_scaled_matmul_softmax_gen_pipeline: Arc::clone(
-                    &backend.batched_scaled_matmul_softmax_gen_pipeline,
-                ),
-                concat_seq_dim_pipeline: Arc::clone(&backend.concat_seq_dim_pipeline),
-                flash_attention_pipeline: Arc::clone(&backend.flash_attention_pipeline),
-                mps_ops: Arc::clone(&backend.mps_ops),
-            })
+        })
+        .map(|backend| MetalBackend {
+            device: backend.device.clone(),
+            command_queue: backend.command_queue.clone(),
+            buffer_cache: Arc::clone(&backend.buffer_cache),
+            matmul_pipeline: Arc::clone(&backend.matmul_pipeline),
+            gelu_pipeline: Arc::clone(&backend.gelu_pipeline),
+            matmul_gelu_pipeline: Arc::clone(&backend.matmul_gelu_pipeline),
+            matmul_bias_gelu_pipeline: Arc::clone(&backend.matmul_bias_gelu_pipeline),
+            scale_pipeline: Arc::clone(&backend.scale_pipeline),
+            add_bias_pipeline: Arc::clone(&backend.add_bias_pipeline),
+            layernorm_pipeline: Arc::clone(&backend.layernorm_pipeline),
+            rope_pipeline: Arc::clone(&backend.rope_pipeline),
+            softmax_causal_pipeline: Arc::clone(&backend.softmax_causal_pipeline),
+            copy_with_offset_pipeline: Arc::clone(&backend.copy_with_offset_pipeline),
+            elementwise_add_pipeline: Arc::clone(&backend.elementwise_add_pipeline),
+            split_qkv_pipeline: Arc::clone(&backend.split_qkv_pipeline),
+            transpose_pipeline: Arc::clone(&backend.transpose_pipeline),
+            reshape_to_heads_pipeline: Arc::clone(&backend.reshape_to_heads_pipeline),
+            reshape_from_heads_pipeline: Arc::clone(&backend.reshape_from_heads_pipeline),
+            batched_transpose_pipeline: Arc::clone(&backend.batched_transpose_pipeline),
+            batched_softmax_causal_pipeline: Arc::clone(&backend.batched_softmax_causal_pipeline),
+            batched_matmul_pipeline: Arc::clone(&backend.batched_matmul_pipeline),
+            batched_matmul_scaled_pipeline: Arc::clone(&backend.batched_matmul_scaled_pipeline),
+            batched_scaled_matmul_softmax_causal_pipeline: Arc::clone(
+                &backend.batched_scaled_matmul_softmax_causal_pipeline,
+            ),
+            batched_scaled_matmul_softmax_gen_pipeline: Arc::clone(
+                &backend.batched_scaled_matmul_softmax_gen_pipeline,
+            ),
+            concat_seq_dim_pipeline: Arc::clone(&backend.concat_seq_dim_pipeline),
+            flash_attention_pipeline: Arc::clone(&backend.flash_attention_pipeline),
+            mps_ops: Arc::clone(&backend.mps_ops),
+        })
 }
 /// Dispatch matrix multiplication to appropriate backend based on device
 #[allow(unused_variables)]

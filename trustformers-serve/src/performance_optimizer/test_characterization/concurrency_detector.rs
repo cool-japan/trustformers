@@ -915,9 +915,8 @@ impl SafeConcurrencyEstimator {
             return 0.0;
         }
 
-        let avg_confidence: f32 = estimations.iter().map(|e| e.confidence).sum::<f64>()
-            as f32
-            / estimations.len() as f32;
+        let avg_confidence: f32 =
+            estimations.iter().map(|e| e.confidence).sum::<f64>() as f32 / estimations.len() as f32;
         let consensus_factor = self.calculate_consensus_factor(estimations);
 
         avg_confidence * consensus_factor
@@ -969,9 +968,7 @@ impl SafeConcurrencyEstimator {
         duration: Duration,
     ) {
         let mut performance = self.algorithm_performance.lock();
-        let entry = performance
-            .entry(algorithm_name.to_string())
-            .or_default();
+        let entry = performance.entry(algorithm_name.to_string()).or_default();
 
         entry.total_runs += 1;
         if success {
@@ -1219,8 +1216,8 @@ impl ResourceConflictDetector {
             return 1.0;
         }
 
-        let avg_probability = conflicts.iter().map(|c| c.probability).sum::<f64>() as f32
-            / conflicts.len() as f32;
+        let avg_probability =
+            conflicts.iter().map(|c| c.probability).sum::<f64>() as f32 / conflicts.len() as f32;
         let severity_factor = conflicts
             .iter()
             .map(|c| match c.severity {
@@ -1471,8 +1468,8 @@ impl ResourceConflictDetector {
             return 1.0;
         }
 
-        let avg_probability = conflicts.iter().map(|c| c.probability).sum::<f64>() as f32
-            / conflicts.len() as f32;
+        let avg_probability =
+            conflicts.iter().map(|c| c.probability).sum::<f64>() as f32 / conflicts.len() as f32;
         let consistency_factor = self.calculate_conflict_consistency(conflicts);
 
         avg_probability * consistency_factor
@@ -2670,7 +2667,7 @@ impl ConcurrencyRiskAssessment {
                     "Low"
                 }
                 .to_string(),
-                risk_score: risk_score,
+                risk_score,
                 risk_factors: Vec::new(),
                 primary_risk_factor: "Concurrency".to_string(),
                 potential_impact: risk_score,

@@ -862,9 +862,7 @@ impl IntensityCalculationEngine {
         result: &ResourceIntensity,
     ) {
         let mut metrics = self.algorithm_metrics.lock();
-        let entry = metrics
-            .entry(algorithm_id.to_string())
-            .or_default();
+        let entry = metrics.entry(algorithm_id.to_string()).or_default();
 
         entry.total_calculations += 1;
         entry.total_duration += duration;

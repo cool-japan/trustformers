@@ -427,10 +427,7 @@ impl LanguageGenerator for KotlinGenerator {
         let mut main_content = Vec::new();
 
         // Package declaration
-        let package_name = self
-            .config
-            .package_name.as_deref()
-            .unwrap_or("com.trustformers.ffi");
+        let package_name = self.config.package_name.as_deref().unwrap_or("com.trustformers.ffi");
         main_content.push(format!("package {}", package_name));
         main_content.push("".to_string());
 

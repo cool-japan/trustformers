@@ -76,6 +76,7 @@ fn test_command_r_model_creation() {
 }
 
 #[test]
+#[ignore] // Very slow test (allocates ~8GB for model weights) - run with --ignored if needed
 fn test_command_r_plus_model_creation() {
     let config = CommandRConfig::command_r_plus();
     let model = CommandRModel::new(&config);
@@ -93,6 +94,7 @@ fn test_command_r_causal_lm_creation() {
 }
 
 #[test]
+#[ignore] // Very slow test (allocates ~8GB for model weights) - run with --ignored if needed
 fn test_command_r_plus_causal_lm_creation() {
     let config = CommandRConfig::command_r_plus();
     let model = CommandRForCausalLM::new(&config);
@@ -201,6 +203,7 @@ fn test_command_r_model_shapes() {
 }
 
 #[test]
+#[ignore] // Very slow test (allocates ~8GB for model weights) - run with --ignored if needed
 fn test_command_r_plus_model_shapes() {
     let config = CommandRConfig::command_r_plus();
     let _model = CommandRModel::new(&config).unwrap();

@@ -896,15 +896,13 @@ impl ResourceUtilizationTracker {
 
         let gpu_monitor = Arc::new(GpuUtilizationMonitor::new(config.gpu_config.clone()).await?);
 
-        let history_manager =
-            Arc::new(UtilizationHistoryManager::new(HistoryManagerConfig).await?);
+        let history_manager = Arc::new(UtilizationHistoryManager::new(HistoryManagerConfig).await?);
 
         let trend_analyzer = Arc::new(TrendAnalyzer::new(TrendAnalyzerConfig).await?);
 
         let alerting_system = Arc::new(AlertingSystem::new(AlertingConfig).await?);
 
-        let report_generator =
-            Arc::new(ReportGenerator::new(ReportGeneratorConfig).await?);
+        let report_generator = Arc::new(ReportGenerator::new(ReportGeneratorConfig).await?);
 
         Ok(Self {
             cpu_monitor,

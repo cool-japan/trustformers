@@ -287,8 +287,7 @@ impl MemoryCoalescingOptimizer {
         }
 
         let total_elements_accessed = indices.len();
-        let theoretical_min_cache_lines =
-            total_elements_accessed.div_ceil(cache_line_size);
+        let theoretical_min_cache_lines = total_elements_accessed.div_ceil(cache_line_size);
 
         theoretical_min_cache_lines as f32 / unique_cache_lines.len() as f32
     }

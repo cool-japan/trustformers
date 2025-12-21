@@ -890,11 +890,7 @@ async fn long_poll_endpoint(
         last_event_id: params.get("last_event_id").cloned(),
     };
 
-    let response = state
-        .polling_service
-        .poll(request)
-        .await
-        .map_err(ServerError::Internal)?;
+    let response = state.polling_service.poll(request).await.map_err(ServerError::Internal)?;
 
     Ok(Json(response))
 }

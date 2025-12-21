@@ -1057,12 +1057,10 @@ pub mod utils {
             return Err(anyhow!("Insufficient memory for sequence parallelism"));
         }
 
-        let required_devices =
-            total_sequence_length.div_ceil(max_tokens_per_device);
+        let required_devices = total_sequence_length.div_ceil(max_tokens_per_device);
         let sequence_parallel_size = std::cmp::min(required_devices, world_size);
 
-        let tokens_per_device =
-            total_sequence_length.div_ceil(sequence_parallel_size);
+        let tokens_per_device = total_sequence_length.div_ceil(sequence_parallel_size);
         let overlap_size = std::cmp::min(128, tokens_per_device / 10); // 10% overlap
 
         Ok(SequenceParallelismConfig {

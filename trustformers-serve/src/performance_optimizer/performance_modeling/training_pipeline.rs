@@ -995,7 +995,7 @@ impl TrainingMonitor {
 
             // Update average completion time
             let total_time = self.statistics.average_completion_time.as_secs()
-                * ((self.statistics.total_runs_monitored - 1))
+                * (self.statistics.total_runs_monitored - 1)
                 + completion_duration.as_secs();
             self.statistics.average_completion_time =
                 Duration::from_secs(total_time / self.statistics.total_runs_monitored);

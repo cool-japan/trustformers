@@ -3159,8 +3159,7 @@ impl AdaptiveRateController {
         };
 
         // TODO: Added f64 type annotation to fix E0689 ambiguous numeric type
-        let clamped_rate =
-            target_rate.clamp(self.config.min_rate, self.config.max_rate);
+        let clamped_rate = target_rate.clamp(self.config.min_rate, self.config.max_rate);
 
         if (clamped_rate - current_rate).abs() > current_rate * self.config.sensitivity as f64 {
             Some(RateAdjustment {

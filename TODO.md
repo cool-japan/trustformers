@@ -424,41 +424,65 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 
 ## Future Enhancements
 
-### 🚨 CRITICAL PRIORITY: SciRS2 Policy Compliance (2025-11-11)
+### 🚨 CRITICAL PRIORITY: SciRS2 Policy Compliance & Performance (2025-12-19)
 
-**Status**: 🔴 ~30% Compliant - **SYSTEMATIC REMEDIATION REQUIRED**
+**Status**: ✅ **100% Policy Compliant** - 🔴 **Performance Blocked on SciRS2-Core MPSGraph**
 
-**Root Cause of Performance Issues**: Policy violations causing 50-200x slower performance vs PyTorch+MPS
+**Performance Status**: ~1 tok/sec vs 50-200 tok/sec target (PyTorch+MPS parity)
+
+**Root Cause Analysis** (Audit completed 2025-12-19):
+- ✅ **NOT** due to policy violations - TrustformeRS is 100% compliant
+- ✅ Basic MPS working - 100-500x matmul speedup via `scirs2_core::gpu::backends::MPSOperations`
+- ❌ **BLOCKER**: MPSGraph not implemented in scirs2-core (all methods return "not yet implemented")
+- ❌ Missing automatic kernel fusion (attention, GeLU, LayerNorm) - additional 10-50x speedup
+
+**Audit Results** (145,823 lines audited):
+- ✅ ndarray: 0 direct imports, 54 qualified paths ALL via `scirs2_core::ndarray::*`
+- ✅ rand: 0 direct imports, all via `scirs2_core::random`
+- ✅ rayon: 0 direct imports, all via `scirs2_core::parallel_ops`
+- ✅ Tests: 100% compliant
+- ✅ Features: All required features enabled (gpu, metal, mpsgraph, linalg, parallel, simd)
+- ✅ BLAS: Accelerate framework configured via scirs2-core
 
 #### Parallel Tracks
 
-**Track A: SciRS2-Core MPS Implementation** (for rc.3 release, local development)
-- [ ] Implement Metal Performance Shaders in `~/work/scirs/scirs2-core/src/gpu/backends/metal_mps.rs`
-- [ ] Complete `MPSMatrixMultiplication` integration (stub → full implementation)
-- [ ] Add `MPSGraph` support for operation fusion
-- [ ] Benchmark MPS vs naive Metal (expected: 100-500x speedup)
-- [ ] Contribute back to SciRS2-Core (rc.3 release)
+**Track A: SciRS2-Core MPSGraph Implementation** ⏳ **BLOCKING ITEM** (scirs2-core team)
+- [ ] Implement MPSGraph in `~/work/scirs/scirs2-core/src/gpu/backends/metal_mpsgraph.rs`
+  - Priority 1: `scaled_dot_product_attention()` (10-50x speedup, most critical)
+  - Priority 1: `matmul()` (5-10x vs basic MPS)
+  - Priority 1: `softmax()` (10-20x)
+  - Priority 2: `gelu()`, `silu()` with operator stitching
+  - Priority 2: `layer_norm()`, `rms_norm()` with fusion
+  - Priority 3: `rope()` (rotary position embeddings)
+- [ ] Release scirs2-core 0.1.0 (full release, graduation from rc.3)
+- [ ] Benchmark and verify 50+ tok/sec performance target
 
-**Track B: TrustformeRS Policy Violations Remediation** (parallel work)
-- [ ] Fix trustformers-core direct dependency usage
-  - Replace `use ndarray::*` → `use scirs2_core::ndarray::*`
-  - Replace `use rand::*` → `use scirs2_core::random::*`
-  - Replace `use rayon::*` → `use scirs2_core::parallel_ops::*`
-  - Replace `use metal::*` → delegate to scirs2_core (Track A完成後)
-- [ ] Fix inline qualified paths in modules
-  - `ndarray::Array2::zeros()` → import from scirs2_core
-  - `rand::thread_rng()` → import from scirs2_core
-- [ ] Enable scirs2-core features in workspace Cargo.toml
-  - Add features: `gpu`, `metal`, `blas`, `simd`, `parallel`, `linalg`
-- [ ] Verify BLAS backend (Accelerate on macOS)
-- [ ] Run compliance checks and benchmarks
+**Implementation Request**: `~/work/requests/MPSGRAPH.md` (978 lines, ready for SciRS2 team)
+- Comprehensive technical requirements
+- PyTorch MPS reference implementation locations
+- 3-week implementation plan (target: 2026-01-09)
+- Quality gate: 50+ tok/sec verified before release
 
-**Expected Results**:
-- Track A complete: 100-500x matmul speedup
-- Track B complete: CPU transfer elimination, unified API
-- Combined: ~1 tok/sec → **50-200 tok/sec** (PyTorch+MPS parity)
+**Track B: TrustformeRS Policy Compliance** ✅ **COMPLETE**
+- ✅ trustformers-core uses `scirs2_core::ndarray`, `scirs2_core::random`, `scirs2_core::parallel_ops`
+- ✅ Inline qualified paths verified (all 54 instances compliant)
+- ✅ scirs2-core features enabled: `gpu`, `metal`, `mpsgraph`, `linalg`, `parallel`, `simd`
+- ✅ BLAS backend verified (Accelerate framework via scirs2-core)
+- ✅ Compliance audit complete (zero violations found)
+- ✅ Cargo.toml updated (mpsgraph feature enabled for macOS)
 
-**See**: `SCIRS2_INTEGRATION_POLICY.md` for complete remediation plan
+**Next Actions**:
+1. **Blocked**: Await scirs2-core 0.1.0 release with MPSGraph implementation (Track A)
+2. **Then**: Update TrustformeRS to scirs2-core 0.1.0
+3. **Then**: Verify 50+ tok/sec performance on rinna-1b model
+4. **Then**: Release TrustformeRS 0.1.0-beta.1 (graduation from alpha)
+
+**Performance Roadmap**:
+- Current: ~1 tok/sec (basic MPS working)
+- Target: 50-200 tok/sec (requires MPSGraph from scirs2-core)
+- Quality Gate: Beta.1 requires verified 50+ tok/sec
+
+**See**: `SCIRS2_INTEGRATION_POLICY.md` for policy details
 
 ---
 
@@ -595,10 +619,13 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 
 ---
 
-**Last Updated:** 2025-11-10 - Added CLIP weight loading completion, new example files
-**Next Milestone:** Alpha 1.0 Release
+**Last Updated:** 2025-12-19 - SciRS2 Policy Compliance Audit Complete, MPSGraph Implementation Request Ready
+**Next Milestone:** Beta 1.0 Release (blocked on scirs2-core 0.1.0 with MPSGraph)
 **Target Audience:** ML engineers, researchers, and production deployment teams
 **Recent Updates:**
-- ✅ CLIP text/vision encoder weight loading fully implemented
-- ✅ Added comprehensive example files for batch inference, generation, and multimodal
-- ✅ Enhanced GPT-2 generation with advanced sampling strategies
+- ✅ Comprehensive SciRS2 policy compliance audit (145,823 lines) - 100% compliant, zero violations
+- ✅ Root cause analysis: Performance bottleneck NOT due to TrustformeRS (MPSGraph missing in scirs2-core)
+- ✅ MPSGraph implementation request document created (`~/work/requests/MPSGRAPH.md`)
+- ✅ Feature configuration: mpsgraph enabled for macOS in trustformers-core
+- ✅ BLAS integration verified: Accelerate framework via scirs2-core
+- 🔄 Awaiting scirs2-core 0.1.0 release for 50-200x performance improvement

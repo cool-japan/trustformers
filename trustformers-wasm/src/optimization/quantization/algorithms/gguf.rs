@@ -445,7 +445,7 @@ impl GGUFBlockQuantizer {
             .iter()
             .map(|&x| {
                 // Simple FP16 approximation: reduce mantissa precision
-                
+
                 (x * 2048.0).round() / 2048.0
             })
             .collect();

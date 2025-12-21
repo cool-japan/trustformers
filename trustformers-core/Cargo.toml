@@ -123,7 +123,7 @@ cudarc = { version = "0.17", optional = true, features = ["nvrtc", "cuda-12000"]
 
 # Metal is only supported on macOS
 [target.'cfg(target_os = "macos")'.dependencies]
-scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu", "metal"] }
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu", "metal", "mpsgraph"] }
 metal = { version = "0.32", optional = true }
 mpsgraph = { version = "0.2", optional = true }
 objc2 = { version = "0.6", optional = true }

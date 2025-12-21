@@ -105,8 +105,7 @@ impl RLHFTrainer {
         }
 
         let mut total_loss = 0.0;
-        let num_batches =
-            self.feedback_data.len().div_ceil(self.config.batch_size);
+        let num_batches = self.feedback_data.len().div_ceil(self.config.batch_size);
 
         // Simulate training epochs
         for epoch in 0..self.config.epochs {
@@ -169,8 +168,7 @@ impl RLHFTrainer {
         let mut total_accuracy = 0.0;
         #[allow(unused_variables)]
         let mut _total_loss = 0.0;
-        let num_batches =
-            self.preference_pairs.len().div_ceil(self.config.batch_size);
+        let num_batches = self.preference_pairs.len().div_ceil(self.config.batch_size);
 
         // Simulate training epochs
         for _epoch in 0..self.config.epochs {
@@ -265,8 +263,7 @@ impl RLHFTrainer {
             let mut epoch_kl_div = 0.0;
             let mut epoch_value_loss = 0.0;
 
-            let num_batches =
-                self.feedback_data.len().div_ceil(self.config.batch_size);
+            let num_batches = self.feedback_data.len().div_ceil(self.config.batch_size);
 
             for batch_idx in 0..num_batches {
                 let start_idx = batch_idx * self.config.batch_size;
@@ -357,8 +354,7 @@ impl RLHFTrainer {
             let mut epoch_dpo_loss = 0.0;
             let mut epoch_reward = 0.0;
 
-            let num_batches =
-                self.preference_pairs.len().div_ceil(self.config.batch_size);
+            let num_batches = self.preference_pairs.len().div_ceil(self.config.batch_size);
 
             for batch_idx in 0..num_batches {
                 let start_idx = batch_idx * self.config.batch_size;
@@ -467,8 +463,7 @@ impl RLHFTrainer {
             let mut epoch_violations = 0;
             let mut epoch_loss = 0.0;
 
-            let num_batches =
-                self.feedback_data.len().div_ceil(self.config.batch_size);
+            let num_batches = self.feedback_data.len().div_ceil(self.config.batch_size);
 
             for batch_idx in 0..num_batches {
                 let start_idx = batch_idx * self.config.batch_size;

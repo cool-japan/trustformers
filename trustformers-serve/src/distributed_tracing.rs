@@ -463,10 +463,15 @@ impl ActiveSpan {
             span.end_time.unwrap().signed_duration_since(span.start_time).num_milliseconds() as f64;
 
         // Emit event
-        if self.manager.event_sender.send(TracingEvent::SpanFinished {
-            span_id: span.span_id.clone(),
-            duration_ms: duration,
-        }).is_ok() {
+        if self
+            .manager
+            .event_sender
+            .send(TracingEvent::SpanFinished {
+                span_id: span.span_id.clone(),
+                duration_ms: duration,
+            })
+            .is_ok()
+        {
             debug!("Span finished: {} ({}ms)", span.span_id, duration);
         }
 
@@ -707,10 +712,14 @@ impl TracingManager {
         }
 
         // Emit event
-        if self.event_sender.send(TracingEvent::SpanStarted {
-            span_id: span_id.clone(),
-            trace_id: trace_id.clone(),
-        }).is_ok() {
+        if self
+            .event_sender
+            .send(TracingEvent::SpanStarted {
+                span_id: span_id.clone(),
+                trace_id: trace_id.clone(),
+            })
+            .is_ok()
+        {
             debug!("Span started: {} (trace: {})", span_id, trace_id);
         }
 

@@ -44,4 +44,6 @@ trustformers = { workspace = true, default-features = false, features = ["all-mo
 pyo3-build-config = "0.27.2"
 
 [features]
-default = ["pyo3/auto-initialize"]
+default = ["pyo3/auto-initialize", "python-gc"]
+python-gc = []  # Enable Python garbage collection integration
+cuda = ["trustformers-core/cuda"]  # CUDA support (propagated from trustformers-core)

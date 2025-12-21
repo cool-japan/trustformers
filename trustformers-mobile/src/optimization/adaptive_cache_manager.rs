@@ -423,10 +423,15 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
             };
 
             if let Some(key) = key {
+                // Get the size BEFORE removing the entry
+                let entry_size = {
+                    let cache = self.cache.lock().unwrap();
+                    cache.get(&key).map(|e| e.size_bytes).unwrap_or(0)
+                };
+
                 drop(stats);
-                if let Some(entry) = self.remove(&key) {
-                    freed +=
-                        self.cache.lock().unwrap().get(&key).map(|e| e.size_bytes).unwrap_or(0);
+                if self.remove(&key).is_some() {
+                    freed += entry_size;
                     stats = self.stats.lock().unwrap();
                     stats.evictions += 1;
                 } else {
@@ -462,12 +467,14 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         drop(cache);
 
         let mut freed = 0;
-        let mut stats = self.stats.lock().unwrap();
-        for (key, size) in keys_to_evict {
-            self.remove(&key);
+        for (key, size) in keys_to_evict.iter() {
+            self.remove(key);
             freed += size;
-            stats.evictions += 1;
         }
+
+        // Update stats after all removals (avoid deadlock)
+        let mut stats = self.stats.lock().unwrap();
+        stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
     }
@@ -507,12 +514,14 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         drop(cache);
 
         let mut freed = 0;
-        let mut stats = self.stats.lock().unwrap();
-        for (key, size) in keys_to_evict {
-            self.remove(&key);
+        for (key, size) in keys_to_evict.iter() {
+            self.remove(key);
             freed += size;
-            stats.evictions += 1;
         }
+
+        // Update stats after all removals (avoid deadlock)
+        let mut stats = self.stats.lock().unwrap();
+        stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
     }
@@ -539,12 +548,14 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         drop(cache);
 
         let mut freed = 0;
-        let mut stats = self.stats.lock().unwrap();
-        for (key, size) in keys_to_evict {
-            self.remove(&key);
+        for (key, size) in keys_to_evict.iter() {
+            self.remove(key);
             freed += size;
-            stats.evictions += 1;
         }
+
+        // Update stats after all removals (avoid deadlock)
+        let mut stats = self.stats.lock().unwrap();
+        stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
     }
@@ -570,12 +581,14 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         drop(cache);
 
         let mut freed = 0;
-        let mut stats = self.stats.lock().unwrap();
-        for (key, size) in keys_to_evict {
-            self.remove(&key);
+        for (key, size) in keys_to_evict.iter() {
+            self.remove(key);
             freed += size;
-            stats.evictions += 1;
         }
+
+        // Update stats after all removals (avoid deadlock)
+        let mut stats = self.stats.lock().unwrap();
+        stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
     }

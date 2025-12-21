@@ -31,8 +31,7 @@ impl T5Model {
         config.validate()?;
 
         // Shared embeddings between encoder and decoder
-        let shared =
-            Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
+        let shared = Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
 
         let encoder_config = config.clone();
         let decoder_config = config.clone();
@@ -130,8 +129,7 @@ impl T5ForConditionalGeneration {
     pub fn new_with_device(config: T5Config, device: Device) -> Result<Self> {
         let transformer = T5Model::new_with_device(config.clone(), device)?;
         // T5 uses shared embeddings as lm_head
-        let lm_head =
-            Linear::new_with_device(config.d_model, config.vocab_size, false, device);
+        let lm_head = Linear::new_with_device(config.d_model, config.vocab_size, false, device);
 
         Ok(Self {
             transformer,
@@ -476,11 +474,7 @@ impl T5Stack {
 
         let mut block = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
-            block.push(T5Block::new_with_device(
-                &config,
-                is_encoder,
-                device,
-            )?);
+            block.push(T5Block::new_with_device(&config, is_encoder, device)?);
         }
 
         Ok(Self {

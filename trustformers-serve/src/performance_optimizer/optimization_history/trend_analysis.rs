@@ -296,10 +296,8 @@ impl EnhancedTrendAnalysisEngine {
         }
 
         // Determine consensus direction
-        let direction_votes: HashMap<TrendDirection, usize> = results
-            .iter()
-            .map(|r| r.direction)
-            .fold(HashMap::new(), |mut acc, direction| {
+        let direction_votes: HashMap<TrendDirection, usize> =
+            results.iter().map(|r| r.direction).fold(HashMap::new(), |mut acc, direction| {
                 *acc.entry(direction).or_insert(0) += 1;
                 acc
             });

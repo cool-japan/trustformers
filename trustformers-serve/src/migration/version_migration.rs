@@ -401,12 +401,7 @@ impl VersionMigrator {
                         if ext == "toml" || ext == "json" {
                             // Check if it's a config file
                             if path.file_name().unwrap().to_str().unwrap().contains("config")
-                                || path
-                                    .file_name()
-                                    .unwrap()
-                                    .to_str()
-                                    .unwrap()
-                                    .contains("server")
+                                || path.file_name().unwrap().to_str().unwrap().contains("server")
                             {
                                 config_files.push(path);
                             }

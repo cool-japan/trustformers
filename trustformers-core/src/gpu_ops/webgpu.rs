@@ -24,6 +24,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 #[cfg(feature = "wgpu_backend")]
 use wgpu::util::DeviceExt;
+#[cfg(feature = "wgpu_backend")]
+use wgpu::PollType;
 
 /// Buffer ID for persistent GPU buffers
 #[cfg(feature = "wgpu_backend")]
@@ -417,7 +419,7 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
 
         // Submit commands
-        self.queue.submit(Some(encoder.finish()));
+        let submission_index = self.queue.submit(Some(encoder.finish()));
 
         // Read result from staging buffer
         let buffer_slice = staging_buffer.slice(..);
@@ -426,7 +428,13 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        // In wgpu 27.0, polling is automatic - removed manual poll call
+        // Wait for the async buffer mapping to complete
+        // Poll the device to execute pending GPU work (wgpu 27.0 uses PollType)
+        let _ = self.device.poll(PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: None, // Wait indefinitely
+        });
+
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),
@@ -617,7 +625,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
 
         // Submit and read result
-        self.queue.submit(Some(encoder.finish()));
+        let submission_index = self.queue.submit(Some(encoder.finish()));
 
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -625,7 +633,13 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        // In wgpu 27.0, polling is automatic - removed manual poll call
+        // Wait for the async buffer mapping to complete
+        // Poll the device to execute pending GPU work (wgpu 27.0 uses PollType)
+        let _ = self.device.poll(PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: None,
+        });
+
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(&format!("Failed to map buffer: {:?}", e), "gelu_f32")
         })?;
@@ -887,7 +901,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             (total_size * std::mem::size_of::<f32>()) as u64,
         );
 
-        self.queue.submit(Some(encoder.finish()));
+        let submission_index = self.queue.submit(Some(encoder.finish()));
 
         // Read result
         let buffer_slice = staging_buffer.slice(..);
@@ -896,7 +910,13 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        // In wgpu 27.0, polling is automatic - removed manual poll call
+        // Wait for the async buffer mapping to complete
+        // Poll the device to execute pending GPU work (wgpu 27.0 uses PollType)
+        let _ = self.device.poll(PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: None,
+        });
+
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),
@@ -936,7 +956,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             (size * std::mem::size_of::<f32>()) as u64,
         );
 
-        self.queue.submit(Some(encoder.finish()));
+        let submission_index = self.queue.submit(Some(encoder.finish()));
 
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -944,7 +964,13 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             sender.send(result).unwrap();
         });
 
-        // In wgpu 27.0, polling is automatic - removed manual poll call
+        // Wait for the async buffer mapping to complete
+        // Poll the device to execute pending GPU work (wgpu 27.0 uses PollType)
+        let _ = self.device.poll(PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: None,
+        });
+
         receiver.recv().unwrap().map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),

@@ -1586,8 +1586,7 @@ impl MetalBackend {
         // );
         {
             let encoder = command_buffer.new_compute_command_encoder();
-            encoder
-                .set_compute_pipeline_state(&self.batched_scaled_matmul_softmax_causal_pipeline);
+            encoder.set_compute_pipeline_state(&self.batched_scaled_matmul_softmax_causal_pipeline);
             encoder.set_buffer(0, Some(&*q_heads_buffer), 0);
             encoder.set_buffer(1, Some(&*k_heads_t_buffer), 0);
             encoder.set_buffer(2, Some(&*attn_weights_buffer), 0);

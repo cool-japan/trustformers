@@ -44,10 +44,9 @@ impl HitRateTracker {
         self.hits += 1;
         self.hit_history.push(true);
 
-        if self.hit_history.len() > self.window_size
-            && !self.hit_history.remove(0) {
-                self.misses = self.misses.saturating_sub(1);
-            }
+        if self.hit_history.len() > self.window_size && !self.hit_history.remove(0) {
+            self.misses = self.misses.saturating_sub(1);
+        }
     }
 
     /// Record a cache miss
@@ -55,10 +54,9 @@ impl HitRateTracker {
         self.misses += 1;
         self.hit_history.push(false);
 
-        if self.hit_history.len() > self.window_size
-            && self.hit_history.remove(0) {
-                self.hits = self.hits.saturating_sub(1);
-            }
+        if self.hit_history.len() > self.window_size && self.hit_history.remove(0) {
+            self.hits = self.hits.saturating_sub(1);
+        }
     }
 
     /// Get current hit rate

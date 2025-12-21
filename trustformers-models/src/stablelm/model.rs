@@ -223,12 +223,8 @@ impl StableLMAttention {
         let num_kv_heads = config.num_key_value_heads.unwrap_or(num_heads);
         let head_dim = hidden_size / num_heads;
 
-        let q_proj = Linear::new_with_device(
-            hidden_size,
-            hidden_size,
-            config.attention_bias,
-            device,
-        );
+        let q_proj =
+            Linear::new_with_device(hidden_size, hidden_size, config.attention_bias, device);
         let k_proj = Linear::new_with_device(
             hidden_size,
             num_kv_heads * head_dim,
@@ -241,12 +237,8 @@ impl StableLMAttention {
             config.attention_bias,
             device,
         );
-        let o_proj = Linear::new_with_device(
-            hidden_size,
-            hidden_size,
-            config.attention_bias,
-            device,
-        );
+        let o_proj =
+            Linear::new_with_device(hidden_size, hidden_size, config.attention_bias, device);
 
         let rotary_emb = RotaryEmbedding::new_with_device(
             head_dim,
@@ -582,14 +574,10 @@ impl StableLMModel {
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(StableLMDecoderLayer::new_with_device(
-                &config,
-                device,
-            ));
+            layers.push(StableLMDecoderLayer::new_with_device(&config, device));
         }
 
-        let norm =
-            RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device);
+        let norm = RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device);
 
         Ok(Self {
             config,
@@ -681,8 +669,7 @@ impl StableLMForCausalLM {
 
     pub fn new_with_device(config: StableLMConfig, device: Device) -> Result<Self> {
         let model = StableLMModel::new_with_device(config.clone(), device)?;
-        let lm_head =
-            Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
 
         Ok(Self {
             model,

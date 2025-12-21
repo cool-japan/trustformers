@@ -617,9 +617,10 @@ impl KernelFusionService {
                     && !self.are_memory_patterns_compatible(
                         &kernel.memory_pattern,
                         &other.memory_pattern,
-                    ) {
-                        return Ok(false);
-                    }
+                    )
+                {
+                    return Ok(false);
+                }
             }
         }
 

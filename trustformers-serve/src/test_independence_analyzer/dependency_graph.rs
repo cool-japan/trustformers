@@ -233,18 +233,12 @@ impl DependencyGraph {
 
     /// Get all dependencies for a test
     pub fn get_dependencies(&self, test_id: &str) -> Vec<DependencyEdge> {
-        self.adjacency_list
-            .read()
-            .get(test_id).cloned()
-            .unwrap_or_default()
+        self.adjacency_list.read().get(test_id).cloned().unwrap_or_default()
     }
 
     /// Get all dependents (reverse dependencies) for a test
     pub fn get_dependents(&self, test_id: &str) -> Vec<DependencyEdge> {
-        self.reverse_adjacency_list
-            .read()
-            .get(test_id).cloned()
-            .unwrap_or_default()
+        self.reverse_adjacency_list.read().get(test_id).cloned().unwrap_or_default()
     }
 
     /// Check if there's a path between two tests

@@ -373,7 +373,8 @@ impl MTlsService {
         let acceptor = self.tls_acceptor.read().await;
         acceptor
             .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("TLS acceptor not initialized")).cloned()
+            .ok_or_else(|| anyhow::anyhow!("TLS acceptor not initialized"))
+            .cloned()
     }
 
     /// Validate client certificate
@@ -666,15 +667,14 @@ impl MTlsService {
         }
 
         // Check certificate pinning
-        if self.config.enable_cert_pinning
-            && !self.is_certificate_pinned(cert_info).await? {
-                return Ok(CertValidationResult {
-                    valid: false,
-                    status: CertValidationStatus::NotPinned,
-                    certificate_info: cert_info.clone(),
-                    validation_details,
-                });
-            }
+        if self.config.enable_cert_pinning && !self.is_certificate_pinned(cert_info).await? {
+            return Ok(CertValidationResult {
+                valid: false,
+                status: CertValidationStatus::NotPinned,
+                certificate_info: cert_info.clone(),
+                validation_details,
+            });
+        }
 
         // Validate against client certificate policy
         match &self.config.client_cert_validation {

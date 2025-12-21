@@ -461,9 +461,9 @@ impl LongPollingService {
                 if found_last
                     && (connection.event_types.contains(&event.event_type)
                         || connection.event_types.contains(&"*".to_string()))
-                    {
-                        missed_events.push(event.clone());
-                    }
+                {
+                    missed_events.push(event.clone());
+                }
 
                 if event.id == *last_event_id {
                     found_last = true;

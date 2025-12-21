@@ -312,9 +312,7 @@ impl ModelRegistry {
             .read()
             .unwrap()
             .values()
-            .filter(|m| {
-                tags.iter().all(|(key, value)| m.tags.get(key) == Some(value))
-            })
+            .filter(|m| tags.iter().all(|(key, value)| m.tags.get(key) == Some(value)))
             .cloned()
             .collect()
     }

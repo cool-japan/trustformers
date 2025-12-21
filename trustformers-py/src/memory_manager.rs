@@ -364,13 +364,13 @@ impl MemoryMonitor {
             // Trigger Python GC if available
             #[cfg(feature = "python-gc")]
             {
+                use pyo3::types::PyAnyMethods;
                 use pyo3::Python;
-                if let Ok(py) = Python::acquire_gil() {
-                    let py = py.python();
+                let _ = Python::try_attach(|py| {
                     if let Ok(gc) = py.import("gc") {
                         let _ = gc.call_method0("collect");
                     }
-                }
+                });
             }
         }
     }

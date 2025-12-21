@@ -656,9 +656,10 @@ impl GraphOptimizationService {
 
         for node_id in graph.nodes.keys() {
             if !visited.contains(node_id)
-                && self.has_cycles_util(node_id, graph, &mut visited, &mut rec_stack) {
-                    return true;
-                }
+                && self.has_cycles_util(node_id, graph, &mut visited, &mut rec_stack)
+            {
+                return true;
+            }
         }
 
         false

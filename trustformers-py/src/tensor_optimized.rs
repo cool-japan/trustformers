@@ -1890,7 +1890,7 @@ impl TensorMemoryPool {
     }
 }
 
-/// Thread-local memory pool for efficient tensor allocation
+// Thread-local memory pool for efficient tensor allocation
 thread_local! {
     static MEMORY_POOL: std::cell::RefCell<TensorMemoryPool> =
         std::cell::RefCell::new(TensorMemoryPool::new());

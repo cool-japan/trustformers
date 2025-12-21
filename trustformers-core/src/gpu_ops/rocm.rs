@@ -294,9 +294,7 @@ pub fn dispatch_rocm_matmul(a: &Tensor, b: &Tensor, device_id: usize) -> Result<
                 let result_dyn = result_2d.into_dyn();
                 Ok(Tensor::F32(result_dyn))
             },
-            _ => {
-                a.matmul(b)
-            },
+            _ => a.matmul(b),
         }
     }
 

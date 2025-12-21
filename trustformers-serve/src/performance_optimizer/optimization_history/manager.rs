@@ -677,7 +677,7 @@ impl AdvancedOptimizationHistoryManager {
         // Adjust for effectiveness
         if effectiveness_stats.total_analyses > 0 {
             let effectiveness_factor = effectiveness_stats.average_effectiveness;
-            health_score *= (0.5 + 0.5 * effectiveness_factor);
+            health_score *= 0.5 + 0.5 * effectiveness_factor;
         }
 
         // Adjust for patterns (positive patterns improve health)

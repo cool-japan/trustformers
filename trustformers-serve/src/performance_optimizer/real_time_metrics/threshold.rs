@@ -1784,12 +1784,11 @@ impl AlertManager {
                 let start_time = Instant::now();
 
                 // Apply suppression
-                if enable_suppression
-                    && suppressor.should_suppress(&alert).await {
-                        suppressor.suppress_alert(&mut alert).await;
-                        stats.alerts_suppressed.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
+                if enable_suppression && suppressor.should_suppress(&alert).await {
+                    suppressor.suppress_alert(&mut alert).await;
+                    stats.alerts_suppressed.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
 
                 // Apply correlation
                 if enable_correlation {
@@ -2126,12 +2125,13 @@ impl AlertSuppressor {
                 }
 
                 if self.matches_criteria(&rule.criteria, alert)
-                    && matches!(rule.action, SuppressionAction::Suppress) {
-                        self.stats.total_suppressed.fetch_add(1, Ordering::Relaxed);
-                        self.update_rule_stats(&rule.id);
-                        suppressed = true;
-                        break;
-                    }
+                    && matches!(rule.action, SuppressionAction::Suppress)
+                {
+                    self.stats.total_suppressed.fetch_add(1, Ordering::Relaxed);
+                    self.update_rule_stats(&rule.id);
+                    suppressed = true;
+                    break;
+                }
             }
 
             suppressed
@@ -2147,11 +2147,10 @@ impl AlertSuppressor {
             config.enable_deduplication
         };
 
-        if enable_deduplication
-            && self.is_duplicate(alert).await {
-                self.stats.total_suppressed.fetch_add(1, Ordering::Relaxed);
-                return true;
-            }
+        if enable_deduplication && self.is_duplicate(alert).await {
+            self.stats.total_suppressed.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
 
         false
     }
@@ -2191,9 +2190,10 @@ impl AlertSuppressor {
 
         // Check severity levels
         if !criteria.severity_levels.is_empty()
-            && !criteria.severity_levels.contains(&alert.severity) {
-                return false;
-            }
+            && !criteria.severity_levels.contains(&alert.severity)
+        {
+            return false;
+        }
 
         // Check threshold patterns
         if !criteria.threshold_patterns.is_empty() {
@@ -4959,10 +4959,11 @@ impl ThresholdMonitor {
 
                                 // Apply suppression if enabled
                                 if self.config.read().unwrap().enable_alert_suppression
-                                    && self.alert_suppressor.should_suppress(&alert).await {
-                                        self.alert_suppressor.suppress_alert(&mut alert).await;
-                                        continue;
-                                    }
+                                    && self.alert_suppressor.should_suppress(&alert).await
+                                {
+                                    self.alert_suppressor.suppress_alert(&mut alert).await;
+                                    continue;
+                                }
 
                                 // Apply correlation if enabled
                                 if self.config.read().unwrap().enable_alert_correlation {
