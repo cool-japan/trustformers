@@ -1802,7 +1802,7 @@ impl Gpt2Attention {
                         }
                     }
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     // CPU fallback - parallelize only for large models (>12 heads)
                     if n_heads > 12 {
@@ -1949,7 +1949,7 @@ impl Gpt2Attention {
                         }
                     }
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     // CPU fallback - parallelize only for large models (>12 heads)
                     if n_heads > 12 {

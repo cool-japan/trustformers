@@ -112,6 +112,7 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 }
 
 #[cfg(not(target_os = "macos"))]
+#[allow(dead_code)] // Reserved for f64 tensor matmul
 #[inline]
 fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
     use scirs2_core::ndarray::Array2;

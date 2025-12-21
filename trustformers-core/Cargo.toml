@@ -72,6 +72,9 @@ pollster = { version = "0.4", optional = true }
 # OpenCL backend (universal GPU support)
 opencl3 = { version = "0.10", optional = true }
 
+# Dynamic loading for optional GPU backends (ROCm)
+libloading = { workspace = true, optional = true }
+
 [dev-dependencies]
 rstest.workspace = true
 approx.workspace = true
@@ -88,7 +91,7 @@ candle = ["dep:candle-core"]
 parallel = []
 mpi = ["dep:mpi"]
 cuda = ["dep:cudarc"]
-rocm = []
+rocm = ["dep:libloading"]
 intel = []
 llvm = []
 cranelift = []

@@ -1,7 +1,5 @@
 use crate::gpt2::{Gpt2Config, Gpt2LMHeadModel, Gpt2Model};
-use std::time::Instant;
 use trustformers_core::{
-    device::Device,
     tensor::Tensor,
     traits::{Model, TokenizedInput},
 };

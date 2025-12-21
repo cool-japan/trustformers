@@ -1,4 +1,4 @@
-use crate::errors::TrustformersPyResult;
+use crate::errors::{TrustformersPyError, TrustformersPyResult};
 use parking_lot::RwLock;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;

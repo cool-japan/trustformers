@@ -1,5 +1,3 @@
-#[cfg(feature = "cuda")]
-use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use std::f32::consts::PI;
@@ -58,6 +56,7 @@ pub fn gelu(x: &Tensor) -> Result<Tensor> {
             // Fallback for non-Linux/Windows platforms
             #[cfg(not(any(target_os = "linux", target_os = "windows")))]
             {
+                use crate::device::Device;
                 let cpu_tensor = Tensor::CUDA(cuda_data.clone()).to_device_enum(&Device::CPU)?;
                 gelu(&cpu_tensor)
             }
