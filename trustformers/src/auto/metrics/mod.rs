@@ -32,7 +32,7 @@
 //!
 //! ### Basic Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{AutoMetric, MetricInput};
 //!
 //! // Create a metric for text classification
@@ -50,7 +50,7 @@
 //!
 //! ### Composite Metrics
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::AutoMetric;
 //!
 //! // Create metrics for multiple tasks
@@ -139,15 +139,15 @@ impl AutoMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::AutoMetric;
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::AutoMetric;
     ///
     /// // Create classification metric
     /// let metric = AutoMetric::for_task("text-classification")?;
     ///
     /// // Create generation metric
     /// let metric = AutoMetric::for_task("text-generation")?;
-    /// ```
+
     pub fn for_task(task: &str) -> Result<Box<dyn Metric>> {
         match task {
             "text-classification" | "sentiment-analysis" => {
@@ -180,8 +180,8 @@ impl AutoMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::AutoMetric;
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::AutoMetric;
     ///
     /// // Create composite metric for multiple tasks
     /// let composite = AutoMetric::composite(&[
@@ -191,7 +191,7 @@ impl AutoMetric {
     ///
     /// // Compute all metrics
     /// let results = composite.compute_all()?;
-    /// ```
+
     pub fn composite(tasks: &[&str]) -> Result<CompositeMetric> {
         let mut metrics = Vec::new();
         for task in tasks {

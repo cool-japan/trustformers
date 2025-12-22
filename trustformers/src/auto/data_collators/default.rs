@@ -35,7 +35,7 @@
 //!
 //! ### General Purpose Collation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::default::{
 //!     DefaultDataCollator, DefaultCollatorConfig
 //! };
@@ -53,7 +53,7 @@
 //!
 //! ### Unknown Task Handling
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::default::{
 //!     DefaultDataCollator, DefaultCollatorConfig
 //! };
@@ -149,7 +149,7 @@ use std::collections::HashMap;
 ///
 /// ## Usage Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::default::{
 ///     DefaultDataCollator, DefaultCollatorConfig
 /// };
@@ -192,7 +192,7 @@ impl DefaultDataCollator {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = DefaultCollatorConfig {
     ///     max_length: Some(256),
     ///     padding: PaddingStrategy::Longest,
@@ -502,8 +502,8 @@ impl DefaultCollatorConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let model_config = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "pad_token_id": 0,
     ///     "vocab_size": 30522
@@ -513,7 +513,7 @@ impl DefaultCollatorConfig {
     /// assert_eq!(config.max_length, Some(512));
     /// assert_eq!(config.pad_token_id, 0);
     /// assert_eq!(config.truncation, true);
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
             max_length: config

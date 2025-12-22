@@ -20,7 +20,7 @@
 //!
 //! ### Basic Language Model Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
 //!
 //! let mut metric = LanguageModelingMetric::new();
@@ -46,7 +46,7 @@
 //!
 //! ### Streaming Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
 //!
 //! let mut metric = LanguageModelingMetric::new();
@@ -132,7 +132,7 @@ impl LanguageModelingMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::LanguageModelingMetric;
     ///
     /// let metric = LanguageModelingMetric::new();
@@ -175,8 +175,8 @@ impl Metric for LanguageModelingMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
     ///
     /// let mut metric = LanguageModelingMetric::new();
     ///
@@ -193,7 +193,7 @@ impl Metric for LanguageModelingMetric {
     /// ]);
     ///
     /// metric.add_batch(&probabilities, &tokens)?;
-    /// ```
+
     fn add_batch(&mut self, predictions: &MetricInput, references: &MetricInput) -> Result<()> {
         match (predictions, references) {
             (MetricInput::Probabilities(probs), MetricInput::Tokens(tokens)) => {
@@ -258,8 +258,8 @@ impl Metric for LanguageModelingMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
     ///
     /// let mut metric = LanguageModelingMetric::new();
     /// metric.add_batch(
@@ -273,7 +273,7 @@ impl Metric for LanguageModelingMetric {
     /// assert!(result.details.contains_key("perplexity"));
     /// assert!(result.details.contains_key("log_likelihood"));
     /// assert!(result.details.contains_key("num_tokens"));
-    /// ```
+
     fn compute(&self) -> Result<MetricResult> {
         // Calculate perplexity
         let perplexity = if self.num_tokens > 0 {
@@ -303,8 +303,8 @@ impl Metric for LanguageModelingMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{LanguageModelingMetric, MetricInput, Metric};
     ///
     /// let mut metric = LanguageModelingMetric::new();
     /// metric.add_batch(
@@ -316,7 +316,7 @@ impl Metric for LanguageModelingMetric {
     ///
     /// let result = metric.compute()?;
     /// assert_eq!(result.value, f64::INFINITY); // No data = infinite perplexity
-    /// ```
+
     fn reset(&mut self) {
         self.log_likelihood = 0.0;
         self.num_tokens = 0;

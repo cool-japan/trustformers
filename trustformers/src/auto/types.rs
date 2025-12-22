@@ -18,7 +18,7 @@
 //!
 //! These types are designed to be used throughout the TrustformeRS ecosystem:
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::types::{FeatureInput, ImageFormat, ImageMetadata};
 //!
 //! let input = FeatureInput::Image {

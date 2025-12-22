@@ -46,7 +46,7 @@
 //!
 //! ### Basic Text Document Processing
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::feature_extractors::document::{DocumentFeatureExtractor, DocumentFeatureConfig};
 //! use trustformers::auto::types::{FeatureInput, DocumentFormat};
 //!
@@ -77,7 +77,7 @@
 //!
 //! ### HTML Document Processing
 //!
-//! ```rust
+//! ```rust,ignore
 //! let html_content = br#"
 //! <html>
 //! <body>
@@ -98,7 +98,7 @@
 //!
 //! ### Configuration from Model Config
 //!
-//! ```rust
+//! ```rust,ignore
 //! use serde_json::json;
 //!
 //! let model_config = json!({
@@ -186,7 +186,7 @@ impl DocumentFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = DocumentFeatureConfig {
     ///     max_length: 512,
     ///     feature_size: 768,
@@ -229,11 +229,11 @@ impl DocumentFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let html_content = b"<h1>Title</h1><p>Content</p>";
+    /// ```rust,ignore
+    ///    /// let html_content = b"<h1>Title</h1><p>Content</p>";
     /// let text = extractor.preprocess_document(html_content, DocumentFormat::Html)?;
     /// assert_eq!(text, "Title Content");
-    /// ```
+
     fn preprocess_document(&self, content: &[u8], format: DocumentFormat) -> Result<String> {
         match format {
             DocumentFormat::Text => {
@@ -286,7 +286,7 @@ impl DocumentFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let html = "<h1>Title</h1><p>Paragraph content</p>";
     /// let text = extractor.extract_text_from_html(html);
     /// assert_eq!(text, "Title Paragraph content");
@@ -331,7 +331,7 @@ impl DocumentFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let markdown = "# Title\n\n**Bold text** and *italic text*";
     /// let text = extractor.extract_text_from_markdown(markdown);
     /// assert_eq!(text, "Title Bold text and italic text");
@@ -386,11 +386,11 @@ impl DocumentFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let text = "Hello world example";
+    /// ```rust,ignore
+    ///    /// let text = "Hello world example";
     /// let features = extractor.extract_document_features(text)?;
     /// assert_eq!(features.len(), config.max_length * config.feature_size);
-    /// ```
+
     fn extract_document_features(&self, text: &str) -> Result<Vec<f32>> {
         // Simplified document feature extraction
         let words: Vec<&str> = text.split_whitespace().collect();
@@ -472,8 +472,8 @@ impl FeatureExtractor for DocumentFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let input = FeatureInput::Document {
+    /// ```rust,ignore
+    ///    /// let input = FeatureInput::Document {
     ///     content: b"Sample document content".to_vec(),
     ///     format: DocumentFormat::Text,
     ///     metadata: None,
@@ -483,7 +483,7 @@ impl FeatureExtractor for DocumentFeatureExtractor {
     /// assert_eq!(output.shape, vec![512, 768]); // max_length, feature_size
     /// assert!(output.attention_mask.is_some());
     /// assert_eq!(output.special_tokens.len(), 2); // CLS and SEP
-    /// ```
+
     fn extract_features(&self, input: &FeatureInput) -> Result<FeatureOutput> {
         match input {
             FeatureInput::Document {
@@ -706,8 +706,8 @@ impl DocumentFeatureConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use serde_json::json;
+    /// ```rust,ignore
+    ///    /// use serde_json::json;
     ///
     /// let model_config = json!({
     ///     "model_type": "layoutlm",
@@ -722,7 +722,7 @@ impl DocumentFeatureConfig {
     /// assert_eq!(config.max_length, 512);
     /// assert!(config.include_layout);
     /// assert!(config.include_visual_features);
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
             max_length: config

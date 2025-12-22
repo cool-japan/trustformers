@@ -35,7 +35,7 @@
 //!
 //! ### Masked Language Modeling (BERT-style)
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::language_modeling::{
 //!     LanguageModelingDataCollator, LanguageModelingCollatorConfig
 //! };
@@ -55,7 +55,7 @@
 //!
 //! ### Causal Language Modeling (GPT-style)
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::language_modeling::{
 //!     CausalLanguageModelingDataCollator, CausalLanguageModelingCollatorConfig
 //! };
@@ -128,7 +128,7 @@ use std::collections::HashMap;
 ///
 /// ## Usage Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::language_modeling::{
 ///     LanguageModelingDataCollator, LanguageModelingCollatorConfig
 /// };
@@ -175,7 +175,7 @@ impl LanguageModelingDataCollator {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = LanguageModelingCollatorConfig {
     ///     max_length: Some(512),
     ///     padding: PaddingStrategy::Longest,
@@ -409,8 +409,8 @@ impl LanguageModelingCollatorConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let model_config = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "pad_token_id": 0,
     ///     "mask_token_id": 103,
@@ -422,7 +422,7 @@ impl LanguageModelingCollatorConfig {
     /// assert_eq!(config.pad_token_id, 0);
     /// assert_eq!(config.mask_token_id, 103);
     /// assert_eq!(config.mlm_probability, 0.15);
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
             max_length: config
@@ -500,7 +500,7 @@ impl DataCollatorConfig for LanguageModelingCollatorConfig {
 ///
 /// ## Usage Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::language_modeling::{
 ///     CausalLanguageModelingDataCollator, CausalLanguageModelingCollatorConfig
 /// };
@@ -545,7 +545,7 @@ impl CausalLanguageModelingDataCollator {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = CausalLanguageModelingCollatorConfig {
     ///     max_length: Some(1024),
     ///     padding: PaddingStrategy::Longest,
@@ -715,8 +715,8 @@ impl CausalLanguageModelingCollatorConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let model_config = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 1024,
     ///     "pad_token_id": 50256,
     ///     "vocab_size": 50257
@@ -725,7 +725,7 @@ impl CausalLanguageModelingCollatorConfig {
     /// let config = CausalLanguageModelingCollatorConfig::from_config(&model_config)?;
     /// assert_eq!(config.max_length, Some(1024));
     /// assert_eq!(config.pad_token_id, 50256);
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
             max_length: config

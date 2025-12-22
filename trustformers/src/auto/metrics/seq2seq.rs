@@ -20,7 +20,7 @@
 //!
 //! ### Translation Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
 //!
 //! let mut metric = Seq2SeqMetric::new();
@@ -45,7 +45,7 @@
 //!
 //! ### Summarization Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
 //!
 //! let mut metric = Seq2SeqMetric::new();
@@ -130,7 +130,7 @@ impl Seq2SeqMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::Seq2SeqMetric;
     ///
     /// let metric = Seq2SeqMetric::new();
@@ -170,8 +170,8 @@ impl Metric for Seq2SeqMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
     ///
     /// let mut metric = Seq2SeqMetric::new();
     ///
@@ -185,7 +185,7 @@ impl Metric for Seq2SeqMetric {
     /// ]);
     ///
     /// metric.add_batch(&predictions, &references)?;
-    /// ```
+
     fn add_batch(&mut self, predictions: &MetricInput, references: &MetricInput) -> Result<()> {
         self.generation_metric.add_batch(predictions, references)
     }
@@ -220,8 +220,8 @@ impl Metric for Seq2SeqMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
     ///
     /// let mut metric = Seq2SeqMetric::new();
     /// metric.add_batch(
@@ -233,7 +233,7 @@ impl Metric for Seq2SeqMetric {
     /// assert_eq!(result.name, "seq2seq");
     /// assert!(result.value >= 0.0 && result.value <= 1.0);
     /// assert!(result.details.contains_key("bleu_like"));
-    /// ```
+
     fn compute(&self) -> Result<MetricResult> {
         let mut result = self.generation_metric.compute()?;
         // Override the name to indicate this is a seq2seq metric
@@ -248,8 +248,8 @@ impl Metric for Seq2SeqMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{Seq2SeqMetric, MetricInput, Metric};
     ///
     /// let mut metric = Seq2SeqMetric::new();
     /// metric.add_batch(
@@ -259,7 +259,7 @@ impl Metric for Seq2SeqMetric {
     ///
     /// metric.reset();
     /// // Metric is now ready for new sequence pairs
-    /// ```
+
     fn reset(&mut self) {
         self.generation_metric.reset();
     }

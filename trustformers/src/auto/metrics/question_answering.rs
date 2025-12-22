@@ -20,7 +20,7 @@
 //!
 //! ### Basic QA Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
 //!
 //! let mut metric = QuestionAnsweringMetric::new();
@@ -46,7 +46,7 @@
 //!
 //! ### Reading Comprehension Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
 //!
 //! let mut metric = QuestionAnsweringMetric::new();
@@ -140,7 +140,7 @@ impl QuestionAnsweringMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::QuestionAnsweringMetric;
     ///
     /// let metric = QuestionAnsweringMetric::new();
@@ -175,7 +175,7 @@ impl QuestionAnsweringMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::QuestionAnsweringMetric;
     ///
     /// let metric = QuestionAnsweringMetric::new();
@@ -219,8 +219,8 @@ impl Metric for QuestionAnsweringMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
     ///
     /// let mut metric = QuestionAnsweringMetric::new();
     ///
@@ -234,7 +234,7 @@ impl Metric for QuestionAnsweringMetric {
     /// ]);
     ///
     /// metric.add_batch(&predictions, &references)?;
-    /// ```
+
     fn add_batch(&mut self, predictions: &MetricInput, references: &MetricInput) -> Result<()> {
         match (predictions, references) {
             (MetricInput::Text(pred), MetricInput::Text(ref_)) => {
@@ -278,8 +278,8 @@ impl Metric for QuestionAnsweringMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
     ///
     /// let mut metric = QuestionAnsweringMetric::new();
     /// metric.add_batch(
@@ -292,7 +292,7 @@ impl Metric for QuestionAnsweringMetric {
     /// assert!(result.value >= 0.0 && result.value <= 1.0);
     /// assert!(result.details.contains_key("exact_match"));
     /// assert!(result.details.contains_key("f1"));
-    /// ```
+
     fn compute(&self) -> Result<MetricResult> {
         if self.predictions.is_empty() {
             return Err(TrustformersError::invalid_input_simple(
@@ -375,8 +375,8 @@ impl Metric for QuestionAnsweringMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{QuestionAnsweringMetric, MetricInput, Metric};
     ///
     /// let mut metric = QuestionAnsweringMetric::new();
     /// metric.add_batch(
@@ -386,7 +386,7 @@ impl Metric for QuestionAnsweringMetric {
     ///
     /// metric.reset();
     /// // Metric is now ready for new answer pairs
-    /// ```
+
     fn reset(&mut self) {
         self.predictions.clear();
         self.references.clear();

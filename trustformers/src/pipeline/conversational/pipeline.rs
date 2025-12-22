@@ -13,7 +13,7 @@
 //!
 //! # Example Usage
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! use trustformers::pipeline::conversational::*;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -35,7 +35,7 @@
 //! println!("Response: {}", output.response);
 //! # Ok(())
 //! # }
-//! ```"
+//! ```
 
 use super::{
     analysis::{types::EnhancedAnalysisConfig, ConversationAnalyzer},

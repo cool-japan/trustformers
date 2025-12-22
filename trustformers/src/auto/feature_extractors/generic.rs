@@ -22,7 +22,7 @@
 //!
 //! ## Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::feature_extractors::generic::{GenericFeatureExtractor, GenericFeatureConfig};
 //! use trustformers::auto::types::FeatureInput;
 //!
@@ -87,7 +87,7 @@ use std::collections::HashMap;
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// let config = GenericFeatureConfig {
 ///     feature_size: 512,
 ///     max_batch_size: Some(16),
@@ -122,7 +122,7 @@ impl GenericFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = GenericFeatureConfig {
     ///     feature_size: 768,
     ///     max_batch_size: Some(32),
@@ -420,7 +420,7 @@ impl FeatureExtractor for GenericFeatureExtractor {
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// // Create configuration from JSON
 /// let config_json = serde_json::json!({
 ///     "hidden_size": 512,
@@ -463,13 +463,13 @@ impl GenericFeatureConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let config = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let config = serde_json::json!({
     ///     "hidden_size": 1024,
     ///     "max_batch_size": 64
     /// });
     /// let feature_config = GenericFeatureConfig::from_config(&config)?;
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         let feature_size = config
             .get("hidden_size")

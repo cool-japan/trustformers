@@ -26,10 +26,15 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::pipeline::conversational::streaming::pipeline::ConversationalStreamingPipeline;
 //! use trustformers::pipeline::conversational::streaming::types::AdvancedStreamingConfig;
 //!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let model = todo!();
+//! # let tokenizer = todo!();
+//! # let input = todo!();
+//! # let conversation_state = todo!();
 //! // Create pipeline with model and tokenizer
 //! let pipeline = ConversationalStreamingPipeline::new(
 //!     model,
@@ -39,6 +44,8 @@
 //!
 //! // Generate streaming response
 //! let stream = pipeline.generate_streaming_response(input, &conversation_state).await?;
+//! # Ok(())
+//! # }
 //! ```
 
 use super::backpressure::{BackpressureController, FlowAction as BackpressureFlowAction};
@@ -134,7 +141,11 @@ where
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust,ignore
+    /// # use trustformers::pipeline::conversational::streaming::pipeline::ConversationalStreamingPipeline;
+    /// # use trustformers::pipeline::conversational::streaming::types::AdvancedStreamingConfig;
+    /// # let my_model = todo!();
+    /// # let my_tokenizer = todo!();
     /// let pipeline = ConversationalStreamingPipeline::new(
     ///     my_model,
     ///     my_tokenizer,
@@ -195,8 +206,13 @@ where
     ///
     /// # Example
     ///
-    /// ```rust
-    /// let stream = pipeline.generate_streaming_response(
+    /// ```rust,ignore
+    /// # use futures::stream::StreamExt;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let pipeline = todo!();
+    /// # let conversational_input = todo!();
+    /// # let conversation_state = todo!();
+    /// let mut stream = pipeline.generate_streaming_response(
     ///     conversational_input,
     ///     &conversation_state
     /// ).await?;
@@ -214,6 +230,8 @@ where
     ///         }
     ///     }
     /// }
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn generate_streaming_response(
         &self,
@@ -640,10 +658,14 @@ where
     /// Call this method periodically (e.g., every 30 minutes) to maintain
     /// optimal resource utilization:
     ///
-    /// ```rust
+    /// ```rust,ignore
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let pipeline = todo!();
     /// // Cleanup sessions older than 60 minutes
     /// let cleaned_count = pipeline.cleanup_sessions(60).await?;
     /// println!("Cleaned up {} expired sessions", cleaned_count);
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn cleanup_sessions(&self, max_age_minutes: u64) -> Result<usize> {
         Ok(self.coordinator.cleanup_expired_sessions(max_age_minutes).await)

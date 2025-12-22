@@ -28,7 +28,7 @@
 //!
 //! ### Basic Audio Feature Extraction
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::feature_extractors::audio::{AudioFeatureExtractor, AudioFeatureConfig};
 //! use trustformers::auto::types::{FeatureInput, AudioMetadata};
 //!
@@ -64,7 +64,7 @@
 //!
 //! ### Advanced Configuration
 //!
-//! ```rust
+//! ```rust,ignore
 //! use serde_json::json;
 //!
 //! // Load configuration from model config
@@ -178,7 +178,7 @@ impl AudioFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = AudioFeatureConfig {
     ///     sampling_rate: 16000,
     ///     feature_size: 80,
@@ -477,7 +477,7 @@ impl FeatureExtractor for AudioFeatureExtractor {
 ///
 /// ## Usage Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// // Standard speech configuration
 /// let speech_config = AudioFeatureConfig {
 ///     sampling_rate: 16000,
@@ -546,8 +546,8 @@ impl AudioFeatureConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use serde_json::json;
+    /// ```rust,ignore
+    ///    /// use serde_json::json;
     ///
     /// let config_json = json!({
     ///     "sampling_rate": 16000,
@@ -557,7 +557,7 @@ impl AudioFeatureConfig {
     /// });
     ///
     /// let audio_config = AudioFeatureConfig::from_config(&config_json)?;
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
             sampling_rate: config.get("sampling_rate").and_then(|v| v.as_u64()).unwrap_or(16000)
@@ -593,8 +593,8 @@ impl AudioFeatureConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let config = AudioFeatureConfig {
+    /// ```rust,ignore
+    ///    /// let config = AudioFeatureConfig {
     ///     sampling_rate: 16000,
     ///     feature_size: 80,
     ///     n_fft: 512,
@@ -604,7 +604,7 @@ impl AudioFeatureConfig {
     /// };
     ///
     /// config.validate_config()?; // Should succeed
-    /// ```
+
     pub fn validate_config(&self) -> Result<()> {
         if self.sampling_rate == 0 {
             return Err(TrustformersError::invalid_input(

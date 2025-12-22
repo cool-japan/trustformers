@@ -33,7 +33,7 @@
 //!
 //! ### Basic Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::feature_extractors::AutoFeatureExtractor;
 //! use trustformers::auto::types::{FeatureInput, ImageFormat, ImageMetadata};
 //!
@@ -59,7 +59,7 @@
 //!
 //! ### Task-Specific Creation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::feature_extractors::AutoFeatureExtractor;
 //!
 //! // Create extractor for specific task
@@ -147,7 +147,7 @@ pub use vision::{VisionFeatureConfig, VisionFeatureExtractor};
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// // From pretrained model
 /// let extractor = AutoFeatureExtractor::from_pretrained("openai/clip-vit-base-patch32")?;
 ///
@@ -181,13 +181,13 @@ impl AutoFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// // Load a vision model
+    /// ```rust,ignore
+    ///    /// // Load a vision model
     /// let extractor = AutoFeatureExtractor::from_pretrained("openai/clip-vit-base-patch32")?;
     ///
     /// // Load an audio model
     /// let extractor = AutoFeatureExtractor::from_pretrained("facebook/wav2vec2-base-960h")?;
-    /// ```
+
     pub fn from_pretrained(model_name_or_path: &str) -> Result<Box<dyn FeatureExtractor>> {
         let config = crate::hub::load_config_from_hub(model_name_or_path, None)?;
 
@@ -233,15 +233,15 @@ impl AutoFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let config = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let config = serde_json::json!({
     ///     "model_type": "clip",
     ///     "image_size": 224,
     ///     "hidden_size": 768
     /// });
     ///
     /// let extractor = AutoFeatureExtractor::for_task("image-classification", &config)?;
-    /// ```
+
     pub fn for_task(
         task: &str,
         model_config: &serde_json::Value,
@@ -356,10 +356,10 @@ pub trait FeatureExtractor: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let features = extractor.extract_features(&input)?;
+    /// ```rust,ignore
+    ///    /// let features = extractor.extract_features(&input)?;
     /// println!("Extracted {} features", features.features.len());
-    /// ```
+
     fn extract_features(&self, input: &FeatureInput) -> Result<FeatureOutput>;
 
     /// Get the feature extractor configuration

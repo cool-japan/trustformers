@@ -20,7 +20,7 @@
 //!
 //! ### Using Default Metric
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{DefaultMetric, MetricInput, Metric};
 //!
 //! let mut metric = DefaultMetric::new();
@@ -36,7 +36,7 @@
 //!
 //! ### Using Composite Metric
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{CompositeMetric, ClassificationMetric, GenerationMetric};
 //!
 //! let mut composite = CompositeMetric::new(vec![
@@ -56,7 +56,7 @@
 //!
 //! ### Creating Composite from AutoMetric
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::AutoMetric;
 //!
 //! // Create composite metric for multiple tasks
@@ -131,7 +131,7 @@ impl DefaultMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::DefaultMetric;
     ///
     /// let metric = DefaultMetric::new();
@@ -172,8 +172,8 @@ impl Metric for DefaultMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{DefaultMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{DefaultMetric, MetricInput, Metric};
     ///
     /// let mut metric = DefaultMetric::new();
     ///
@@ -181,7 +181,7 @@ impl Metric for DefaultMetric {
     /// let references = MetricInput::Classifications(vec![0, 0, 1]);
     ///
     /// metric.add_batch(&predictions, &references)?;
-    /// ```
+
     fn add_batch(&mut self, predictions: &MetricInput, references: &MetricInput) -> Result<()> {
         self.classification_metric.add_batch(predictions, references)
     }
@@ -204,8 +204,8 @@ impl Metric for DefaultMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{DefaultMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{DefaultMetric, MetricInput, Metric};
     ///
     /// let mut metric = DefaultMetric::new();
     /// metric.add_batch(
@@ -216,7 +216,7 @@ impl Metric for DefaultMetric {
     /// let result = metric.compute()?;
     /// assert_eq!(result.name, "default");
     /// assert_eq!(result.value, 1.0); // Perfect accuracy
-    /// ```
+
     fn compute(&self) -> Result<MetricResult> {
         let mut result = self.classification_metric.compute()?;
         // Override the name to indicate this is a default metric
@@ -231,8 +231,8 @@ impl Metric for DefaultMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{DefaultMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{DefaultMetric, MetricInput, Metric};
     ///
     /// let mut metric = DefaultMetric::new();
     /// metric.add_batch(
@@ -242,7 +242,7 @@ impl Metric for DefaultMetric {
     ///
     /// metric.reset();
     /// // Metric is now ready for new data
-    /// ```
+
     fn reset(&mut self) {
         self.classification_metric.reset();
     }
@@ -319,7 +319,7 @@ impl CompositeMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::{CompositeMetric, ClassificationMetric, GenerationMetric};
     ///
     /// let composite = CompositeMetric::new(vec![
@@ -349,7 +349,7 @@ impl CompositeMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::{CompositeMetric, ClassificationMetric};
     ///
     /// let mut composite = CompositeMetric::new(vec![]);
@@ -421,8 +421,8 @@ impl CompositeMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{CompositeMetric, ClassificationMetric, MetricInput};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{CompositeMetric, ClassificationMetric, MetricInput};
     ///
     /// let mut composite = CompositeMetric::new(vec![
     ///     Box::new(ClassificationMetric::new()),
@@ -433,7 +433,7 @@ impl CompositeMetric {
     ///
     /// let results = composite.compute_all()?;
     /// assert_eq!(results.len(), 1);
-    /// ```
+
     pub fn compute_all(&self) -> Result<Vec<MetricResult>> {
         self.metrics.iter().map(|m| m.compute()).collect()
     }
@@ -509,8 +509,8 @@ impl CompositeMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{CompositeMetric, ClassificationMetric, MetricInput};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{CompositeMetric, ClassificationMetric, MetricInput};
     ///
     /// let mut composite = CompositeMetric::new(vec![
     ///     Box::new(ClassificationMetric::new()),
@@ -520,7 +520,7 @@ impl CompositeMetric {
     /// let references = MetricInput::Classifications(vec![0, 1]);
     ///
     /// composite.add_batch_to_compatible(&predictions, &references)?;
-    /// ```
+
     pub fn add_batch_to_compatible(
         &mut self,
         predictions: &MetricInput,

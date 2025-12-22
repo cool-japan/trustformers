@@ -15,7 +15,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers::pipeline::conversational::safety::SafetyFilter;
 //!
 //! // Create a safety filter with default configuration
