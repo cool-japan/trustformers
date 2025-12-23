@@ -98,6 +98,41 @@ impl Default for CommandRConfig {
 }
 
 impl CommandRConfig {
+    /// Create a tiny configuration for testing purposes
+    /// Uses very small dimensions to allow fast test execution
+    pub fn tiny() -> Self {
+        Self {
+            model_name: "command-r-tiny".to_string(),
+            vocab_size: 1000,
+            hidden_size: 64,
+            num_attention_heads: 4,
+            num_key_value_heads: 4,
+            num_hidden_layers: 2,
+            intermediate_size: 128,
+            max_sequence_length: 128,
+            rms_norm_eps: 1e-5,
+            rope_theta: 10000.0,
+            rope_scaling_factor: 1.0,
+            attention_dropout: 0.0,
+            hidden_dropout: 0.0,
+            use_bias: false,
+            tie_word_embeddings: false,
+            activation_function: "silu".to_string(),
+            layer_norm_eps: 1e-5,
+            use_logit_bias: false,
+            logit_scale: 1.0,
+            use_sliding_window: false,
+            sliding_window_size: 64,
+            use_flash_attention: false,
+            pad_token_id: Some(0),
+            bos_token_id: Some(1),
+            eos_token_id: Some(2),
+            model_type: "command-r".to_string(),
+            torch_dtype: "float32".to_string(),
+            transformers_version: "4.39.0".to_string(),
+        }
+    }
+
     /// Create Command R base model configuration
     pub fn command_r() -> Self {
         Self::default()

@@ -606,6 +606,7 @@ mod cross_platform_tests {
     }
 
     #[test]
+    #[ignore = "Performance test - requires significant time for large matrix operations"]
     fn test_performance_parity() -> TestResult<()> {
         let config = HardwareTestConfig::default();
 
