@@ -181,7 +181,8 @@ fn test_vision_transformer_creation() {
 
 #[test]
 fn test_visual_expert_creation() {
-    let config = CogVlmConfig::default();
+    // Use small_test_config for fast testing
+    let config = CogVlmConfig::small_test_config();
     let result = VisualExpert::new(config);
     assert!(
         result.is_ok(),
@@ -343,7 +344,8 @@ fn test_vision_transformer_forward() {
 
 #[test]
 fn test_visual_expert_forward() {
-    let config = CogVlmConfig::default();
+    // Use small_test_config for fast testing
+    let config = CogVlmConfig::small_test_config();
     let visual_expert = VisualExpert::new(config.clone()).unwrap();
 
     let lang_hidden = Tensor::zeros(&[1, 10, config.hidden_size]).unwrap();
@@ -440,11 +442,12 @@ fn test_vision_encoder_standalone() {
 
 #[test]
 fn test_visual_expert_standalone() {
-    let config = CogVlmConfig::default();
-    let expert = visual_expert(config).unwrap();
+    // Use small_test_config for fast testing
+    let config = CogVlmConfig::small_test_config();
+    let expert = visual_expert(config.clone()).unwrap();
 
-    let lang_hidden = Tensor::zeros(&[1, 10, 4096]).unwrap();
-    let vision_hidden = Tensor::zeros(&[1, 256, 1792]).unwrap();
+    let lang_hidden = Tensor::zeros(&[1, 10, config.hidden_size]).unwrap();
+    let vision_hidden = Tensor::zeros(&[1, 256, config.vision_config.hidden_size]).unwrap();
 
     let result = expert.forward((lang_hidden, vision_hidden));
     assert!(result.is_ok());

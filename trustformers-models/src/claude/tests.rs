@@ -148,20 +148,48 @@ fn test_rotary_embedding_creation() {
 
 #[test]
 fn test_claude_attention_creation() {
-    let config = ClaudeConfig::claude_3_haiku();
+    // Use small_test_config for fast testing
+    let config = ClaudeConfig::small_test_config();
     let attention = ClaudeAttention::new(config);
     assert!(attention.is_ok());
 }
 
 #[test]
 fn test_claude_mlp_creation() {
-    let config = ClaudeConfig::claude_3_sonnet();
+    // Use small_test_config for fast testing
+    let config = ClaudeConfig::small_test_config();
     let mlp = ClaudeMLP::new(config);
     assert!(mlp.is_ok());
 }
 
 #[test]
 fn test_claude_decoder_layer_creation() {
+    // Use small_test_config for fast testing
+    let config = ClaudeConfig::small_test_config();
+    let layer = ClaudeDecoderLayer::new(config);
+    assert!(layer.is_ok());
+}
+
+// Full model size tests - ignored by default due to memory/time requirements
+#[test]
+#[ignore = "Full model size test - requires significant memory and time"]
+fn test_claude_attention_creation_haiku() {
+    let config = ClaudeConfig::claude_3_haiku();
+    let attention = ClaudeAttention::new(config);
+    assert!(attention.is_ok());
+}
+
+#[test]
+#[ignore = "Full model size test - requires significant memory and time"]
+fn test_claude_mlp_creation_sonnet() {
+    let config = ClaudeConfig::claude_3_sonnet();
+    let mlp = ClaudeMLP::new(config);
+    assert!(mlp.is_ok());
+}
+
+#[test]
+#[ignore = "Full model size test - requires significant memory and time"]
+fn test_claude_decoder_layer_creation_opus() {
     let config = ClaudeConfig::claude_3_opus();
     let layer = ClaudeDecoderLayer::new(config);
     assert!(layer.is_ok());
