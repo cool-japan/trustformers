@@ -1,7 +1,6 @@
 #![allow(unused_variables)] // Multi-backend GPU implementation with feature gates
 
 use crate::errors::{Result, TrustformersError};
-use std::sync::{Arc, Mutex};
 use crate::gpu::GpuBackend;
 #[cfg(feature = "cuda")]
 use crate::kernels::cuda_kernels::CudaKernel;
@@ -12,6 +11,7 @@ use crate::kernels::rocm_kernels::RocmKernel;
 #[cfg(feature = "vulkan")]
 use crate::kernels::vulkan_kernels::VulkanKernel;
 use crate::tensor::Tensor;
+use std::sync::{Arc, Mutex};
 
 /// GPU-accelerated operations manager
 ///

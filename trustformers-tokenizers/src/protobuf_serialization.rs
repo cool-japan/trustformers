@@ -5,7 +5,7 @@ use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
 
 /// Protobuf-compatible tokenizer metadata
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtobufTokenizerMetadata {
     pub name: String,
     pub version: String,
@@ -25,7 +25,7 @@ pub struct ProtobufTokenizerMetadata {
 }
 
 /// Protobuf-compatible vocabulary entry
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtobufVocabEntry {
     pub token: String,
     pub id: u32,
@@ -35,7 +35,7 @@ pub struct ProtobufVocabEntry {
 }
 
 /// Protobuf-compatible normalization rule
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtobufNormalizationRule {
     pub rule_type: u32, // Enumerated rule type
     pub pattern: Option<String>,
@@ -45,7 +45,7 @@ pub struct ProtobufNormalizationRule {
 }
 
 /// Protobuf-compatible merge rule (for BPE)
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtobufMergeRule {
     pub first_token: String,
     pub second_token: String,
@@ -54,7 +54,7 @@ pub struct ProtobufMergeRule {
 }
 
 /// Complete protobuf tokenizer model
-#[derive(Debug, Clone, Serialize, Deserialize, bincode::Encode, bincode::Decode)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProtobufTokenizerModel {
     pub metadata: ProtobufTokenizerMetadata,
     pub vocabulary: Vec<ProtobufVocabEntry>,
@@ -218,9 +218,9 @@ impl ProtobufSerializer {
 
     /// Serialize to protobuf binary format
     pub fn to_protobuf_bytes(model: &ProtobufTokenizerModel) -> Result<Vec<u8>> {
-        // Using serde with bincode as a simplified protobuf-like format
+        // Using serde with oxicode as a simplified protobuf-like format
         // In a real implementation, you'd use actual protobuf libraries like prost
-        bincode::encode_to_vec(model, bincode::config::standard()).map_err(|e| {
+        oxicode::serde::encode_to_vec(model, oxicode::config::standard()).map_err(|e| {
             TrustformersError::other(
                 anyhow::anyhow!("Failed to serialize protobuf: {}", e).to_string(),
             )
@@ -230,7 +230,7 @@ impl ProtobufSerializer {
     /// Deserialize from protobuf binary format
     pub fn from_protobuf_bytes(bytes: &[u8]) -> Result<ProtobufTokenizerModel> {
         let (result, _): (ProtobufTokenizerModel, usize) =
-            bincode::decode_from_slice(bytes, bincode::config::standard()).map_err(|e| {
+            oxicode::serde::decode_from_slice(bytes, oxicode::config::standard()).map_err(|e| {
                 TrustformersError::other(
                     anyhow::anyhow!("Failed to deserialize protobuf: {}", e).to_string(),
                 )

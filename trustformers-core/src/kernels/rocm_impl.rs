@@ -44,13 +44,25 @@ struct HipLibrary {
     hip_set_device: unsafe extern "C" fn(i32) -> i32,
     hip_malloc: unsafe extern "C" fn(*mut *mut std::ffi::c_void, usize) -> i32,
     hip_free: unsafe extern "C" fn(*mut std::ffi::c_void) -> i32,
-    hip_memcpy: unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, usize, i32) -> i32,
+    hip_memcpy:
+        unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, usize, i32) -> i32,
     hip_device_synchronize: unsafe extern "C" fn() -> i32,
-    hip_module_load_data: unsafe extern "C" fn(*mut *mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
-    hip_module_get_function: unsafe extern "C" fn(*mut *mut std::ffi::c_void, *mut std::ffi::c_void, *const i8) -> i32,
+    hip_module_load_data:
+        unsafe extern "C" fn(*mut *mut std::ffi::c_void, *const std::ffi::c_void) -> i32,
+    hip_module_get_function:
+        unsafe extern "C" fn(*mut *mut std::ffi::c_void, *mut std::ffi::c_void, *const i8) -> i32,
     hip_module_launch_kernel: unsafe extern "C" fn(
-        *mut std::ffi::c_void, u32, u32, u32, u32, u32, u32, u32,
-        *mut std::ffi::c_void, *mut *mut std::ffi::c_void, *mut *mut std::ffi::c_void
+        *mut std::ffi::c_void,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        *mut std::ffi::c_void,
+        *mut *mut std::ffi::c_void,
+        *mut *mut std::ffi::c_void,
     ) -> i32,
 }
 
@@ -62,34 +74,115 @@ impl HipLibrary {
             libloading::Library::new("libamdhip64.so")
                 .or_else(|_| libloading::Library::new("libamdhip64.so.5"))
                 .or_else(|_| libloading::Library::new("libamdhip64.so.6"))
-                .map_err(|e| TrustformersError::hardware_error(
-                    &format!("Failed to load ROCm HIP library: {}. Make sure ROCm is installed.", e),
-                    "HipLibrary::load",
-                ))?
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!(
+                            "Failed to load ROCm HIP library: {}. Make sure ROCm is installed.",
+                            e
+                        ),
+                        "HipLibrary::load",
+                    )
+                })?
         };
 
         unsafe {
-            let hip_get_device_count = *lib.get::<unsafe extern "C" fn(*mut i32) -> i32>(b"hipGetDeviceCount\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipGetDeviceCount: {}", e), "HipLibrary::load"))?;
-            let hip_set_device = *lib.get::<unsafe extern "C" fn(i32) -> i32>(b"hipSetDevice\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipSetDevice: {}", e), "HipLibrary::load"))?;
-            let hip_malloc = *lib.get::<unsafe extern "C" fn(*mut *mut std::ffi::c_void, usize) -> i32>(b"hipMalloc\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipMalloc: {}", e), "HipLibrary::load"))?;
-            let hip_free = *lib.get::<unsafe extern "C" fn(*mut std::ffi::c_void) -> i32>(b"hipFree\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipFree: {}", e), "HipLibrary::load"))?;
-            let hip_memcpy = *lib.get::<unsafe extern "C" fn(*mut std::ffi::c_void, *const std::ffi::c_void, usize, i32) -> i32>(b"hipMemcpy\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipMemcpy: {}", e), "HipLibrary::load"))?;
-            let hip_device_synchronize = *lib.get::<unsafe extern "C" fn() -> i32>(b"hipDeviceSynchronize\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipDeviceSynchronize: {}", e), "HipLibrary::load"))?;
-            let hip_module_load_data = *lib.get::<unsafe extern "C" fn(*mut *mut std::ffi::c_void, *const std::ffi::c_void) -> i32>(b"hipModuleLoadData\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipModuleLoadData: {}", e), "HipLibrary::load"))?;
-            let hip_module_get_function = *lib.get::<unsafe extern "C" fn(*mut *mut std::ffi::c_void, *mut std::ffi::c_void, *const i8) -> i32>(b"hipModuleGetFunction\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipModuleGetFunction: {}", e), "HipLibrary::load"))?;
-            let hip_module_launch_kernel = *lib.get::<unsafe extern "C" fn(
-                *mut std::ffi::c_void, u32, u32, u32, u32, u32, u32, u32,
-                *mut std::ffi::c_void, *mut *mut std::ffi::c_void, *mut *mut std::ffi::c_void
-            ) -> i32>(b"hipModuleLaunchKernel\0")
-                .map_err(|e| TrustformersError::hardware_error(&format!("hipModuleLaunchKernel: {}", e), "HipLibrary::load"))?;
+            let hip_get_device_count = *lib
+                .get::<unsafe extern "C" fn(*mut i32) -> i32>(b"hipGetDeviceCount\0")
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipGetDeviceCount: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
+            let hip_set_device =
+                *lib.get::<unsafe extern "C" fn(i32) -> i32>(b"hipSetDevice\0").map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipSetDevice: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
+            let hip_malloc = *lib
+                .get::<unsafe extern "C" fn(*mut *mut std::ffi::c_void, usize) -> i32>(
+                    b"hipMalloc\0",
+                )
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipMalloc: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
+            let hip_free = *lib
+                .get::<unsafe extern "C" fn(*mut std::ffi::c_void) -> i32>(b"hipFree\0")
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipFree: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
+            let hip_memcpy = *lib
+                .get::<unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    *const std::ffi::c_void,
+                    usize,
+                    i32,
+                ) -> i32>(b"hipMemcpy\0")
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipMemcpy: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
+            let hip_device_synchronize = *lib
+                .get::<unsafe extern "C" fn() -> i32>(b"hipDeviceSynchronize\0")
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipDeviceSynchronize: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
+            let hip_module_load_data =
+                *lib.get::<unsafe extern "C" fn(
+                    *mut *mut std::ffi::c_void,
+                    *const std::ffi::c_void,
+                ) -> i32>(b"hipModuleLoadData\0")
+                    .map_err(|e| {
+                        TrustformersError::hardware_error(
+                            &format!("hipModuleLoadData: {}", e),
+                            "HipLibrary::load",
+                        )
+                    })?;
+            let hip_module_get_function = *lib
+                .get::<unsafe extern "C" fn(
+                    *mut *mut std::ffi::c_void,
+                    *mut std::ffi::c_void,
+                    *const i8,
+                ) -> i32>(b"hipModuleGetFunction\0")
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipModuleGetFunction: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
+            let hip_module_launch_kernel = *lib
+                .get::<unsafe extern "C" fn(
+                    *mut std::ffi::c_void,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    u32,
+                    *mut std::ffi::c_void,
+                    *mut *mut std::ffi::c_void,
+                    *mut *mut std::ffi::c_void,
+                ) -> i32>(b"hipModuleLaunchKernel\0")
+                .map_err(|e| {
+                    TrustformersError::hardware_error(
+                        &format!("hipModuleLaunchKernel: {}", e),
+                        "HipLibrary::load",
+                    )
+                })?;
 
             Ok(Self {
                 _library: lib,
@@ -266,7 +359,10 @@ impl RocmImpl {
         // Load module
         let mut module = std::ptr::null_mut();
         let result = unsafe {
-            (self.hip_lib.hip_module_load_data)(&mut module, code_object.as_ptr() as *const std::ffi::c_void)
+            (self.hip_lib.hip_module_load_data)(
+                &mut module,
+                code_object.as_ptr() as *const std::ffi::c_void,
+            )
         };
         if result != HIP_SUCCESS {
             return Err(TrustformersError::hardware_error(
@@ -278,7 +374,9 @@ impl RocmImpl {
         // Get function
         let mut function = std::ptr::null_mut();
         let name_cstr = std::ffi::CString::new(name).unwrap();
-        let result = unsafe { (self.hip_lib.hip_module_get_function)(&mut function, module, name_cstr.as_ptr()) };
+        let result = unsafe {
+            (self.hip_lib.hip_module_get_function)(&mut function, module, name_cstr.as_ptr())
+        };
         if result != HIP_SUCCESS {
             return Err(TrustformersError::hardware_error(
                 "Failed to get ROCm function",
@@ -1159,7 +1257,10 @@ mod tests {
             // This will use actual implementation if ROCm is available
             let result = rocm.matmul(&a, &b, &mut c);
             if result.is_err() {
-                println!("ROCm matmul failed (expected if no ROCm hardware): {:?}", result);
+                println!(
+                    "ROCm matmul failed (expected if no ROCm hardware): {:?}",
+                    result
+                );
             }
         } else {
             println!("ROCm not available for testing");

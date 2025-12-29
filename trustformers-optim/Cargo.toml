@@ -17,7 +17,7 @@ scirs2-core = { workspace = true, features = ["parallel"] }
 num-traits.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-bincode.workspace = true
+oxicode.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 parking_lot.workspace = true

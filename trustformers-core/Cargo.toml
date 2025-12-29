@@ -24,7 +24,7 @@ log.workspace = true
 num-traits.workspace = true  # Still needed for trait bounds
 # num-complex removed - use scirs2_core::Complex instead
 half.workspace = true
-bincode.workspace = true
+oxicode.workspace = true
 safetensors.workspace = true
 byteorder.workspace = true
 chrono.workspace = true

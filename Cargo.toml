@@ -108,7 +108,7 @@ pyo3 = "0.27.2"
 numpy = "0.27.1"
 
 # Additional core dependencies
-bincode = "2.0"
+oxicode = { path = "../oxicode", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.1"
 zstd = "0.13"
