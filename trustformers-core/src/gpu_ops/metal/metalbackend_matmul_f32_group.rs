@@ -22,25 +22,20 @@ impl MetalBackend {
         n: usize,
     ) -> Result<Vec<f32>> {
         #[cfg(all(target_os = "macos", feature = "metal"))]
-        unsafe {
-            use cblas_sys::{cblas_sgemm, CblasNoTrans, CblasRowMajor};
+        {
+            use oxiblas_blas::level3::gemm;
+            use oxiblas_matrix::{MatMut, MatRef};
+
             let mut result = vec![0.0f32; m * n];
-            cblas_sgemm(
-                CblasRowMajor,
-                CblasNoTrans,
-                CblasNoTrans,
-                m as i32,
-                n as i32,
-                k as i32,
-                1.0,
-                a.as_ptr(),
-                k as i32,
-                b.as_ptr(),
-                n as i32,
-                0.0,
-                result.as_mut_ptr(),
-                n as i32,
-            );
+
+            // Create matrix views from slices (row-major layout)
+            let a_mat = MatRef::new(a.as_ptr(), m, k, k);
+            let b_mat = MatRef::new(b.as_ptr(), k, n, n);
+            let c_mat = MatMut::new(result.as_mut_ptr(), m, n, n);
+
+            // GEMM: C = 1.0 * A * B + 0.0 * C
+            gemm(1.0, a_mat, b_mat, 0.0, c_mat);
+
             Ok(result)
         }
         #[cfg(not(feature = "metal"))]

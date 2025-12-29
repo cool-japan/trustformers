@@ -96,7 +96,7 @@ intel = []
 llvm = []
 cranelift = []
 vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]
-# Note: cblas-sys and blas-src are now always included on macOS for CPU BLAS acceleration
+# Note: OxiBLAS is now used for all BLAS/LAPACK operations (pure Rust implementation)
 metal = ["dep:metal", "dep:mpsgraph", "dep:objc2", "dep:objc2-metal"]
 wgpu_backend = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
 opencl = ["dep:opencl3"]
@@ -131,6 +131,7 @@ metal = { version = "0.32", optional = true }
 mpsgraph = { version = "0.2", optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-metal = { version = "0.3", optional = true }
-# Direct BLAS for maximum CPU performance via Accelerate framework
-cblas-sys = { workspace = true }
-blas-src = { workspace = true, features = ["accelerate"] }
+# OxiBLAS - Pure Rust BLAS/LAPACK implementation (replaces Accelerate framework)
+oxiblas = { workspace = true }
+oxiblas-blas = { workspace = true }
+oxiblas-matrix = { workspace = true }

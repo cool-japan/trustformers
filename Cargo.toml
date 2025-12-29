@@ -118,9 +118,10 @@ tar = "0.4"
 libc = "0.2.178"
 libloading = "0.8"
 
-# BLAS dependencies (for Accelerate framework on macOS)
-cblas-sys = "0.3"
-blas-src = { version = "0.14", features = ["accelerate"] }
+# BLAS dependencies - OxiBLAS (Pure Rust BLAS/LAPACK from SciRS2 ecosystem)
+oxiblas = { path = "../oxiblas/crates/oxiblas", features = ["parallel"] }
+oxiblas-blas = { path = "../oxiblas/crates/oxiblas-blas" }
+oxiblas-matrix = { path = "../oxiblas/crates/oxiblas-matrix" }
 
 # Server and networking dependencies
 tokio-util = "0.7"

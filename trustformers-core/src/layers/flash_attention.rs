@@ -11,29 +11,20 @@ use scirs2_core::simd_ops::SimdUnifiedOps;
 /// Minimum size threshold for BLAS GEMM
 const MIN_SIZE_FOR_BLAS: usize = 32;
 
-/// Direct BLAS GEMM using cblas_sgemm for maximum performance on macOS (Accelerate)
+/// Direct BLAS GEMM using OxiBLAS for maximum performance
 #[cfg(target_os = "macos")]
 #[inline]
 fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
-    unsafe {
-        use cblas_sys::{cblas_sgemm, CblasNoTrans, CblasRowMajor};
-        cblas_sgemm(
-            CblasRowMajor,
-            CblasNoTrans,
-            CblasNoTrans,
-            m as i32,
-            n as i32,
-            k as i32,
-            1.0,
-            a.as_ptr(),
-            k as i32,
-            b.as_ptr(),
-            n as i32,
-            0.0,
-            c.as_mut_ptr(),
-            n as i32,
-        );
-    }
+    use oxiblas_blas::level3::gemm;
+    use oxiblas_matrix::{MatMut, MatRef};
+
+    // Create matrix views from slices (row-major layout)
+    let a_mat = MatRef::new(a.as_ptr(), m, k, k);
+    let b_mat = MatRef::new(b.as_ptr(), k, n, n);
+    let c_mat = MatMut::new(c.as_mut_ptr(), m, n, n);
+
+    // GEMM: C = 1.0 * A * B + 0.0 * C
+    gemm(1.0, a_mat, b_mat, 0.0, c_mat);
 }
 
 /// Fallback for non-macOS: use scirs2-core SIMD GEMM
