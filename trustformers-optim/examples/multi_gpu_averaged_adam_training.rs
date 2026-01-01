@@ -12,7 +12,6 @@
 //! - Fault-tolerant distributed training
 //! - Performance profiling and optimization
 
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;

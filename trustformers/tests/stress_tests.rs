@@ -799,12 +799,6 @@ impl StressTestRunner {
     async fn run_long_running_stress(&self) -> Result<()> {
         println!("Running long running stress test...");
 
-        // Use shorter duration for testing
-        let mut config = self.config.clone();
-        if config.duration.is_none() {
-            config.duration = Some(Duration::from_secs(10)); // 10 seconds for tests
-        }
-
         self.run_text_generation_stress().await
     }
 

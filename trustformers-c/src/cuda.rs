@@ -341,9 +341,10 @@ impl CudaOperations {
                 CUDA_MANAGER.lock().map_err(|_| anyhow!("Failed to lock CUDA manager"))?;
             if let Some(context) = manager.cuda_contexts.get(&tensor.device_id) {
                 // Copy host data to device using cudarc 0.17 API
-                // htod_copy copies host slice to device, returns new CudaSlice
-                let new_slice: CudaSlice<f32> = context
-                    .htod_copy(host_data)
+                // Use stream.memcpy_stod which copies host slice to device, returns new CudaSlice
+                let stream = context.default_stream();
+                let new_slice: CudaSlice<f32> = stream
+                    .memcpy_stod(host_data)
                     .map_err(|e| anyhow!("Failed to copy data to device: {:?}", e))?;
                 tensor.device_slice = new_slice;
                 return Ok(());
@@ -378,11 +379,11 @@ impl CudaOperations {
                 CUDA_MANAGER.lock().map_err(|_| anyhow!("Failed to lock CUDA manager"))?;
             if let Some(context) = manager.cuda_contexts.get(&tensor.device_id) {
                 // Copy device data to host using cudarc 0.17 API
-                // dtoh_sync_copy copies device to host, returns Vec<T>
-                let host_vec = context
-                    .dtoh_sync_copy(&tensor.device_slice)
+                // Use stream.memcpy_dtoh which copies device to host slice
+                let stream = context.default_stream();
+                stream
+                    .memcpy_dtoh(&tensor.device_slice, host_data)
                     .map_err(|e| anyhow!("Failed to copy data from device: {:?}", e))?;
-                host_data.copy_from_slice(&host_vec);
                 return Ok(());
             }
             return Err(anyhow!("CUDA context {} not found", tensor.device_id).into());
@@ -427,12 +428,15 @@ impl CudaOperations {
             let manager =
                 CUDA_MANAGER.lock().map_err(|_| anyhow!("Failed to lock CUDA manager"))?;
             if let Some(context) = manager.cuda_contexts.get(&a.device_id) {
-                // Placeholder: copy a to c via host memory
-                let host_data = context
-                    .dtoh_sync_copy(&a.device_slice)
+                // Placeholder: copy a to c via host memory using stream API
+                let stream = context.default_stream();
+                let total_elements: usize = a.shape.iter().product();
+                let mut host_data = vec![0.0f32; total_elements];
+                stream
+                    .memcpy_dtoh(&a.device_slice, &mut host_data)
                     .map_err(|e| anyhow!("Failed to copy tensor data: {:?}", e))?;
-                let new_c_slice = context
-                    .htod_copy(&host_data)
+                let new_c_slice = stream
+                    .memcpy_stod(&host_data)
                     .map_err(|e| anyhow!("Failed to copy tensor data: {:?}", e))?;
                 c.device_slice = new_c_slice;
                 return Ok(());
@@ -464,12 +468,15 @@ impl CudaOperations {
                 CUDA_MANAGER.lock().map_err(|_| anyhow!("Failed to lock CUDA manager"))?;
             if let Some(context) = manager.cuda_contexts.get(&a.device_id) {
                 // Copy a to result first (placeholder - real impl would use a kernel)
-                // Use host memory as intermediate
-                let host_data = context
-                    .dtoh_sync_copy(&a.device_slice)
+                // Use host memory as intermediate via stream API
+                let stream = context.default_stream();
+                let total_elements: usize = a.shape.iter().product();
+                let mut host_data = vec![0.0f32; total_elements];
+                stream
+                    .memcpy_dtoh(&a.device_slice, &mut host_data)
                     .map_err(|e| anyhow!("Failed to copy tensor data: {:?}", e))?;
-                let new_result = context
-                    .htod_copy(&host_data)
+                let new_result = stream
+                    .memcpy_stod(&host_data)
                     .map_err(|e| anyhow!("Failed to copy tensor data: {:?}", e))?;
                 result.device_slice = new_result;
                 return Ok(());
@@ -507,11 +514,14 @@ impl CudaOperations {
             if let Some(context) = manager.cuda_contexts.get(&input.device_id) {
                 // For real implementation, you would launch custom CUDA kernels for each activation
                 // For now, we'll copy input to output via host memory as a placeholder
-                let host_data = context
-                    .dtoh_sync_copy(&input.device_slice)
+                let stream = context.default_stream();
+                let total_elements: usize = input.shape.iter().product();
+                let mut host_data = vec![0.0f32; total_elements];
+                stream
+                    .memcpy_dtoh(&input.device_slice, &mut host_data)
                     .map_err(|e| anyhow!("Failed to copy tensor data: {:?}", e))?;
-                let new_output = context
-                    .htod_copy(&host_data)
+                let new_output = stream
+                    .memcpy_stod(&host_data)
                     .map_err(|e| anyhow!("Failed to copy tensor data: {:?}", e))?;
                 output.device_slice = new_output;
 
