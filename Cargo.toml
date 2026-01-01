@@ -43,15 +43,15 @@ trustformers-c = { version = "0.1.0-alpha.2", path = "trustformers-c", default-f
 anyhow = "1.0.100"
 thiserror = "2.0.17"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
+serde_json = "1.0.148"
 serde_yaml = "0.9.34"
 semver = { version = "1.0.27", features = ["serde"] }
 tokio = { version = "1.48.0", features = ["full"] }
-tracing = "0.1.43"
+tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 log = "0.4.29"
 lazy_static = "1.5.0"
-reqwest = { version = "0.12.26", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.12.28", features = ["json", "stream", "blocking"] }
 futures = "0.3.31"
 bytes = "1.11.0"
 indicatif = "0.18.3"
@@ -108,7 +108,7 @@ pyo3 = "0.27.2"
 numpy = "0.27.1"
 
 # Additional core dependencies
-oxicode = { path = "../oxicode", features = ["serde"] }
+oxicode = { version = "0.1.1", features = ["serde"] }
 byteorder = "1.5"
 dashmap = "6.1"
 zstd = "0.13"
@@ -119,9 +119,9 @@ libc = "0.2.178"
 libloading = "0.8"
 
 # BLAS dependencies - OxiBLAS (Pure Rust BLAS/LAPACK from SciRS2 ecosystem)
-oxiblas = { path = "../oxiblas/crates/oxiblas", features = ["parallel"] }
-oxiblas-blas = { path = "../oxiblas/crates/oxiblas-blas" }
-oxiblas-matrix = { path = "../oxiblas/crates/oxiblas-matrix" }
+oxiblas = { version = "0.1.2", features = ["parallel"] }
+oxiblas-blas = { version = "0.1.2" }
+oxiblas-matrix = { version = "0.1.2" }
 
 # Server and networking dependencies
 tokio-util = "0.7"
@@ -143,7 +143,7 @@ approx = "0.5"
 pretty_assertions = "1.4"
 axum-test = "17.0"
 tokio-test = "0.4"
-tempfile = "3.23"
+tempfile = "3.24"
 paste = "1.0"
 
 # Debug-specific dependencies
@@ -167,10 +167,10 @@ vulkano = "0.35.2"
 vulkano-shaders = "0.35.0"
 bytemuck = { version = "1.24.0", features = ["derive"] }
 
-# SciRS2 dependencies - using crates.io 0.1.0-rc.3
+# SciRS2 dependencies - using crates.io 0.1.x
 # Note: "metal" feature removed from default features as it's Apple-specific
 # Individual crates should enable it conditionally using target-specific dependencies
-scirs2-core = { version = "0.1.0-rc.3", default-features = false, features = [
+scirs2-core = { version = "0.1.1", default-features = false, features = [
     "array",
     "simd",
     "parallel",
@@ -182,7 +182,7 @@ scirs2-core = { version = "0.1.0-rc.3", default-features = false, features = [
     "gpu",     # GPU acceleration abstractions
     # Metal removed - enable via platform-specific dependencies in individual crates
 ]}
-scirs2-linalg = { version = "0.1.0-rc.3" }
+scirs2-linalg = { version = "0.1.1" }
 
 [profile.release]
 lto = true
