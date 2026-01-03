@@ -935,6 +935,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - StableLM 3B model creation, run with --ignored
     fn test_stablelm_model_creation() {
         let config = StableLMConfig::stablelm_3b();
         let model = StableLMModel::new(config.clone()).unwrap();
@@ -944,6 +945,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - StableLM 3B CausalLM, run with --ignored
     fn test_stablelm_causal_lm() {
         let config = StableLMConfig::stablelm_3b();
         let _model = StableLMForCausalLM::new(config.clone()).unwrap();
@@ -964,6 +966,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - StableLM 3B device support, run with --ignored
     fn test_device_support() {
         let config = StableLMConfig::stablelm_3b();
 
@@ -987,6 +990,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - StableLM 3B CausalLM device support (SIGKILL risk), run with --ignored
     fn test_causal_lm_device_support() {
         let config = StableLMConfig::stablelm_3b();
 

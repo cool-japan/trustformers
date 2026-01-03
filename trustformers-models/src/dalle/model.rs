@@ -1374,6 +1374,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Heavy test - large model creation, run with --ignored
     fn test_dalle_model_creation() {
         let config = DalleConfig::dalle_mini();
         let model = DalleModel::new(config);
@@ -1381,6 +1382,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - large encoder, run with --ignored
     fn test_dalle_text_encoder() {
         let config = DalleTextConfig::clip_base();
         let encoder = DalleTextEncoder::new(config).unwrap();
@@ -1398,6 +1400,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - large encoder, run with --ignored
     fn test_dalle_image_encoder() {
         let config = DalleVisionConfig::clip_vit_b();
         let encoder = DalleImageEncoder::new(config).unwrap();
@@ -1413,6 +1416,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - VAE requires significant memory, run with --ignored
     fn test_dalle_vae() {
         let config = DalleImageConfig::dalle_mini();
         let vae = DalleVAE::new(config.clone()).unwrap();
@@ -1435,6 +1439,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - UNet requires significant memory, run with --ignored
     fn test_dalle_unet() {
         let image_config = DalleImageConfig::dalle_mini();
         let diffusion_config = DalleDiffusionConfig::dalle_mini();
@@ -1474,6 +1479,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - full generation pipeline, run with --ignored
     fn test_dalle_generation_pipeline() {
         let config = DalleConfig::dalle_mini();
         let model = DalleModel::new(config.clone()).unwrap();
@@ -1495,6 +1501,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - training forward pass, run with --ignored
     fn test_dalle_training_forward() {
         let config = DalleConfig::dalle_mini();
         let model = DalleModel::new(config.clone()).unwrap();

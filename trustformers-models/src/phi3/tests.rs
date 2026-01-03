@@ -106,6 +106,7 @@ fn test_phi3_decoder_layer_creation() {
 }
 
 #[test]
+#[ignore] // Heavy test - Phi3 model creation, run with --ignored
 fn test_phi3_model_creation() {
     let config = Phi3Config::phi3_mini_4k_instruct();
     let model = Phi3Model::new(config.clone());
@@ -116,6 +117,7 @@ fn test_phi3_model_creation() {
 }
 
 #[test]
+#[ignore] // Heavy test - Phi3 CausalLM creation, run with --ignored
 fn test_phi3_causal_lm_creation() {
     let config = Phi3Config::phi3_mini_4k_instruct();
     let model = Phi3ForCausalLM::new(config.clone());
@@ -126,6 +128,7 @@ fn test_phi3_causal_lm_creation() {
 }
 
 #[test]
+#[ignore] // Heavy test - Phi3 forward pass, run with --ignored
 fn test_phi3_forward_shape() {
     let config = Phi3Config::phi3_mini_4k_instruct();
     let model = Phi3Model::new(config);
@@ -154,6 +157,7 @@ mod integration_tests {
     use super::*;
 
     #[test]
+    #[ignore] // Very heavy test - creates all Phi3 variants (SIGKILL risk), run with --ignored
     fn test_all_phi3_variants() {
         // Test that all preset configurations are valid
         let configs = vec![

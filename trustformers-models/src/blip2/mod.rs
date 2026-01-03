@@ -10,6 +10,7 @@ mod tests {
     use trustformers_core::Tensor;
 
     #[test]
+    #[ignore] // Heavy test - large model creation, run with --ignored
     fn test_blip2_model_creation() {
         let config = Blip2Config::default();
         let model = Blip2Model::new(config);
@@ -17,6 +18,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - large model creation, run with --ignored
     fn test_blip2_for_conditional_generation() {
         let config = Blip2Config::default();
         let model = Blip2ForConditionalGeneration::new(config);
@@ -24,6 +26,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - vision model creation, run with --ignored
     fn test_blip2_vision_model() {
         let config = Blip2VisionConfig::default();
         let model = Blip2VisionModel::new(config);
@@ -31,6 +34,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - QFormer creation, run with --ignored
     fn test_blip2_qformer() {
         let config = Blip2QFormerConfig::default();
         let model = Blip2QFormerModel::new(config);
@@ -38,6 +42,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - full forward pass, run with --ignored
     fn test_blip2_forward() {
         let config = Blip2Config::default();
         let model = Blip2ForConditionalGeneration::new(config).unwrap();
@@ -62,6 +67,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - text generation, run with --ignored
     fn test_blip2_text_generation() {
         let config = Blip2Config::default();
         let model = Blip2ForConditionalGeneration::new(config).unwrap();
@@ -73,6 +79,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - vision text similarity, run with --ignored
     fn test_blip2_vision_text_similarity() {
         let config = Blip2Config::default();
         let model = Blip2Model::new(config).unwrap();
@@ -104,6 +111,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - creates multiple large models, run with --ignored
     fn test_blip2_model_sizes() {
         let configs = vec![
             Blip2Config::opt_2_7b(),
@@ -119,6 +127,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - attention mechanism requires full model, run with --ignored
     fn test_blip2_attention_mechanism() {
         let config = Blip2Config::default();
         let model = Blip2Model::new(config).unwrap();
@@ -135,6 +144,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - vision transformer, run with --ignored
     fn test_blip2_vision_transformer() {
         let config = Blip2VisionConfig::default();
         let model = Blip2VisionModel::new(config).unwrap();
@@ -149,6 +159,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - QFormer model, run with --ignored
     fn test_blip2_qformer_model() {
         let config = Blip2QFormerConfig::default();
         let model = Blip2QFormerModel::new(config).unwrap();

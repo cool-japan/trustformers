@@ -1476,6 +1476,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Heavy test - large model creation (~17s), run with --ignored
     fn test_blip2_model_creation() {
         let config = Blip2Config::default();
         let model = Blip2Model::new(config);
@@ -1483,6 +1484,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - vision model creation (~17s), run with --ignored
     fn test_blip2_vision_model() {
         let config = Blip2VisionConfig::default();
         let model = Blip2VisionModel::new(config);
@@ -1490,6 +1492,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - QFormer model creation, run with --ignored
     fn test_blip2_qformer_model() {
         let config = Blip2QFormerConfig::default();
         let model = Blip2QFormerModel::new(config);
@@ -1510,6 +1513,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - OPT 2.7B language model (~45s), run with --ignored
     fn test_blip2_opt_language_model() {
         let config = Blip2TextConfig::opt_2_7b();
         let model = Blip2OptLanguageModel::new(config);
@@ -1517,6 +1521,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - T5 XL language model (~30s), run with --ignored
     fn test_blip2_t5_language_model() {
         let config = Blip2TextConfig::flan_t5_xl();
         let model = Blip2T5LanguageModel::new(config);

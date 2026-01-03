@@ -143,12 +143,14 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - creates StableLM 3B model, run with --ignored
     fn test_create_model() {
         let model = create_model(StableLMVariant::Base3B);
         assert_eq!(model.unwrap().model.config.hidden_size, 2560);
     }
 
     #[test]
+    #[ignore] // Heavy test - creates StableLM 3B model, run with --ignored
     fn test_from_pretrained_name() {
         let model = from_pretrained_name("stabilityai/stablelm-3b-4e1t");
         assert!(model.is_some());

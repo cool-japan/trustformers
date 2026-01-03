@@ -66,6 +66,7 @@ fn test_command_r_gqa_detection() {
 }
 
 #[test]
+#[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_model_creation() {
     let config = CommandRConfig::command_r();
     let model = CommandRModel::new(&config);
@@ -87,6 +88,7 @@ fn test_command_r_plus_model_creation() {
 }
 
 #[test]
+#[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_causal_lm_creation() {
     let config = CommandRConfig::command_r();
     let model = CommandRForCausalLM::new(&config);
@@ -143,6 +145,7 @@ fn test_command_r_rope_creation() {
 }
 
 #[test]
+#[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_model_forward() {
     let config = CommandRConfig::command_r();
     let mut model = CommandRModel::new(&config).unwrap();
@@ -159,6 +162,7 @@ fn test_command_r_model_forward() {
 }
 
 #[test]
+#[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_causal_lm_forward() {
     let config = CommandRConfig::command_r();
     let mut model = CommandRForCausalLM::new(&config).unwrap();
@@ -195,6 +199,7 @@ fn test_command_r_config_validation() {
 }
 
 #[test]
+#[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_model_shapes() {
     let config = CommandRConfig::command_r();
     let _model = CommandRModel::new(&config).unwrap();

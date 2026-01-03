@@ -924,6 +924,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Very heavy test - Falcon 7B model (SIGKILL risk), run with --ignored
     fn test_falcon_model_creation() {
         let config = FalconConfig::falcon_7b();
         let model = FalconModel::new(config);
@@ -931,6 +932,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - Falcon 7B CausalLM (SIGKILL risk), run with --ignored
     fn test_falcon_causal_lm_creation() {
         let config = FalconConfig::falcon_7b();
         let model = FalconForCausalLM::new(config);

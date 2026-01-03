@@ -599,6 +599,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - creates multiple large models, run with --ignored
     fn test_predefined_models() {
         assert!(MambaModel::mamba_130m().is_ok());
         assert!(MambaModel::mamba_370m().is_ok());
@@ -652,6 +653,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - creates multiple large models with device, run with --ignored
     fn test_all_predefined_models_with_device() {
         let device = Device::CPU;
         assert!(MambaModel::mamba_130m_with_device(device).is_ok());

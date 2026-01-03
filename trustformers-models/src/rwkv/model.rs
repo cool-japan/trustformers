@@ -535,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - creates multiple large RWKV models, run with --ignored
     fn test_predefined_models() {
         assert!(RwkvModel::rwkv_169m().is_ok());
         assert!(RwkvModel::rwkv_430m().is_ok());

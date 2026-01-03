@@ -229,6 +229,7 @@ fn test_memory_state_read() {
 }
 
 #[test]
+#[ignore] // Heavy test - RecursiveTransformer creation, run with --ignored
 fn test_recursive_transformer_creation() {
     let config = RecursiveConfig::default();
     let result = RecursiveTransformer::new(config);
@@ -240,6 +241,7 @@ fn test_recursive_transformer_creation() {
 }
 
 #[test]
+#[ignore] // Heavy test - RecursiveForCausalLM creation, run with --ignored
 fn test_recursive_for_causal_lm_creation() {
     let config = RecursiveConfig::default();
     let result = RecursiveForCausalLM::new(config);
@@ -251,6 +253,7 @@ fn test_recursive_for_causal_lm_creation() {
 }
 
 #[test]
+#[ignore] // Heavy test - RecursiveForSequenceClassification creation, run with --ignored
 fn test_recursive_for_sequence_classification_creation() {
     let config = RecursiveConfig::default();
     let result = RecursiveForSequenceClassification::new(config, 10);

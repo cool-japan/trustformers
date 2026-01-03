@@ -1100,6 +1100,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore] // Heavy test - Flamingo 3B model, run with --ignored
     fn test_flamingo_model_creation() {
         let config = FlamingoConfig::flamingo_3b();
         let model = FlamingoModel::new(config);
@@ -1107,6 +1108,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - vision encoder, run with --ignored
     fn test_flamingo_vision_encoder() {
         let config = FlamingoVisionConfig::clip_vit_l();
         let encoder = FlamingoVisionEncoder::new(config).unwrap();
@@ -1169,6 +1171,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - Chinchilla 1B language model, run with --ignored
     fn test_flamingo_language_model() {
         let language_config = FlamingoLanguageConfig::chinchilla_1b();
         let cross_attention_config = FlamingoXAttentionConfig::default();
@@ -1218,6 +1221,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - full end-to-end (~100s), run with --ignored
     fn test_flamingo_end_to_end() {
         let config = FlamingoConfig::flamingo_3b();
         let model = FlamingoModel::new(config.clone()).unwrap();
@@ -1254,6 +1258,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - Flamingo generation, run with --ignored
     fn test_flamingo_generation() {
         let config = FlamingoConfig::flamingo_3b();
         let model = FlamingoModel::new(config.clone()).unwrap();
@@ -1288,6 +1293,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - Flamingo with media locations, run with --ignored
     fn test_flamingo_with_media_locations() {
         let config = FlamingoConfig::flamingo_3b();
         let model = FlamingoModel::new(config.clone()).unwrap();
@@ -1328,6 +1334,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - creates multiple large models, run with --ignored
     fn test_flamingo_different_configs() {
         let configs = vec![
             FlamingoConfig::flamingo_3b(),
@@ -1342,6 +1349,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - language layer, run with --ignored
     fn test_flamingo_language_layer() {
         let language_config = FlamingoLanguageConfig::chinchilla_1b();
         let cross_attention_config = FlamingoXAttentionConfig::default();

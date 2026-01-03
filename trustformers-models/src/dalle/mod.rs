@@ -20,6 +20,7 @@ mod tests {
     use trustformers_core::{Tensor, TensorType};
 
     #[test]
+    #[ignore] // Heavy test - creates full model, run with --ignored
     fn test_dalle_module_imports() {
         // Test that all main types can be imported
         let _config = DalleConfig::default();
@@ -35,6 +36,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - full end-to-end pipeline, run with --ignored
     fn test_dalle_mini_end_to_end() {
         let config = DalleConfig::dalle_mini();
         let model = DalleModel::new(config.clone()).unwrap();
@@ -97,6 +99,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - DALL-E 2 model, run with --ignored
     fn test_dalle_2_configuration() {
         let config = DalleConfig::dalle_2();
         let model = DalleModel::new(config.clone()).unwrap();
@@ -132,6 +135,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - DALL-E 3 model (SIGKILL risk), run with --ignored
     fn test_dalle_3_configuration() {
         let config = DalleConfig::dalle_3();
 
@@ -152,6 +156,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - multiple components, run with --ignored
     fn test_dalle_components_separately() {
         let config = DalleConfig::dalle_mini();
 
@@ -216,6 +221,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - model output structure, run with --ignored
     fn test_dalle_model_output_structure() {
         let config = DalleConfig::dalle_mini();
         let model = DalleModel::new(config.clone()).unwrap();

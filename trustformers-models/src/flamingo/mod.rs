@@ -23,6 +23,7 @@ mod tests {
     use trustformers_core::{Tensor, TensorType};
 
     #[test]
+    #[ignore] // Heavy test - creates 3B model, run with --ignored
     fn test_flamingo_module_imports() {
         // Test that all main types can be imported
         let _config = FlamingoConfig::default();
@@ -38,6 +39,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - full 3B end-to-end, run with --ignored
     fn test_flamingo_3b_end_to_end() {
         let config = FlamingoConfig::flamingo_3b();
         let model = FlamingoModel::new(config.clone()).unwrap();
@@ -110,6 +112,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - 9B model (SIGKILL risk), run with --ignored
     fn test_flamingo_9b_configuration() {
         let config = FlamingoConfig::flamingo_9b();
         let model = FlamingoModel::new(config.clone()).unwrap();
@@ -148,6 +151,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - OpenFlamingo model, run with --ignored
     fn test_flamingo_open_source_variant() {
         let config = FlamingoConfig::open_flamingo();
 
@@ -164,6 +168,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - creates multiple components, run with --ignored
     fn test_flamingo_components_separately() {
         let config = FlamingoConfig::flamingo_3b();
 
@@ -195,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - 9B model cross attention, run with --ignored
     fn test_flamingo_cross_attention_layers() {
         let config = FlamingoConfig::flamingo_9b();
         let model = FlamingoModel::new(config.clone()).unwrap();
@@ -292,6 +298,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Heavy test - 3B few-shot simulation, run with --ignored
     fn test_flamingo_few_shot_simulation() {
         let config = FlamingoConfig::flamingo_3b();
         let model = FlamingoModel::new(config.clone()).unwrap();
