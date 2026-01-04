@@ -52,6 +52,7 @@ impl Default for LayerAnalysisConfig {
 
 /// Current state information for a layer.
 #[derive(Debug, Clone)]
+#[derive(Default)]
 struct LayerState {
     /// Health score history
     health_scores: Vec<f64>,
@@ -62,15 +63,6 @@ struct LayerState {
     last_analysis_step: usize,
 }
 
-impl Default for LayerState {
-    fn default() -> Self {
-        Self {
-            health_scores: Vec::new(),
-            detected_issues: Vec::new(),
-            last_analysis_step: 0,
-        }
-    }
-}
 
 impl LayerAnalyzer {
     /// Create a new layer analyzer.
@@ -97,7 +89,7 @@ impl LayerAnalyzer {
         let health_score = self.calculate_layer_health_score(&stats);
 
         let layer_stats =
-            self.layer_activations.entry(layer_name.to_string()).or_insert_with(Vec::new);
+            self.layer_activations.entry(layer_name.to_string()).or_default();
         layer_stats.push(stats);
 
         // Maintain reasonable history length
@@ -109,7 +101,7 @@ impl LayerAnalyzer {
         let layer_state = self
             .layer_states
             .entry(layer_name.to_string())
-            .or_insert_with(LayerState::default);
+            .or_default();
         layer_state.health_scores.push(health_score);
 
         if layer_state.health_scores.len() > 50 {

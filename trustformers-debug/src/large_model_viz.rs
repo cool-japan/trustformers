@@ -388,7 +388,7 @@ impl LargeModelVisualizer {
         for metadata in cache.values() {
             groups
                 .entry(metadata.layer_type.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(metadata.index);
         }
 
@@ -774,9 +774,11 @@ mod tests {
 
     #[test]
     fn test_uniform_sampling() -> Result<()> {
-        let mut config = LargeModelVisualizerConfig::default();
-        config.max_full_layers = 5;
-        config.sampling_strategy = SamplingStrategy::Uniform;
+        let config = LargeModelVisualizerConfig {
+            max_full_layers: 5,
+            sampling_strategy: SamplingStrategy::Uniform,
+            ..Default::default()
+        };
 
         let visualizer = LargeModelVisualizer::new(config);
 

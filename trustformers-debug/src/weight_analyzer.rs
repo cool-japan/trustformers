@@ -457,7 +457,7 @@ impl WeightAnalyzer {
             ));
         }
 
-        output.push_str(&format!("\nStatistics:\n"));
+        output.push_str("\nStatistics:\n");
         output.push_str(&format!("  Mean: {:.6}\n", analysis.statistics.mean));
         output.push_str(&format!("  Std Dev: {:.6}\n", analysis.statistics.std_dev));
         output.push_str(&format!(
@@ -584,7 +584,7 @@ mod tests {
         let output_path = temp_dir.join("weight_analysis.json");
 
         let mut analyzer = WeightAnalyzer::new();
-        analyzer.analyze("layer1", &vec![1.0, 2.0, 3.0]).unwrap();
+        analyzer.analyze("layer1", &[1.0, 2.0, 3.0]).unwrap();
 
         analyzer.export_to_json("layer1", &output_path).unwrap();
         assert!(output_path.exists());
@@ -610,8 +610,8 @@ mod tests {
     fn test_print_summary() {
         let mut analyzer = WeightAnalyzer::new();
 
-        analyzer.analyze("layer1", &vec![1.0, 2.0, 3.0]).unwrap();
-        analyzer.analyze("layer2", &vec![0.5, 1.0, 1.5]).unwrap();
+        analyzer.analyze("layer1", &[1.0, 2.0, 3.0]).unwrap();
+        analyzer.analyze("layer2", &[0.5, 1.0, 1.5]).unwrap();
 
         let summary = analyzer.print_summary();
         assert!(summary.contains("layer1"));
@@ -634,8 +634,8 @@ mod tests {
     fn test_clear_analyses() {
         let mut analyzer = WeightAnalyzer::new();
 
-        analyzer.analyze("layer1", &vec![1.0]).unwrap();
-        analyzer.analyze("layer2", &vec![2.0]).unwrap();
+        analyzer.analyze("layer1", &[1.0]).unwrap();
+        analyzer.analyze("layer2", &[2.0]).unwrap();
 
         assert_eq!(analyzer.num_layers(), 2);
 

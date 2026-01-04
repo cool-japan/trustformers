@@ -306,7 +306,7 @@ impl AutoDebugger {
     pub fn record_layer_stats(&mut self, stats: LayerActivationStats) {
         let layer_name = stats.layer_name.clone();
 
-        let layer_history = self.layer_history.entry(layer_name).or_insert_with(VecDeque::new);
+        let layer_history = self.layer_history.entry(layer_name).or_default();
         layer_history.push_back(stats);
 
         while layer_history.len() > self.config.max_history_size {
@@ -659,28 +659,25 @@ impl AutoDebugger {
         if let Some(latest_dynamics) = self.dynamics_history.back() {
             // Check for overfitting indicators
             for indicator in &latest_dynamics.overfitting_indicators {
-                match indicator {
-                    super::types::OverfittingIndicator::TrainValidationGap { gap } => {
-                        if *gap > 0.1 {
-                            issues_to_add.push(IdentifiedIssue {
-                                category: IssueCategory::Overfitting,
-                                description: "Large training-validation gap detected".to_string(),
-                                severity: IssueSeverity::Major,
-                                confidence: 0.85,
-                                evidence: vec![
-                                    format!("Train-validation gap: {:.3}", gap),
-                                    "Overfitting indicator present".to_string(),
-                                ],
-                                potential_causes: vec![
-                                    "Model complexity too high".to_string(),
-                                    "Insufficient regularization".to_string(),
-                                    "Training set too small".to_string(),
-                                ],
-                                identified_at: chrono::Utc::now(),
-                            });
-                        }
-                    },
-                    _ => {},
+                if let super::types::OverfittingIndicator::TrainValidationGap { gap } = indicator {
+                    if *gap > 0.1 {
+                        issues_to_add.push(IdentifiedIssue {
+                            category: IssueCategory::Overfitting,
+                            description: "Large training-validation gap detected".to_string(),
+                            severity: IssueSeverity::Major,
+                            confidence: 0.85,
+                            evidence: vec![
+                                format!("Train-validation gap: {:.3}", gap),
+                                "Overfitting indicator present".to_string(),
+                            ],
+                            potential_causes: vec![
+                                "Model complexity too high".to_string(),
+                                "Insufficient regularization".to_string(),
+                                "Training set too small".to_string(),
+                            ],
+                            identified_at: chrono::Utc::now(),
+                        });
+                    }
                 }
             }
 

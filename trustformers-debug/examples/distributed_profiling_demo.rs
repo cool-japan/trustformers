@@ -195,8 +195,10 @@ fn demo_communication_analysis() -> Result<()> {
 fn demo_load_balance_analysis() -> Result<()> {
     println!("--- Demo 3: Load Balance Analysis ---\n");
 
-    let mut config = DistributedProfilerConfig::default();
-    config.enable_load_balance_profiling = true;
+    let config = DistributedProfilerConfig {
+        enable_load_balance_profiling: true,
+        ..Default::default()
+    };
     let profiler = DistributedProfiler::new(config);
 
     // Register nodes
@@ -280,9 +282,11 @@ fn demo_load_balance_analysis() -> Result<()> {
 fn demo_bottleneck_detection() -> Result<()> {
     println!("--- Demo 4: Bottleneck Detection & Recommendations ---\n");
 
-    let mut config = DistributedProfilerConfig::default();
-    config.enable_bottleneck_detection = true;
-    config.bottleneck_threshold_pct = 60.0; // Lower threshold for demo
+    let config = DistributedProfilerConfig {
+        enable_bottleneck_detection: true,
+        bottleneck_threshold_pct: 60.0, // Lower threshold for demo
+        ..Default::default()
+    };
     let profiler = DistributedProfiler::new(config);
 
     // Register nodes

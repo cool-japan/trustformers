@@ -459,9 +459,9 @@ impl GradientDebugger {
         let latest_norm = history.gradient_norms.back().cloned().unwrap_or(0.0);
         let alert_count = self.get_layer_alerts(layer_name).len();
 
-        if latest_norm < 1e-7 || latest_norm > 100.0 || alert_count > 3 {
+        if !(1e-7..=100.0).contains(&latest_norm) || alert_count > 3 {
             LayerHealth::Critical
-        } else if latest_norm < 1e-5 || latest_norm > 10.0 || alert_count > 0 {
+        } else if !(1e-5..=10.0).contains(&latest_norm) || alert_count > 0 {
             LayerHealth::Warning
         } else {
             LayerHealth::Healthy
@@ -769,8 +769,8 @@ impl GradientDebugger {
         let sum_xy = recent.iter().enumerate().map(|(i, &y)| i as f64 * y).sum::<f64>();
         let sum_x2 = (0..recent.len()).map(|i| (i * i) as f64).sum::<f64>();
 
-        let slope = (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x);
-        slope
+        
+        (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
     }
 
     /// Calculate quick health score
@@ -837,7 +837,7 @@ impl ComprehensiveGradientReport {
     /// Check if there are vanishing gradient issues
     pub fn has_vanishing_gradients(&self) -> bool {
         // Check if any layers have very small gradients
-        for (_, layer_status) in &self.status.layer_statuses {
+        for layer_status in self.status.layer_statuses.values() {
             if layer_status.latest_gradient_norm < 1e-8 {
                 return true;
             }
@@ -859,7 +859,7 @@ impl ComprehensiveGradientReport {
     /// Check if there are exploding gradient issues
     pub fn has_exploding_gradients(&self) -> bool {
         // Check if any layers have very large gradients
-        for (_, layer_status) in &self.status.layer_statuses {
+        for layer_status in self.status.layer_statuses.values() {
             if layer_status.latest_gradient_norm > 100.0 {
                 return true;
             }

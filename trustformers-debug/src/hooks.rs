@@ -249,7 +249,7 @@ impl HookManager {
         let tensor_bytes = unsafe {
             std::slice::from_raw_parts(
                 tensor_data.as_ptr() as *const u8,
-                tensor_data.len() * std::mem::size_of::<T>(),
+                std::mem::size_of_val(tensor_data),
             )
         };
 

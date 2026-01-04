@@ -212,7 +212,8 @@ impl Template {
         let mut result = content.to_string();
 
         // Very basic conditional handling: {{#if condition}}...{{/if}}
-        let if_regex = regex::Regex::new(r"\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}").unwrap();
+        // Use (?s) flag to enable single-line mode where . matches newlines
+        let if_regex = regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}").unwrap();
 
         while let Some(captures) = if_regex.captures(&result) {
             let condition_name = captures.get(1).unwrap().as_str();
@@ -239,8 +240,9 @@ impl Template {
         }
 
         // Handle {{#if condition}}...{{else}}...{{/if}}
+        // Use (?s) flag to enable single-line mode where . matches newlines
         let if_else_regex =
-            regex::Regex::new(r"\{\{#if\s+(\w+)\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}").unwrap();
+            regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}").unwrap();
 
         while let Some(captures) = if_else_regex.captures(&result) {
             let condition_name = captures.get(1).unwrap().as_str();
@@ -277,7 +279,9 @@ impl Template {
         let mut result = content.to_string();
 
         // Basic loop handling: {{#each list_name}}...{{/each}}
-        let each_regex = regex::Regex::new(r"\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}").unwrap();
+        // Use (?s) flag to enable single-line mode where . matches newlines
+        let each_regex =
+            regex::Regex::new(r"(?s)\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}").unwrap();
 
         while let Some(captures) = each_regex.captures(&result) {
             let list_name = captures.get(1).unwrap().as_str();

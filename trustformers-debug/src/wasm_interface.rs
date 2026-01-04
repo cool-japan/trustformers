@@ -82,6 +82,12 @@ pub struct WasmDebugSession {
     is_initialized: bool,
 }
 
+impl Default for WasmDebugSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[wasm_bindgen]
 impl WasmDebugSession {
     /// Create new WASM debugging session

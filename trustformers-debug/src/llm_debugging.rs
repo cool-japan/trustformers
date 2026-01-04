@@ -414,7 +414,7 @@ impl LLMDebugger {
         let performance_analysis = if self.config.enable_llm_performance_profiling {
             Some(
                 self.performance_profiler
-                    .profile_response(&model_response, generation_metrics)
+                    .profile_response(model_response, generation_metrics)
                     .await?,
             )
         } else {
@@ -1152,6 +1152,12 @@ impl BiasDetector {
             key_metrics: HashMap::new(),
             issues: vec![],
         }
+    }
+}
+
+impl Default for LLMPerformanceProfiler {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

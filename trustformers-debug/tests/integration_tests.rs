@@ -420,7 +420,7 @@ async fn test_comprehensive_debugging_flow() -> Result<()> {
         let metrics = ModelPerformanceMetrics {
             training_step: step,
             loss,
-            accuracy: Some(accuracy.max(0.0).min(1.0)),
+            accuracy: Some(accuracy.clamp(0.0, 1.0)),
             learning_rate: 1e-4,
             batch_size: 32,
             throughput_samples_per_sec: 100.0,

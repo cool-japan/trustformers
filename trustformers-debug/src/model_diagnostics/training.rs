@@ -337,17 +337,14 @@ impl TrainingDynamicsAnalyzer {
             _ => {},
         }
 
-        match dynamics.training_stability {
-            TrainingStability::Unstable => {
-                recommendations.push(TrainingRecommendation {
-                    category: "Stability".to_string(),
-                    priority: TrainingRecommendationPriority::High,
-                    description: "Training is unstable".to_string(),
-                    action: "Reduce learning rate or add gradient clipping".to_string(),
-                    expected_impact: 0.7,
-                });
-            },
-            _ => {},
+        if let TrainingStability::Unstable = dynamics.training_stability {
+            recommendations.push(TrainingRecommendation {
+                category: "Stability".to_string(),
+                priority: TrainingRecommendationPriority::High,
+                description: "Training is unstable".to_string(),
+                action: "Reduce learning rate or add gradient clipping".to_string(),
+                expected_impact: 0.7,
+            });
         }
 
         if dynamics.learning_efficiency < 0.3 {

@@ -429,7 +429,7 @@ impl RealtimeDashboard {
             // Add to metric data
             {
                 let mut data = self.metric_data.lock().unwrap();
-                let category_data = data.entry(category.clone()).or_insert_with(VecDeque::new);
+                let category_data = data.entry(category.clone()).or_default();
                 category_data.push_back(data_point.clone());
 
                 let max_points = self.config.lock().unwrap().max_data_points;
@@ -799,7 +799,7 @@ impl RealtimeDashboard {
 
         // Z-score based anomaly detection
         let z_threshold = 2.0; // 2 standard deviations
-        for (_i, point) in data.iter().enumerate() {
+        for point in data.iter() {
             let z_score = (point.value - mean).abs() / std_dev;
             if z_score > z_threshold {
                 let anomaly_type =
@@ -1017,7 +1017,7 @@ impl RealtimeDashboard {
             session_id: self.session_id.clone(),
         };
 
-        if let Err(_) = self.websocket_sender.send(theme_message) {
+        if self.websocket_sender.send(theme_message).is_err() {
             // No active subscribers, but that's okay
         }
 
@@ -1223,17 +1223,11 @@ impl RealtimeDashboard {
 
 /// Dashboard builder for easier configuration
 #[derive(Debug)]
+#[derive(Default)]
 pub struct DashboardBuilder {
     config: DashboardConfig,
 }
 
-impl Default for DashboardBuilder {
-    fn default() -> Self {
-        Self {
-            config: DashboardConfig::default(),
-        }
-    }
-}
 
 impl DashboardBuilder {
     /// Create new dashboard builder

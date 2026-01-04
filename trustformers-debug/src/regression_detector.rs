@@ -477,10 +477,10 @@ impl ChangePointDetector {
         let variance = values.iter().map(|&x| (x - overall_mean).powi(2)).sum::<f64>() / (n - 1.0);
 
         if variance > 0.0 {
-            let statistic = (n1 * (mean1 - overall_mean).powi(2)
+            
+            (n1 * (mean1 - overall_mean).powi(2)
                 + n2 * (mean2 - overall_mean).powi(2))
-                / variance;
-            statistic
+                / variance
         } else {
             0.0
         }
@@ -526,7 +526,7 @@ impl SeasonalDecomposer {
         let mut trend = vec![0.0; values.len()];
 
         for i in 0..values.len() {
-            let start = if i >= window_size / 2 { i - window_size / 2 } else { 0 };
+            let start = i.saturating_sub(window_size / 2);
             let end = std::cmp::min(i + window_size / 2 + 1, values.len());
 
             let sum: f64 = values[start..end].iter().sum();
@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     fn test_trend_analysis() {
         let analyzer = TrendAnalyzer::new(3, 0.9);
-        let values = vec![1.0, 1.1, 1.2, 10.0, 20.0, 30.0];
+        let values = [1.0, 1.1, 1.2, 10.0, 20.0, 30.0];
 
         // Test that trend analyzer can calculate slopes
         let recent_values = &values[3..6]; // [10.0, 20.0, 30.0]

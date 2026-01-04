@@ -347,7 +347,7 @@ impl ArchitectureAnalyzer {
                 let pattern: Vec<LayerType> =
                     self.layers[i..i + window_size].iter().map(|l| l.layer_type.clone()).collect();
 
-                block_patterns.entry(pattern).or_insert_with(Vec::new).push(i);
+                block_patterns.entry(pattern).or_default().push(i);
             }
         }
 
@@ -380,7 +380,7 @@ impl ArchitectureAnalyzer {
         for layer in &self.layers {
             param_groups
                 .entry(layer.parameters)
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(layer.id.clone());
         }
 

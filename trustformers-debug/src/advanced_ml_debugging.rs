@@ -849,11 +849,11 @@ impl AdvancedMLDebugger {
 
         // Determine urgency
         let lr_ratio = recommended_lr / current_lr;
-        let urgency = if lr_ratio > 10.0 || lr_ratio < 0.1 {
+        let urgency = if !(0.1..=10.0).contains(&lr_ratio) {
             AdaptationUrgency::Critical
-        } else if lr_ratio > 3.0 || lr_ratio < 0.33 {
+        } else if !(0.33..=3.0).contains(&lr_ratio) {
             AdaptationUrgency::High
-        } else if lr_ratio > 1.5 || lr_ratio < 0.67 {
+        } else if !(0.67..=1.5).contains(&lr_ratio) {
             AdaptationUrgency::Medium
         } else {
             AdaptationUrgency::Low
@@ -923,9 +923,7 @@ impl AdvancedMLDebugger {
 
         LRAdaptationStrategy {
             strategy_name: strategy_name.clone(),
-            description: format!(
-                "Strategy to optimize learning rates based on current model state"
-            ),
+            description: "Strategy to optimize learning rates based on current model state".to_string(),
             implementation_steps: vec![ImplementationStep {
                 step_number: 1,
                 description: "Implement layer-wise learning rate multipliers".to_string(),

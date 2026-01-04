@@ -212,7 +212,7 @@ async fn comprehensive_model_debugging() -> Result<()> {
         let metrics = ModelPerformanceMetrics {
             training_step: step,
             loss,
-            accuracy: Some(accuracy.max(0.0).min(1.0)),
+            accuracy: Some(accuracy.clamp(0.0, 1.0)),
             learning_rate: 1e-4,
             batch_size: 32,
             throughput_samples_per_sec: 150.0 + (step as f64 * 2.0),
@@ -717,7 +717,7 @@ async fn visualization_demo() -> Result<()> {
     let losses: Vec<f64> =
         train_steps.iter().map(|&step| 2.0 * (-0.05 * step).exp() + 0.1).collect();
     let accuracies: Vec<f64> =
-        losses.iter().map(|&loss| (1.0 - loss / 2.5).max(0.0).min(1.0)).collect();
+        losses.iter().map(|&loss| (1.0 - loss / 2.5).clamp(0.0, 1.0)).collect();
 
     let metrics_plot =
         visualizer.plot_training_metrics(&train_steps, &losses, Some(&accuracies))?;
@@ -767,7 +767,7 @@ async fn visualization_demo() -> Result<()> {
 
     // ASCII line plot
     let line_plot = terminal_viz.ascii_line_plot(
-        &steps[0..20].iter().map(|&x| x).collect::<Vec<_>>(),
+        &steps[0..20].to_vec(),
         &gradient_norms[0..20],
         "Gradient Norm Over Time",
     );

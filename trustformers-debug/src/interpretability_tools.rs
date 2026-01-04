@@ -132,7 +132,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_interpretability_analyzer_creation() {
-        let config = InterpretabilityConfig::default();
+        let config = InterpretabilityConfig;
         let _analyzer = InterpretabilityAnalyzer::new(config);
         // Basic test to ensure analyzer can be created
         assert!(true); // Placeholder test
@@ -140,7 +140,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shap_analysis() {
-        let config = InterpretabilityConfig::default();
+        let config = InterpretabilityConfig;
         let analyzer = InterpretabilityAnalyzer::new(config);
 
         let mut instance = HashMap::new();
@@ -161,7 +161,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lime_analysis() {
-        let config = InterpretabilityConfig::default();
+        let config = InterpretabilityConfig;
         let analyzer = InterpretabilityAnalyzer::new(config);
 
         let mut instance = HashMap::new();

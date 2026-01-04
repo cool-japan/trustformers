@@ -180,6 +180,7 @@ pub enum ExportFormat {
 
 /// Statistical analysis results.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Default)]
 pub struct StatisticalAnalysis {
     /// Mean values
     pub means: Vec<f64>,
@@ -524,7 +525,7 @@ impl AdvancedAnalytics {
             data.push(row);
         }
 
-        let dimensions = (data.len(), data.get(0).map_or(0, |row| row.len()));
+        let dimensions = (data.len(), data.first().map_or(0, |row| row.len()));
 
         Ok(ActivationHeatmap {
             data,
@@ -1331,18 +1332,6 @@ impl TemporalAnalysisCache {
     }
 }
 
-impl Default for StatisticalAnalysis {
-    fn default() -> Self {
-        Self {
-            means: Vec::new(),
-            std_devs: Vec::new(),
-            correlation_matrix: Vec::new(),
-            principal_components: Vec::new(),
-            explained_variance_ratios: Vec::new(),
-            significance_tests: Vec::new(),
-        }
-    }
-}
 
 impl Default for AnomalyDetectionResults {
     fn default() -> Self {

@@ -659,12 +659,9 @@ mod tests {
     #[test]
     fn test_blas_backend_default() {
         let backend = BlasBackend::default();
-
-        #[cfg(target_os = "macos")]
+        // Default is Accelerate as specified by #[default] attribute
+        // Runtime fallback to available backends happens in BlasOptimizer
         assert_eq!(backend, BlasBackend::Accelerate);
-
-        #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
-        assert_eq!(backend, BlasBackend::OpenBlas);
     }
 
     #[test]

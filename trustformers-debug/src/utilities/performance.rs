@@ -238,6 +238,12 @@ pub struct SystemMemoryProfiler {
     checkpoints: HashMap<String, usize>,
 }
 
+impl Default for SystemMemoryProfiler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemMemoryProfiler {
     pub fn new() -> Self {
         Self {
@@ -302,6 +308,12 @@ pub struct MemoryReport {
 pub struct SystemProfiler {
     performance_monitor: PerformanceMonitor,
     memory_profiler: SystemMemoryProfiler,
+}
+
+impl Default for SystemProfiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SystemProfiler {

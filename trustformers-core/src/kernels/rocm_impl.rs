@@ -305,20 +305,27 @@ impl RocmImpl {
 
     /// Get global ROCm instance
     pub fn global() -> Result<&'static Arc<RocmImpl>> {
-        ROCM_INSTANCE.get_or_init(|| {
-            Arc::new(Self::new().unwrap_or_else(|_| {
-                // Create mock instance if ROCm is not available
-                Self::mock_instance()
-            }))
-        });
-        Ok(ROCM_INSTANCE.get().unwrap())
-    }
+        // Use Option to track initialization - None means not attempted, Some(true) means success
+        static INIT_SUCCESS: OnceLock<bool> = OnceLock::new();
 
-    /// Create mock instance for testing when ROCm is not available
-    fn mock_instance() -> Self {
-        // Note: This will fail at runtime if any operations are attempted
-        // because hip_lib is required for all operations
-        panic!("ROCm not available - cannot create mock instance with dynamic loading");
+        let success = *INIT_SUCCESS.get_or_init(|| {
+            match Self::new() {
+                Ok(instance) => {
+                    let _ = ROCM_INSTANCE.set(Arc::new(instance));
+                    true
+                }
+                Err(_) => false,
+            }
+        });
+
+        if success {
+            Ok(ROCM_INSTANCE.get().unwrap())
+        } else {
+            Err(TrustformersError::hardware_error(
+                "ROCm not available on this system",
+                "RocmImpl::global",
+            ))
+        }
     }
 
     /// Get device properties

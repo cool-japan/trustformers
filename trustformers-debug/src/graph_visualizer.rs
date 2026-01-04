@@ -241,7 +241,7 @@ impl GraphVisualizer {
         for edge in &self.graph.edges {
             adjacency
                 .entry(edge.from.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(edge.to.clone());
         }
 
@@ -303,7 +303,7 @@ impl GraphVisualizer {
             }
 
             let color = self.get_node_color(node);
-            let mut label = format!("{}", node.label);
+            let mut label = node.label.to_string();
 
             if self.config.show_shapes {
                 if let Some(ref shape) = node.shape {

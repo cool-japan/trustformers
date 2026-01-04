@@ -36,7 +36,7 @@ num_cpus.workspace = true
 chrono.workspace = true
 
 # System-level APIs
-libc = "0.2.178"
+libc = "0.2.179"
 
 # CLI tools
 clap.workspace = true

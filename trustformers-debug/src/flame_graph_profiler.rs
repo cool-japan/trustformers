@@ -627,11 +627,11 @@ impl FlameGraphProfiler {
         match &self.config.color_scheme {
             FlameGraphColorScheme::Hot => {
                 let intensity = (node.percentage / 100.0 * 255.0) as u8;
-                format!("rgb({}, {}, 0)", 255, 255 - intensity.min(255))
+                format!("rgb({}, {}, 0)", 255, 255 - intensity)
             },
             FlameGraphColorScheme::Cool => {
                 let intensity = (node.percentage / 100.0 * 255.0) as u8;
-                format!("rgb(0, {}, {})", intensity.min(255), 255)
+                format!("rgb(0, {}, {})", intensity, 255)
             },
             FlameGraphColorScheme::Memory => {
                 if node.name.contains("alloc") || node.name.contains("malloc") {
@@ -832,6 +832,7 @@ pub struct HotFunctionInfo {
 
 /// Memory usage statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct MemoryUsageStats {
     pub peak_memory_bytes: usize,
     pub avg_memory_bytes: usize,
@@ -839,16 +840,6 @@ pub struct MemoryUsageStats {
     pub total_samples: usize,
 }
 
-impl Default for MemoryUsageStats {
-    fn default() -> Self {
-        Self {
-            peak_memory_bytes: 0,
-            avg_memory_bytes: 0,
-            min_memory_bytes: 0,
-            total_samples: 0,
-        }
-    }
-}
 
 /// GPU kernel statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]
