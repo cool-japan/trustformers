@@ -1065,6 +1065,12 @@ impl IssueDetector for DataIssueDetector {
     }
 }
 
+impl Default for KnowledgeBase {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KnowledgeBase {
     pub fn new() -> Self {
         Self {

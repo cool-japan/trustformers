@@ -226,6 +226,12 @@ pub struct MemoryTracker {
     deallocation_count: usize,
 }
 
+impl Default for MemoryTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryTracker {
     pub fn new() -> Self {
         Self {
@@ -316,7 +322,7 @@ impl GpuProfiler {
     pub fn profile_kernel(&mut self, kernel_profile: GpuKernelProfile) {
         self.active_streams
             .entry(kernel_profile.stream_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(kernel_profile);
     }
 
@@ -356,6 +362,12 @@ pub struct BandwidthSample {
     pub timestamp: SystemTime,
     pub bandwidth_mb_s: f64,
     pub device_type: IoDeviceType,
+}
+
+impl Default for IoMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl IoMonitor {
@@ -706,7 +718,7 @@ impl Profiler {
 
             grouped_events
                 .entry(event_type.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(event);
         }
 
@@ -1002,11 +1014,7 @@ impl Profiler {
         let io_bandwidth_stats = self.get_io_bandwidth_stats();
         let layer_analysis = self.get_layer_latency_analysis();
 
-        let gpu_utilization = if let Some(profiler) = &self.gpu_profiler {
-            Some(profiler.get_gpu_utilization(0))
-        } else {
-            None
-        };
+        let gpu_utilization = self.gpu_profiler.as_ref().map(|profiler| profiler.get_gpu_utilization(0));
 
         PerformanceAnalysis {
             memory_stats,
@@ -1225,7 +1233,7 @@ impl Profiler {
             {
                 operation_groups
                     .entry(operation.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(*duration);
             }
         }

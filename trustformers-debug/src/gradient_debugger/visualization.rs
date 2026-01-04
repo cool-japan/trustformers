@@ -225,17 +225,11 @@ pub enum ColorScheme {
 
 /// Gradient flow visualization generator
 #[derive(Debug)]
+#[derive(Default)]
 pub struct GradientFlowVisualizer {
     config: GradientVisualizationConfig,
 }
 
-impl Default for GradientFlowVisualizer {
-    fn default() -> Self {
-        Self {
-            config: GradientVisualizationConfig::default(),
-        }
-    }
-}
 
 impl GradientFlowVisualizer {
     pub fn new(config: GradientVisualizationConfig) -> Self {

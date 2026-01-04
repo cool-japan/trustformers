@@ -212,6 +212,12 @@ pub struct ConvergenceAnalyzer {
     convergence_threshold: f64,
 }
 
+impl Default for ConvergenceAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConvergenceAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -341,6 +347,12 @@ pub enum OverfittingRisk {
     Medium,
     High,
     Severe,
+}
+
+impl Default for OverfittingDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OverfittingDetector {
@@ -477,6 +489,12 @@ pub struct ComplexityMetrics {
     #[allow(dead_code)]
     effective_capacity: f64,
     data_size: usize,
+}
+
+impl Default for GeneralizationMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GeneralizationMonitor {
@@ -778,7 +796,9 @@ impl HealthChecker {
             let memory_usage = last_metrics.memory_usage_mb;
 
             // Assume 8GB as reasonable upper limit
-            let memory_score = if memory_usage < 4096.0 {
+            
+
+            if memory_usage < 4096.0 {
                 0.9
             } else if memory_usage < 6144.0 {
                 0.7
@@ -786,9 +806,7 @@ impl HealthChecker {
                 0.5
             } else {
                 0.2
-            };
-
-            memory_score
+            }
         } else {
             0.5
         }

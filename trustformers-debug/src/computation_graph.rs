@@ -1102,7 +1102,7 @@ mod tests {
         let analysis = analyzer.analyze_graph(graph_id).unwrap();
 
         assert_eq!(analysis.statistics.nodes_by_type.len(), 4); // MatMul, ReLU, Custom("Input"), Custom("Output")
-        assert!(analysis.critical_path.len() > 0);
+        assert!(!analysis.critical_path.is_empty());
     }
 
     #[test]

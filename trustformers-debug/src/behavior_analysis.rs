@@ -236,7 +236,7 @@ impl BehaviorAnalyzer {
     pub fn record_activations(&mut self, layer_id: String, activations: Vec<f32>) {
         self.activation_history
             .entry(layer_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(activations);
     }
 
@@ -294,7 +294,7 @@ impl BehaviorAnalyzer {
     async fn analyze_input_sensitivity(&self) -> Result<Vec<InputSensitivity>> {
         let mut sensitivities = Vec::new();
 
-        for (_input_id, gradients) in &self.input_gradients {
+        for gradients in self.input_gradients.values() {
             for (dim, &gradient) in gradients.iter().enumerate() {
                 let sensitivity_score = gradient.abs();
                 let gradient_magnitude = gradient.abs();
@@ -604,7 +604,7 @@ impl BehaviorAnalyzer {
         for i in 0..n {
             for j in i..n {
                 let correlation =
-                    self.compute_correlation(&gradient_vectors[i], &gradient_vectors[j]);
+                    self.compute_correlation(gradient_vectors[i], gradient_vectors[j]);
                 correlation_matrix[i][j] = correlation;
                 correlation_matrix[j][i] = correlation;
 

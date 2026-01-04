@@ -942,19 +942,16 @@ impl AICodeAnalyzer {
             expected_output: "Model architecture and parameter count".to_string(),
         });
 
-        match error_context.error_type.as_str() {
-            "OutOfMemoryError" => {
-                steps.push(DebuggingStep {
-                    step_number: 3,
-                    description: "Check tensor shapes and batch size".to_string(),
-                    command: Some(
-                        "print(f'Batch size: {batch_size}, Input shape: {input.shape}')"
-                            .to_string(),
-                    ),
-                    expected_output: "Current batch size and input dimensions".to_string(),
-                });
-            },
-            _ => {},
+        if error_context.error_type.as_str() == "OutOfMemoryError" {
+            steps.push(DebuggingStep {
+                step_number: 3,
+                description: "Check tensor shapes and batch size".to_string(),
+                command: Some(
+                    "print(f'Batch size: {batch_size}, Input shape: {input.shape}')"
+                        .to_string(),
+                ),
+                expected_output: "Current batch size and input dimensions".to_string(),
+            });
         }
 
         Ok(steps)

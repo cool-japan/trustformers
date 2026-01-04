@@ -267,7 +267,7 @@ impl ArchitectureAnalyzer {
 
         // Penalty for extreme aspect ratios
         let aspect_ratio = arch_info.depth as f64 / arch_info.width as f64;
-        let aspect_penalty = if aspect_ratio > 0.05 || aspect_ratio < 0.002 { 0.9 } else { 1.0 };
+        let aspect_penalty = if !(0.002..=0.05).contains(&aspect_ratio) { 0.9 } else { 1.0 };
 
         diversity_bonus * activation_bonus * aspect_penalty
     }

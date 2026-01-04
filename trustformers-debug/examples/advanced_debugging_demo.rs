@@ -134,7 +134,8 @@ async fn quantum_debugging_demo() -> Result<()> {
     Ok(())
 }
 
-/// Demonstrate WebAssembly interface capabilities (commented out - requires 'wasm' feature)
+// Demonstrate WebAssembly interface capabilities (commented out - requires 'wasm' feature)
+#[allow(dead_code)]
 /*
 async fn wasm_interface_demo() -> Result<()> {
     println!("🌐 Initializing WebAssembly Debug Session...");

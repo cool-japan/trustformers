@@ -355,7 +355,7 @@ impl SimulationAnalyzer {
             for change in &scenario.changed_features {
                 feature_impacts
                     .entry(change.feature_name.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push((scenario.prediction - base_scenario.prediction).abs());
             }
         }
@@ -977,7 +977,7 @@ impl SimulationAnalyzer {
             let prediction = model_fn(&test_input);
 
             // Check if this is an edge case (extreme prediction, unexpected behavior, etc.)
-            if prediction < 0.1 || prediction > 0.9 || prediction.is_nan() {
+            if !(0.1..=0.9).contains(&prediction) || prediction.is_nan() {
                 edge_cases.push(EdgeCase {
                     id: format!("edge_{}", i),
                     description: format!("Edge case with extreme prediction: {:.3}", prediction),
@@ -986,7 +986,7 @@ impl SimulationAnalyzer {
                     expected_output: None,
                     edge_case_type: if prediction.is_nan() {
                         EdgeCaseType::ModelConfusion
-                    } else if prediction < 0.1 || prediction > 0.9 {
+                    } else if !(0.1..=0.9).contains(&prediction) {
                         EdgeCaseType::DistributionBoundary
                     } else {
                         EdgeCaseType::Outlier

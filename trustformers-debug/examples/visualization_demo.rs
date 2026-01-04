@@ -138,7 +138,7 @@ fn main() -> Result<()> {
     let layer2_activations: Vec<f32> = (0..1000)
         .map(|i| {
             let x = i as f32 / 1000.0;
-            (x * 6.28).sin()
+            (x * std::f32::consts::TAU).sin()
         })
         .collect();
     act_viz.register("layer2.gelu", layer2_activations, vec![1, 1000])?;

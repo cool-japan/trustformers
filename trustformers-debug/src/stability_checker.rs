@@ -342,7 +342,7 @@ impl StabilityChecker {
     /// Add an issue to the tracker
     fn add_issue(&mut self, issue: StabilityIssue) {
         let layer_name = issue.layer_name.clone();
-        self.issues.entry(layer_name).or_insert_with(Vec::new).push(issue);
+        self.issues.entry(layer_name).or_default().push(issue);
     }
 
     /// Get the next issue ID

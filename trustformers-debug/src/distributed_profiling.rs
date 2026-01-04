@@ -411,7 +411,7 @@ impl DistributedProfiler {
     pub fn record_snapshot(&self, snapshot: NodePerformanceSnapshot) -> Result<()> {
         let mut snapshots = self.node_snapshots.write();
 
-        let node_history = snapshots.entry(snapshot.node_id.clone()).or_insert_with(Vec::new);
+        let node_history = snapshots.entry(snapshot.node_id.clone()).or_default();
 
         // Limit stored snapshots
         if node_history.len() >= self.config.max_events_per_category {

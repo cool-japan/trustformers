@@ -82,7 +82,7 @@ impl Default for DebugConfig {
             behavior_analysis_config: BehaviorAnalysisConfig::default(),
             training_dynamics_config: TrainingDynamicsConfig::default(),
             differential_debugging_config: DifferentialDebuggingConfig::default(),
-            interpretability_config: InterpretabilityConfig::default(),
+            interpretability_config: InterpretabilityConfig,
             neural_network_debugging_config: None,
             advanced_ml_debugging_config: AdvancedMLDebuggingConfig::default(),
             advanced_gpu_profiling_config: AdvancedGpuProfilingConfig::default(),
@@ -135,14 +135,12 @@ impl DebugSession {
             None
         };
 
-        let transformer_debugger =
-            if let Some(ref neural_config) = config.neural_network_debugging_config {
-                Some(neural_network_debugging::TransformerDebugger::new(
-                    neural_config.clone(),
-                ))
-            } else {
-                None
-            };
+        let transformer_debugger = config
+            .neural_network_debugging_config
+            .as_ref()
+            .map(|neural_config| {
+                neural_network_debugging::TransformerDebugger::new(neural_config.clone())
+            });
 
         let advanced_gpu_profiler = if config.advanced_gpu_profiling_config.enable_gpu_profiling {
             AdvancedGpuMemoryProfiler::new(config.advanced_gpu_profiling_config.device_count).ok()
@@ -511,11 +509,10 @@ impl DebugSession {
         let advanced_ml_debugging_report = Some(self.advanced_ml_debugger.generate_report().await?);
 
         // Generate GPU profiling reports
-        let advanced_gpu_profiling_report = if let Some(ref profiler) = self.advanced_gpu_profiler {
-            Some(profiler.get_memory_analysis_report())
-        } else {
-            None
-        };
+        let advanced_gpu_profiling_report = self
+            .advanced_gpu_profiler
+            .as_ref()
+            .map(|profiler| profiler.get_memory_analysis_report());
 
         let kernel_optimization_report =
             Some(self.generate_kernel_optimization_summary_report().await?);
@@ -597,11 +594,10 @@ impl DebugSession {
         let advanced_ml_debugging_report = Some(self.advanced_ml_debugger.generate_report().await?);
 
         // Generate GPU profiling reports for snapshot
-        let advanced_gpu_profiling_report = if let Some(ref profiler) = self.advanced_gpu_profiler {
-            Some(profiler.get_memory_analysis_report())
-        } else {
-            None
-        };
+        let advanced_gpu_profiling_report = self
+            .advanced_gpu_profiler
+            .as_ref()
+            .map(|profiler| profiler.get_memory_analysis_report());
 
         let kernel_optimization_report =
             Some(self.generate_kernel_optimization_summary_report().await?);
@@ -760,8 +756,11 @@ pub fn debug_session_with_config(config: DebugConfig) -> DebugSession {
 
 /// Convenience function to create a debug session with transformer debugging enabled
 pub fn debug_session_with_transformer() -> DebugSession {
-    let mut config = DebugConfig::default();
-    config.neural_network_debugging_config =
-        Some(neural_network_debugging::TransformerDebugConfig::default());
+    let config = DebugConfig {
+        neural_network_debugging_config: Some(
+            neural_network_debugging::TransformerDebugConfig::default(),
+        ),
+        ..Default::default()
+    };
     DebugSession::new(config)
 }

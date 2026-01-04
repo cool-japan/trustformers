@@ -82,6 +82,7 @@ pub struct MemoryAccessPattern {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct MemoryUsageStats {
     pub total_accesses: u64,
     pub bytes_read: u64,
@@ -1047,17 +1048,6 @@ impl Default for MemoryAccessPattern {
     }
 }
 
-impl Default for MemoryUsageStats {
-    fn default() -> Self {
-        Self {
-            total_accesses: 0,
-            bytes_read: 0,
-            bytes_written: 0,
-            lifetime_duration: None,
-            peak_concurrent_usage: 0,
-        }
-    }
-}
 
 // Implementation stubs for remaining structures
 

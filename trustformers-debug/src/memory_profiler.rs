@@ -894,7 +894,7 @@ impl MemoryProfiler {
             .cloned()
             .collect();
 
-        let impact_score = if allocations.len() > 0 {
+        let impact_score = if !allocations.is_empty() {
             large_allocations.len() as f64 / allocations.len() as f64
         } else {
             0.0
@@ -1013,8 +1013,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_leak_detection() -> Result<()> {
-        let mut config = MemoryProfilingConfig::default();
-        config.leak_detection_threshold_secs = 1; // 1 second for testing
+        let config = MemoryProfilingConfig {
+            leak_detection_threshold_secs: 1, // 1 second for testing
+            ..Default::default()
+        };
 
         let mut profiler = MemoryProfiler::new(config);
         profiler.start().await?; // Start the profiler
