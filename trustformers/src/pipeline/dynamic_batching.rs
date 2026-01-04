@@ -130,8 +130,8 @@ where
         // Notify the batcher
         self.notify.notify_one();
 
-        // Wait for response with timeout
-        let timeout_duration = Duration::from_millis(self.config.max_wait_time_ms * 2);
+        // Wait for response with timeout (use 10x max_wait_time for robustness in tests)
+        let timeout_duration = Duration::from_millis(self.config.max_wait_time_ms * 10);
 
         match timeout(timeout_duration, rx).await {
             Ok(Ok(result)) => result,

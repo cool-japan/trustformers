@@ -464,14 +464,15 @@ mod tests {
     fn test_benchmark_function() {
         let result = benchmark_utils::benchmark_function(
             || {
-                // Simulate some work
-                let _: Vec<i32> = (0..1000).collect();
+                // Simulate some work with measurable duration
+                std::thread::sleep(Duration::from_micros(100));
             },
             10,
             2,
         );
 
         assert_eq!(result.iterations, 10);
-        assert!(result.avg_time_ms > 0.0);
+        // avg_time_ms should be at least 0.1ms (100 microseconds)
+        assert!(result.avg_time_ms >= 0.1, "avg_time_ms was {}", result.avg_time_ms);
     }
 }
