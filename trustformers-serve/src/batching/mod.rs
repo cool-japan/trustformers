@@ -68,6 +68,7 @@ impl DynamicBatchingService {
     pub async fn start(&self) -> Result<()> {
         // Start background tasks
         self.start_batch_collector().await?;
+        self.start_batch_timeout_checker().await?;
         self.start_metrics_collector().await?;
         self.start_optimizer().await?;
 
@@ -79,8 +80,12 @@ impl DynamicBatchingService {
         // Add to aggregator
         let batch_future = self.aggregator.write().await.add_request(request).await?;
 
-        // Wait for processing
-        let result = batch_future.await?;
+        // Wait for processing with a reasonable timeout
+        let timeout_duration = self.config.max_wait_time * 10 + std::time::Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout_duration, batch_future)
+            .await
+            .map_err(|_| anyhow::anyhow!("Request processing timed out"))?
+            .map_err(|e| anyhow::anyhow!("Request processing failed: {}", e))?;
 
         // Update metrics
         self.metrics.record_request_completion(&result);
@@ -108,19 +113,70 @@ impl DynamicBatchingService {
 
     // Background tasks
     async fn start_batch_collector(&self) -> Result<()> {
-        let _aggregator = self.aggregator.clone();
+        // Get the batch receiver and response channels ONCE at startup (briefly hold lock)
+        // This avoids holding the RwLock during the main processing loop
+        let batch_rx = self.aggregator.read().await.batch_receiver();
+        let response_channels = self.aggregator.read().await.response_channels();
         let processor = self.processor.clone();
-        let scheduler = self.scheduler.clone();
 
         tokio::spawn(async move {
             loop {
-                // Get next batch from scheduler
-                if let Some(batch) = scheduler.get_next_batch().await {
+                // Wait for next batch using the direct receiver (no RwLock held)
+                let batch = {
+                    tokio::time::timeout(
+                        tokio::time::Duration::from_millis(50),
+                        batch_rx.lock().await.recv(),
+                    )
+                    .await
+                    .ok()
+                    .flatten()
+                };
+
+                if let Some(batch) = batch {
+                    let batch_id = batch.id;
                     // Process batch
-                    let _ = processor.process_batch(batch).await;
+                    if let Ok(results) = processor.process_batch(batch).await {
+                        // Send results back to waiting callers (using direct channel access)
+                        let mut channels = response_channels.lock().await;
+                        for (request_id, result) in results {
+                            if let Some(tx) = channels.remove(&request_id) {
+                                let _ = tx.send(result);
+                            }
+                        }
+                        drop(channels);
+                        tracing::debug!("Processed batch {}", batch_id);
+                    }
                 }
 
                 tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+            }
+        });
+
+        Ok(())
+    }
+
+    async fn start_batch_timeout_checker(&self) -> Result<()> {
+        let aggregator = self.aggregator.clone();
+        let max_wait_time = self.config.max_wait_time;
+
+        tokio::spawn(async move {
+            // Check interval should be half of max_wait_time for responsiveness
+            let check_interval = max_wait_time / 2;
+            let check_interval =
+                if check_interval < tokio::time::Duration::from_millis(10) {
+                    tokio::time::Duration::from_millis(10)
+                } else {
+                    check_interval
+                };
+
+            loop {
+                tokio::time::sleep(check_interval).await;
+
+                // Briefly acquire write lock to check for timed-out requests and form batches
+                let mut agg = aggregator.write().await;
+                if let Err(e) = agg.try_form_batch_on_timeout().await {
+                    tracing::debug!("Timeout batch formation error: {}", e);
+                }
             }
         });
 

@@ -9,7 +9,10 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use trustformers_serve::{Device, ModelConfig, ServerConfig, TrustformerServer};
+use trustformers_serve::{
+    batching::{BatchingConfig, BatchingMode},
+    Device, ModelConfig, ServerConfig, TrustformerServer,
+};
 
 /// Test configuration for integration tests
 fn create_test_config() -> ServerConfig {
@@ -22,6 +25,15 @@ fn create_test_config() -> ServerConfig {
         device: Device::Cpu,
         max_sequence_length: 2048,
         enable_caching: true,
+    };
+    // Use Fixed batching mode for tests to form batches immediately
+    // This avoids timeout-based batch formation which can cause test delays
+    config.batching_config = BatchingConfig {
+        mode: BatchingMode::Fixed,
+        min_batch_size: 1,
+        max_batch_size: 32,
+        max_wait_time: Duration::from_millis(10),
+        ..BatchingConfig::default()
     };
     config
 }

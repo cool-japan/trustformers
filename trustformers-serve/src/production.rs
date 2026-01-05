@@ -837,34 +837,39 @@ impl ProductionManager {
         update_id: String,
         strategy: UpdateStrategy,
     ) -> Result<()> {
-        let mut state = self.state.write().await;
-        let mut metrics = self.metrics.lock().await;
+        // Perform initial setup with locks, then release before executing update
+        {
+            let mut state = self.state.write().await;
+            let mut metrics = self.metrics.lock().await;
 
-        if !self.config.rolling_updates.enabled {
-            return Err(anyhow!("Rolling updates are not enabled"));
+            if !self.config.rolling_updates.enabled {
+                return Err(anyhow!("Rolling updates are not enabled"));
+            }
+
+            if state.active_update.is_some() {
+                return Err(anyhow!("An update is already in progress"));
+            }
+
+            state.deployment_status = DeploymentStatus::Updating;
+            state.active_update = Some(UpdateInfo {
+                update_id: update_id.clone(),
+                strategy: strategy.clone(),
+                start_time: Instant::now(),
+                current_stage: "starting".to_string(),
+                progress: 0.0,
+                canary_metrics: None,
+            });
+
+            metrics.update_count += 1;
+
+            info!(
+                "Starting rolling update: {} with strategy: {:?}",
+                update_id, strategy
+            );
+            // Locks are dropped here at end of scope
         }
 
-        if state.active_update.is_some() {
-            return Err(anyhow!("An update is already in progress"));
-        }
-
-        state.deployment_status = DeploymentStatus::Updating;
-        state.active_update = Some(UpdateInfo {
-            update_id: update_id.clone(),
-            strategy: strategy.clone(),
-            start_time: Instant::now(),
-            current_stage: "starting".to_string(),
-            progress: 0.0,
-            canary_metrics: None,
-        });
-
-        metrics.update_count += 1;
-
-        info!(
-            "Starting rolling update: {} with strategy: {:?}",
-            update_id, strategy
-        );
-
+        // Execute update strategy without holding state/metrics locks
         match strategy {
             UpdateStrategy::Rolling {
                 max_unavailable,
@@ -905,18 +910,23 @@ impl ProductionManager {
         // Implementation would perform rolling update
         // This is a placeholder for the actual rolling update logic
 
-        let mut state = self.state.write().await;
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "rolling".to_string();
-            update.progress = 50.0;
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "rolling".to_string();
+                update.progress = 50.0;
+            }
         }
 
         // Simulate update progress
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "completed".to_string();
-            update.progress = 100.0;
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "completed".to_string();
+                update.progress = 100.0;
+            }
         }
 
         self.complete_update().await?;
@@ -934,25 +944,30 @@ impl ProductionManager {
             canary_percentage
         );
 
-        let mut state = self.state.write().await;
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "canary".to_string();
-            update.progress = 25.0;
-            update.canary_metrics = Some(CanaryMetrics {
-                traffic_percentage: canary_percentage,
-                success_rate: 99.5,
-                error_rate: 0.5,
-                avg_latency: Duration::from_millis(150),
-            });
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "canary".to_string();
+                update.progress = 25.0;
+                update.canary_metrics = Some(CanaryMetrics {
+                    traffic_percentage: canary_percentage,
+                    success_rate: 99.5,
+                    error_rate: 0.5,
+                    avg_latency: Duration::from_millis(150),
+                });
+            }
         }
 
         // Implementation would deploy canary and monitor metrics
 
         tokio::time::sleep(Duration::from_secs(10)).await;
 
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "promoting".to_string();
-            update.progress = 75.0;
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "promoting".to_string();
+                update.progress = 75.0;
+            }
         }
 
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -972,19 +987,24 @@ impl ProductionManager {
             switch_delay
         );
 
-        let mut state = self.state.write().await;
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "preparing_green".to_string();
-            update.progress = 33.0;
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "preparing_green".to_string();
+                update.progress = 33.0;
+            }
         }
 
         // Implementation would prepare green environment
 
         tokio::time::sleep(switch_delay).await;
 
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "switching".to_string();
-            update.progress = 66.0;
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "switching".to_string();
+                update.progress = 66.0;
+            }
         }
 
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -997,19 +1017,24 @@ impl ProductionManager {
     async fn execute_recreate_deployment(&self) -> Result<()> {
         info!("Executing recreate deployment");
 
-        let mut state = self.state.write().await;
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "stopping".to_string();
-            update.progress = 25.0;
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "stopping".to_string();
+                update.progress = 25.0;
+            }
         }
 
         // Implementation would stop all instances
 
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        if let Some(update) = &mut state.active_update {
-            update.current_stage = "starting".to_string();
-            update.progress = 75.0;
+        {
+            let mut state = self.state.write().await;
+            if let Some(update) = &mut state.active_update {
+                update.current_stage = "starting".to_string();
+                update.progress = 75.0;
+            }
         }
 
         tokio::time::sleep(Duration::from_secs(5)).await;

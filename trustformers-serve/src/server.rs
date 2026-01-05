@@ -186,6 +186,11 @@ impl TrustformerServer {
 
     /// Create the router with all endpoints for testing
     pub async fn create_test_router(self) -> Router {
+        // Start the batching service background tasks for processing requests
+        if let Err(e) = self.batching_service.start().await {
+            tracing::warn!("Failed to start batching service for tests: {}", e);
+        }
+
         let shared_state = Arc::new(self);
         let router = Router::new()
             // Health endpoints

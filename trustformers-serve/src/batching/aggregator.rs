@@ -560,9 +560,27 @@ impl BatchAggregator {
         Ok(())
     }
 
+    /// Try to form a batch based on timeout (called periodically by background task)
+    /// This is the public version that can be called from the batching service
+    pub async fn try_form_batch_on_timeout(&mut self) -> Result<()> {
+        self.try_form_batch().await
+    }
+
     /// Get the next batch (called by scheduler)
     pub async fn get_next_batch(&self) -> Option<RequestBatch> {
         self.batch_rx.lock().await.recv().await
+    }
+
+    /// Get access to the batch receiver Arc for external processing without holding aggregator lock
+    pub fn batch_receiver(&self) -> Arc<tokio::sync::Mutex<mpsc::Receiver<RequestBatch>>> {
+        self.batch_rx.clone()
+    }
+
+    /// Get access to the response channels Arc for external processing
+    pub fn response_channels(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<ProcessingResult>>>> {
+        self.response_channels.clone()
     }
 
     /// Process batch results

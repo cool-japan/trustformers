@@ -486,30 +486,32 @@ impl OperatorSchedulingService {
 
         // Select device and schedule task
         let decision = self.make_scheduling_decision(&task).await?;
+        let device = decision.device;
 
-        // Add task to appropriate queue
-        let mut queues = self.task_queues.write().await;
-        if let Some(queue) = queues.get_mut(&decision.device) {
-            if queue.len() >= self.config.max_queue_size_per_device {
-                return Err(OperatorSchedulingError::QueueFull(decision.device));
+        // Add task to appropriate queue (scope to release lock before update_submission_stats)
+        {
+            let mut queues = self.task_queues.write().await;
+            if let Some(queue) = queues.get_mut(&decision.device) {
+                if queue.len() >= self.config.max_queue_size_per_device {
+                    return Err(OperatorSchedulingError::QueueFull(decision.device));
+                }
+
+                let priority_task = PriorityTask {
+                    task: task.clone(),
+                    priority_score: decision.score,
+                    queue_time: SystemTime::now(),
+                };
+
+                queue.push(priority_task);
+            } else {
+                return Err(OperatorSchedulingError::DeviceUnavailable(decision.device));
             }
-
-            let priority_task = PriorityTask {
-                task: task.clone(),
-                priority_score: decision.score,
-                queue_time: SystemTime::now(),
-            };
-
-            queue.push(priority_task);
-        } else {
-            return Err(OperatorSchedulingError::DeviceUnavailable(decision.device));
         }
 
-        // Update statistics
+        // Update statistics (queues lock is now released)
         self.update_submission_stats(&task).await;
 
-        // Store scheduling decision and capture device for later use
-        let device = decision.device;
+        // Store scheduling decision
         self.scheduling_history.write().await.push(decision);
 
         // Trigger scheduling if possible
