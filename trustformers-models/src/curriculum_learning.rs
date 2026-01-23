@@ -1236,9 +1236,10 @@ mod tests {
         let curriculum = vec![0.7, 0.8, 0.85, 0.9];
 
         let analysis = utils::analyze_curriculum_effectiveness(&baseline, &curriculum);
-        assert_eq!(analysis.final_accuracy_improvement, 0.1); // 0.9 - 0.8
-        assert_eq!(analysis.baseline_final_accuracy, 0.8);
-        assert_eq!(analysis.curriculum_final_accuracy, 0.9);
+        // Use approximate comparison for floating point values
+        assert!((analysis.final_accuracy_improvement - 0.1).abs() < 1e-6); // 0.9 - 0.8
+        assert!((analysis.baseline_final_accuracy - 0.8).abs() < 1e-6);
+        assert!((analysis.curriculum_final_accuracy - 0.9).abs() < 1e-6);
         assert!(analysis.convergence_speedup > 1.0);
     }
 }

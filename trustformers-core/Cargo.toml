@@ -86,6 +86,8 @@ criterion.workspace = true
 [features]
 default = ["linalg"]
 linalg = ["scirs2-core/linalg"]  # Linear algebra operations
+# torch feature disabled - requires matching libtorch version at runtime
+# Enable only when you have a properly configured libtorch environment
 torch = ["dep:tch"]
 candle = ["dep:candle-core"]
 parallel = []
@@ -106,6 +108,8 @@ oneapi = []
 riscv = []
 nccl = []
 backtrace = []
+# Full feature set for testing (excludes torch due to libtorch version requirements)
+full = ["linalg", "candle", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
 
 [[bench]]
 name = "tensor_operations"

@@ -37,5 +37,8 @@ tempfile.workspace = true
 
 [features]
 default = []
+# torch feature disabled by default - requires matching libtorch version at runtime
 torch = ["trustformers-core/torch"]
 candle = ["trustformers-core/candle"]
+# Full feature set for testing (excludes torch)
+full = ["candle", "trustformers-core/full"]

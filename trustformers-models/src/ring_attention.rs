@@ -490,7 +490,7 @@ impl RingAttention {
         let mut masked_scores = scores.clone();
 
         // Apply causal masking: can only attend to current and previous positions
-        if key_block.start_pos > query_block.end_pos {
+        if key_block.start_pos >= query_block.end_pos {
             // Key block is completely in the future - mask everything
             masked_scores = Tensor::full(f32::NEG_INFINITY, scores_shape.to_vec())?;
         } else if key_block.start_pos < query_block.start_pos {

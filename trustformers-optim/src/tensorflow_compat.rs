@@ -1026,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_variable_management() {
-        let mut optimizer = TensorFlowAdam::default().unwrap();
+        let mut optimizer = TensorFlowAdam::with_defaults().unwrap();
 
         let var1 = Tensor::zeros(&[10, 10]).unwrap();
         let var2 = Tensor::zeros(&[5, 5]).unwrap();
@@ -1042,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_learning_rate_updates() {
-        let mut optimizer = TensorFlowAdam::default().unwrap();
+        let mut optimizer = TensorFlowAdam::with_defaults().unwrap();
         assert_eq!(optimizer.get_learning_rate(), 0.001);
 
         optimizer.set_learning_rate(0.01).unwrap();

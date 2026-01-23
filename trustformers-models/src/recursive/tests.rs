@@ -161,7 +161,8 @@ fn test_config_helper_methods() {
     assert_eq!(config.head_dim(), 64); // 768 / 12
     assert_eq!(config.num_kv_heads(), 12); // No GQA by default
     assert_eq!(config.effective_chunk_size(), 448); // 512 - 64
-    assert_eq!(config.total_memory_capacity(), 1024); // No hierarchy by default
+    // With hierarchical attention: 1024 * (1.0 + 0.5 + 0.25) = 1792
+    assert_eq!(config.total_memory_capacity(), 1792);
 }
 
 #[test]

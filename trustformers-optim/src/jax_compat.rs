@@ -917,14 +917,14 @@ mod tests {
 
     #[test]
     fn test_jax_adam_creation() {
-        let optimizer = JAXAdam::default().unwrap();
+        let optimizer = JAXAdam::with_defaults().unwrap();
         assert_eq!(optimizer.name(), "adam");
         assert_eq!(optimizer.learning_rate, 1e-3);
     }
 
     #[test]
     fn test_jax_adamw_creation() {
-        let optimizer = JAXAdamW::default().unwrap();
+        let optimizer = JAXAdamW::with_defaults().unwrap();
         assert_eq!(optimizer.name(), "adamw");
         assert_eq!(optimizer.learning_rate, 1e-3);
         assert_eq!(optimizer.weight_decay, 1e-4);
@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_jax_sgd_creation() {
-        let optimizer = JAXSGD::default().unwrap();
+        let optimizer = JAXSGD::with_defaults().unwrap();
         assert_eq!(optimizer.name(), "sgd");
         assert_eq!(optimizer.learning_rate, 1e-3);
         assert_eq!(optimizer.momentum, 0.0);
@@ -976,8 +976,9 @@ mod tests {
 
     #[test]
     fn test_jax_optimizer_init() {
-        let optimizer = JAXAdam::default().unwrap();
-        let params = [
+        use std::collections::HashMap;
+        let optimizer = JAXAdam::with_defaults().unwrap();
+        let params: HashMap<String, Tensor> = [
             ("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap()),
             ("param2".to_string(), Tensor::zeros(&[5, 5]).unwrap()),
         ]
@@ -995,18 +996,21 @@ mod tests {
 
     #[test]
     fn test_jax_optimizer_update() {
-        let optimizer = JAXAdam::default().unwrap();
-        let params = [("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())]
-            .iter()
-            .cloned()
-            .collect();
+        use std::collections::HashMap;
+        let optimizer = JAXAdam::with_defaults().unwrap();
+        let params: HashMap<String, Tensor> =
+            [("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())]
+                .iter()
+                .cloned()
+                .collect();
 
         let state = optimizer.init(&params).unwrap();
 
-        let gradients = [("param1".to_string(), Tensor::ones(&[10, 10]).unwrap())]
-            .iter()
-            .cloned()
-            .collect();
+        let gradients: HashMap<String, Tensor> =
+            [("param1".to_string(), Tensor::ones(&[10, 10]).unwrap())]
+                .iter()
+                .cloned()
+                .collect();
 
         let (updated_params, updated_state) =
             optimizer.update(&gradients, &state, Some(&params)).unwrap();
@@ -1016,6 +1020,7 @@ mod tests {
 
     #[test]
     fn test_jax_chain_transformation() {
+        use std::collections::HashMap;
         let adam = JAXOptimizerFactory::adam(1e-3, 0.9, 0.999, 1e-8, 0.0, None).unwrap();
         let sgd = JAXOptimizerFactory::sgd(1e-3, 0.9, false, None).unwrap();
 
@@ -1023,10 +1028,11 @@ mod tests {
 
         assert_eq!(chain.name(), "chain");
 
-        let params = [("param1".to_string(), Tensor::zeros(&[5, 5]).unwrap())]
-            .iter()
-            .cloned()
-            .collect();
+        let params: HashMap<String, Tensor> =
+            [("param1".to_string(), Tensor::zeros(&[5, 5]).unwrap())]
+                .iter()
+                .cloned()
+                .collect();
 
         let state = chain.init(&params).unwrap();
         assert!(state.params.contains_key("chain_0"));

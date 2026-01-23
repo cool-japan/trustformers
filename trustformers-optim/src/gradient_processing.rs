@@ -748,20 +748,20 @@ mod tests {
 
     #[test]
     fn test_gradient_processor_creation() {
-        let processor = GradientProcessor::default();
+        let processor = GradientProcessor::with_defaults();
         assert_eq!(processor.current_step, 0);
         assert_eq!(processor.gradient_norm_history.len(), 0);
     }
 
     #[test]
     fn test_gradient_norm_stats_empty() {
-        let processor = GradientProcessor::default();
+        let processor = GradientProcessor::with_defaults();
         assert!(processor.get_gradient_norm_stats().is_none());
     }
 
     #[test]
     fn test_gradient_processor_reset() {
-        let mut processor = GradientProcessor::default();
+        let mut processor = GradientProcessor::with_defaults();
         processor.current_step = 10;
         processor.gradient_norm_history.push(1.0);
 

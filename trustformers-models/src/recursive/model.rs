@@ -659,49 +659,74 @@ impl MemoryState {
     }
 
     pub fn update(&mut self, new_content: Tensor) -> Result<()> {
-        // Simple circular buffer update
         let content_size = new_content.shape()[1];
-        let end_pos = std::cmp::min(self.write_head + content_size, self.capacity);
 
-        // Update memory content using tensor slicing and concatenation
-        let start_pos = self.write_head;
-        let hidden_size = self.content.shape()[2]; // Get hidden size from tensor shape
+        // If new content is larger than or equal to capacity, just use the last `capacity` elements
+        if content_size >= self.capacity {
+            self.content = new_content.slice(1, content_size - self.capacity, content_size)?;
+            self.write_head = 0;
+            return Ok(());
+        }
 
-        if start_pos + content_size <= self.capacity {
-            // Simple case: content fits without wrapping
-            let before = if start_pos > 0 {
-                Some(self.content.slice_multi(&[(0, start_pos), (0, hidden_size)])?)
+        // Simple append if there's room
+        let end_pos = self.write_head + content_size;
+
+        if end_pos <= self.capacity {
+            // Content fits without wrapping
+            let before = if self.write_head > 0 {
+                Some(self.content.slice(1, 0, self.write_head)?)
             } else {
                 None
             };
 
             let after = if end_pos < self.capacity {
-                Some(self.content.slice_multi(&[(end_pos, self.capacity), (0, hidden_size)])?)
+                Some(self.content.slice(1, end_pos, self.capacity)?)
             } else {
                 None
             };
 
-            // Reconstruct memory with new content
+            // Reconstruct memory with new content (concatenate on dimension 1)
             match (before, after) {
                 (Some(b), Some(a)) => {
-                    self.content = Tensor::concat(&[b, new_content, a], 0)?;
-                },
+                    self.content = Tensor::concat(&[b, new_content, a], 1)?;
+                }
                 (Some(b), None) => {
-                    self.content = Tensor::concat(&[b, new_content], 0)?;
-                },
+                    self.content = Tensor::concat(&[b, new_content], 1)?;
+                }
                 (None, Some(a)) => {
-                    self.content = Tensor::concat(&[new_content, a], 0)?;
-                },
+                    self.content = Tensor::concat(&[new_content, a], 1)?;
+                }
                 (None, None) => {
                     self.content = new_content;
-                },
+                }
             }
+            self.write_head = end_pos;
         } else {
-            // Content wraps around - for now, just add to existing content
-            self.content = self.content.add(&new_content)?;
+            // Content wraps around
+            let available = self.capacity - self.write_head;
+            let first_part = new_content.slice(1, 0, available)?;
+            let second_part = new_content.slice(1, available, content_size)?;
+            let remaining = content_size - available;
+
+            // Get any old content between where second_part ends and write_head
+            let middle = if remaining < self.write_head {
+                Some(self.content.slice(1, remaining, self.write_head)?)
+            } else {
+                None
+            };
+
+            // Reconstruct: [second_part, middle (if any), first_part]
+            match middle {
+                Some(m) => {
+                    self.content = Tensor::concat(&[second_part, m, first_part], 1)?;
+                }
+                None => {
+                    self.content = Tensor::concat(&[second_part, first_part], 1)?;
+                }
+            }
+            self.write_head = remaining;
         }
 
-        self.write_head = (self.write_head + content_size) % self.capacity;
         Ok(())
     }
 

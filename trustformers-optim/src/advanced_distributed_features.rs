@@ -134,6 +134,10 @@ impl AutoScaler {
     /// Builder pattern for configuration
     pub fn with_min_nodes(mut self, min_nodes: usize) -> Self {
         self.config.min_nodes = min_nodes;
+        // Also update current_nodes if it's below the new minimum
+        if self.current_nodes < min_nodes {
+            self.current_nodes = min_nodes;
+        }
         self
     }
 
@@ -999,7 +1003,8 @@ impl PerformanceMLOptimizer {
             config,
             performance_model: Arc::new(Mutex::new(MLPerformanceModel::new())),
             optimization_history: Vec::new(),
-            last_optimization: Instant::now(),
+            // Initialize to a time in the past so first optimization can run immediately
+            last_optimization: Instant::now() - Duration::from_secs(120),
         }
     }
 

@@ -818,8 +818,10 @@ mod tests {
 
         assert!(!progress.is_plateau());
 
-        // Add plateau losses
-        for _ in 0..10 {
+        // Add plateau losses - need enough constant losses so both
+        // "older" (indices len-20 to len-10) and "recent" (last 10)
+        // are all constant, making improvement near 0
+        for _ in 0..25 {
             progress.update(0.8); // Constant loss
         }
 

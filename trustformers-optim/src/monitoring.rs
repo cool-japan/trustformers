@@ -901,14 +901,14 @@ mod tests {
 
     #[test]
     fn test_optimizer_monitor_creation() {
-        let monitor = OptimizerMonitor::default();
+        let monitor = OptimizerMonitor::with_defaults();
         assert_eq!(monitor.metrics.step, 0);
         assert!(monitor.previous_parameters.is_none());
     }
 
     #[test]
     fn test_monitor_should_log() {
-        let mut monitor = OptimizerMonitor::default();
+        let mut monitor = OptimizerMonitor::with_defaults();
 
         // Should log at step 0
         assert!(monitor.should_log());
@@ -957,7 +957,7 @@ mod tests {
 
     #[test]
     fn test_hyperparameter_sensitivity_analyzer() {
-        let mut analyzer = HyperparameterSensitivity::default();
+        let mut analyzer = HyperparameterSensitivity::with_defaults();
 
         // Test baseline loss recording
         analyzer.record_baseline_loss(1.0);
@@ -986,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_sensitivity_analysis_methods() {
-        let mut analyzer = HyperparameterSensitivity::default();
+        let mut analyzer = HyperparameterSensitivity::with_defaults();
 
         // Test learning rate sensitivity
         let lr_sensitivity = analyzer.analyze_learning_rate_sensitivity(0.01, 1.0, 1.1);
@@ -1006,7 +1006,7 @@ mod tests {
 
     #[test]
     fn test_sensitivity_should_analyze() {
-        let mut analyzer = HyperparameterSensitivity::default();
+        let mut analyzer = HyperparameterSensitivity::with_defaults();
 
         // Should not analyze initially (below min_samples)
         assert!(!analyzer.should_analyze());
@@ -1026,7 +1026,7 @@ mod tests {
 
     #[test]
     fn test_sensitivity_report_generation() {
-        let mut analyzer = HyperparameterSensitivity::default();
+        let mut analyzer = HyperparameterSensitivity::with_defaults();
 
         // Add some sensitivity data
         analyzer.compute_sensitivity("learning_rate", 0.01, 0.0101, 0.1);
@@ -1043,7 +1043,7 @@ mod tests {
 
     #[test]
     fn test_sensitivity_most_sensitive_hyperparameters() {
-        let mut analyzer = HyperparameterSensitivity::default();
+        let mut analyzer = HyperparameterSensitivity::with_defaults();
 
         // Add different sensitivity levels
         analyzer.compute_sensitivity("learning_rate", 0.01, 0.0101, 0.2); // High sensitivity
@@ -1061,7 +1061,7 @@ mod tests {
 
     #[test]
     fn test_sensitivity_reset() {
-        let mut analyzer = HyperparameterSensitivity::default();
+        let mut analyzer = HyperparameterSensitivity::with_defaults();
 
         // Add some data
         analyzer.record_baseline_loss(1.0);
