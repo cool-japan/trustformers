@@ -11,7 +11,7 @@ members = [
     "trustformers-debug",
     "trustformers-serve",
 ]
-exclude = ["examples/server", "examples/grpc-server", "trustformers-py"]
+exclude = ["examples/server", "examples/grpc-server", "trustformers-py", "trustformers-c"]
 resolver = "2"
 
 [workspace.package]
