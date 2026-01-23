@@ -737,12 +737,12 @@ mod tests {
         let dynamic_mode = QuantizationMode::Dynamic;
 
         match static_mode {
-            QuantizationMode::Static => assert!(true),
+            QuantizationMode::Static => {},
             _ => panic!("Expected Static mode"),
         }
 
         match dynamic_mode {
-            QuantizationMode::Dynamic => assert!(true),
+            QuantizationMode::Dynamic => {},
             _ => panic!("Expected Dynamic mode"),
         }
     }

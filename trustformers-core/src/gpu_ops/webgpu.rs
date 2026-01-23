@@ -376,7 +376,7 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Matmul Pipeline Layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Create compute pipeline
@@ -585,7 +585,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GELU Pipeline Layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -863,7 +863,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("LayerNorm Pipeline Layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

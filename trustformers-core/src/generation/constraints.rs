@@ -28,16 +28,14 @@ impl ConstraintValidator {
             .as_ref()
             .map(|choices| choices.iter().cloned().collect::<HashSet<String>>());
 
-        let json_schema = if config.json_schema.is_some() {
-            Some(JsonSchemaValidator::new(
-                config.json_schema.as_ref().unwrap(),
-            )?)
+        let json_schema = if let Some(schema) = &config.json_schema {
+            Some(JsonSchemaValidator::new(schema)?)
         } else {
             None
         };
 
-        let grammar = if config.grammar.is_some() {
-            Some(GrammarValidator::new(config.grammar.as_ref().unwrap())?)
+        let grammar = if let Some(grammar_config) = &config.grammar {
+            Some(GrammarValidator::new(grammar_config)?)
         } else {
             None
         };

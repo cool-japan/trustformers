@@ -1049,6 +1049,7 @@ impl BioTokenizer {
 
 /// Sequence type detection
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::upper_case_acronyms)]
 enum SequenceType {
     DNA,
     RNA,

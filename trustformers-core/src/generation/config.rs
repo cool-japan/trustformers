@@ -437,11 +437,7 @@ mod tests {
         if let GenerationStrategy::Sampling { temperature } = config.strategy {
             assert_eq!(temperature, 0.8);
         } else {
-            assert!(
-                false,
-                "Expected sampling strategy but got {:?}",
-                config.strategy
-            );
+            panic!("Expected sampling strategy but got {:?}", config.strategy);
         }
 
         assert_eq!(config.max_new_tokens, Some(50));
@@ -460,8 +456,7 @@ mod tests {
         if let GenerationStrategy::BeamSearch { num_beams } = config.strategy {
             assert_eq!(num_beams, 4);
         } else {
-            assert!(
-                false,
+            panic!(
                 "Expected beam search strategy but got {:?}",
                 config.strategy
             );

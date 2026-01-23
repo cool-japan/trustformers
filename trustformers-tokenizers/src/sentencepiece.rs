@@ -779,12 +779,12 @@ impl SentencePieceTokenizer {
                 continue;
             }
 
-            if token.starts_with('▁') {
+            if let Some(stripped) = token.strip_prefix('▁') {
                 // SentencePiece word boundary marker
                 if !result.is_empty() {
                     result.push(' ');
                 }
-                result.push_str(&token[3..]); // Remove the ▁ character (3 bytes in UTF-8)
+                result.push_str(stripped);
             } else {
                 result.push_str(token);
             }

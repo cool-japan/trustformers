@@ -984,7 +984,6 @@ mod tests {
 ///
 /// This module provides sophisticated GPU memory management capabilities
 /// for high-performance inference and training workloads.
-
 /// GPU Memory Pool for efficient allocation and deallocation
 #[derive(Debug)]
 pub struct GpuMemoryPool {

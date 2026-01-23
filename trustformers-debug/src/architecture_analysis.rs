@@ -378,10 +378,7 @@ impl ArchitectureAnalyzer {
         // Detect parameter symmetries
         let mut param_groups: HashMap<usize, Vec<String>> = HashMap::new();
         for layer in &self.layers {
-            param_groups
-                .entry(layer.parameters)
-                .or_default()
-                .push(layer.id.clone());
+            param_groups.entry(layer.parameters).or_default().push(layer.id.clone());
         }
 
         for (param_count, layer_ids) in param_groups {

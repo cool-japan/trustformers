@@ -1229,8 +1229,8 @@ impl GpuTokenizer {
     /// Apply padding to token sequences
     fn apply_padding(
         &self,
-        token_ids: &mut Vec<Vec<u32>>,
-        attention_masks: &mut Vec<Vec<u8>>,
+        token_ids: &mut [Vec<u32>],
+        attention_masks: &mut [Vec<u8>],
     ) -> Result<(), GpuTokenizerError> {
         if token_ids.is_empty() {
             return Ok(());

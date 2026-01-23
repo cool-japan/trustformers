@@ -62,13 +62,19 @@ pub struct NoGradContext {
     prev_state: bool,
 }
 
+impl Default for NoGradContext {
+    fn default() -> Self {
+        let prev_state =
+            std::env::var("TRUSTFORMERS_GRAD_ENABLED").map(|v| v == "true").unwrap_or(true);
+        NoGradContext { prev_state }
+    }
+}
+
 #[pymethods]
 impl NoGradContext {
     #[new]
     pub fn new() -> Self {
-        let prev_state =
-            std::env::var("TRUSTFORMERS_GRAD_ENABLED").map(|v| v == "true").unwrap_or(true);
-        NoGradContext { prev_state }
+        Self::default()
     }
 
     fn __enter__(&self) -> PyResult<()> {
@@ -188,15 +194,21 @@ pub struct PyMemoryTracker {
     peak: usize,
 }
 
-#[pymethods]
-impl PyMemoryTracker {
-    #[new]
-    pub fn new() -> Self {
+impl Default for PyMemoryTracker {
+    fn default() -> Self {
         let baseline = get_memory_usage();
         PyMemoryTracker {
             baseline,
             peak: baseline,
         }
+    }
+}
+
+#[pymethods]
+impl PyMemoryTracker {
+    #[new]
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Get current memory usage in MB
@@ -281,10 +293,7 @@ impl PyTimer {
     fn get_laps<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let laps = PyList::new(
             py,
-            self.laps.iter().map(|(label, time)| {
-                let tuple = (label.clone(), *time);
-                tuple
-            }),
+            self.laps.iter().map(|(label, time)| (label.clone(), *time)),
         )?;
         Ok(laps)
     }
@@ -316,7 +325,7 @@ impl PyTimer {
 
 /// Configuration utilities
 #[pyclass(name = "Config")]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PyConfig {
     data: HashMap<String, String>,
 }
@@ -325,9 +334,7 @@ pub struct PyConfig {
 impl PyConfig {
     #[new]
     pub fn new() -> Self {
-        PyConfig {
-            data: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Load configuration from file

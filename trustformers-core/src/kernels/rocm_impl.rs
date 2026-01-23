@@ -308,14 +308,12 @@ impl RocmImpl {
         // Use Option to track initialization - None means not attempted, Some(true) means success
         static INIT_SUCCESS: OnceLock<bool> = OnceLock::new();
 
-        let success = *INIT_SUCCESS.get_or_init(|| {
-            match Self::new() {
-                Ok(instance) => {
-                    let _ = ROCM_INSTANCE.set(Arc::new(instance));
-                    true
-                }
-                Err(_) => false,
-            }
+        let success = *INIT_SUCCESS.get_or_init(|| match Self::new() {
+            Ok(instance) => {
+                let _ = ROCM_INSTANCE.set(Arc::new(instance));
+                true
+            },
+            Err(_) => false,
         });
 
         if success {

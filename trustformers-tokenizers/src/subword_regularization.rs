@@ -234,6 +234,7 @@ impl UnigramSubwordRegularizer {
         self.backtrack_segmentation(&best_seg, 0, n, &chars)
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn backtrack_segmentation(
         &self,
         best_seg: &[Vec<Option<String>>],
@@ -253,7 +254,7 @@ impl UnigramSubwordRegularizer {
         let mut best_split = start + 1;
         let mut best_score = f32::NEG_INFINITY;
 
-        for mid in start + 1..end {
+        for (mid, _) in best_seg.iter().enumerate().take(end).skip(start + 1) {
             let score = best_seg[start][mid].as_ref().map(|_| 1.0).unwrap_or(0.0)
                 + best_seg[mid][end].as_ref().map(|_| 1.0).unwrap_or(0.0);
             if score > best_score {

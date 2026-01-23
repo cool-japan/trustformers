@@ -865,7 +865,7 @@ impl DynamicPruner {
             let confidence = if config.use_entropy {
                 // Simulate entropy-based confidence
                 // Higher entropy = lower confidence, lower entropy = higher confidence
-                let simulated_logits = vec![
+                let simulated_logits = [
                     0.8 + (i as f32 / seq_len as f32) * 0.15, // Main prediction
                     0.1 - (i as f32 / seq_len as f32) * 0.05, // Alternative 1
                     0.1 - (i as f32 / seq_len as f32) * 0.05, // Alternative 2
@@ -1594,10 +1594,10 @@ mod tests {
         let config = AttentionBasedPruningConfig::default();
         let pruner = DynamicPruner::attention_based(config);
 
-        match pruner.strategy {
-            PruningStrategy::AttentionBased => assert!(true),
-            _ => panic!("Expected AttentionBased strategy"),
-        }
+        assert!(
+            matches!(pruner.strategy, PruningStrategy::AttentionBased),
+            "Expected AttentionBased strategy"
+        );
     }
 
     #[test]

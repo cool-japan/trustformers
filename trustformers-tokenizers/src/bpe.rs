@@ -228,9 +228,8 @@ impl BPETokenizer {
         for ch in text.chars() {
             let is_chinese = self.is_chinese_char(ch);
 
-            if is_chinese && !prev_was_chinese && !result.is_empty() && !result.ends_with(' ') {
-                result.push(' ');
-            } else if !is_chinese && prev_was_chinese && !result.is_empty() {
+            // Add space when transitioning between Chinese and non-Chinese text
+            if (is_chinese != prev_was_chinese) && !result.is_empty() && !result.ends_with(' ') {
                 result.push(' ');
             }
 

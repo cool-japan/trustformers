@@ -1038,7 +1038,7 @@ mod tests {
             assert!(timing.average_time >= Duration::from_millis(8)); // Allow some variance
             assert!(timing.total_time >= Duration::from_millis(40));
         } else {
-            assert!(false, "Layer timing not found");
+            panic!("Layer timing not found");
         }
 
         Ok(())

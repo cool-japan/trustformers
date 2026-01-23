@@ -608,10 +608,12 @@ mod tests {
         let teacher = MockTeacherModel::new("teacher");
         let student = MockStudentModel::new("student");
 
-        let mut config = DistillationConfig::default();
-        config.epochs = 3; // Small number for testing
-        config.batch_size = 4;
-        config.learning_rate = 0.01;
+        let config = DistillationConfig {
+            epochs: 3, // Small number for testing
+            batch_size: 4,
+            learning_rate: 0.01,
+            ..Default::default()
+        };
 
         // Test that the training loop executes the training process
         let result = distiller.distill(&teacher, &student, &config).await;
@@ -633,11 +635,13 @@ mod tests {
         let teacher = MockTeacherModel::new("teacher");
         let student = MockStudentModel::new("student");
 
-        let mut config = DistillationConfig::default();
-        config.epochs = 2;
-        config.batch_size = 4;
-        config.use_feature_distillation = true;
-        config.feature_weight = 0.1;
+        let config = DistillationConfig {
+            epochs: 2,
+            batch_size: 4,
+            use_feature_distillation: true,
+            feature_weight: 0.1,
+            ..Default::default()
+        };
 
         // Test with feature distillation enabled
         let result = distiller.distill(&teacher, &student, &config).await;

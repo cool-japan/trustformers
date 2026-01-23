@@ -7,13 +7,11 @@ members = [
     "trustformers-training",
     "trustformers",
     "trustformers-wasm",
-    "trustformers-py",
     "trustformers-mobile",
     "trustformers-debug",
     "trustformers-serve",
-    "trustformers-c",
 ]
-exclude = ["examples/server", "examples/grpc-server"]
+exclude = ["examples/server", "examples/grpc-server", "trustformers-py"]
 resolver = "2"
 
 [workspace.package]
@@ -37,13 +35,12 @@ trustformers-wasm = { version = "0.1.0-alpha.2", path = "trustformers-wasm", def
 trustformers-mobile = { version = "0.1.0-alpha.2", path = "trustformers-mobile", default-features = false }
 trustformers-debug = { version = "0.1.0-alpha.2", path = "trustformers-debug", default-features = false }
 trustformers-serve = { version = "0.1.0-alpha.2", path = "trustformers-serve", default-features = false }
-trustformers-c = { version = "0.1.0-alpha.2", path = "trustformers-c", default-features = false }
 
 # Core dependencies
 anyhow = "1.0.100"
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.148"
+serde_json = "1.0.149"
 serde_yaml = "0.9.34"
 semver = { version = "1.0.27", features = ["serde"] }
 tokio = { version = "1.49.0", features = ["full"] }
@@ -51,7 +48,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 log = "0.4.29"
 lazy_static = "1.5.0"
-reqwest = { version = "0.12.28", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.13.1", features = ["json", "stream", "blocking", "form", "query"] }
 futures = "0.3.31"
 bytes = "1.11.0"
 indicatif = "0.18.3"
@@ -62,8 +59,8 @@ dirs = "6.0.0"
 # ML/Math dependencies
 # Note: Per SciRS2 Integration Policy, scientific computing deps are accessed via scirs2-core
 # ndarray, rand, rand_distr, rayon, num-complex removed - all crates now use scirs2-core
-ndarray-rand = "0.15.0"  # TODO: Remove once all usages migrated to scirs2-core
-ndarray-linalg = { version = "0.17.0", features = [] }  # TODO: Replace with scirs2-linalg
+ndarray-rand = "0.16.0"  # TODO: Remove once all usages migrated to scirs2-core
+ndarray-linalg = { version = "0.18.1", features = [] }  # TODO: Replace with scirs2-linalg
 nalgebra = "0.33.2"
 num-traits = "0.2.19"
 ordered-float = "5.1.0"
@@ -79,7 +76,7 @@ regex = "1.12.2"
 # Optional dependencies for different backends
 candle-core = "0.9.1"
 candle-nn = "0.9.1"
-tch = { version = "0.22", features = ["download-libtorch"] }
+tch = { version = "0.23", features = ["download-libtorch"] }
 ort = "1.16"
 safetensors = "0.5"
 
@@ -90,7 +87,7 @@ chrono = { version = "0.4", features = ["serde"] }
 jsonwebtoken = "9.3"
 num_cpus = "1.17"
 once_cell = "1.21"
-prometheus = "0.13"
+prometheus = "0.14"
 prost = "0.14"
 tokio-stream = { version = "0.1", features = ["sync"] }
 tonic = "0.14.2"
@@ -115,7 +112,7 @@ zstd = "0.13"
 flate2 = "1.1"
 lz4 = "1.28"
 tar = "0.4"
-libc = "0.2.179"
+libc = "0.2.180"
 libloading = "0.8"
 
 # BLAS dependencies - OxiBLAS (Pure Rust BLAS/LAPACK from SciRS2 ecosystem)
@@ -151,8 +148,8 @@ indexmap = { version = "2.11", features = ["serde"] }
 plotters = "0.3"
 tui = "0.19"
 crossterm = "0.29"
-ratatui = "0.29"
-gif = "0.13"
+ratatui = "0.30"
+gif = "0.14"
 image = "0.25.6"
 ffmpeg-next = "8.0"
 statrs = "0.18"
@@ -170,7 +167,7 @@ bytemuck = { version = "1.24.0", features = ["derive"] }
 # SciRS2 dependencies - using crates.io 0.1.x
 # Note: "metal" feature removed from default features as it's Apple-specific
 # Individual crates should enable it conditionally using target-specific dependencies
-scirs2-core = { version = "0.1.1", default-features = false, features = [
+scirs2-core = { version = "0.1.2", default-features = false, features = [
     "array",
     "simd",
     "parallel",
@@ -182,7 +179,7 @@ scirs2-core = { version = "0.1.1", default-features = false, features = [
     "gpu",     # GPU acceleration abstractions
     # Metal removed - enable via platform-specific dependencies in individual crates
 ]}
-scirs2-linalg = { version = "0.1.1" }
+scirs2-linalg = { version = "0.1.2" }
 
 [profile.release]
 lto = true

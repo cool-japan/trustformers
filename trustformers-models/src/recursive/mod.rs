@@ -191,7 +191,6 @@ pub struct ModelInfo {
 }
 
 /// Utility functions for working with recursive transformers
-
 /// Create memory state for a given batch and configuration
 pub fn create_memory_state(batch_size: usize, config: &RecursiveConfig) -> MemoryState {
     MemoryState::new(batch_size, config.memory_size, config.hidden_size)

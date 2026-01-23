@@ -301,8 +301,8 @@ impl GANOptimizer {
             // Compute norm
             v_norm = new_v.iter().map(|x| x * x).sum::<f32>().sqrt();
             if v_norm > 1e-8 {
-                for i in 0..new_v.len() {
-                    new_v[i] /= v_norm;
+                for item in &mut new_v {
+                    *item /= v_norm;
                 }
                 // Resize v to match new_v for next iteration
                 v = new_v;

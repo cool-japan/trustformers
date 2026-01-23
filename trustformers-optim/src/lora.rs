@@ -390,8 +390,8 @@ impl OptimizerState for LoRAOptimizer {
                         _ => {},
                     }
                 }
-            } else if key.starts_with("base_") {
-                base_state.insert(key[5..].to_string(), value);
+            } else if let Some(stripped) = key.strip_prefix("base_") {
+                base_state.insert(stripped.to_string(), value);
             }
         }
 

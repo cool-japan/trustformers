@@ -721,7 +721,7 @@ mod tests {
 
             let _ = tuner.tune_matmul(128, 128, 128)?;
             assert!(
-                tuner.cache.len() > 0,
+                !tuner.cache.is_empty(),
                 "Cache should be populated after tuning"
             );
             tuner.save_cache()?;
@@ -734,7 +734,7 @@ mod tests {
                 ..Default::default()
             })?;
 
-            assert!(tuner.cache.len() > 0, "Cache should be loaded from disk");
+            assert!(!tuner.cache.is_empty(), "Cache should be loaded from disk");
         }
 
         // Cleanup

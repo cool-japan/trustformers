@@ -796,7 +796,6 @@ impl HealthChecker {
             let memory_usage = last_metrics.memory_usage_mb;
 
             // Assume 8GB as reasonable upper limit
-            
 
             if memory_usage < 4096.0 {
                 0.9

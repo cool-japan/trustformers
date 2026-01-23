@@ -17,6 +17,29 @@
 #![allow(unused_assignments)]
 #![allow(private_interfaces)]
 #![allow(unused_must_use)]
+// Allow FFI patterns - raw pointer handling in Unity interop is intentional
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::manual_memcpy)]
+#![allow(clippy::useless_vec)]
+// Allow mobile-specific patterns
+#![allow(clippy::await_holding_lock)]
+#![allow(clippy::arc_with_non_send_sync)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::manual_clamp)]
+#![allow(clippy::borrowed_box)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::redundant_pattern_matching)]
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::explicit_counter_loop)]
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::to_string_trait_impl)]
+#![allow(clippy::match_like_matches_macro)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::empty_line_after_doc_comments)]
 
 pub mod abi_checker;
 pub mod benchmarks;

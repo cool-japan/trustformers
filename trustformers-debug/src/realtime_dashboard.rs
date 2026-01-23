@@ -1222,12 +1222,10 @@ impl RealtimeDashboard {
 }
 
 /// Dashboard builder for easier configuration
-#[derive(Debug)]
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct DashboardBuilder {
     config: DashboardConfig,
 }
-
 
 impl DashboardBuilder {
     /// Create new dashboard builder

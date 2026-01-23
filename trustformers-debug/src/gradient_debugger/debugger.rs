@@ -769,7 +769,6 @@ impl GradientDebugger {
         let sum_xy = recent.iter().enumerate().map(|(i, &y)| i as f64 * y).sum::<f64>();
         let sum_x2 = (0..recent.len()).map(|i| (i * i) as f64).sum::<f64>();
 
-        
         (n * sum_xy - sum_x * sum_y) / (n * sum_x2 - sum_x * sum_x)
     }
 

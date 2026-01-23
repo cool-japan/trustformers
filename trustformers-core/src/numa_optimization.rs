@@ -774,9 +774,11 @@ mod tests {
 
     #[test]
     fn test_numa_policy() {
-        let mut policy = NumaPolicy::default();
-        policy.strategy = NumaStrategy::PreferredNodes(vec![0, 1]);
-        policy.strict = true;
+        let policy = NumaPolicy {
+            strategy: NumaStrategy::PreferredNodes(vec![0, 1]),
+            strict: true,
+            ..Default::default()
+        };
 
         assert_eq!(policy.strategy, NumaStrategy::PreferredNodes(vec![0, 1]));
         assert!(policy.strict);

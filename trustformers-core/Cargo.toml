@@ -66,11 +66,11 @@ bytemuck = { workspace = true, optional = true }
 # Metal-specific dependencies moved to target-specific section for macOS only
 
 # WebGPU backend (cross-platform)
-wgpu = { version = "27.0", optional = true }
+wgpu = { version = "28.0", optional = true }
 pollster = { version = "0.4", optional = true }
 
 # OpenCL backend (universal GPU support)
-opencl3 = { version = "0.10", optional = true }
+opencl3 = { version = "0.12", optional = true }
 
 # Dynamic loading for optional GPU backends (ROCm)
 libloading = { workspace = true, optional = true }
@@ -122,12 +122,12 @@ path = "src/bin/naming_checker.rs"
 # Platform-specific dependencies
 # CUDA is only supported on Linux and Windows (not macOS)
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-cudarc = { version = "0.17", optional = true, features = ["nvrtc", "cuda-12000"] }
+cudarc = { version = "0.19", optional = true, features = ["nvrtc", "cuda-12000"] }
 
 # Metal is only supported on macOS
 [target.'cfg(target_os = "macos")'.dependencies]
 scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu", "metal", "mpsgraph"] }
-metal = { version = "0.32", optional = true }
+metal = { version = "0.33", optional = true }
 mpsgraph = { version = "0.2", optional = true }
 objc2 = { version = "0.6", optional = true }
 objc2-metal = { version = "0.3", optional = true }

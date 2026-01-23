@@ -36,7 +36,7 @@ num_cpus.workspace = true
 chrono.workspace = true
 
 # System-level APIs
-libc = "0.2.179"
+libc = "0.2.180"
 
 # CLI tools
 clap.workspace = true
@@ -52,7 +52,7 @@ path = "src/bin/abi-checker.rs"
 objc = "0.2.7"
 core-foundation = "0.10.1"
 core-foundation-sys = "0.8.7"
-metal = "0.32.0"
+metal = "0.33.0"
 cocoa = "0.26.1"
 
 # Android specific dependencies (conditional compilation)
@@ -62,9 +62,9 @@ android_logger = "0.15.1"
 
 # WebAssembly specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-wasm-bindgen = "0.2.106"
-wasm-bindgen-futures = "0.4.56"
-web-sys = { version = "0.3.83", features = [
+wasm-bindgen = "0.2.108"
+wasm-bindgen-futures = "0.4.58"
+web-sys = { version = "0.3.85", features = [
     "console",
     "Window",
     "Performance",
@@ -72,7 +72,7 @@ web-sys = { version = "0.3.83", features = [
     "WorkerGlobalScope",
     "Worker",
 ] }
-js-sys = "0.3.83"
+js-sys = "0.3.85"
 console_error_panic_hook = "0.1.7"
 
 [dev-dependencies]

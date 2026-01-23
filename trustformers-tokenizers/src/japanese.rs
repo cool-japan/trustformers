@@ -90,6 +90,7 @@ unsafe impl Sync for ThreadSafeTagger {}
 
 #[cfg(feature = "mecab")]
 impl ThreadSafeTagger {
+    #[allow(clippy::arc_with_non_send_sync)]
     fn new(config: &str) -> Result<Self> {
         let tagger = Tagger::new(config);
         Ok(Self {

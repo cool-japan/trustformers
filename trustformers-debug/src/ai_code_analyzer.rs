@@ -947,8 +947,7 @@ impl AICodeAnalyzer {
                 step_number: 3,
                 description: "Check tensor shapes and batch size".to_string(),
                 command: Some(
-                    "print(f'Batch size: {batch_size}, Input shape: {input.shape}')"
-                        .to_string(),
+                    "print(f'Batch size: {batch_size}, Input shape: {input.shape}')".to_string(),
                 ),
                 expected_output: "Current batch size and input dimensions".to_string(),
             });

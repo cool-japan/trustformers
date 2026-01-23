@@ -275,7 +275,7 @@ impl OptimizerMonitor {
     }
 
     /// Create a monitor with default configuration.
-    pub fn default() -> Self {
+    pub fn with_defaults() -> Self {
         Self::new(MonitoringConfig::default())
     }
 
@@ -608,7 +608,7 @@ impl HyperparameterSensitivity {
     }
 
     /// Create analyzer with default configuration.
-    pub fn default() -> Self {
+    pub fn with_defaults() -> Self {
         Self::new(HyperparameterSensitivityConfig::default())
     }
 
@@ -1260,7 +1260,7 @@ impl OptimizerSelector {
     }
 
     /// Rank recommendations based on user requirements
-    fn rank_recommendations(&self, recommendations: &mut Vec<OptimizerRecommendation>) {
+    fn rank_recommendations(&self, recommendations: &mut [OptimizerRecommendation]) {
         recommendations.sort_by(|a, b| {
             let score_a = self.calculate_suitability_score(a);
             let score_b = self.calculate_suitability_score(b);

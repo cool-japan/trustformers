@@ -372,7 +372,7 @@ impl JAXAdam {
     }
 
     /// Create with default JAX Adam parameters
-    pub fn default() -> Result<Self> {
+    pub fn with_defaults() -> Result<Self> {
         Self::from_params(1e-3, 0.9, 0.999, 1e-8, 0.0, None)
     }
 
@@ -545,7 +545,7 @@ impl JAXAdamW {
     }
 
     /// Create with default JAX AdamW parameters
-    pub fn default() -> Result<Self> {
+    pub fn with_defaults() -> Result<Self> {
         Self::from_params(1e-3, 0.9, 0.999, 1e-8, 0.0, 1e-4)
     }
 }
@@ -681,7 +681,7 @@ impl JAXSGD {
     }
 
     /// Create with default JAX SGD parameters
-    pub fn default() -> Result<Self> {
+    pub fn with_defaults() -> Result<Self> {
         Self::from_params(1e-3, 0.0, false, None)
     }
 }

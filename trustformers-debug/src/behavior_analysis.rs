@@ -234,10 +234,7 @@ impl BehaviorAnalyzer {
 
     /// Record neuron activations for analysis
     pub fn record_activations(&mut self, layer_id: String, activations: Vec<f32>) {
-        self.activation_history
-            .entry(layer_id)
-            .or_default()
-            .push(activations);
+        self.activation_history.entry(layer_id).or_default().push(activations);
     }
 
     /// Record input gradients for sensitivity analysis

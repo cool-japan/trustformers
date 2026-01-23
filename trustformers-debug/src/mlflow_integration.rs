@@ -279,11 +279,7 @@ impl MLflowClient {
             timestamp,
         };
 
-        self.metrics_cache
-            .write()
-            .entry(key.clone())
-            .or_default()
-            .push(metric);
+        self.metrics_cache.write().entry(key.clone()).or_default().push(metric);
 
         tracing::debug!(key = %key, value = %value, step = %step, "Logged metric");
 

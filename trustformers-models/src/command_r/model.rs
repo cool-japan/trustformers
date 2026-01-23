@@ -1453,11 +1453,7 @@ mod tests {
         let hidden_states = Tensor::zeros(&[batch_size, seq_len, config.hidden_size]).unwrap();
 
         let result = model.forward(hidden_states);
-        assert!(
-            result.is_ok(),
-            "Forward pass failed: {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "Forward pass failed: {:?}", result.err());
     }
 
     #[test]

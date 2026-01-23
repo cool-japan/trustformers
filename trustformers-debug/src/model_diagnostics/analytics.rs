@@ -179,8 +179,7 @@ pub enum ExportFormat {
 }
 
 /// Statistical analysis results.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct StatisticalAnalysis {
     /// Mean values
     pub means: Vec<f64>,
@@ -1331,7 +1330,6 @@ impl TemporalAnalysisCache {
         }
     }
 }
-
 
 impl Default for AnomalyDetectionResults {
     fn default() -> Self {

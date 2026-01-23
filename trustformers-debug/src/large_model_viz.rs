@@ -386,10 +386,7 @@ impl LargeModelVisualizer {
 
         // Group by layer type
         for metadata in cache.values() {
-            groups
-                .entry(metadata.layer_type.clone())
-                .or_default()
-                .push(metadata.index);
+            groups.entry(metadata.layer_type.clone()).or_default().push(metadata.index);
         }
 
         // Create LayerGroup objects

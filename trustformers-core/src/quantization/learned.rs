@@ -800,8 +800,10 @@ mod tests {
 
     #[test]
     fn test_learned_fake_quantize() {
-        let mut config = LearnedQuantConfig::default();
-        config.per_channel_learned = false; // Use per-tensor quantization to avoid shape issues
+        let config = LearnedQuantConfig {
+            per_channel_learned: false, // Use per-tensor quantization to avoid shape issues
+            ..Default::default()
+        };
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![5, 10];
 
@@ -836,9 +838,11 @@ mod tests {
 
     #[test]
     fn test_parameter_constraints() {
-        let mut config = LearnedQuantConfig::default();
-        config.scale_min = 0.1;
-        config.scale_max = 10.0;
+        let config = LearnedQuantConfig {
+            scale_min: 0.1,
+            scale_max: 10.0,
+            ..Default::default()
+        };
 
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![5];
@@ -859,9 +863,11 @@ mod tests {
 
     #[test]
     fn test_ema_updates() {
-        let mut config = LearnedQuantConfig::default();
-        config.use_ema = true;
-        config.ema_momentum = 0.9;
+        let config = LearnedQuantConfig {
+            use_ema: true,
+            ema_momentum: 0.9,
+            ..Default::default()
+        };
 
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![3];
@@ -881,9 +887,11 @@ mod tests {
 
     #[test]
     fn test_regularization_loss() {
-        let mut config = LearnedQuantConfig::default();
-        config.use_ema = false; // Disable EMA to avoid computation graph issues
-        config.regularization_weight = 0.0; // Test zero weight case first
+        let config = LearnedQuantConfig {
+            use_ema: false,             // Disable EMA to avoid computation graph issues
+            regularization_weight: 0.0, // Test zero weight case first
+            ..Default::default()
+        };
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![2];
 
@@ -893,9 +901,11 @@ mod tests {
         assert_eq!(reg_loss.item().unwrap(), 0.0);
 
         // Now test non-zero weight
-        let mut config2 = LearnedQuantConfig::default();
-        config2.use_ema = false;
-        config2.regularization_weight = 1e-6;
+        let config2 = LearnedQuantConfig {
+            use_ema: false,
+            regularization_weight: 1e-6,
+            ..Default::default()
+        };
         let params2 = LearnedQuantParams::new(config2, &shape, &engine).unwrap();
 
         // Test scales and zero_points separately first

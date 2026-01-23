@@ -443,8 +443,8 @@ mod tests {
         assert_eq!(time_series.len(), 10);
 
         // Verify values are in order
-        for i in 0..10 {
-            assert_eq!(time_series[i].1, 100.0 + i as f64);
+        for (i, (_, value)) in time_series.iter().enumerate().take(10) {
+            assert_eq!(*value, 100.0 + i as f64);
         }
     }
 }

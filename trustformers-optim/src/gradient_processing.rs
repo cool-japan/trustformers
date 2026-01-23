@@ -208,7 +208,7 @@ impl GradientProcessor {
     }
 
     /// Create a gradient processor with default configuration.
-    pub fn default() -> Self {
+    pub fn with_defaults() -> Self {
         Self::new(GradientProcessingConfig::default())
     }
 

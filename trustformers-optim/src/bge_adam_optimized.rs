@@ -177,8 +177,8 @@ impl OptimizedBGEAdam {
     fn process_gradients_single_pass(
         &mut self,
         gradients: &[f32],
-        momentum: &mut Vec<f32>,
-        variance: &mut Vec<f32>,
+        momentum: &mut [f32],
+        variance: &mut [f32],
         params: &mut [f32],
         step_count: f32,
     ) -> Result<f32> {

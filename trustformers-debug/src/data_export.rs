@@ -762,6 +762,8 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
+    // These values are test data, not approximations of mathematical constants
+    #[allow(clippy::approx_constant)]
     fn create_test_data() -> Vec<ExportableData> {
         let table_data = TableData {
             headers: vec![

@@ -477,10 +477,7 @@ impl ChangePointDetector {
         let variance = values.iter().map(|&x| (x - overall_mean).powi(2)).sum::<f64>() / (n - 1.0);
 
         if variance > 0.0 {
-            
-            (n1 * (mean1 - overall_mean).powi(2)
-                + n2 * (mean2 - overall_mean).powi(2))
-                / variance
+            (n1 * (mean1 - overall_mean).powi(2) + n2 * (mean2 - overall_mean).powi(2)) / variance
         } else {
             0.0
         }

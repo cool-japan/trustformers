@@ -923,7 +923,8 @@ impl AdvancedMLDebugger {
 
         LRAdaptationStrategy {
             strategy_name: strategy_name.clone(),
-            description: "Strategy to optimize learning rates based on current model state".to_string(),
+            description: "Strategy to optimize learning rates based on current model state"
+                .to_string(),
             implementation_steps: vec![ImplementationStep {
                 step_number: 1,
                 description: "Implement layer-wise learning rate multipliers".to_string(),

@@ -128,8 +128,7 @@ impl<T: Tokenizer + Sync> BatchTokenizer<T> {
             .collect::<Result<Vec<_>>>()?;
 
         // Apply truncation if enabled
-        let mut processed = if self.truncation && self.max_length.is_some() {
-            let max_len = self.max_length.unwrap();
+        let mut processed = if let (true, Some(max_len)) = (self.truncation, self.max_length) {
             encoded
                 .into_iter()
                 .map(|mut input| {

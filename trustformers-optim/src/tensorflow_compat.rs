@@ -246,7 +246,7 @@ impl TensorFlowAdam {
     }
 
     /// Create with default parameters
-    pub fn default() -> Result<Self> {
+    pub fn with_defaults() -> Result<Self> {
         Self::new(
             0.001,
             0.9,
@@ -589,7 +589,7 @@ impl TensorFlowAdamW {
     }
 
     /// Create with default parameters
-    pub fn default() -> Result<Self> {
+    pub fn with_defaults() -> Result<Self> {
         Self::new(
             0.001,
             0.9,
@@ -938,14 +938,14 @@ mod tests {
 
     #[test]
     fn test_tensorflow_adam_creation() {
-        let optimizer = TensorFlowAdam::default().unwrap();
+        let optimizer = TensorFlowAdam::with_defaults().unwrap();
         assert_eq!(optimizer.get_learning_rate(), 0.001);
         assert_eq!(optimizer.get_name(), "Adam");
     }
 
     #[test]
     fn test_tensorflow_adamw_creation() {
-        let optimizer = TensorFlowAdamW::default().unwrap();
+        let optimizer = TensorFlowAdamW::with_defaults().unwrap();
         assert_eq!(optimizer.get_learning_rate(), 0.001);
         assert_eq!(optimizer.get_name(), "AdamW");
     }
@@ -1051,7 +1051,7 @@ mod tests {
 
     #[test]
     fn test_config_serialization() {
-        let optimizer = TensorFlowAdam::default().unwrap();
+        let optimizer = TensorFlowAdam::with_defaults().unwrap();
         let config = optimizer.get_config();
 
         assert_eq!(config.learning_rate, 0.001);

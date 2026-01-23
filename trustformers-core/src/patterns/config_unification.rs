@@ -1029,8 +1029,10 @@ mod tests {
 
     #[test]
     fn test_resource_limits_validation() {
-        let mut limits = MemoryLimits::default();
-        limits.warning_threshold_percent = 150.0; // Invalid percentage
+        let limits = MemoryLimits {
+            warning_threshold_percent: 150.0, // Invalid percentage
+            ..Default::default()
+        };
 
         let result = limits.validate();
         assert!(result.is_err());

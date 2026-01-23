@@ -4,6 +4,14 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::excessive_nesting)]
+// Allow training-specific patterns
+#![allow(clippy::await_holding_lock)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::manual_clamp)]
+#![allow(clippy::derivable_impls)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::ptr_arg)]
 
 pub mod adaptive_gradient_scaling;
 pub mod adaptive_learning_rate;

@@ -630,8 +630,10 @@ mod tests {
 
     #[test]
     fn test_anomaly_detection() {
-        let mut config = AutodiffConfig::default();
-        config.detect_anomalies = true;
+        let config = AutodiffConfig {
+            detect_anomalies: true,
+            ..Default::default()
+        };
         let engine = AutodiffEngine::new(config);
 
         let var = engine.variable(Tensor::scalar(1.0).unwrap(), true);

@@ -252,7 +252,7 @@ mod tests {
                 } else {
                     let x_cubed = x * x * x;
                     let inner = 0.7978845608f32 * (x + 0.044715 * x_cubed);
-                    let clamped = inner.max(-20.0).min(20.0);
+                    let clamped = inner.clamp(-20.0, 20.0);
                     0.5 * x * (1.0 + clamped.tanh())
                 }
             })
@@ -361,7 +361,7 @@ mod tests {
                 } else {
                     let x_cubed = x_with_bias * x_with_bias * x_with_bias;
                     let inner = 0.7978845608f32 * (x_with_bias + 0.044715 * x_cubed);
-                    let clamped = inner.max(-20.0).min(20.0);
+                    let clamped = inner.clamp(-20.0, 20.0);
                     0.5 * x_with_bias * (1.0 + clamped.tanh())
                 }
             })

@@ -239,10 +239,7 @@ impl GraphVisualizer {
         // Build adjacency list
         let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
         for edge in &self.graph.edges {
-            adjacency
-                .entry(edge.from.clone())
-                .or_default()
-                .push(edge.to.clone());
+            adjacency.entry(edge.from.clone()).or_default().push(edge.to.clone());
         }
 
         // BFS from input nodes

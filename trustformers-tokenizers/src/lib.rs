@@ -6,6 +6,12 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::excessive_nesting)]
+// Temporary clippy allows for alpha release - to be addressed in 0.1.0
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::wrong_self_convention)]
+// Allow common test patterns - field reassignment after default and len comparison
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::len_zero)]
 
 pub mod advanced_vocab_intelligence;
 pub mod alignment;

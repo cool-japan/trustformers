@@ -162,12 +162,11 @@ impl DynamicBatchingService {
         tokio::spawn(async move {
             // Check interval should be half of max_wait_time for responsiveness
             let check_interval = max_wait_time / 2;
-            let check_interval =
-                if check_interval < tokio::time::Duration::from_millis(10) {
-                    tokio::time::Duration::from_millis(10)
-                } else {
-                    check_interval
-                };
+            let check_interval = if check_interval < tokio::time::Duration::from_millis(10) {
+                tokio::time::Duration::from_millis(10)
+            } else {
+                check_interval
+            };
 
             loop {
                 tokio::time::sleep(check_interval).await;

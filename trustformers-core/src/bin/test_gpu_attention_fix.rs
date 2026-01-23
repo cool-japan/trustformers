@@ -72,16 +72,16 @@ fn main() -> Result<()> {
     // Print first few elements of first and last position
     println!("First position output (first 10 elements):");
     print!("  ");
-    for i in 0..10.min(hidden_size) {
-        print!("{:.4} ", output_data[i]);
+    for val in output_data.iter().take(10.min(hidden_size)) {
+        print!("{:.4} ", val);
     }
     println!("\n");
 
     println!("Last position output (first 10 elements):");
     let last_pos_offset = (seq_len - 1) * hidden_size;
     print!("  ");
-    for i in 0..10.min(hidden_size) {
-        print!("{:.4} ", output_data[last_pos_offset + i]);
+    for val in output_data.iter().skip(last_pos_offset).take(10.min(hidden_size)) {
+        print!("{:.4} ", val);
     }
     println!("\n");
 

@@ -77,8 +77,7 @@ impl<T: Optimizer> ZeROStage1<T> {
         }
 
         // Partition parameters across ranks for optimizer state ownership
-        let mut param_idx = 0;
-        for (name, tensor) in parameters {
+        for (param_idx, (name, tensor)) in parameters.into_iter().enumerate() {
             // Determine which rank owns this parameter's optimizer state
             let owner_rank = param_idx % world_size;
             self.parameter_ownership.insert(name.clone(), owner_rank);
@@ -92,8 +91,6 @@ impl<T: Optimizer> ZeROStage1<T> {
             let mut group = ParameterGroup::new(format!("param_{}", param_idx), vec![name.clone()]);
             group.add_parameter(name.clone(), tensor);
             self.parameter_groups.insert(name.clone(), group);
-
-            param_idx += 1;
         }
 
         Ok(())

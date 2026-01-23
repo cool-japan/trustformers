@@ -547,11 +547,7 @@ mod tests {
 
         match &layer_types[5] {
             TensorRTLayerType::Plugin(name) => assert_eq!(name, "custom_plugin"),
-            _ => assert!(
-                false,
-                "Expected Plugin layer type but got {:?}",
-                &layer_types[5]
-            ),
+            _ => panic!("Expected Plugin layer type but got {:?}", &layer_types[5]),
         }
     }
 

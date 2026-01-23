@@ -396,11 +396,9 @@ impl StatefulOptimizer for EVA {
 
     fn load_state_dict(&mut self, state_dict: HashMap<String, Tensor>) -> Result<()> {
         // Load step count
-        if let Some(step_tensor) = state_dict.get("step_count") {
-            if let Tensor::F32(data) = step_tensor {
-                if !data.is_empty() {
-                    self.step_count = data[0] as usize;
-                }
+        if let Some(Tensor::F32(data)) = state_dict.get("step_count") {
+            if !data.is_empty() {
+                self.step_count = data[0] as usize;
             }
         }
 

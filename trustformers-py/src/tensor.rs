@@ -1,4 +1,4 @@
-use numpy::{
+use scirs2_numpy::{
     IxDyn, PyArray, PyArrayDyn, PyArrayMethods, PyReadonlyArrayDyn, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
@@ -125,9 +125,9 @@ impl PyTensor {
                 variable: None,
             })
         } else {
-            return Err(PyValueError::new_err(
+            Err(PyValueError::new_err(
                 "Array must be C-contiguous for zero-copy conversion",
-            ));
+            ))
         }
     }
 
@@ -458,7 +458,7 @@ impl PyTensor {
             } else {
                 // Multiple axes - use sum_axes
                 self.inner
-                    .sum_axes(&axes)
+                    .sum_axes(axes)
                     .map_err(|e| PyValueError::new_err(format!("Sum along axes failed: {}", e)))?
             }
         } else {
@@ -469,19 +469,20 @@ impl PyTensor {
         };
 
         // Handle keepdim parameter for axis-based operations
-        let final_result = if keepdim && axis.is_some() {
-            // Add back dimensions that were reduced
-            let mut shape = self.inner.shape().to_vec();
-            for &ax in axis.as_ref().unwrap() {
-                if ax < shape.len() {
-                    shape[ax] = 1;
+        let final_result = match (keepdim, axis.as_ref()) {
+            (true, Some(axes)) => {
+                // Add back dimensions that were reduced
+                let mut shape = self.inner.shape().to_vec();
+                for &ax in axes {
+                    if ax < shape.len() {
+                        shape[ax] = 1;
+                    }
                 }
-            }
-            result
-                .reshape(&shape)
-                .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
-        } else {
-            result
+                result
+                    .reshape(&shape)
+                    .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
+            },
+            _ => result,
         };
 
         Ok(PyTensor::from_tensor(final_result))
@@ -500,7 +501,7 @@ impl PyTensor {
             } else {
                 // Multiple axes - use mean_axes
                 self.inner
-                    .mean_axes(&axes)
+                    .mean_axes(axes)
                     .map_err(|e| PyValueError::new_err(format!("Mean along axes failed: {}", e)))?
             }
         } else {
@@ -511,19 +512,20 @@ impl PyTensor {
         };
 
         // Handle keepdim parameter for axis-based operations
-        let final_result = if keepdim && axis.is_some() {
-            // Add back dimensions that were reduced
-            let mut shape = self.inner.shape().to_vec();
-            for &ax in axis.as_ref().unwrap() {
-                if ax < shape.len() {
-                    shape[ax] = 1;
+        let final_result = match (keepdim, axis.as_ref()) {
+            (true, Some(axes)) => {
+                // Add back dimensions that were reduced
+                let mut shape = self.inner.shape().to_vec();
+                for &ax in axes {
+                    if ax < shape.len() {
+                        shape[ax] = 1;
+                    }
                 }
-            }
-            result
-                .reshape(&shape)
-                .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
-        } else {
-            result
+                result
+                    .reshape(&shape)
+                    .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
+            },
+            _ => result,
         };
 
         Ok(PyTensor::from_tensor(final_result))
@@ -594,7 +596,9 @@ impl PyTensor {
     }
 
     /// Clone the tensor
-    pub fn clone(&self) -> PyTensor {
+    #[pyo3(name = "clone")]
+    #[allow(clippy::should_implement_trait)]
+    pub fn py_clone(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.clone())
     }
 

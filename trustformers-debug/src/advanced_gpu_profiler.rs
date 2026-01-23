@@ -81,8 +81,7 @@ pub struct MemoryAccessPattern {
     pub cache_hit_rate: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryUsageStats {
     pub total_accesses: u64,
     pub bytes_read: u64,
@@ -1047,7 +1046,6 @@ impl Default for MemoryAccessPattern {
         }
     }
 }
-
 
 // Implementation stubs for remaining structures
 

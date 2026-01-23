@@ -3,6 +3,8 @@
 //! This tool provides command-line profiling of mobile AI models including
 //! performance metrics, memory usage, battery consumption, and platform-specific optimizations.
 
+#![allow(clippy::result_large_err)]
+
 use clap::{Arg, Command};
 use serde::{Deserialize, Serialize};
 use std::fs;

@@ -1,6 +1,7 @@
 //! Hardware-specific test suites for different GPU architectures
 #![allow(unused_variables)]
 #![allow(unused_mut)]
+#![allow(clippy::result_large_err)]
 //!
 //! This module contains comprehensive test suites that validate functionality
 //! across different hardware backends including CUDA, ROCm, Intel oneAPI, and Vulkan.

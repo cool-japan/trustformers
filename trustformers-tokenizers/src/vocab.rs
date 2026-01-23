@@ -89,6 +89,10 @@ impl Vocab {
         self.id_to_token.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.id_to_token.is_empty()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&String, &u32)> {
         self.token_to_id.iter()
     }

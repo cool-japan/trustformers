@@ -1244,7 +1244,6 @@ pub struct TaskDistribution {
 
 /// Concrete implementations of meta-learning models would go here
 /// For brevity, I'll include basic stubs
-
 pub struct MAMLModel {
     #[allow(dead_code)]
     config: MetaLearningConfig,

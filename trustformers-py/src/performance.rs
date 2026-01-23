@@ -1,4 +1,4 @@
-use numpy::{PyArray, PyArrayMethods};
+use scirs2_numpy::{PyArray, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 /// Performance profiler for tensor operations
 #[pyclass]
+#[derive(Default)]
 pub struct PerformanceProfiler {
     measurements: HashMap<String, Vec<Duration>>,
     memory_usage: HashMap<String, usize>,
@@ -18,11 +19,7 @@ pub struct PerformanceProfiler {
 impl PerformanceProfiler {
     #[new]
     pub fn new() -> Self {
-        Self {
-            measurements: HashMap::new(),
-            memory_usage: HashMap::new(),
-            start_times: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Start timing an operation
@@ -36,7 +33,7 @@ impl PerformanceProfiler {
             let duration = start_time.elapsed();
             let duration_ms = duration.as_secs_f64() * 1000.0;
 
-            self.measurements.entry(operation).or_insert_with(Vec::new).push(duration);
+            self.measurements.entry(operation).or_default().push(duration);
 
             Ok(duration_ms)
         } else {
@@ -225,7 +222,7 @@ impl PerformanceProfiler {
             },
             "relu" => Ok(array.mapv(|x| x.max(0.0))),
             "gelu" => Ok(array
-                .mapv(|x| 0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x.powi(3))).tanh()))),
+                .mapv(|x| 0.5 * x * (1.0 + (0.797_884_6 * (x + 0.044715 * x.powi(3))).tanh()))),
             "exp" => Ok(array.mapv(|x| x.exp())),
             "log" => Ok(array.mapv(|x| x.ln())),
             "sqrt" => Ok(array.mapv(|x| x.sqrt())),
@@ -240,6 +237,7 @@ impl PerformanceProfiler {
 
 /// Memory tracker for monitoring memory usage
 #[pyclass]
+#[derive(Default)]
 pub struct MemoryTracker {
     peak_usage: usize,
     current_usage: usize,
@@ -250,11 +248,7 @@ pub struct MemoryTracker {
 impl MemoryTracker {
     #[new]
     pub fn new() -> Self {
-        Self {
-            peak_usage: 0,
-            current_usage: 0,
-            allocations: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Record a memory allocation

@@ -135,10 +135,8 @@ impl DebugSession {
             None
         };
 
-        let transformer_debugger = config
-            .neural_network_debugging_config
-            .as_ref()
-            .map(|neural_config| {
+        let transformer_debugger =
+            config.neural_network_debugging_config.as_ref().map(|neural_config| {
                 neural_network_debugging::TransformerDebugger::new(neural_config.clone())
             });
 

@@ -831,15 +831,13 @@ pub struct HotFunctionInfo {
 }
 
 /// Memory usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryUsageStats {
     pub peak_memory_bytes: usize,
     pub avg_memory_bytes: usize,
     pub min_memory_bytes: usize,
     pub total_samples: usize,
 }
-
 
 /// GPU kernel statistics
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,4 +1,8 @@
-use crate::errors::{TrustformersPyError, TrustformersPyResult};
+// Allow result_large_err for internal functions - TrustformersError is intentionally detailed
+// Allow excessive_nesting for complex memory management algorithms
+#![allow(clippy::result_large_err, clippy::excessive_nesting)]
+
+use crate::errors::TrustformersPyResult;
 use parking_lot::RwLock;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
@@ -23,8 +27,8 @@ pub struct TrackingAllocator {
     active_allocations: AtomicUsize,
 }
 
-impl TrackingAllocator {
-    pub fn new() -> Self {
+impl Default for TrackingAllocator {
+    fn default() -> Self {
         Self {
             current_usage: AtomicUsize::new(0),
             peak_usage: AtomicUsize::new(0),
@@ -32,6 +36,12 @@ impl TrackingAllocator {
             total_deallocated: AtomicUsize::new(0),
             active_allocations: AtomicUsize::new(0),
         }
+    }
+}
+
+impl TrackingAllocator {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn get_stats(&self) -> MemoryStats {
@@ -128,7 +138,7 @@ impl<T: Default + Clone> MemoryPool<T> {
         }
 
         let mut pools = self.pools.write();
-        let pool = pools.entry(size).or_insert_with(Vec::new);
+        let pool = pools.entry(size).or_default();
 
         if pool.len() < self.max_pool_size {
             pool.push(buffer);
@@ -159,14 +169,20 @@ pub struct GlobalMemoryManager {
     tracking_allocator: TrackingAllocator,
 }
 
-impl GlobalMemoryManager {
-    pub fn new() -> Self {
+impl Default for GlobalMemoryManager {
+    fn default() -> Self {
         Self {
             f32_pool: MemoryPool::new(100), // Keep up to 100 buffers per size
             i32_pool: MemoryPool::new(50),
             f64_pool: MemoryPool::new(50),
-            tracking_allocator: TrackingAllocator::new(),
+            tracking_allocator: TrackingAllocator::default(),
         }
+    }
+}
+
+impl GlobalMemoryManager {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn get_f32_buffer(&self, size: usize) -> Box<[f32]> {
@@ -545,8 +561,8 @@ where
                     cache.iter().map(|(k, (_, timestamp))| (k.clone(), *timestamp)).collect();
                 items.sort_by_key(|(_, timestamp)| *timestamp);
 
-                for i in 0..items_to_remove.min(items.len()) {
-                    cache.remove(&items[i].0);
+                for (key, _) in items.iter().take(items_to_remove.min(items.len())) {
+                    cache.remove(key);
                 }
             },
             EvictionStrategy::TTL => {
@@ -560,8 +576,8 @@ where
                         cache.iter().map(|(k, (_, timestamp))| (k.clone(), *timestamp)).collect();
                     items.sort_by_key(|(_, timestamp)| *timestamp);
 
-                    for i in 0..items_to_remove.min(items.len()) {
-                        cache.remove(&items[i].0);
+                    for (key, _) in items.iter().take(items_to_remove.min(items.len())) {
+                        cache.remove(key);
                     }
                 }
             },

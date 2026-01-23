@@ -713,8 +713,8 @@ mod tensor_property_tests {
                 // Create a mostly sparse tensor (80% zeros)
                 let mut vals: Vec<f32> = vec![0.0; size];
                 let non_zero_count = size / 5; // 20% non-zero
-                for i in 0..non_zero_count {
-                    vals[i] = generate_f32();
+                for val in vals.iter_mut().take(non_zero_count) {
+                    *val = generate_f32();
                 }
 
                 if let Ok(dense_tensor) = Tensor::from_vec(vals.clone(), &shape) {

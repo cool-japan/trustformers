@@ -670,9 +670,11 @@ mod tests {
 
     #[test]
     fn test_activation_quantizer_int8() {
-        let mut config = ActivationQuantConfig::default();
-        config.calibration_samples = 1;
-        config.scheme = ActivationQuantScheme::Int8;
+        let config = ActivationQuantConfig {
+            calibration_samples: 1,
+            scheme: ActivationQuantScheme::Int8,
+            ..Default::default()
+        };
 
         let mut quantizer = ActivationQuantizer::new(config);
 
@@ -714,9 +716,11 @@ mod tests {
 
     #[test]
     fn test_activation_quantizer_adaptive() {
-        let mut config = ActivationQuantConfig::default();
-        config.scheme = ActivationQuantScheme::Adaptive;
-        config.calibration_samples = 1;
+        let config = ActivationQuantConfig {
+            scheme: ActivationQuantScheme::Adaptive,
+            calibration_samples: 1,
+            ..Default::default()
+        };
 
         let mut quantizer = ActivationQuantizer::new(config);
 

@@ -375,12 +375,12 @@ mod tests {
 
         match int_param {
             OperationParameter::Integer(val) => assert_eq!(val, 42),
-            _ => assert!(false, "Expected Integer parameter but got {:?}", int_param),
+            _ => panic!("Expected Integer parameter but got {:?}", int_param),
         }
 
         match float_param {
             OperationParameter::Float(val) => assert_eq!(val, std::f64::consts::PI),
-            _ => assert!(false, "Expected Float parameter but got {:?}", float_param),
+            _ => panic!("Expected Float parameter but got {:?}", float_param),
         }
     }
 
@@ -392,7 +392,7 @@ mod tests {
         let failed_status = AsyncOperationStatus::Failed("test error".to_string());
         match failed_status {
             AsyncOperationStatus::Failed(msg) => assert_eq!(msg, "test error"),
-            _ => assert!(false, "Expected Failed status but got {:?}", failed_status),
+            _ => panic!("Expected Failed status but got {:?}", failed_status),
         }
     }
 

@@ -1,5 +1,9 @@
+// Allow result_large_err for internal functions - TrustformersError is intentionally detailed
+// Allow excessive_nesting for matrix multiplication algorithms
+#![allow(clippy::result_large_err, clippy::excessive_nesting)]
+
 use crate::errors::{TrustformersPyError, TrustformersPyResult};
-use numpy::{PyArray, PyArrayMethods};
+use scirs2_numpy::{PyArray, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -432,19 +436,21 @@ impl TensorOptimizer {
 }
 
 /// Memory pool for reusing tensor allocations
+#[derive(Default)]
 pub struct TensorMemoryPool {
     pools: std::collections::HashMap<Vec<usize>, Vec<ArrayD<f32>>>,
 }
 
 /// Python wrapper for optimized tensor operations
 #[pyclass(name = "TensorOptimized", module = "trustformers")]
+#[derive(Default)]
 pub struct PyTensorOptimized;
 
 #[pymethods]
 impl PyTensorOptimized {
     #[new]
     pub fn new() -> Self {
-        PyTensorOptimized
+        Self
     }
 
     /// Apply GELU activation function
@@ -794,12 +800,13 @@ impl PyTensorOptimized {
             ArrayD::from_elem(vec![], total_sum)
         };
 
-        let result_shape = if keepdims && axis.is_some() {
-            let mut shape = tensor_array.shape().to_vec();
-            shape[axis.unwrap()] = 1;
-            shape
-        } else {
-            result.shape().to_vec()
+        let result_shape = match (keepdims, axis) {
+            (true, Some(ax)) => {
+                let mut shape = tensor_array.shape().to_vec();
+                shape[ax] = 1;
+                shape
+            },
+            _ => result.shape().to_vec(),
         };
 
         let result_data: Vec<f32> = result.iter().cloned().collect();
@@ -837,12 +844,13 @@ impl PyTensorOptimized {
             ArrayD::from_elem(vec![], total_mean)
         };
 
-        let result_shape = if keepdims && axis.is_some() {
-            let mut shape = tensor_array.shape().to_vec();
-            shape[axis.unwrap()] = 1;
-            shape
-        } else {
-            result.shape().to_vec()
+        let result_shape = match (keepdims, axis) {
+            (true, Some(ax)) => {
+                let mut shape = tensor_array.shape().to_vec();
+                shape[ax] = 1;
+                shape
+            },
+            _ => result.shape().to_vec(),
         };
 
         let result_data: Vec<f32> = result.iter().cloned().collect();
@@ -959,7 +967,7 @@ impl PyTensorOptimized {
                 "Input tensors must have the same shape",
             ));
         }
-        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a, &b| a.max(b));
+        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a: &f32, &b: &f32| a.max(b));
         let result_shape = result.shape();
         let result_data: Vec<f32> = result.iter().cloned().collect();
         let py_array = PyArray::from_vec(py, result_data).reshape(result_shape)?;
@@ -980,7 +988,7 @@ impl PyTensorOptimized {
                 "Input tensors must have the same shape",
             ));
         }
-        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a, &b| a.min(b));
+        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a: &f32, &b: &f32| a.min(b));
         let result_shape = result.shape();
         let result_data: Vec<f32> = result.iter().cloned().collect();
         let py_array = PyArray::from_vec(py, result_data).reshape(result_shape)?;
@@ -1591,7 +1599,7 @@ impl PyTensorOptimized {
         let result = ndarray::Zip::from(&cond_array)
             .and(&true_array)
             .and(&false_array)
-            .map_collect(|&c, &t, &f| if c != 0.0 { t } else { f });
+            .map_collect(|&c: &f32, &t: &f32, &f: &f32| if c != 0.0 { t } else { f });
 
         let result_shape = result.shape();
         let result_data: Vec<f32> = result.iter().cloned().collect();
@@ -1616,7 +1624,7 @@ impl PyTensorOptimized {
             ));
         }
 
-        let result = ndarray::Zip::from(&array).and(&mask_array).map_collect(|&x, &m| {
+        let result = ndarray::Zip::from(&array).and(&mask_array).map_collect(|&x: &f32, &m: &f32| {
             if m != 0.0 {
                 value
             } else {
@@ -1712,7 +1720,7 @@ impl PyTensorOptimized {
         let result_list = PyList::empty(py);
         for dim_indices in indices {
             let dim_indices_i64: Vec<i64> = dim_indices.iter().map(|&x| x as i64).collect();
-            let py_array = numpy::PyArray::from_vec(py, dim_indices_i64);
+            let py_array = scirs2_numpy::PyArray::from_vec(py, dim_indices_i64);
             result_list.append(py_array)?;
         }
 
@@ -1745,13 +1753,14 @@ impl PyTensorOptimized {
 
 /// Advanced activation functions for neural networks
 #[pyclass(name = "AdvancedActivations")]
+#[derive(Default)]
 pub struct PyAdvancedActivations;
 
 #[pymethods]
 impl PyAdvancedActivations {
     #[new]
     pub fn new() -> Self {
-        PyAdvancedActivations
+        Self
     }
 
     /// Swish activation function (x * sigmoid(x))
@@ -1803,8 +1812,8 @@ impl PyAdvancedActivations {
     #[staticmethod]
     pub fn selu(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
-        let alpha = 1.6732632423543772848170429916717;
-        let scale = 1.0507009873554804934193349852946;
+        let alpha = 1.673_263_2_f32;
+        let scale = 1.050_701_f32;
         let result =
             input_array.mapv(
                 |x| {
@@ -1829,7 +1838,7 @@ impl PyAdvancedActivations {
     ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| {
-            let relu6 = (x + 3.0).max(0.0).min(6.0);
+            let relu6 = (x + 3.0).clamp(0.0, 6.0);
             x * relu6 / 6.0
         });
         let result_shape = result.shape();
@@ -1868,9 +1877,7 @@ impl PyAdvancedActivations {
 
 impl TensorMemoryPool {
     pub fn new() -> Self {
-        Self {
-            pools: std::collections::HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn get_tensor(&mut self, shape: &[usize]) -> ArrayD<f32> {
@@ -1886,7 +1893,7 @@ impl TensorMemoryPool {
 
     pub fn return_tensor(&mut self, tensor: ArrayD<f32>) {
         let shape = tensor.shape().to_vec();
-        self.pools.entry(shape).or_insert_with(Vec::new).push(tensor);
+        self.pools.entry(shape).or_default().push(tensor);
     }
 }
 

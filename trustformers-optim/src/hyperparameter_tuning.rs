@@ -384,15 +384,15 @@ impl MultiObjectiveOptimizer {
         self.pareto_front.clear();
 
         for sample in &self.bayesian_opt.samples {
-            if sample.performance_score.is_some() {
+            if let Some(sample_score) = sample.performance_score {
                 let mut is_dominated = false;
 
                 for other in &self.bayesian_opt.samples {
-                    if other.performance_score.is_some()
-                        && other.performance_score.unwrap() > sample.performance_score.unwrap()
-                    {
-                        is_dominated = true;
-                        break;
+                    if let Some(other_score) = other.performance_score {
+                        if other_score > sample_score {
+                            is_dominated = true;
+                            break;
+                        }
                     }
                 }
 

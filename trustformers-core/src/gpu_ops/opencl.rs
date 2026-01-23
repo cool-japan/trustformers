@@ -937,7 +937,10 @@ mod tests {
         let result = match backend.matmul_f32(&a, &b, 2, 2, 2) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Skipping OpenCL matmul test: kernel execution failed: {}", e);
+                eprintln!(
+                    "Skipping OpenCL matmul test: kernel execution failed: {}",
+                    e
+                );
                 return Ok(());
             },
         };

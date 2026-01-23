@@ -135,7 +135,6 @@ mod tests {
         let config = InterpretabilityConfig;
         let _analyzer = InterpretabilityAnalyzer::new(config);
         // Basic test to ensure analyzer can be created
-        assert!(true); // Placeholder test
     }
 
     #[tokio::test]

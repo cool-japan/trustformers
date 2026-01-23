@@ -716,10 +716,7 @@ impl Profiler {
                 ProfileEvent::GradientComputation { .. } => "GradientComputation",
             };
 
-            grouped_events
-                .entry(event_type.to_string())
-                .or_default()
-                .push(event);
+            grouped_events.entry(event_type.to_string()).or_default().push(event);
         }
 
         // Calculate statistics for each event type
@@ -1014,7 +1011,8 @@ impl Profiler {
         let io_bandwidth_stats = self.get_io_bandwidth_stats();
         let layer_analysis = self.get_layer_latency_analysis();
 
-        let gpu_utilization = self.gpu_profiler.as_ref().map(|profiler| profiler.get_gpu_utilization(0));
+        let gpu_utilization =
+            self.gpu_profiler.as_ref().map(|profiler| profiler.get_gpu_utilization(0));
 
         PerformanceAnalysis {
             memory_stats,
@@ -1231,10 +1229,7 @@ impl Profiler {
                 ..
             } = event
             {
-                operation_groups
-                    .entry(operation.clone())
-                    .or_default()
-                    .push(*duration);
+                operation_groups.entry(operation.clone()).or_default().push(*duration);
             }
         }
 

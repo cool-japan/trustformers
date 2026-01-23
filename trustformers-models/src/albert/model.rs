@@ -39,7 +39,6 @@ pub struct AlbertLayer {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-#[allow(dead_code)]
 pub struct AlbertAttention {
     query: Linear,
     key: Linear,
