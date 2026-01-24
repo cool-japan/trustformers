@@ -11,7 +11,12 @@ use crate::kernels::rocm_kernels::RocmKernel;
 #[cfg(feature = "vulkan")]
 use crate::kernels::vulkan_kernels::VulkanKernel;
 use crate::tensor::Tensor;
-#[cfg(any(feature = "cuda", feature = "rocm", feature = "intel", feature = "vulkan"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "rocm",
+    feature = "intel",
+    feature = "vulkan"
+))]
 use std::sync::{Arc, Mutex};
 
 /// GPU-accelerated operations manager

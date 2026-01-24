@@ -428,13 +428,16 @@ impl AdaptiveLearningRateScheduler {
             return PerformanceTrend::Unknown;
         }
 
-        let recent_losses: Vec<f32> = self
+        // Take the most recent entries and restore chronological order (oldest to newest)
+        // This ensures slope is negative when loss is decreasing over time
+        let mut recent_losses: Vec<f32> = self
             .dynamics_history
             .iter()
             .rev()
             .take(self.config.trend_window)
             .map(|d| d.loss)
             .collect();
+        recent_losses.reverse(); // Restore chronological order
 
         let slope = self.compute_slope(&recent_losses);
         let variance = self.compute_variance(&recent_losses);

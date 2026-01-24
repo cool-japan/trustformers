@@ -415,6 +415,12 @@ impl AutoParallelismSelector {
             strategies.push(self.create_hybrid_strategy()?);
         }
 
+        // Fallback: If no rules matched, provide a sensible default
+        if strategies.is_empty() {
+            // For medium-sized models (1B-10B params), use data parallelism as default
+            strategies.push(self.create_data_parallel_strategy()?);
+        }
+
         Ok(strategies)
     }
 

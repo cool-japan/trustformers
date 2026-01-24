@@ -75,7 +75,8 @@ async fn test_health_endpoints() {
 
     let body: Value = response.json();
     assert_eq!(body["status"], "healthy");
-    assert!(body["checks"].is_object());
+    // API returns "services" instead of "checks"
+    assert!(body["services"].is_object());
 
     // Test readiness check
     let response = server.get("/health/readiness").await;
@@ -92,12 +93,9 @@ async fn test_inference_endpoints() {
 
     // Test single inference
     let request_body = json!({
-        "model": "test-model",
-        "input": "Hello, world!",
-        "parameters": {
-            "max_tokens": 100,
-            "temperature": 0.7
-        }
+        "text": "Hello, world!",
+        "max_length": 100,
+        "temperature": 0.7
     });
 
     let response = server.post("/v1/inference").json(&request_body).await;
@@ -105,20 +103,15 @@ async fn test_inference_endpoints() {
     response.assert_status_ok();
     let body: Value = response.json();
     assert!(body["request_id"].is_string());
-    assert!(body["response"].is_string());
+    assert!(body["text"].is_string());
 
     // Test batch inference
     let batch_request = json!({
-        "model": "test-model",
-        "inputs": [
-            "Hello, world!",
-            "How are you?",
-            "What is AI?"
-        ],
-        "parameters": {
-            "max_tokens": 100,
-            "temperature": 0.7
-        }
+        "requests": [
+            {"text": "Hello, world!", "max_length": 100, "temperature": 0.7},
+            {"text": "How are you?", "max_length": 100, "temperature": 0.7},
+            {"text": "What is AI?", "max_length": 100, "temperature": 0.7}
+        ]
     });
 
     let response = server.post("/v1/inference/batch").json(&batch_request).await;
@@ -153,9 +146,10 @@ async fn test_admin_endpoints() {
     response.assert_status_ok();
 
     let body: Value = response.json();
-    assert!(body["server_stats"].is_object());
+    // The stats endpoint returns batching_stats, caching_stats, streaming_stats, ha_stats
     assert!(body["batching_stats"].is_object());
     assert!(body["caching_stats"].is_object());
+    assert!(body["streaming_stats"].is_object());
 
     // Test config endpoint
     let response = server.get("/admin/config").await;

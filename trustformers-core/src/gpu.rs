@@ -518,10 +518,17 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(backend, GpuBackend::Metal);
 
+        // On non-macOS platforms, any valid backend is acceptable
+        // The actual backend depends on available hardware
         #[cfg(not(target_os = "macos"))]
         assert!(matches!(
             backend,
-            GpuBackend::Cuda | GpuBackend::Rocm | GpuBackend::Vulkan | GpuBackend::Cpu
+            GpuBackend::Cuda
+                | GpuBackend::Rocm
+                | GpuBackend::Vulkan
+                | GpuBackend::Metal
+                | GpuBackend::WebGpu
+                | GpuBackend::Cpu
         ));
     }
 

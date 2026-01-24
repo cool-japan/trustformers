@@ -1163,8 +1163,8 @@ impl TrustformerServer {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_server_creation() {
+    #[tokio::test]
+    async fn test_server_creation() {
         let config = ServerConfig::default();
         let _server = TrustformerServer::new(config);
         // Basic test that server can be created

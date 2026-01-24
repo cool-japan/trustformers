@@ -428,7 +428,9 @@ impl AdvancedStabilityMonitor {
             return TrendDirection::Stable;
         }
 
-        let recent: Vec<f32> = history.iter().rev().take(10).cloned().collect();
+        // Take the 10 most recent values and restore chronological order
+        let mut recent: Vec<f32> = history.iter().rev().take(10).cloned().collect();
+        recent.reverse(); // Restore chronological order for slope computation
         let slope = self.compute_slope(&recent);
         let variance = self.compute_variance(&recent);
 

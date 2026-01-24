@@ -112,7 +112,7 @@ impl CudaBackend {
 
     /// Create a persistent GPU buffer and return its ID
     pub fn create_persistent_buffer(&self, data: &[f32]) -> Result<BufferId> {
-        let buffer = Arc::new(self.stream.memcpy_stod(data).map_err(|e| {
+        let buffer = Arc::new(self.stream.clone_htod(data).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy data to device: {}", e),
                 "create_persistent_buffer",
@@ -184,7 +184,7 @@ impl CudaBackend {
     /// Download data from GPU buffer to CPU
     pub fn download_buffer(&self, buffer_id: &BufferId) -> Result<Vec<f32>> {
         let buffer = self.get_persistent_buffer(buffer_id)?;
-        let data_vec = self.stream.memcpy_dtov(&*buffer).map_err(|e| {
+        let data_vec = self.stream.clone_dtoh(&*buffer).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy data from device: {}", e),
                 "download_buffer",
@@ -250,14 +250,14 @@ extern "C" __global__ void matmul_kernel(
         })?;
 
         // Allocate device memory and copy data
-        let a_dev = self.stream.memcpy_stod(a).map_err(|e| {
+        let a_dev = self.stream.clone_htod(a).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy A to device: {}", e),
                 "matmul_f32",
             )
         })?;
 
-        let b_dev = self.stream.memcpy_stod(b).map_err(|e| {
+        let b_dev = self.stream.clone_htod(b).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy B to device: {}", e),
                 "matmul_f32",
@@ -302,7 +302,7 @@ extern "C" __global__ void matmul_kernel(
         }
 
         // Copy result back to CPU
-        let result = self.stream.memcpy_dtov(&c_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&c_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "matmul_f32",
@@ -371,7 +371,7 @@ extern "C" __global__ void matmul_kernel(
         let b_dev = self.get_persistent_buffer(weight_buffer_id)?;
 
         // Create buffer for input (activations change on each forward pass)
-        let a_dev = self.stream.memcpy_stod(a).map_err(|e| {
+        let a_dev = self.stream.clone_htod(a).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy A to device: {}", e),
                 "matmul_with_cached_weight",
@@ -416,7 +416,7 @@ extern "C" __global__ void matmul_kernel(
         }
 
         // Copy result back to CPU
-        let result = self.stream.memcpy_dtov(&c_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&c_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "matmul_with_cached_weight",
@@ -486,7 +486,7 @@ extern "C" __global__ void gelu_kernel(
         })?;
 
         // Allocate device memory
-        let input_dev = self.stream.memcpy_stod(input).map_err(|e| {
+        let input_dev = self.stream.clone_htod(input).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy input to device: {}", e),
                 "gelu_f32",
@@ -525,7 +525,7 @@ extern "C" __global__ void gelu_kernel(
         }
 
         // Copy result back to CPU
-        let result = self.stream.memcpy_dtov(&output_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&output_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "gelu_f32",
@@ -828,21 +828,21 @@ extern "C" __global__ void layernorm_kernel(
         })?;
 
         // Allocate device memory
-        let input_dev = self.stream.memcpy_stod(input).map_err(|e| {
+        let input_dev = self.stream.clone_htod(input).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy input to device: {}", e),
                 "layernorm_f32",
             )
         })?;
 
-        let weight_dev = self.stream.memcpy_stod(weight).map_err(|e| {
+        let weight_dev = self.stream.clone_htod(weight).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy weight to device: {}", e),
                 "layernorm_f32",
             )
         })?;
 
-        let bias_dev = self.stream.memcpy_stod(bias).map_err(|e| {
+        let bias_dev = self.stream.clone_htod(bias).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy bias to device: {}", e),
                 "layernorm_f32",
@@ -886,7 +886,7 @@ extern "C" __global__ void layernorm_kernel(
         }
 
         // Copy result back to CPU
-        let result = self.stream.memcpy_dtov(&output_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&output_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "layernorm_f32",
@@ -1228,7 +1228,7 @@ extern "C" __global__ void rope_kernel(
         })?;
 
         // Allocate device memory
-        let input_dev = self.stream.memcpy_stod(input).map_err(|e| {
+        let input_dev = self.stream.clone_htod(input).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy input to device: {}", e),
                 "rope_f32",
@@ -1278,7 +1278,7 @@ extern "C" __global__ void rope_kernel(
         }
 
         // Copy result back to CPU
-        let result = self.stream.memcpy_dtov(&output_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&output_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "rope_f32",
@@ -1375,7 +1375,7 @@ extern "C" __global__ void softmax_causal_kernel(
         })?;
 
         // Allocate device memory
-        let input_dev = self.stream.memcpy_stod(input).map_err(|e| {
+        let input_dev = self.stream.clone_htod(input).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy input to device: {}", e),
                 "softmax_causal_f32",
@@ -1414,7 +1414,7 @@ extern "C" __global__ void softmax_causal_kernel(
         }
 
         // Copy result back to CPU
-        let result = self.stream.memcpy_dtov(&output_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&output_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "softmax_causal_f32",
@@ -1428,7 +1428,7 @@ extern "C" __global__ void softmax_causal_kernel(
     pub fn buffer_to_cpu(&self, buffer_id: &BufferId, _size: usize) -> Result<Vec<f32>> {
         let buffer = self.get_persistent_buffer(buffer_id)?;
 
-        self.stream.memcpy_dtov(&*buffer).map_err(|e| {
+        self.stream.clone_dtoh(&*buffer).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy buffer to CPU: {}", e),
                 "buffer_to_cpu",
@@ -1628,16 +1628,37 @@ mod tests {
             },
         };
 
+        // Test GELU on various inputs
+        // Note: GELU has a local minimum around x ≈ -0.8, so it's NOT monotonic over all ranges
         let input = vec![-2.0, -1.0, 0.0, 1.0, 2.0];
         let result = backend.gelu_f32(&input)?;
 
-        // GELU should be monotonic increasing
-        for i in 0..result.len() - 1 {
-            assert!(result[i] <= result[i + 1], "GELU should be monotonic");
-        }
-
         // GELU(0) ≈ 0
         assert!((result[2]).abs() < 0.01, "GELU(0) should be ~0");
+
+        // Check approximate expected values for GELU
+        // GELU(-2) ≈ -0.045, GELU(-1) ≈ -0.159, GELU(0) = 0, GELU(1) ≈ 0.841, GELU(2) ≈ 1.955
+        let expected = [-0.045, -0.159, 0.0, 0.841, 1.955];
+        for i in 0..input.len() {
+            assert!(
+                (result[i] - expected[i]).abs() < 0.05,
+                "GELU({}) = {} but expected ~{}",
+                input[i],
+                result[i],
+                expected[i]
+            );
+        }
+
+        // GELU is monotonic increasing only for x >= ~-0.5
+        // Test monotonicity in the positive region
+        let positive_input = vec![0.0, 0.5, 1.0, 1.5, 2.0];
+        let positive_result = backend.gelu_f32(&positive_input)?;
+        for i in 0..positive_result.len() - 1 {
+            assert!(
+                positive_result[i] <= positive_result[i + 1] + 1e-5,
+                "GELU should be monotonic in positive region"
+            );
+        }
 
         Ok(())
     }
@@ -1831,14 +1852,14 @@ extern "C" __global__ void matmul_tiled_kernel(
         })?;
 
         // Allocate device memory
-        let a_dev = self.stream.memcpy_stod(a).map_err(|e| {
+        let a_dev = self.stream.clone_htod(a).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy A to device: {}", e),
                 "matmul_tiled_f32",
             )
         })?;
 
-        let b_dev = self.stream.memcpy_stod(b).map_err(|e| {
+        let b_dev = self.stream.clone_htod(b).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy B to device: {}", e),
                 "matmul_tiled_f32",
@@ -1883,7 +1904,7 @@ extern "C" __global__ void matmul_tiled_kernel(
         }
 
         // Copy result back
-        let result = self.stream.memcpy_dtov(&c_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&c_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "matmul_tiled_f32",
@@ -2089,14 +2110,14 @@ extern "C" __global__ void matmul_gelu_fused_kernel(
         })?;
 
         // Allocate device memory
-        let a_dev = self.stream.memcpy_stod(a).map_err(|e| {
+        let a_dev = self.stream.clone_htod(a).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy A to device: {}", e),
                 "matmul_gelu_fused_f32",
             )
         })?;
 
-        let b_dev = self.stream.memcpy_stod(b).map_err(|e| {
+        let b_dev = self.stream.clone_htod(b).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy B to device: {}", e),
                 "matmul_gelu_fused_f32",
@@ -2141,7 +2162,7 @@ extern "C" __global__ void matmul_gelu_fused_kernel(
         }
 
         // Copy result back
-        let result = self.stream.memcpy_dtov(&c_dev).map_err(|e| {
+        let result = self.stream.clone_dtoh(&c_dev).map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to copy result to host: {}", e),
                 "matmul_gelu_fused_f32",

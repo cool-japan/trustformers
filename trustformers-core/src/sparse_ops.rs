@@ -734,8 +734,12 @@ mod tests {
     fn test_sliding_window_mask() -> Result<()> {
         let mask = sparse_attention::sliding_window_mask(100, 10)?;
 
-        // Each position should attend to window_size positions
-        assert!(mask.nnz <= 100 * 10);
+        // Each position attends to window_size/2 positions on each side plus itself
+        // So each position has approximately window_size + 1 elements
+        // The total is bounded by seq_len * (window_size + 1) for middle positions
+        // Edge positions have fewer elements due to boundary effects
+        assert!(mask.nnz <= 100 * 11);
+        assert!(mask.nnz > 0);
 
         Ok(())
     }

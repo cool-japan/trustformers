@@ -652,19 +652,21 @@ mod tests {
     fn test_lru_eviction() {
         let config = AdaptiveCacheConfig {
             max_memory_bytes: 1000,
-            soft_limit_fraction: 0.8,
+            // Use 1.0 so eviction only happens when exceeding max_memory_bytes
+            soft_limit_fraction: 1.0,
             eviction_strategy: EvictionStrategy::LRU,
             ..Default::default()
         };
 
         let cache: AdaptiveCacheManager<String, Vec<u8>> = AdaptiveCacheManager::new(config);
 
-        // Insert items
+        // Insert items (300 * 3 = 900 bytes, under 1000 limit)
         cache.insert("a".to_string(), vec![0u8; 300], 300).unwrap();
         cache.insert("b".to_string(), vec![0u8; 300], 300).unwrap();
         cache.insert("c".to_string(), vec![0u8; 300], 300).unwrap();
 
-        // This should trigger eviction of "a" (oldest)
+        // This should trigger eviction of "a" (oldest) to make room
+        // 900 + 300 = 1200 > 1000, need to free at least 200 bytes -> evict "a" (300 bytes)
         cache.insert("d".to_string(), vec![0u8; 300], 300).unwrap();
 
         assert!(!cache.contains(&"a".to_string()));
@@ -677,14 +679,15 @@ mod tests {
     fn test_adaptive_eviction() {
         let config = AdaptiveCacheConfig {
             max_memory_bytes: 1000,
-            soft_limit_fraction: 0.8,
+            // Use 1.0 so eviction only happens when exceeding max_memory_bytes
+            soft_limit_fraction: 1.0,
             eviction_strategy: EvictionStrategy::Adaptive,
             ..Default::default()
         };
 
         let cache: AdaptiveCacheManager<String, Vec<u8>> = AdaptiveCacheManager::new(config);
 
-        // Insert items
+        // Insert items (300 * 3 = 900 bytes, under 1000 limit)
         cache.insert("a".to_string(), vec![0u8; 300], 300).unwrap();
         cache.insert("b".to_string(), vec![0u8; 300], 300).unwrap();
         cache.insert("c".to_string(), vec![0u8; 300], 300).unwrap();
@@ -721,14 +724,15 @@ mod tests {
     fn test_priority_eviction() {
         let config = AdaptiveCacheConfig {
             max_memory_bytes: 1000,
-            soft_limit_fraction: 0.8,
+            // Use 1.0 so eviction only happens when exceeding max_memory_bytes
+            soft_limit_fraction: 1.0,
             eviction_strategy: EvictionStrategy::Priority,
             ..Default::default()
         };
 
         let cache: AdaptiveCacheManager<String, Vec<u8>> = AdaptiveCacheManager::new(config);
 
-        // Insert with different priorities
+        // Insert with different priorities (300 * 3 = 900 bytes, under 1000 limit)
         cache.insert_with_priority("low".to_string(), vec![0u8; 300], 300, 1).unwrap();
         cache.insert_with_priority("high".to_string(), vec![0u8; 300], 300, 10).unwrap();
         cache

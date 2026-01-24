@@ -1275,14 +1275,20 @@ mod tests {
 
     #[test]
     fn test_optimal_tensor_config_calculation() {
+        // Use 10B parameters (40GB memory) with 8GB per device
+        // This requires at least 5 devices, so tensor_parallel_size > 1
         let config = utils::calculate_optimal_tensor_config(
-            1_000_000_000,          // 1B parameters
+            10_000_000_000,         // 10B parameters (40GB memory)
             8 * 1024 * 1024 * 1024, // 8GB memory per device
             8,                      // world size
         )
         .unwrap();
 
-        assert!(config.tensor_parallel_size > 1);
+        assert!(
+            config.tensor_parallel_size > 1,
+            "Expected tensor_parallel_size > 1, got {}",
+            config.tensor_parallel_size
+        );
     }
 
     #[test]

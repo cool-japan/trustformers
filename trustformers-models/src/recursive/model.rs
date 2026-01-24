@@ -689,16 +689,16 @@ impl MemoryState {
             match (before, after) {
                 (Some(b), Some(a)) => {
                     self.content = Tensor::concat(&[b, new_content, a], 1)?;
-                }
+                },
                 (Some(b), None) => {
                     self.content = Tensor::concat(&[b, new_content], 1)?;
-                }
+                },
                 (None, Some(a)) => {
                     self.content = Tensor::concat(&[new_content, a], 1)?;
-                }
+                },
                 (None, None) => {
                     self.content = new_content;
-                }
+                },
             }
             self.write_head = end_pos;
         } else {
@@ -719,10 +719,10 @@ impl MemoryState {
             match middle {
                 Some(m) => {
                     self.content = Tensor::concat(&[second_part, m, first_part], 1)?;
-                }
+                },
                 None => {
                     self.content = Tensor::concat(&[second_part, first_part], 1)?;
-                }
+                },
             }
             self.write_head = remaining;
         }

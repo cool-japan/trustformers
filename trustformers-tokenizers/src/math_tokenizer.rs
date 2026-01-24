@@ -457,14 +457,14 @@ impl MathTokenizer {
             }
         }
 
-        let token_type =
-            if (self.config.recognize_scientific_notation && self.scientific_regex.is_match(&number))
-                || self.number_regex.is_match(&number)
-            {
-                MathTokenType::Number
-            } else {
-                MathTokenType::Unknown
-            };
+        let token_type = if (self.config.recognize_scientific_notation
+            && self.scientific_regex.is_match(&number))
+            || self.number_regex.is_match(&number)
+        {
+            MathTokenType::Number
+        } else {
+            MathTokenType::Unknown
+        };
 
         Ok(Some(MathToken::new(
             number,

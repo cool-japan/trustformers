@@ -748,13 +748,22 @@ impl Model for HyenaModel {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        let seq_len = input.len();
         let mut hidden_states = self.embeddings.forward(input)?;
+
+        // Embeddings return [seq_len, hidden_size], but layers expect [batch_size, seq_len, hidden_size]
+        // Add batch dimension
+        hidden_states = hidden_states.reshape(&[1, seq_len, self.config.hidden_size])?;
 
         for layer in &self.layers {
             hidden_states = layer.forward(hidden_states)?;
         }
 
-        self.final_norm.forward(hidden_states)
+        // Apply final norm
+        hidden_states = self.final_norm.forward(hidden_states)?;
+
+        // Remove batch dimension to return [seq_len, hidden_size]
+        hidden_states.reshape(&[seq_len, self.config.hidden_size])
     }
 
     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {

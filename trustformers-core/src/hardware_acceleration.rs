@@ -185,7 +185,7 @@ impl HardwareAccelerator {
                         "Metal backend initialized successfully for Apple Silicon acceleration"
                     );
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     return Err(
                         acceleration_error("Metal", "Support not compiled in this build")
@@ -301,7 +301,7 @@ impl HardwareAccelerator {
                 {
                     crate::kernels::metal_impl::MetalImpl::new().is_ok()
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     false
                 }
@@ -374,7 +374,7 @@ impl HardwareAccelerator {
                         }
                     })
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     self.cpu_matmul(a, b, c)
                 }
@@ -450,7 +450,7 @@ impl HardwareAccelerator {
                     let metal_impl = crate::kernels::metal_impl::MetalImpl::new()?;
                     metal_impl.flash_attention(query, key, value, output)
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     self.cpu_flash_attention(query, key, value, output)
                 }
