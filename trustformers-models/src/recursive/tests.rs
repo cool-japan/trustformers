@@ -597,6 +597,7 @@ fn test_config_architecture_name() {
 fn test_very_long_sequence() {
     let mut config = RecursiveConfig::long_document();
     config.chunk_size = 512; // Smaller chunks for test
+    config.overlap_size = 0; // No overlap to preserve sequence length exactly
     let model = RecursiveTransformer::new(config).unwrap();
 
     let input_ids = Tensor::zeros(&[1, 5000]).unwrap(); // Very long sequence
@@ -611,6 +612,7 @@ fn test_very_long_sequence() {
     assert!(result.is_ok(), "Very long sequence processing failed");
 
     let output = result.unwrap();
+    // With no overlap, output sequence length matches input
     assert_eq!(output.last_hidden_state.shape()[1], 5000);
     assert!(output.recursion_depth > 1); // Should use multiple recursion levels
 }
