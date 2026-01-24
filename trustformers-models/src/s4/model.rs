@@ -577,9 +577,25 @@ impl Model for S4Model {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // Convert input to token IDs if needed
-        let input_ids = match input {
-            Tensor::I64(ref arr) => arr.mapv(|x| x as u32).into_raw_vec_and_offset().0,
+        // Get batch and sequence dimensions from input
+        let (batch_size, seq_len, input_ids) = match &input {
+            Tensor::I64(ref arr) => {
+                if arr.ndim() == 2 {
+                    let batch_size = arr.shape()[0];
+                    let seq_len = arr.shape()[1];
+                    let ids = arr.mapv(|x| x as u32).into_raw_vec_and_offset().0;
+                    (batch_size, seq_len, ids)
+                } else if arr.ndim() == 1 {
+                    let seq_len = arr.len();
+                    let ids = arr.mapv(|x| x as u32).into_raw_vec_and_offset().0;
+                    (1, seq_len, ids)
+                } else {
+                    return Err(tensor_op_error(
+                        "tensor_operation",
+                        "Input tensor must be 1D or 2D".to_string(),
+                    ));
+                }
+            },
             _ => {
                 return Err(tensor_op_error(
                     "tensor_operation",
@@ -587,8 +603,22 @@ impl Model for S4Model {
                 ))
             },
         };
-        // Get embeddings
-        let mut hidden = self.embeddings.forward(input_ids)?;
+
+        // Get embeddings - returns [total_tokens, d_model]
+        let embedded = self.embeddings.forward(input_ids)?;
+
+        // Reshape to 3D [batch_size, seq_len, d_model]
+        let mut hidden = if embedded.shape().len() == 2 {
+            let total_tokens = embedded.shape()[0];
+            let d_model = embedded.shape()[1];
+            if total_tokens == batch_size * seq_len {
+                embedded.reshape(&[batch_size, seq_len, d_model])?
+            } else {
+                embedded.reshape(&[1, total_tokens, d_model])?
+            }
+        } else {
+            embedded
+        };
 
         // Apply S4 blocks
         for block in &self.blocks {

@@ -556,7 +556,9 @@ impl DeepDistributedQP {
         let state = self.states.get_mut(&param_key).unwrap();
 
         // Warm start from previous solution
-        if let (true, Some(prev_solution)) = (self.config.warm_start, state.previous_solution.as_ref()) {
+        if let (true, Some(prev_solution)) =
+            (self.config.warm_start, state.previous_solution.as_ref())
+        {
             for node in &mut state.consensus_nodes {
                 node.local_variables = prev_solution.clone();
             }

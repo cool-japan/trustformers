@@ -497,7 +497,9 @@ impl MusicTokenizer {
             MusicTokenType::Barline
         } else if token.chars().any(|c| "ABCDEFGabcdefg".contains(c)) {
             MusicTokenType::NoteName
-        } else if token.chars().all(|c| c.is_ascii_digit() || "/".contains(c)) || token.contains('.') {
+        } else if token.chars().all(|c| c.is_ascii_digit() || "/".contains(c))
+            || token.contains('.')
+        {
             MusicTokenType::Duration
         } else {
             MusicTokenType::Unknown
