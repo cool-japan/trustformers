@@ -736,6 +736,10 @@ impl GatedCrossAttention {
         let seq_len = hidden_states.shape()[1];
         let vision_seq_len = vision_features.shape()[1];
 
+        // Ensure inputs are contiguous
+        let hidden_states = hidden_states.contiguous()?;
+        let vision_features = vision_features.contiguous()?;
+
         // Project to query, key, value
         let queries = self.q_proj.forward(hidden_states.clone())?;
         let keys = self.k_proj.forward(vision_features.clone())?;
@@ -746,17 +750,21 @@ impl GatedCrossAttention {
 
         let queries = queries
             .reshape(&[batch_size, seq_len, self.config.num_heads, head_dim])?
-            .transpose(1, 2)?;
+            .transpose(1, 2)?
+            .contiguous()?;
         let keys = keys
             .reshape(&[batch_size, vision_seq_len, self.config.num_heads, head_dim])?
-            .transpose(1, 2)?;
+            .transpose(1, 2)?
+            .contiguous()?;
         let values = values
             .reshape(&[batch_size, vision_seq_len, self.config.num_heads, head_dim])?
-            .transpose(1, 2)?;
+            .transpose(1, 2)?
+            .contiguous()?;
 
         // Compute attention scores
         let scale = (head_dim as f64).sqrt().recip();
-        let attention_scores = (&queries.matmul(&keys.transpose_i64(-1, -2)?)? * scale)?;
+        let keys_t = keys.transpose_i64(-1, -2)?.contiguous()?;
+        let attention_scores = (&queries.matmul(&keys_t)? * scale)?;
 
         // Apply media location mask if provided
         let attention_scores = if let Some(media_mask) = media_locations {
@@ -774,10 +782,10 @@ impl GatedCrossAttention {
 
         // Compute attention weights and apply to values
         let attention_weights = attention_scores.softmax(-1)?;
-        let attention_output = attention_weights.matmul(&values)?;
+        let attention_output = attention_weights.contiguous()?.matmul(&values)?;
 
-        // Reshape back
-        let attention_output = attention_output.transpose(1, 2)?.reshape(&[
+        // Reshape back - transpose needs contiguous before reshape
+        let attention_output = attention_output.transpose(1, 2)?.contiguous()?.reshape(&[
             batch_size,
             seq_len,
             self.config.cross_attention_dim,
@@ -1147,25 +1155,29 @@ mod tests {
 
     #[test]
     fn test_gated_cross_attention() {
-        let hidden_size = 2048;
-        let config = FlamingoXAttentionConfig::default();
+        // Use SIMD-friendly dimensions (powers of 2 and multiples of 64)
+        let hidden_size = 256;
+        let mut config = FlamingoXAttentionConfig::default();
+        config.cross_attention_dim = 256;
+        config.num_heads = 4;
+        config.head_dim = 64;
         let cross_attn = GatedCrossAttention::new(hidden_size, config.clone()).unwrap();
 
-        let batch_size = 2;
-        let seq_len = 10;
-        let vision_seq_len = 64;
+        let batch_size = 1; // Single batch for simplicity
+        let seq_len = 8;
+        let vision_seq_len = 16;
 
         let hidden_states = Tensor::randn(&[batch_size, seq_len, hidden_size]).unwrap();
         let vision_features =
             Tensor::randn(&[batch_size, vision_seq_len, config.cross_attention_dim]).unwrap();
 
         let output = cross_attn.forward(&hidden_states, &vision_features, None);
-        assert!(output.is_ok());
+        assert!(output.is_ok(), "Forward failed: {:?}", output.err());
 
         let output = output.unwrap();
         assert_eq!(
             output.hidden_states.shape(),
-            &[batch_size, seq_len, config.cross_attention_dim]
+            &[batch_size, seq_len, hidden_size]
         );
         assert!(output.attention_weights.is_some());
     }

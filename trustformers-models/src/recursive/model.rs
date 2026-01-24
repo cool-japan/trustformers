@@ -98,9 +98,16 @@ impl RecursiveTransformer {
         depth: usize,
         memory: &mut MemoryState,
     ) -> Result<Tensor> {
-        if depth == 0 || chunks.len() == 1 {
+        if chunks.len() == 1 {
             // Base case: process single chunk
             return self.process_single_chunk(&chunks[0], memory);
+        }
+
+        if depth == 0 {
+            // Depth exhausted but multiple chunks remain - process and combine all
+            let processed: Result<Vec<Tensor>> =
+                chunks.iter().map(|chunk| self.process_single_chunk(chunk, memory)).collect();
+            return self.combine_chunks(processed?, memory);
         }
 
         // Divide chunks into groups for recursive processing
