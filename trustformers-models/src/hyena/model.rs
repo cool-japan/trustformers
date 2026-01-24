@@ -168,7 +168,12 @@ impl Layer for HyenaFilter {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let seq_len = input.shape()[1];
+        // Handle both 2D [seq_len, hidden_size] and 3D [batch_size, seq_len, hidden_size]
+        let seq_len = if input.shape().len() == 2 {
+            input.shape()[0] // 2D: [seq_len, hidden_size]
+        } else {
+            input.shape()[1] // 3D: [batch_size, seq_len, hidden_size]
+        };
 
         // Generate filter for current sequence length
         let filter = self.generate_filter(seq_len)?;
@@ -313,29 +318,50 @@ impl HyenaOperator {
             ));
         }
 
-        let batch_size = tensors[0].shape()[0];
-        let seq_len = tensors[0].shape()[1];
         let total_hidden = self.hidden_size * self.order;
 
-        let mut result = Tensor::zeros(&[batch_size, seq_len, total_hidden])?;
+        if tensors[0].shape().len() == 2 {
+            // Handle 2D tensors: [seq_len, hidden_size]
+            let seq_len = tensors[0].shape()[0];
 
-        for (i, tensor) in tensors.iter().enumerate() {
-            let start_idx = i * self.hidden_size;
-            let _end_idx = (i + 1) * self.hidden_size;
+            let mut result = Tensor::zeros(&[seq_len, total_hidden])?;
 
-            // Copy tensor data to the appropriate slice
-            // This is a simplified implementation
-            for b in 0..batch_size {
+            for (i, tensor) in tensors.iter().enumerate() {
+                let start_idx = i * self.hidden_size;
+
+                // Copy tensor data to the appropriate slice
                 for s in 0..seq_len {
                     for h in 0..self.hidden_size {
-                        let val = tensor.get_scalar(&[b, s, h])?;
-                        result = result.set_scalar(&[b, s, start_idx + h], val)?;
+                        let val = tensor.get_scalar(&[s, h])?;
+                        result = result.set_scalar(&[s, start_idx + h], val)?;
                     }
                 }
             }
-        }
 
-        Ok(result)
+            Ok(result)
+        } else {
+            // Handle 3D tensors: [batch_size, seq_len, hidden_size]
+            let batch_size = tensors[0].shape()[0];
+            let seq_len = tensors[0].shape()[1];
+
+            let mut result = Tensor::zeros(&[batch_size, seq_len, total_hidden])?;
+
+            for (i, tensor) in tensors.iter().enumerate() {
+                let start_idx = i * self.hidden_size;
+
+                // Copy tensor data to the appropriate slice
+                for b in 0..batch_size {
+                    for s in 0..seq_len {
+                        for h in 0..self.hidden_size {
+                            let val = tensor.get_scalar(&[b, s, h])?;
+                            result = result.set_scalar(&[b, s, start_idx + h], val)?;
+                        }
+                    }
+                }
+            }
+
+            Ok(result)
+        }
     }
 }
 
@@ -884,7 +910,23 @@ impl Model for HyenaForSequenceClassification {
 
         // Use global average pooling for sequence classification
         let pooled = self.global_average_pool(&sequence_output)?;
-        self.classifier.forward(pooled)
+
+        // Handle 1D pooled output - reshape to 2D for classifier
+        let classifier_input = if pooled.shape().len() == 1 {
+            let hidden_size = pooled.shape()[0];
+            pooled.reshape(&[1, hidden_size])?
+        } else {
+            pooled
+        };
+
+        let logits = self.classifier.forward(classifier_input)?;
+
+        // If output is 2D [1, num_labels], squeeze to 1D [num_labels]
+        if logits.shape().len() == 2 && logits.shape()[0] == 1 {
+            logits.reshape(&[logits.shape()[1]])
+        } else {
+            Ok(logits)
+        }
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
