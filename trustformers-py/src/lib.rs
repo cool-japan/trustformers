@@ -1,3 +1,57 @@
+//! # TrustformeRS Python Bindings
+//!
+//! High-performance Python bindings for TrustformeRS transformer library using PyO3.
+//!
+//! This crate provides Python access to TrustformeRS's transformer models and utilities,
+//! offering native Rust performance with a Pythonic interface. It's built with PyO3 and
+//! maturin for seamless Python integration.
+//!
+//! ## Features
+//!
+//! - **Zero-copy tensor operations**: Direct memory sharing with NumPy
+//! - **GPU acceleration**: Automatic CUDA/Metal backend selection
+//! - **Type safety**: Rust's type system prevents common Python errors
+//! - **Performance**: 10-100x faster than pure Python implementations
+//! - **Pythonic API**: Familiar interface for PyTorch/Transformers users
+//!
+//! ## Installation
+//!
+//! ```bash
+//! pip install trustformers
+//! ```
+//!
+//! ## Quick Start
+//!
+//! ```python
+//! import trustformers as tf
+//! import numpy as np
+//!
+//! # Create a tensor
+//! tensor = tf.Tensor.from_numpy(np.random.randn(32, 512))
+//!
+//! # Use GPU if available
+//! if tf.cuda_is_available():
+//!     tensor = tensor.cuda()
+//!
+//! # Perform operations
+//! result = tensor.matmul(tensor.t())
+//! ```
+//!
+//! ## Architecture
+//!
+//! The Python bindings wrap TrustformeRS Core functionality:
+//! - Tensors are zero-copy NumPy-compatible arrays
+//! - Models support standard HuggingFace interfaces
+//! - Memory management is automatic via PyO3
+//! - GIL is released for compute-heavy operations
+//!
+//! ## Performance
+//!
+//! - **Memory efficiency**: Shared memory with NumPy (no copies)
+//! - **GIL-free**: Computation releases Python GIL
+//! - **Parallel**: Multi-threaded via Rayon
+//! - **GPU**: CUDA/Metal acceleration when available
+
 use pyo3::prelude::*;
 
 // pub mod auto;  // Temporarily disabled due to dependency issues

@@ -647,12 +647,18 @@ mod tests {
         let extractor = AudioFeatureExtractor::new(config);
         let caps = extractor.capabilities();
 
-        assert_eq!(caps.get("feature_size").unwrap().as_u64().unwrap(), 80);
+        assert_eq!(
+            caps.get("feature_size").unwrap().as_u64().expect("expected u64 value"),
+            80
+        );
         assert_eq!(
             caps.get("supports_batching").unwrap().as_bool().unwrap(),
             true
         );
-        assert_eq!(caps.get("max_batch_size").unwrap().as_u64().unwrap(), 16);
+        assert_eq!(
+            caps.get("max_batch_size").unwrap().as_u64().expect("expected u64 value"),
+            16
+        );
     }
 
     #[test]

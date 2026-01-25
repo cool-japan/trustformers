@@ -67,7 +67,9 @@ impl ElectraEmbeddings {
         let seq_len = input_ids.len();
 
         // Word embeddings
-        let word_emb = self.word_embeddings.forward_ids(input_ids.as_slice().unwrap())?;
+        let word_emb = self
+            .word_embeddings
+            .forward_ids(input_ids.as_slice().expect("operation failed"))?;
         let word_emb_2d = match word_emb {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()
@@ -86,7 +88,9 @@ impl ElectraEmbeddings {
         } else {
             (0..seq_len as u32).collect()
         };
-        let pos_emb = self.position_embeddings.forward_ids(pos_ids.as_slice().unwrap())?;
+        let pos_emb = self
+            .position_embeddings
+            .forward_ids(pos_ids.as_slice().expect("operation failed"))?;
         let pos_emb_2d = match pos_emb {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()
@@ -105,7 +109,9 @@ impl ElectraEmbeddings {
         } else {
             Array1::zeros(seq_len)
         };
-        let tt_emb = self.token_type_embeddings.forward_ids(tt_ids.as_slice().unwrap())?;
+        let tt_emb = self
+            .token_type_embeddings
+            .forward_ids(tt_ids.as_slice().expect("operation failed"))?;
         let tt_emb_2d = match tt_emb {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()

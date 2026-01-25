@@ -127,7 +127,7 @@ impl RecursiveTransformer {
 
         // Combine processed chunks
         if processed_chunks.len() == 1 {
-            Ok(processed_chunks.into_iter().next().unwrap())
+            Ok(processed_chunks.into_iter().next().expect("operation failed"))
         } else {
             self.combine_chunks(processed_chunks, memory)
         }
@@ -493,7 +493,7 @@ impl RecursiveTransformer {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -517,7 +517,11 @@ impl RecursiveTransformer {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {
@@ -729,7 +733,8 @@ pub struct MemoryState {
 
 impl MemoryState {
     pub fn new(batch_size: usize, memory_size: usize, hidden_size: usize) -> Self {
-        let content = Tensor::zeros(&[batch_size, memory_size, hidden_size]).unwrap();
+        let content =
+            Tensor::zeros(&[batch_size, memory_size, hidden_size]).expect("operation failed");
         Self {
             content,
             write_head: 0,
@@ -1274,7 +1279,7 @@ impl RecursiveForSequenceClassification {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -1298,7 +1303,11 @@ impl RecursiveForSequenceClassification {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {

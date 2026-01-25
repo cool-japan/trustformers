@@ -46,8 +46,8 @@ impl CommandRRoPE {
             self.create_cache(seq_len)?;
         }
 
-        let cos = self.cos_cache.as_ref().unwrap();
-        let sin = self.sin_cache.as_ref().unwrap();
+        let cos = self.cos_cache.as_ref().expect("operation failed");
+        let sin = self.sin_cache.as_ref().expect("operation failed");
 
         Ok((cos.clone(), sin.clone()))
     }
@@ -1325,7 +1325,7 @@ impl CommandRForCausalLM {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -1349,7 +1349,11 @@ impl CommandRForCausalLM {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {
@@ -1444,13 +1448,14 @@ mod tests {
     #[ignore = "Forward pass requires proper hidden state input - model's forward method is shadowed by Model trait"]
     fn test_command_r_forward_pass_tiny() {
         let config = CommandRConfig::tiny();
-        let model = CommandRModel::new(&config).unwrap();
+        let model = CommandRModel::new(&config).expect("operation failed");
 
         // The Model trait's forward expects hidden states (F32 tensor), not input_ids
         // Create a proper hidden state tensor for testing
         let batch_size = 1;
         let seq_len = 4;
-        let hidden_states = Tensor::zeros(&[batch_size, seq_len, config.hidden_size]).unwrap();
+        let hidden_states =
+            Tensor::zeros(&[batch_size, seq_len, config.hidden_size]).expect("operation failed");
 
         let result = model.forward(hidden_states);
         assert!(result.is_ok(), "Forward pass failed: {:?}", result.err());
@@ -1512,10 +1517,10 @@ mod tests {
     #[ignore = "Full model size test - requires significant memory and time"]
     fn test_command_r_forward_pass() {
         let config = CommandRConfig::command_r();
-        let model = CommandRModel::new(&config).unwrap();
+        let model = CommandRModel::new(&config).expect("operation failed");
 
         // Use I64 tensor for input_ids (token IDs should be integers)
-        let input_ids = Tensor::from_vec_i64(vec![1, 2, 3, 4], &[1, 4]).unwrap();
+        let input_ids = Tensor::from_vec_i64(vec![1, 2, 3, 4], &[1, 4]).expect("operation failed");
 
         let result = model.forward(input_ids);
         assert!(result.is_ok());

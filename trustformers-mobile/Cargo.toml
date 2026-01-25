@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-mobile"
 description = "Mobile deployment support for TrustformeRS (iOS, Android)"
+keywords = ["mobile", "ios", "android", "machine-learning", "transformers"]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true

@@ -44,12 +44,12 @@ fn test_phi3_config_presets() {
 fn test_phi3_config_from_pretrained() {
     let config = Phi3Config::from_pretrained_name("microsoft/Phi-3-mini-4k-instruct");
     assert!(config.is_some());
-    let config = config.unwrap();
+    let config = config.expect("operation failed");
     assert_eq!(config.model_type, "phi3-mini-instruct");
 
     let config = Phi3Config::from_pretrained_name("microsoft/Phi-3-small-128k-instruct");
     assert!(config.is_some());
-    let config = config.unwrap();
+    let config = config.expect("operation failed");
     assert!(config.is_long_context());
 
     let config = Phi3Config::from_pretrained_name("unknown-model");
@@ -112,7 +112,7 @@ fn test_phi3_model_creation() {
     let model = Phi3Model::new(config.clone());
     assert!(model.is_ok());
 
-    let model = model.unwrap();
+    let model = model.expect("operation failed");
     assert_eq!(model.config().hidden_size, config.hidden_size);
 }
 
@@ -123,7 +123,7 @@ fn test_phi3_causal_lm_creation() {
     let model = Phi3ForCausalLM::new(config.clone());
     assert!(model.is_ok());
 
-    let model = model.unwrap();
+    let model = model.expect("operation failed");
     assert_eq!(model.config().vocab_size, config.vocab_size);
 }
 
@@ -146,7 +146,7 @@ fn test_rope_scaling_types() {
     let long_config = Phi3Config::phi3_mini_128k_instruct();
     assert!(long_config.rope_scaling.is_some());
 
-    let scaling = long_config.rope_scaling.unwrap();
+    let scaling = long_config.rope_scaling.expect("operation failed");
     assert_eq!(scaling.scaling_type, "longrope");
     assert!(scaling.long_factor.is_some());
     assert!(scaling.short_factor.is_some());

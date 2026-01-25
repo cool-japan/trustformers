@@ -331,7 +331,7 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn calibrate(&self, data: &[Tensor]) -> Result<()> {
-        let mut calibration = self.calibration.write().unwrap();
+        let mut calibration = self.calibration.write().expect("RwLock poisoned");
 
         for tensor in data {
             let tensor_data = tensor.data()?;
@@ -351,12 +351,15 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn quantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         // Get or compute scale and zero point
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             // Compute on the fly if not calibrated
             let min_val = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
@@ -380,12 +383,15 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn dequantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         // Get quantization parameters from calibration data
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             // Fallback: estimate from quantized data range
             let min_q = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b)) as i8;
@@ -454,7 +460,7 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn calibrate(&self, data: &[Tensor]) -> Result<()> {
-        let mut calibration = self.calibration.write().unwrap();
+        let mut calibration = self.calibration.write().expect("RwLock poisoned");
 
         for tensor in data {
             let tensor_data = tensor.data()?;
@@ -467,7 +473,7 @@ impl MobileQuantizer for Int8Quantizer {
                 },
                 CalibrationMethod::Percentile => {
                     let mut sorted = tensor_data.to_vec();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     let percentile_idx =
                         (sorted.len() as f32 * self.context.percentile / 100.0) as usize;
                     let min_idx =
@@ -498,11 +504,14 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn quantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             let min_val = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
             let max_val = tensor_data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
@@ -527,12 +536,15 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn dequantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         // Get quantization parameters from calibration data
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             // Fallback: estimate from quantized data range
             let min_q = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b)) as i32;
@@ -856,36 +868,39 @@ mod tests {
     #[test]
     fn test_int4_quantization() {
         let quantizer = Int4Quantizer::new();
-        let tensor =
-            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]).unwrap();
+        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4])
+            .expect("Failed to create tensor");
 
         // Calibrate
-        quantizer.calibrate(&[tensor.clone()]).unwrap();
+        quantizer.calibrate(&[tensor.clone()]).expect("Calibration failed");
 
         // Quantize
-        let quantized = quantizer.quantize_tensor(&tensor).unwrap();
+        let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
         assert_eq!(quantized.shape(), tensor.shape());
 
         // Dequantize
-        let dequantized = quantizer.dequantize_tensor(&quantized).unwrap();
+        let dequantized = quantizer.dequantize_tensor(&quantized).expect("Dequantization failed");
         assert_eq!(dequantized.shape(), tensor.shape());
 
         // Check error is reasonable
-        let error = QuantizationUtils::compute_error(&tensor, &dequantized).unwrap();
+        let error = QuantizationUtils::compute_error(&tensor, &dequantized)
+            .expect("Error computation failed");
         assert!(error < 1.0); // Error should be small
     }
 
     #[test]
     fn test_int8_quantization() {
         let quantizer = Int8Quantizer::new();
-        let tensor = Tensor::from_vec(vec![-10.0, -5.0, 0.0, 5.0, 10.0], &[5]).unwrap();
+        let tensor = Tensor::from_vec(vec![-10.0, -5.0, 0.0, 5.0, 10.0], &[5])
+            .expect("Failed to create tensor");
 
-        quantizer.calibrate(&[tensor.clone()]).unwrap();
+        quantizer.calibrate(&[tensor.clone()]).expect("Calibration failed");
 
-        let quantized = quantizer.quantize_tensor(&tensor).unwrap();
-        let dequantized = quantizer.dequantize_tensor(&quantized).unwrap();
+        let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
+        let dequantized = quantizer.dequantize_tensor(&quantized).expect("Dequantization failed");
 
-        let error = QuantizationUtils::compute_error(&tensor, &dequantized).unwrap();
+        let error = QuantizationUtils::compute_error(&tensor, &dequantized)
+            .expect("Error computation failed");
         assert!(error < 0.1); // INT8 should have very low error
     }
 
@@ -897,11 +912,12 @@ mod tests {
         // FP16 doesn't require calibration
         assert!(!quantizer.requires_calibration());
 
-        let quantized = quantizer.quantize_tensor(&tensor).unwrap();
-        let dequantized = quantizer.dequantize_tensor(&quantized).unwrap();
+        let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
+        let dequantized = quantizer.dequantize_tensor(&quantized).expect("Dequantization failed");
 
         // FP16 should have minimal error for normal range values
-        let error = QuantizationUtils::compute_error(&tensor, &dequantized).unwrap();
+        let error = QuantizationUtils::compute_error(&tensor, &dequantized)
+            .expect("Error computation failed");
         assert!(error < 0.001);
     }
 

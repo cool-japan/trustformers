@@ -253,7 +253,7 @@ mod tests {
     fn test_from_pretrained_name() {
         let config = StableLMConfig::from_pretrained_name("stabilityai/stablelm-3b-4e1t");
         assert!(config.is_some());
-        assert_eq!(config.unwrap().hidden_size, 2560);
+        assert_eq!(config.expect("operation failed").hidden_size, 2560);
 
         let config = StableLMConfig::from_pretrained_name("nonexistent/model");
         assert!(config.is_none());
@@ -293,8 +293,8 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = StableLMConfig::stablelm_3b();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: StableLMConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("operation failed");
+        let deserialized: StableLMConfig = serde_json::from_str(&json).expect("operation failed");
 
         assert_eq!(config.hidden_size, deserialized.hidden_size);
         assert_eq!(

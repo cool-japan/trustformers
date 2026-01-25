@@ -11,7 +11,7 @@
 //! - Various model sizes: 1.6B, 3B, 7B, 12B parameters
 //!
 //! References:
-//! - StableLM models: https://github.com/Stability-AI/StableLM
+//! - StableLM models: <https://github.com/Stability-AI/StableLM>
 //! - Based on LLaMA architecture innovations
 
 pub mod config;
@@ -146,7 +146,10 @@ mod tests {
     #[ignore] // Heavy test - creates StableLM 3B model, run with --ignored
     fn test_create_model() {
         let model = create_model(StableLMVariant::Base3B);
-        assert_eq!(model.unwrap().model.config.hidden_size, 2560);
+        assert_eq!(
+            model.expect("operation failed").model.config.hidden_size,
+            2560
+        );
     }
 
     #[test]

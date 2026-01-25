@@ -97,7 +97,7 @@ impl MemoryLeakDetector {
 
     /// Record a memory allocation
     pub fn record_allocation(&self, size: usize) -> u64 {
-        let mut next_id = self.next_id.lock().unwrap();
+        let mut next_id = self.next_id.lock().expect("Lock poisoned");
         let allocation_id = *next_id;
         *next_id += 1;
         drop(next_id);
@@ -116,18 +116,18 @@ impl MemoryLeakDetector {
         };
 
         {
-            let mut allocations = self.allocations.lock().unwrap();
+            let mut allocations = self.allocations.lock().expect("Lock poisoned");
             allocations.insert(allocation_id, allocation_info);
 
             let current_memory: usize = allocations.values().map(|a| a.size).sum();
-            let mut peak = self.peak_memory.lock().unwrap();
+            let mut peak = self.peak_memory.lock().expect("Lock poisoned");
             if current_memory > *peak {
                 *peak = current_memory;
             }
         }
 
         {
-            let mut total = self.total_allocations.lock().unwrap();
+            let mut total = self.total_allocations.lock().expect("Lock poisoned");
             *total += 1;
         }
 
@@ -136,11 +136,11 @@ impl MemoryLeakDetector {
 
     /// Record a memory deallocation
     pub fn record_deallocation(&self, allocation_id: u64) -> bool {
-        let mut allocations = self.allocations.lock().unwrap();
+        let mut allocations = self.allocations.lock().expect("Lock poisoned");
         let removed = allocations.remove(&allocation_id).is_some();
 
         if removed {
-            let mut total = self.total_deallocations.lock().unwrap();
+            let mut total = self.total_deallocations.lock().expect("Lock poisoned");
             *total += 1;
         }
 
@@ -149,12 +149,12 @@ impl MemoryLeakDetector {
 
     /// Generate a memory leak report
     pub fn generate_report(&self, test_name: &str) -> MemoryLeakReport {
-        let allocations = self.allocations.lock().unwrap();
+        let allocations = self.allocations.lock().expect("Lock poisoned");
         let leaked_allocations: Vec<AllocationInfo> = allocations.values().cloned().collect();
         let leaked_bytes: usize = leaked_allocations.iter().map(|a| a.size).sum();
-        let total_allocations = *self.total_allocations.lock().unwrap();
-        let total_deallocations = *self.total_deallocations.lock().unwrap();
-        let peak_memory = *self.peak_memory.lock().unwrap();
+        let total_allocations = *self.total_allocations.lock().expect("Lock poisoned");
+        let total_deallocations = *self.total_deallocations.lock().expect("Lock poisoned");
+        let peak_memory = *self.peak_memory.lock().expect("Lock poisoned");
 
         let average_allocation_size = if !leaked_allocations.is_empty() {
             leaked_bytes as f64 / leaked_allocations.len() as f64
@@ -177,7 +177,7 @@ impl MemoryLeakDetector {
 
     /// Check if there are memory leaks based on configured thresholds
     pub fn has_leaks(&self) -> bool {
-        let allocations = self.allocations.lock().unwrap();
+        let allocations = self.allocations.lock().expect("Lock poisoned");
         let leaked_bytes: usize = allocations.values().map(|a| a.size).sum();
         let leaked_count = allocations.len();
 
@@ -199,17 +199,17 @@ impl MemoryLeakDetector {
 
                 // Check if we should stop monitoring
                 {
-                    let should_stop = *stop_flag_clone.lock().unwrap();
+                    let should_stop = *stop_flag_clone.lock().expect("Lock poisoned");
                     if should_stop {
                         break;
                     }
                 }
 
-                let allocations = allocations.lock().unwrap();
+                let allocations = allocations.lock().expect("Lock poisoned");
                 let current_memory: usize = allocations.values().map(|a| a.size).sum();
 
                 {
-                    let mut peak = peak_memory.lock().unwrap();
+                    let mut peak = peak_memory.lock().expect("Lock poisoned");
                     if current_memory > *peak {
                         *peak = current_memory;
                     }
@@ -282,11 +282,11 @@ impl MemoryLeakDetector {
 
     /// Reset the detector state
     pub fn reset(&self) {
-        self.allocations.lock().unwrap().clear();
-        *self.next_id.lock().unwrap() = 0;
-        *self.peak_memory.lock().unwrap() = 0;
-        *self.total_allocations.lock().unwrap() = 0;
-        *self.total_deallocations.lock().unwrap() = 0;
+        self.allocations.lock().expect("Lock poisoned").clear();
+        *self.next_id.lock().expect("Lock poisoned") = 0;
+        *self.peak_memory.lock().expect("Lock poisoned") = 0;
+        *self.total_allocations.lock().expect("Lock poisoned") = 0;
+        *self.total_deallocations.lock().expect("Lock poisoned") = 0;
     }
 }
 
@@ -300,7 +300,7 @@ impl Drop for MonitoringHandle {
     fn drop(&mut self) {
         // Signal the monitoring thread to stop
         {
-            let mut stop_flag = self.stop_flag.lock().unwrap();
+            let mut stop_flag = self.stop_flag.lock().expect("Lock poisoned");
             *stop_flag = true;
         }
 
@@ -665,7 +665,7 @@ impl MemoryPatternAnalyzer {
 
     /// Analyze memory allocation patterns to detect potential issues
     pub fn analyze_patterns(&self) -> MemoryPatternReport {
-        let allocations = self.detector.allocations.lock().unwrap();
+        let allocations = self.detector.allocations.lock().expect("Lock poisoned");
         let mut patterns = MemoryPatternReport::default();
 
         let now = Instant::now();
@@ -834,7 +834,7 @@ impl TensorLeakDetector {
 
         // Update operation statistics
         {
-            let mut ops = self.tensor_operations.lock().unwrap();
+            let mut ops = self.tensor_operations.lock().expect("Lock poisoned");
             let stats =
                 ops.entry(operation_name.to_string()).or_insert_with(|| TensorOperationStats {
                     operation_name: operation_name.to_string(),
@@ -868,7 +868,7 @@ impl TensorLeakDetector {
 
     /// Generate tensor operation memory report
     pub fn generate_tensor_report(&self) -> TensorMemoryReport {
-        let ops = self.tensor_operations.lock().unwrap();
+        let ops = self.tensor_operations.lock().expect("Lock poisoned");
         let operations: Vec<TensorOperationStats> = ops.values().cloned().collect();
 
         let mut report = TensorMemoryReport {
@@ -898,7 +898,7 @@ impl TensorLeakDetector {
     }
 
     fn get_current_memory_usage(&self) -> usize {
-        let allocations = self.detector.allocations.lock().unwrap();
+        let allocations = self.detector.allocations.lock().expect("Lock poisoned");
         allocations.values().map(|a| a.size).sum()
     }
 }

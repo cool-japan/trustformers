@@ -445,7 +445,7 @@ impl CogVlmModel {
                 Tensor::F32(array) => {
                     // Flatten the 2D array and add to combined data
                     for row in array.rows() {
-                        combined_data.extend_from_slice(row.as_slice().unwrap());
+                        combined_data.extend_from_slice(row.as_slice().expect("operation failed"));
                     }
                 },
                 _ => {
@@ -677,7 +677,9 @@ impl CogVlmLanguageModel {
 
         for batch_emb in batch_embeddings {
             match batch_emb {
-                Tensor::F32(array) => output_data.extend_from_slice(array.as_slice().unwrap()),
+                Tensor::F32(array) => {
+                    output_data.extend_from_slice(array.as_slice().expect("operation failed"))
+                },
                 _ => {
                     return Err(TrustformersError::tensor_op_error(
                         "Unsupported tensor type in batch embeddings",
@@ -1299,7 +1301,8 @@ fn inject_vision_at_positions(
 
                             // Inject vision feature with adaptive blending
                             if hidden_idx_flat < result_data.len() {
-                                let vision_val = vision_arr.as_slice().unwrap()[vision_idx_flat];
+                                let vision_val = vision_arr.as_slice().expect("operation failed")
+                                    [vision_idx_flat];
                                 let hidden_val = result_data[hidden_idx_flat];
 
                                 // Use adaptive blending based on feature magnitude

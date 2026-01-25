@@ -486,7 +486,7 @@ impl GenerationUtils {
 
         // Get top-k indices
         let mut indexed_logits: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
         indexed_logits.truncate(k);
 
         // Compute probabilities for top-k
@@ -509,7 +509,7 @@ impl GenerationUtils {
 
         // Sort by probability (descending)
         let mut indexed_logits: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
 
         // Compute probabilities
         let sorted_logits: Vec<f32> = indexed_logits.iter().map(|(_, logit)| *logit).collect();
@@ -558,9 +558,9 @@ impl GenerationUtils {
             let max_idx = logits
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("operation failed"))
                 .map(|(idx, _)| idx)
-                .unwrap();
+                .expect("operation failed");
             return Ok(max_idx as u32);
         }
 
@@ -595,7 +595,7 @@ impl GenerationUtils {
         logits
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("operation failed"))
             .map(|(idx, _)| idx as u32)
             .unwrap_or(0)
     }
@@ -837,11 +837,11 @@ mod tests {
         let key = Tensor::F32(Array2::zeros((2, 4)).into_dyn());
         let value = Tensor::F32(Array2::zeros((2, 4)).into_dyn());
 
-        cache.append(0, key.clone(), value.clone()).unwrap();
+        cache.append(0, key.clone(), value.clone()).expect("operation failed");
         cache.increment_seq_length(1);
         assert_eq!(cache.seq_length, 1);
 
-        let (cached_key, cached_value) = cache.get(0).unwrap();
+        let (cached_key, cached_value) = cache.get(0).expect("operation failed");
         // Basic check that cache returns something
         assert!(matches!(cached_key, Tensor::F32(_)));
         assert!(matches!(cached_value, Tensor::F32(_)));

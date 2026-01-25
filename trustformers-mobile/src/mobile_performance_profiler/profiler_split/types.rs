@@ -733,38 +733,38 @@ impl MobilePerformanceProfiler {
     pub fn start_profiling(&self) -> Result<String> {
         info!("Starting profiling session");
         {
-            let state = self.profiling_state.read().unwrap();
+            let state = self.profiling_state.read().expect("RwLock poisoned");
             if state.is_active {
                 warn!("Profiling session already active");
                 return Err(anyhow::anyhow!("Profiling is already active"));
             }
         }
         {
-            let config = self.config.read().unwrap();
+            let config = self.config.read().expect("RwLock poisoned");
             if !config.enabled {
                 warn!("Profiling is disabled in configuration");
                 return Err(anyhow::anyhow!("Profiling is disabled"));
             }
         }
         let session_id = {
-            let mut session = self.session_tracker.lock().unwrap();
+            let mut session = self.session_tracker.lock().expect("Lock poisoned");
             session.start_session().context("Failed to start profiling session")?
         };
         {
-            let collector = self.metrics_collector.lock().unwrap();
+            let collector = self.metrics_collector.lock().expect("Lock poisoned");
             collector.start_collection().context("Failed to start metrics collection")?;
         }
         {
-            let config = self.config.read().unwrap();
+            let config = self.config.read().expect("RwLock poisoned");
             if config.real_time_monitoring.enabled {
-                let mut monitor = self.real_time_monitor.lock().unwrap();
+                let mut monitor = self.real_time_monitor.lock().expect("Lock poisoned");
                 monitor
                     .start_monitoring()
                     .context("Failed to start real-time monitoring")?;
             }
         }
         {
-            let mut state = self.profiling_state.write().unwrap();
+            let mut state = self.profiling_state.write().expect("RwLock poisoned");
             state.is_active = true;
             state.current_session_id = Some(session_id.clone());
             state.start_time = Some(Instant::now());
@@ -792,7 +792,7 @@ impl MobilePerformanceProfiler {
     pub fn stop_profiling(&self) -> Result<ProfilingData> {
         info!("Stopping profiling session");
         let session_id = {
-            let state = self.profiling_state.read().unwrap();
+            let state = self.profiling_state.read().expect("RwLock poisoned");
             if !state.is_active {
                 warn!("No active profiling session to stop");
                 return Err(anyhow::anyhow!("No active profiling session"));
@@ -800,31 +800,31 @@ impl MobilePerformanceProfiler {
             state.current_session_id.clone()
         };
         {
-            let mut session = self.session_tracker.lock().unwrap();
+            let mut session = self.session_tracker.lock().expect("Lock poisoned");
             session.end_session().context("Failed to end profiling session")?;
         }
         {
-            let collector = self.metrics_collector.lock().unwrap();
+            let collector = self.metrics_collector.lock().expect("Lock poisoned");
             collector.stop_collection().context("Failed to stop metrics collection")?;
         }
         {
-            let mut monitor = self.real_time_monitor.lock().unwrap();
+            let mut monitor = self.real_time_monitor.lock().expect("Lock poisoned");
             monitor.stop_monitoring().context("Failed to stop real-time monitoring")?;
         }
         let profiling_data = self
             .generate_profiling_data()
             .context("Failed to generate profiling data")?;
         {
-            let config = self.config.read().unwrap();
+            let config = self.config.read().expect("RwLock poisoned");
             if config.export_config.auto_export {
-                let export_manager = self.export_manager.lock().unwrap();
+                let export_manager = self.export_manager.lock().expect("Lock poisoned");
                 if let Err(e) = export_manager.export_data(&profiling_data) {
                     warn!("Auto-export failed: {}", e);
                 }
             }
         }
         {
-            let mut state = self.profiling_state.write().unwrap();
+            let mut state = self.profiling_state.write().expect("RwLock poisoned");
             state.is_active = false;
             state.current_session_id = None;
             if let Some(start_time) = state.start_time {
@@ -841,17 +841,17 @@ impl MobilePerformanceProfiler {
     pub fn pause_profiling(&self) -> Result<()> {
         info!("Pausing profiling session");
         {
-            let state = self.profiling_state.read().unwrap();
+            let state = self.profiling_state.read().expect("RwLock poisoned");
             if !state.is_active {
                 return Err(anyhow::anyhow!("No active profiling session to pause"));
             }
         }
         {
-            let collector = self.metrics_collector.lock().unwrap();
+            let collector = self.metrics_collector.lock().expect("Lock poisoned");
             collector.pause_collection()?;
         }
         {
-            let mut monitor = self.real_time_monitor.lock().unwrap();
+            let mut monitor = self.real_time_monitor.lock().expect("Lock poisoned");
             monitor.pause_monitoring()?;
         }
         info!("Profiling session paused");
@@ -863,17 +863,17 @@ impl MobilePerformanceProfiler {
     pub fn resume_profiling(&self) -> Result<()> {
         info!("Resuming profiling session");
         {
-            let state = self.profiling_state.read().unwrap();
+            let state = self.profiling_state.read().expect("RwLock poisoned");
             if !state.is_active {
                 return Err(anyhow::anyhow!("No active profiling session to resume"));
             }
         }
         {
-            let collector = self.metrics_collector.lock().unwrap();
+            let collector = self.metrics_collector.lock().expect("Lock poisoned");
             collector.resume_collection()?;
         }
         {
-            let mut monitor = self.real_time_monitor.lock().unwrap();
+            let mut monitor = self.real_time_monitor.lock().expect("Lock poisoned");
             monitor.resume_monitoring()?;
         }
         info!("Profiling session resumed");
@@ -916,11 +916,11 @@ impl MobilePerformanceProfiler {
             duration_ms,
         };
         {
-            let mut session = self.session_tracker.lock().unwrap();
+            let mut session = self.session_tracker.lock().expect("Lock poisoned");
             session.add_event(event);
         }
         {
-            let mut state = self.profiling_state.write().unwrap();
+            let mut state = self.profiling_state.write().expect("RwLock poisoned");
             state.events_recorded += 1;
         }
         Ok(())
@@ -935,7 +935,7 @@ impl MobilePerformanceProfiler {
     /// Current metrics snapshot or error if collection is not active.
     pub fn get_current_metrics(&self) -> Result<MobileMetricsSnapshot> {
         debug!("Getting current metrics snapshot");
-        let collector = self.metrics_collector.lock().unwrap();
+        let collector = self.metrics_collector.lock().expect("Lock poisoned");
         collector
             .get_current_snapshot()
             .context("Failed to get current metrics snapshot")
@@ -944,7 +944,7 @@ impl MobilePerformanceProfiler {
     ///
     /// Returns detailed statistics about the metrics collection process.
     pub fn get_collection_stats(&self) -> Result<CollectionStatistics> {
-        let collector = self.metrics_collector.lock().unwrap();
+        let collector = self.metrics_collector.lock().expect("Lock poisoned");
         Ok(collector.get_collection_stats()?)
     }
     /// Detect current performance bottlenecks
@@ -956,7 +956,7 @@ impl MobilePerformanceProfiler {
     /// Vector of detected bottlenecks sorted by severity.
     pub fn detect_bottlenecks(&self) -> Result<Vec<PerformanceBottleneck>> {
         debug!("Detecting performance bottlenecks");
-        let detector = self.bottleneck_detector.lock().unwrap();
+        let detector = self.bottleneck_detector.lock().expect("Lock poisoned");
         let bottlenecks = detector.get_active_bottlenecks();
         debug!("Detected {} bottlenecks", bottlenecks.len());
         Ok(bottlenecks)
@@ -971,7 +971,7 @@ impl MobilePerformanceProfiler {
     /// Vector of optimization suggestions ranked by potential impact.
     pub fn get_optimization_suggestions(&self) -> Result<Vec<OptimizationSuggestion>> {
         debug!("Getting optimization suggestions");
-        let engine = self.optimization_engine.lock().unwrap();
+        let engine = self.optimization_engine.lock().expect("Lock poisoned");
         let suggestions = engine.get_active_suggestions();
         debug!("Generated {} optimization suggestions", suggestions.len());
         Ok(suggestions)
@@ -980,7 +980,7 @@ impl MobilePerformanceProfiler {
     ///
     /// Returns currently active performance alerts that require attention.
     pub fn get_active_alerts(&self) -> Result<Vec<PerformanceAlert>> {
-        let manager = self.alert_manager.lock().unwrap();
+        let manager = self.alert_manager.lock().expect("Lock poisoned");
         Ok(manager.get_active_alerts())
     }
     /// Get comprehensive system health assessment
@@ -989,7 +989,7 @@ impl MobilePerformanceProfiler {
     /// health scores and recommendations.
     pub fn get_system_health(&self) -> Result<SystemHealth> {
         debug!("Getting system health assessment");
-        let analyzer = self.performance_analyzer.lock().unwrap();
+        let analyzer = self.performance_analyzer.lock().expect("Lock poisoned");
         analyzer.get_current_health().context("Failed to get system health assessment")
     }
     /// Export profiling data in specified format
@@ -1006,7 +1006,7 @@ impl MobilePerformanceProfiler {
         let profiling_data = self
             .generate_profiling_data()
             .context("Failed to generate profiling data for export")?;
-        let manager = self.export_manager.lock().unwrap();
+        let manager = self.export_manager.lock().expect("Lock poisoned");
         let export_path = manager
             .export_data(&profiling_data)
             .context("Failed to export profiling data")?;
@@ -1024,23 +1024,23 @@ impl MobilePerformanceProfiler {
         info!("Updating profiler configuration");
         Self::validate_config(&new_config).context("Invalid profiler configuration")?;
         {
-            let mut config = self.config.write().unwrap();
+            let mut config = self.config.write().expect("RwLock poisoned");
             *config = new_config.clone();
         }
         {
-            let collector = self.metrics_collector.lock().unwrap();
+            let collector = self.metrics_collector.lock().expect("Lock poisoned");
             collector.update_config(new_config.clone())?;
         }
         {
-            let mut detector = self.bottleneck_detector.lock().unwrap();
+            let mut detector = self.bottleneck_detector.lock().expect("Lock poisoned");
             detector.update_config(new_config.clone())?;
         }
         {
-            let mut engine = self.optimization_engine.lock().unwrap();
+            let mut engine = self.optimization_engine.lock().expect("Lock poisoned");
             engine.update_config(new_config.clone())?;
         }
         {
-            let mut monitor = self.real_time_monitor.lock().unwrap();
+            let mut monitor = self.real_time_monitor.lock().expect("Lock poisoned");
             monitor.update_config(new_config.clone())?;
         }
         info!("Profiler configuration updated successfully");
@@ -1052,14 +1052,14 @@ impl MobilePerformanceProfiler {
     ///
     /// `true` if profiling is active, `false` otherwise.
     pub fn is_profiling_active(&self) -> bool {
-        let state = self.profiling_state.read().unwrap();
+        let state = self.profiling_state.read().expect("RwLock poisoned");
         state.is_active
     }
     /// Get current profiling state information
     ///
     /// Returns comprehensive information about the current profiling state.
     pub fn get_profiling_state(&self) -> ProfilingState {
-        let state = self.profiling_state.read().unwrap();
+        let state = self.profiling_state.read().expect("RwLock poisoned");
         state.clone()
     }
     /// Generate performance report
@@ -1074,7 +1074,7 @@ impl MobilePerformanceProfiler {
         let profiling_data = self
             .generate_profiling_data()
             .context("Failed to generate profiling data for report")?;
-        let manager = self.export_manager.lock().unwrap();
+        let manager = self.export_manager.lock().expect("Lock poisoned");
         manager
             .generate_report(&profiling_data)
             .context("Failed to generate performance report")
@@ -1084,7 +1084,7 @@ impl MobilePerformanceProfiler {
     /// Returns system health status and diagnostic information.
     pub fn health_check(&self) -> Result<SystemHealth> {
         debug!("Performing profiler health check");
-        let analyzer = self.performance_analyzer.lock().unwrap();
+        let analyzer = self.performance_analyzer.lock().expect("Lock poisoned");
         analyzer.get_current_health().context("Failed to perform health check")
     }
     /// Get profiler capabilities and supported features
@@ -1092,7 +1092,7 @@ impl MobilePerformanceProfiler {
     /// Returns information about what the profiler can monitor and analyze.
     pub fn get_capabilities(&self) -> Result<ProfilerCapabilities> {
         debug!("Getting profiler capabilities");
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("RwLock poisoned");
         Ok(ProfilerCapabilities {
             memory_profiling: config.memory_profiling.enabled,
             cpu_profiling: config.cpu_profiling.enabled,
@@ -1109,7 +1109,7 @@ impl MobilePerformanceProfiler {
     /// Captures current system state for analysis.
     pub fn take_snapshot(&self) -> Result<MobileMetricsSnapshot> {
         debug!("Taking performance snapshot");
-        let collector = self.metrics_collector.lock().unwrap();
+        let collector = self.metrics_collector.lock().expect("Lock poisoned");
         collector.get_current_snapshot().context("Failed to take performance snapshot")
     }
     /// Assess overall system health
@@ -1117,35 +1117,35 @@ impl MobilePerformanceProfiler {
     /// Provides comprehensive health assessment of the mobile system.
     pub fn assess_system_health(&self) -> Result<SystemHealth> {
         debug!("Assessing system health");
-        let analyzer = self.performance_analyzer.lock().unwrap();
+        let analyzer = self.performance_analyzer.lock().expect("Lock poisoned");
         analyzer.get_current_health().context("Failed to assess system health")
     }
     /// Generate comprehensive profiling data
     fn generate_profiling_data(&self) -> Result<ProfilingData> {
         debug!("Generating comprehensive profiling data");
         let session_info = {
-            let session = self.session_tracker.lock().unwrap();
+            let session = self.session_tracker.lock().expect("Lock poisoned");
             session.get_session_info()?
         };
         let metrics = {
-            let collector = self.metrics_collector.lock().unwrap();
+            let collector = self.metrics_collector.lock().expect("Lock poisoned");
             collector.get_all_snapshots()
         };
         let events = {
-            let session = self.session_tracker.lock().unwrap();
+            let session = self.session_tracker.lock().expect("Lock poisoned");
             session.get_all_events()
         };
         let bottlenecks = {
-            let detector = self.bottleneck_detector.lock().unwrap();
+            let detector = self.bottleneck_detector.lock().expect("Lock poisoned");
             detector.get_all_bottlenecks()
         };
         let suggestions = {
-            let engine = self.optimization_engine.lock().unwrap();
+            let engine = self.optimization_engine.lock().expect("Lock poisoned");
             engine.get_all_suggestions()
         };
         let summary = self.calculate_profiling_summary(&metrics, &events, &bottlenecks)?;
         let system_health = {
-            let analyzer = self.performance_analyzer.lock().unwrap();
+            let analyzer = self.performance_analyzer.lock().expect("Lock poisoned");
             analyzer.get_current_health()?
         };
         Ok(ProfilingData {
@@ -1251,7 +1251,7 @@ impl MobilePerformanceProfiler {
     }
     /// Get current session duration in milliseconds
     fn get_session_duration_ms(&self) -> u64 {
-        let state = self.profiling_state.read().unwrap();
+        let state = self.profiling_state.read().expect("RwLock poisoned");
         if let Some(start_time) = state.start_time {
             start_time.elapsed().as_millis() as u64
         } else {

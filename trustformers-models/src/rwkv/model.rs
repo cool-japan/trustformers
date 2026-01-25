@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn test_forward_pass_shape() {
         let config = RwkvConfig::default();
-        let model = RwkvModel::new(config).unwrap();
+        let model = RwkvModel::new(config).expect("operation failed");
 
         // Create dummy input as i64 tensor (seq_len=8)
         let input_data = vec![1i64, 2, 3, 4, 5, 6, 7, 8];

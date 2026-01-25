@@ -212,7 +212,7 @@ impl QuantumTrainingManager {
         }
 
         let first_loss = self.training_history[0].total_loss;
-        let last_loss = self.training_history.last().unwrap().total_loss;
+        let last_loss = self.training_history.last().expect("operation failed").total_loss;
 
         if first_loss > 0.0 {
             (first_loss - last_loss) / first_loss

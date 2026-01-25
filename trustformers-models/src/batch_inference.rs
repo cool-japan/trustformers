@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn test_memory_estimation() {
         let config = BatchConfig::default();
-        let processor = BatchProcessor::new(config).unwrap();
+        let processor = BatchProcessor::new(config).expect("operation failed");
 
         // Test with larger sequences to see actual memory differences
         let mem_mb_small = processor.estimate_memory_mb(32, 2048);

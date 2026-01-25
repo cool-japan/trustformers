@@ -36,12 +36,13 @@
 
 use chrono::{DateTime, Utc};
 use criterion::{
-    black_box, criterion_group, criterion_main, measurement::WallTime, AxisScale, BenchmarkId,
-    Criterion, PlotConfiguration, Throughput,
+    criterion_group, criterion_main, measurement::WallTime, AxisScale, BenchmarkId, Criterion,
+    PlotConfiguration, Throughput,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;

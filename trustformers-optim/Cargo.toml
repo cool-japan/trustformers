@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-optim"
 description = "Optimizers for TrustformeRS"
+keywords = ["optimizer", "adam", "sgd", "machine-learning", "training"]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true

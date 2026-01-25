@@ -729,7 +729,7 @@ impl FalconForCausalLM {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -753,7 +753,11 @@ impl FalconForCausalLM {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {
@@ -966,7 +970,7 @@ mod tests {
         let alibi = ALiBi::new(8);
         assert!(alibi.is_ok());
 
-        let alibi = alibi.unwrap();
+        let alibi = alibi.expect("operation failed");
         assert_eq!(alibi.num_heads, 8);
     }
 

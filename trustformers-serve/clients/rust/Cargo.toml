@@ -1,12 +1,12 @@
 [package]
 name = "trustformers-client"
-version = "1.0.0"
-edition = "2021"
-authors = ["TrustformeRS Team <contact@trustformers.com>"]
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "Rust client library for TrustformeRS serving infrastructure"
-homepage = "https://github.com/cool-japan/trustformers"
-repository = "https://github.com/cool-japan/trustformers"
+homepage.workspace = true
+repository.workspace = true
 documentation = "https://docs.rs/trustformers-client"
 readme = "README.md"
 keywords = ["machine-learning", "transformers", "ai", "client", "trustformers"]

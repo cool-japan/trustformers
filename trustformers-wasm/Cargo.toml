@@ -5,9 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-wasm"
 description = "WebAssembly bindings for TrustformeRS transformer library"
 categories = ["wasm", "web-programming", "science"]
 keywords = ["transformers", "webassembly", "wasm", "machine-learning", "nlp"]
+readme = "README.md"
 
 [lints]
 workspace = true

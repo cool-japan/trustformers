@@ -647,8 +647,11 @@ impl FlamingoLanguageLayer {
         let hidden_states = if let (Some(cross_attention), Some(vision_features)) =
             (&self.cross_attention, &vision_features)
         {
-            let normed_states =
-                self.layer_norm3.as_ref().unwrap().forward(hidden_states.clone())?;
+            let normed_states = self
+                .layer_norm3
+                .as_ref()
+                .expect("operation failed")
+                .forward(hidden_states.clone())?;
             let cross_output =
                 cross_attention.forward(&normed_states, vision_features, media_locations)?;
             cross_attention_weights = cross_output.attention_weights;
@@ -1119,15 +1122,15 @@ mod tests {
     #[ignore] // Heavy test - vision encoder, run with --ignored
     fn test_flamingo_vision_encoder() {
         let config = FlamingoVisionConfig::clip_vit_l();
-        let encoder = FlamingoVisionEncoder::new(config).unwrap();
+        let encoder = FlamingoVisionEncoder::new(config).expect("operation failed");
 
         let batch_size = 2;
-        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).unwrap();
+        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).expect("operation failed");
 
         let output = encoder.forward(&pixel_values);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape()[0], batch_size);
         assert_eq!(output.shape()[1], encoder.config.seq_len()); // patches + cls
         assert_eq!(output.shape()[2], encoder.config.hidden_size);
@@ -1137,16 +1140,18 @@ mod tests {
     fn test_perceiver_resampler() {
         let config = FlamingoPerceiverConfig::default();
         let input_dim = 1024;
-        let resampler = PerceiverResampler::new(config.clone(), input_dim).unwrap();
+        let resampler =
+            PerceiverResampler::new(config.clone(), input_dim).expect("operation failed");
 
         let batch_size = 2;
         let seq_len = 257; // ViT output length
-        let vision_features = Tensor::randn(&[batch_size, seq_len, input_dim]).unwrap();
+        let vision_features =
+            Tensor::randn(&[batch_size, seq_len, input_dim]).expect("operation failed");
 
         let output = resampler.forward(&vision_features);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(
             output.shape(),
             &[batch_size, config.num_latents, config.latent_dim]
@@ -1161,20 +1166,23 @@ mod tests {
         config.cross_attention_dim = 256;
         config.num_heads = 4;
         config.head_dim = 64;
-        let cross_attn = GatedCrossAttention::new(hidden_size, config.clone()).unwrap();
+        let cross_attn =
+            GatedCrossAttention::new(hidden_size, config.clone()).expect("operation failed");
 
         let batch_size = 1; // Single batch for simplicity
         let seq_len = 8;
         let vision_seq_len = 16;
 
-        let hidden_states = Tensor::randn(&[batch_size, seq_len, hidden_size]).unwrap();
+        let hidden_states =
+            Tensor::randn(&[batch_size, seq_len, hidden_size]).expect("operation failed");
         let vision_features =
-            Tensor::randn(&[batch_size, vision_seq_len, config.cross_attention_dim]).unwrap();
+            Tensor::randn(&[batch_size, vision_seq_len, config.cross_attention_dim])
+                .expect("operation failed");
 
         let output = cross_attn.forward(&hidden_states, &vision_features, None);
         assert!(output.is_ok(), "Forward failed: {:?}", output.err());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(
             output.hidden_states.shape(),
             &[batch_size, seq_len, hidden_size]
@@ -1194,7 +1202,7 @@ mod tests {
             cross_attention_config.clone(),
             cross_attention_layers.clone(),
         )
-        .unwrap();
+        .expect("operation failed");
 
         let batch_size = 2;
         let seq_len = 10;
@@ -1204,14 +1212,14 @@ mod tests {
             &[batch_size, seq_len],
             TensorType::I64,
         )
-        .unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
+        .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
 
         // Test without vision features
         let output = model.forward(&input_ids, &attention_mask, None, None);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(
             output.logits.shape(),
             &[batch_size, seq_len, language_config.vocab_size]
@@ -1219,12 +1227,13 @@ mod tests {
 
         // Test with vision features
         let vision_features =
-            Tensor::randn(&[batch_size, 64, cross_attention_config.cross_attention_dim]).unwrap();
+            Tensor::randn(&[batch_size, 64, cross_attention_config.cross_attention_dim])
+                .expect("operation failed");
         let output_with_vision =
             model.forward(&input_ids, &attention_mask, Some(&vision_features), None);
         assert!(output_with_vision.is_ok());
 
-        let output_with_vision = output_with_vision.unwrap();
+        let output_with_vision = output_with_vision.expect("operation failed");
         assert_eq!(
             output_with_vision.logits.shape(),
             &[batch_size, seq_len, language_config.vocab_size]
@@ -1236,7 +1245,7 @@ mod tests {
     #[ignore] // Very heavy test - full end-to-end (~100s), run with --ignored
     fn test_flamingo_end_to_end() {
         let config = FlamingoConfig::flamingo_3b();
-        let model = FlamingoModel::new(config.clone()).unwrap();
+        let model = FlamingoModel::new(config.clone()).expect("operation failed");
 
         let batch_size = 1;
         let seq_len = 20;
@@ -1246,16 +1255,16 @@ mod tests {
             &[batch_size, seq_len],
             TensorType::I64,
         )
-        .unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
-        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).unwrap();
+        .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
+        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).expect("operation failed");
 
         // Test training forward pass
         let output =
             model.forward_train(&input_ids, &attention_mask, Some(&pixel_values), None, None);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(
             output.logits.shape(),
             &[batch_size, seq_len, config.language_config.vocab_size]
@@ -1263,7 +1272,7 @@ mod tests {
         assert!(output.vision_features.is_some());
         assert!(!output.cross_attention_weights.is_empty());
 
-        let vision_features = output.vision_features.unwrap();
+        let vision_features = output.vision_features.expect("operation failed");
         assert_eq!(vision_features.shape()[0], batch_size);
         assert_eq!(vision_features.shape()[1], config.media_token_length);
         assert_eq!(vision_features.shape()[2], config.vision_language_dim);
@@ -1273,7 +1282,7 @@ mod tests {
     #[ignore] // Heavy test - Flamingo generation, run with --ignored
     fn test_flamingo_generation() {
         let config = FlamingoConfig::flamingo_3b();
-        let model = FlamingoModel::new(config.clone()).unwrap();
+        let model = FlamingoModel::new(config.clone()).expect("operation failed");
 
         let batch_size = 1;
         let seq_len = 10;
@@ -1283,9 +1292,9 @@ mod tests {
             &[batch_size, seq_len],
             TensorType::I64,
         )
-        .unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
-        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).unwrap();
+        .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
+        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).expect("operation failed");
 
         // Test generation
         let generated = model.generate_with_shots(
@@ -1299,7 +1308,7 @@ mod tests {
         );
 
         assert!(generated.is_ok());
-        let generated = generated.unwrap();
+        let generated = generated.expect("operation failed");
         assert_eq!(generated.shape()[0], batch_size);
         assert!(generated.shape()[1] > seq_len); // Should have generated new tokens
     }
@@ -1308,7 +1317,7 @@ mod tests {
     #[ignore] // Heavy test - Flamingo with media locations, run with --ignored
     fn test_flamingo_with_media_locations() {
         let config = FlamingoConfig::flamingo_3b();
-        let model = FlamingoModel::new(config.clone()).unwrap();
+        let model = FlamingoModel::new(config.clone()).expect("operation failed");
 
         let batch_size = 1;
         let seq_len = 20;
@@ -1318,14 +1327,14 @@ mod tests {
             &[batch_size, seq_len],
             TensorType::I64,
         )
-        .unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
-        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).unwrap();
+        .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
+        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).expect("operation failed");
 
         // Create media locations mask (first 5 tokens are media tokens)
-        let mut media_locations = Tensor::zeros(&[batch_size, seq_len]).unwrap();
+        let mut media_locations = Tensor::zeros(&[batch_size, seq_len]).expect("operation failed");
         for i in 0..5 {
-            media_locations = media_locations.set_scalar(&[0, i], 1.0).unwrap();
+            media_locations = media_locations.set_scalar(&[0, i], 1.0).expect("operation failed");
         }
 
         let output = model.forward_train(
@@ -1337,7 +1346,7 @@ mod tests {
         );
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(
             output.logits.shape(),
             &[batch_size, seq_len, config.language_config.vocab_size]
@@ -1368,27 +1377,29 @@ mod tests {
 
         // Test layer with cross-attention
         let layer_with_cross =
-            FlamingoLanguageLayer::new(&language_config, &cross_attention_config, true).unwrap();
+            FlamingoLanguageLayer::new(&language_config, &cross_attention_config, true)
+                .expect("operation failed");
         assert!(layer_with_cross.cross_attention.is_some());
         assert!(layer_with_cross.layer_norm3.is_some());
 
         // Test layer without cross-attention
         let layer_without_cross =
-            FlamingoLanguageLayer::new(&language_config, &cross_attention_config, false).unwrap();
+            FlamingoLanguageLayer::new(&language_config, &cross_attention_config, false)
+                .expect("operation failed");
         assert!(layer_without_cross.cross_attention.is_none());
         assert!(layer_without_cross.layer_norm3.is_none());
 
         let batch_size = 2;
         let seq_len = 10;
-        let hidden_states =
-            Tensor::randn(&[batch_size, seq_len, language_config.hidden_size]).unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
+        let hidden_states = Tensor::randn(&[batch_size, seq_len, language_config.hidden_size])
+            .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
 
         // Test forward without vision features
         let output = layer_without_cross.forward(&hidden_states, &attention_mask, None, None);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.hidden_states.shape(), hidden_states.shape());
         assert!(output.cross_attention_weights.is_none());
     }

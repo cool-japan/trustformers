@@ -171,7 +171,9 @@ impl MemoryManager {
         }
 
         // Sort by importance (descending)
-        memories.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap());
+        memories.sort_by(|a, b| {
+            b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Group similar memories and merge them
         let mut compressed = Vec::new();
@@ -206,7 +208,9 @@ impl MemoryManager {
         }
 
         // Keep only the most important memories
-        compressed.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap());
+        compressed.sort_by(|a, b| {
+            b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal)
+        });
         compressed.truncate(self.config.max_memories);
 
         *memories = compressed;
@@ -261,8 +265,10 @@ impl MemoryManager {
         // Find the most important memory as the base
         let base_memory = memories
             .iter()
-            .max_by(|a, b| a.importance.partial_cmp(&b.importance).unwrap())
-            .unwrap();
+            .max_by(|a, b| {
+                a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("memories list should not be empty");
 
         // Combine content
         let mut combined_content = base_memory.content.clone();
@@ -286,7 +292,11 @@ impl MemoryManager {
         let combined_importance = (max_importance + avg_importance) / 2.0;
 
         // Use the most recent access time
-        let last_accessed = memories.iter().map(|m| m.last_accessed).max().unwrap();
+        let last_accessed = memories
+            .iter()
+            .map(|m| m.last_accessed)
+            .max()
+            .expect("memories should have at least one element");
 
         // Sum access counts
         let total_access_count = memories.iter().map(|m| m.access_count).sum();
@@ -350,7 +360,9 @@ impl MemoryManager {
 
         let most_important = memories
             .iter()
-            .max_by(|a, b| a.importance.partial_cmp(&b.importance).unwrap())
+            .max_by(|a, b| {
+                a.importance.partial_cmp(&b.importance).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned();
 
         let most_accessed = memories.iter().max_by_key(|m| m.access_count).cloned();

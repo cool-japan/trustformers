@@ -39,7 +39,7 @@ mod tests {
     #[ignore] // Heavy test - full end-to-end pipeline, run with --ignored
     fn test_dalle_mini_end_to_end() {
         let config = DalleConfig::dalle_mini();
-        let model = DalleModel::new(config.clone()).unwrap();
+        let model = DalleModel::new(config.clone()).expect("operation failed");
 
         // Create sample inputs
         let batch_size = 1;
@@ -50,17 +50,17 @@ mod tests {
             &[batch_size, seq_len],
             TensorType::I64,
         )
-        .unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
-        let pixel_values =
-            Tensor::randn(&[batch_size, 3, config.image_size, config.image_size]).unwrap();
+        .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
+        let pixel_values = Tensor::randn(&[batch_size, 3, config.image_size, config.image_size])
+            .expect("operation failed");
 
         // Test training forward pass
         let train_output =
             model.forward_train(&input_ids, &attention_mask, &pixel_values, None, None);
         assert!(train_output.is_ok());
 
-        let train_output = train_output.unwrap();
+        let train_output = train_output.expect("operation failed");
 
         // Verify outputs have correct shapes
         assert!(train_output.text_embeds.is_some());
@@ -71,11 +71,11 @@ mod tests {
         assert!(train_output.noise_pred.is_some());
         assert!(train_output.noise_pred_target.is_some());
 
-        let text_embeds = train_output.text_embeds.unwrap();
-        let image_embeds = train_output.image_embeds.unwrap();
-        let logits_per_image = train_output.logits_per_image.unwrap();
-        let latents = train_output.latents.unwrap();
-        let noise_pred = train_output.noise_pred.unwrap();
+        let text_embeds = train_output.text_embeds.expect("operation failed");
+        let image_embeds = train_output.image_embeds.expect("operation failed");
+        let logits_per_image = train_output.logits_per_image.expect("operation failed");
+        let latents = train_output.latents.expect("operation failed");
+        let noise_pred = train_output.noise_pred.expect("operation failed");
 
         // Check tensor shapes
         assert_eq!(text_embeds.shape()[0], batch_size);
@@ -91,7 +91,7 @@ mod tests {
             model.generate(&input_ids, &attention_mask, Some(5), Some(3.0), Some(42));
         assert!(generated_images.is_ok());
 
-        let generated_images = generated_images.unwrap();
+        let generated_images = generated_images.expect("operation failed");
         assert_eq!(
             generated_images.shape(),
             &[batch_size, 3, config.image_size, config.image_size]
@@ -102,7 +102,7 @@ mod tests {
     #[ignore] // Heavy test - DALL-E 2 model, run with --ignored
     fn test_dalle_2_configuration() {
         let config = DalleConfig::dalle_2();
-        let model = DalleModel::new(config.clone()).unwrap();
+        let model = DalleModel::new(config.clone()).expect("operation failed");
 
         // Verify configuration parameters
         assert_eq!(config.text_vocab_size, 49408); // CLIP vocab
@@ -122,14 +122,14 @@ mod tests {
             &[batch_size, seq_len],
             TensorType::I64,
         )
-        .unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
+        .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
 
         // Test text encoding
         let text_features = model.text_encoder.forward(&input_ids, &attention_mask);
         assert!(text_features.is_ok());
 
-        let text_features = text_features.unwrap();
+        let text_features = text_features.expect("operation failed");
         assert_eq!(text_features.shape()[0], batch_size);
         assert_eq!(text_features.shape()[1], config.text_config.hidden_size);
     }
@@ -194,11 +194,11 @@ mod tests {
             let json = serde_json::to_string(&config);
             assert!(json.is_ok());
 
-            let json_str = json.unwrap();
+            let json_str = json.expect("operation failed");
             let deserialized: Result<DalleConfig, _> = serde_json::from_str(&json_str);
             assert!(deserialized.is_ok());
 
-            let deserialized = deserialized.unwrap();
+            let deserialized = deserialized.expect("operation failed");
 
             // Verify key fields are preserved
             assert_eq!(config.text_vocab_size, deserialized.text_vocab_size);
@@ -224,7 +224,7 @@ mod tests {
     #[ignore] // Heavy test - model output structure, run with --ignored
     fn test_dalle_model_output_structure() {
         let config = DalleConfig::dalle_mini();
-        let model = DalleModel::new(config.clone()).unwrap();
+        let model = DalleModel::new(config.clone()).expect("operation failed");
 
         let batch_size = 1;
         let seq_len = 77;
@@ -234,14 +234,14 @@ mod tests {
             &[batch_size, seq_len],
             TensorType::I64,
         )
-        .unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
-        let pixel_values =
-            Tensor::randn(&[batch_size, 3, config.image_size, config.image_size]).unwrap();
+        .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
+        let pixel_values = Tensor::randn(&[batch_size, 3, config.image_size, config.image_size])
+            .expect("operation failed");
 
         let output = model
             .forward_train(&input_ids, &attention_mask, &pixel_values, None, None)
-            .unwrap();
+            .expect("operation failed");
 
         // Verify all expected outputs are present
         assert!(output.text_embeds.is_some());
@@ -253,8 +253,8 @@ mod tests {
         assert!(output.noise_pred_target.is_some());
 
         // Verify contrastive logits are symmetric
-        let logits_per_image = output.logits_per_image.unwrap();
-        let logits_per_text = output.logits_per_text.unwrap();
+        let logits_per_image = output.logits_per_image.expect("operation failed");
+        let logits_per_text = output.logits_per_text.expect("operation failed");
 
         assert_eq!(logits_per_image.shape()[0], batch_size);
         assert_eq!(logits_per_image.shape()[1], batch_size);

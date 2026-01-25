@@ -479,7 +479,13 @@ impl LearnedQuantOptimizer {
 
         // Set updated values
         parameter.set_data(new_param)?;
-        momentum_dict.get_mut(param_name).unwrap().set_data(new_momentum)?;
+        if let Some(momentum_var) = momentum_dict.get_mut(param_name) {
+            momentum_var.set_data(new_momentum)?;
+        } else {
+            return Err(TrustformersError::runtime_error(
+                "Momentum variable not found after insertion".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -513,7 +519,13 @@ impl LearnedQuantOptimizer {
 
         // Set updated values
         parameter.set_data(new_param)?;
-        self.scale_momentum.get_mut(param_name).unwrap().set_data(new_momentum)?;
+        if let Some(momentum_var) = self.scale_momentum.get_mut(param_name) {
+            momentum_var.set_data(new_momentum)?;
+        } else {
+            return Err(TrustformersError::runtime_error(
+                "Scale momentum variable not found after insertion".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -547,7 +559,13 @@ impl LearnedQuantOptimizer {
 
         // Set updated values
         parameter.set_data(new_param)?;
-        self.zero_point_momentum.get_mut(param_name).unwrap().set_data(new_momentum)?;
+        if let Some(momentum_var) = self.zero_point_momentum.get_mut(param_name) {
+            momentum_var.set_data(new_momentum)?;
+        } else {
+            return Err(TrustformersError::runtime_error(
+                "Zero point momentum variable not found after insertion".into(),
+            ));
+        }
 
         Ok(())
     }

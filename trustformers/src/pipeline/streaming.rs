@@ -366,7 +366,7 @@ where
 
     /// Get current streaming statistics
     pub fn get_stats(&self) -> StreamStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("lock should not be poisoned").clone()
     }
 }
 
@@ -436,7 +436,7 @@ where
 
         // Add to priority queue
         {
-            let mut queues = self.priority_queues.lock().unwrap();
+            let mut queues = self.priority_queues.lock().expect("lock should not be poisoned");
             queues[priority].push_back(PriorityItem {
                 item,
                 timestamp: start_time,
@@ -450,7 +450,7 @@ where
 
     async fn process_next_priority_item(&self) -> Result<O> {
         let priority_item = {
-            let mut queues = self.priority_queues.lock().unwrap();
+            let mut queues = self.priority_queues.lock().expect("lock should not be poisoned");
 
             // Find highest priority non-empty queue
             let mut found_item = None;
@@ -504,7 +504,7 @@ where
 
     /// Get real-time processing statistics
     pub fn get_stats(&self) -> RealTimeStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("lock should not be poisoned").clone()
     }
 }
 
@@ -631,12 +631,12 @@ impl BackpressureController {
     }
 
     pub fn should_throttle(&self) -> bool {
-        let load = *self.current_load.lock().unwrap();
+        let load = *self.current_load.lock().expect("lock should not be poisoned");
         load > self.threshold
     }
 
     pub fn update_load(&mut self, new_measurement: f64) {
-        let mut load = self.current_load.lock().unwrap();
+        let mut load = self.current_load.lock().expect("lock should not be poisoned");
         *load = (*load * 0.9) + (new_measurement * 0.1); // Exponential moving average
     }
 }

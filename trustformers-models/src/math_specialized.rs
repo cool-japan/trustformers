@@ -920,12 +920,12 @@ mod tests {
     fn test_from_pretrained_name() {
         let config = MathSpecializedConfig::from_pretrained_name("math-llama-7b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.model_variant, MathModelVariant::MathLlama);
 
         let config = MathSpecializedConfig::from_pretrained_name("minerva-8b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.model_variant, MathModelVariant::Minerva);
 
         let config = MathSpecializedConfig::from_pretrained_name("unknown-model");
@@ -1046,7 +1046,7 @@ mod tests {
 
         let model = MathSpecializedModel::new(config.clone());
         assert!(model.is_ok());
-        let model = model.unwrap();
+        let model = model.expect("operation failed");
         assert!(model.supports_domain(&MathDomain::Algebra));
         assert!(model.supports_strategy(&ReasoningStrategy::StepByStep));
 

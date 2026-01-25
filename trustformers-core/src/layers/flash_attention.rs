@@ -31,11 +31,19 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 #[cfg(not(target_os = "macos"))]
 #[inline]
 fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    // Safe expect: shape and vector length are guaranteed to match by caller
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).expect("BLAS input shape mismatch");
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).expect("BLAS input shape mismatch");
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).expect("BLAS output shape mismatch");
     f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
-    c.copy_from_slice(c_arr.as_slice().unwrap());
+    if let Some(slice) = c_arr.as_slice() {
+        c.copy_from_slice(slice);
+    } else {
+        // Fallback: copy element by element
+        for (i, &val) in c_arr.iter().enumerate() {
+            c[i] = val;
+        }
+    }
 }
 
 /// FlashAttention: Memory-efficient attention computation

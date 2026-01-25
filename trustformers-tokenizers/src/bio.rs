@@ -692,8 +692,8 @@ impl BioTokenizer {
     /// Create secondary structure patterns
     fn create_structure_patterns() -> Vec<Regex> {
         vec![
-            Regex::new(r"[HEC]+").unwrap(), // Secondary structure annotations
-            Regex::new(r"[αβ]+").unwrap(),  // Greek letter annotations
+            Regex::new(r"[HEC]+").expect("valid regex"), // Secondary structure annotations
+            Regex::new(r"[αβ]+").expect("valid regex"),  // Greek letter annotations
         ]
     }
 

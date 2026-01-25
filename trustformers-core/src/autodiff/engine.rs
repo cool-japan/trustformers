@@ -187,7 +187,7 @@ impl AutodiffEngine {
         Variable::from_graph(
             self.graph.clone(),
             {
-                let mut graph = self.graph.lock().unwrap();
+                let mut graph = self.graph.lock().expect("lock should not be poisoned");
                 graph.add_node(tensor, requires_grad, None)
             },
             requires_grad,
@@ -204,7 +204,7 @@ impl AutodiffEngine {
         Variable::from_graph(
             self.graph.clone(),
             {
-                let mut graph = self.graph.lock().unwrap();
+                let mut graph = self.graph.lock().expect("lock should not be poisoned");
                 graph.add_node(tensor, requires_grad, Some(name))
             },
             requires_grad,
@@ -222,7 +222,7 @@ impl AutodiffEngine {
         }?;
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("lock should not be poisoned");
         stats.backward_passes += 1;
         stats.backward_time_us += start_time.elapsed().as_micros() as u64;
 
@@ -233,20 +233,20 @@ impl AutodiffEngine {
     fn forward_mode_backward(&self, output: &Variable, grad_output: Option<Tensor>) -> Result<()> {
         // Forward-mode AD is typically used for computing derivatives with respect to few inputs
         // This is a simplified implementation
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(output.node_id(), grad_output)
     }
 
     /// Reverse-mode automatic differentiation (standard backpropagation)
     fn reverse_mode_backward(&self, output: &Variable, grad_output: Option<Tensor>) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(output.node_id(), grad_output)
     }
 
     /// Mixed-mode automatic differentiation
     fn mixed_mode_backward(&self, output: &Variable, grad_output: Option<Tensor>) -> Result<()> {
         // Decide between forward and reverse mode based on graph characteristics
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         let num_nodes = graph.num_nodes();
 
         // Use forward mode for small graphs, reverse mode for large graphs
@@ -261,34 +261,34 @@ impl AutodiffEngine {
 
     /// Zero all gradients in the computation graph
     pub fn zero_grad(&self) {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.zero_grad();
     }
 
     /// Get gradient for a variable
     pub fn get_grad(&self, variable: &Variable) -> Result<Option<Tensor>> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         Ok(graph.get_gradient(variable.node_id()).cloned())
     }
 
     /// Clear the computation graph
     pub fn clear_graph(&self) {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         *graph = ComputationGraph::new();
 
-        let mut tape = self.tape.lock().unwrap();
+        let mut tape = self.tape.lock().expect("lock should not be poisoned");
         tape.clear();
     }
 
     /// Get engine statistics
     pub fn stats(&self) -> AutodiffStats {
-        let stats = self.stats.lock().unwrap();
+        let stats = self.stats.lock().expect("lock should not be poisoned");
         stats.clone()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("lock should not be poisoned");
         *stats = AutodiffStats::default();
     }
 
@@ -303,7 +303,7 @@ impl AutodiffEngine {
             return Ok(());
         }
 
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
 
         // Perform various graph optimizations
         self.eliminate_dead_nodes(&mut graph)?;
@@ -411,7 +411,7 @@ impl AutodiffEngine {
 
     /// Export computation graph for visualization
     pub fn export_graph(&self) -> Result<String> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         let graph_export = graph.export_graph();
 
         // Convert to DOT format for visualization
@@ -447,7 +447,7 @@ impl AutodiffEngine {
 
     /// Get memory usage information
     pub fn memory_info(&self) -> Result<MemoryInfo> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         let mut total_memory = 0;
         let mut num_tensors = 0;
 

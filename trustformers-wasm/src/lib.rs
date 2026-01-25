@@ -1,3 +1,67 @@
+//! # TrustformeRS WebAssembly Bindings
+//!
+//! Run transformer models directly in the browser with WebAssembly and WebGPU acceleration.
+//!
+//! This crate provides WebAssembly bindings for TrustformeRS, enabling transformer model
+//! inference in web browsers with near-native performance. It leverages WebGPU for GPU
+//! acceleration and Web Workers for parallel processing.
+//!
+//! ## Features
+//!
+//! - **WebGPU acceleration**: GPU compute in the browser via WebGPU API
+//! - **Web Workers**: Multi-threaded inference using Web Workers
+//! - **Streaming inference**: Progressive token generation for chat applications
+//! - **Zero downloads**: Models run entirely in-browser (no server calls)
+//! - **Privacy-preserving**: All computation happens client-side
+//!
+//! ## Quick Start
+//!
+//! ```javascript
+//! import init, { Model, Tokenizer } from './trustformers_wasm.js';
+//!
+//! async function main() {
+//!   // Initialize the WASM module
+//!   await init();
+//!
+//!   // Load model and tokenizer
+//!   const model = await Model.from_pretrained("bert-base-uncased");
+//!   const tokenizer = await Tokenizer.from_pretrained("bert-base-uncased");
+//!
+//!   // Run inference
+//!   const text = "Hello, world!";
+//!   const tokens = tokenizer.encode(text);
+//!   const output = await model.forward(tokens);
+//!
+//!   console.log(output);
+//! }
+//! ```
+//!
+//! ## Architecture
+//!
+//! - **WASM Core**: Compiled Rust code for tensor operations
+//! - **WebGPU Backend**: GPU compute shaders for matrix operations
+//! - **Web Workers**: Parallel processing for batched inference
+//! - **Shared Memory**: Zero-copy data transfer between workers
+//!
+//! ## Performance
+//!
+//! - **WebGPU**: ~50-100x faster than CPU-only WASM
+//! - **SIMD**: Vectorized operations via WASM SIMD
+//! - **Streaming**: Progressive inference for lower latency
+//! - **Caching**: Model weights cached in IndexedDB
+//!
+//! ## Browser Support
+//!
+//! - Chrome/Edge 113+ (WebGPU)
+//! - Firefox 121+ (WebGPU experimental)
+//! - Safari 18+ (WebGPU preview)
+//!
+//! ## Build
+//!
+//! ```bash
+//! wasm-pack build --target web --features webgpu
+//! ```
+
 // Using std for wasm-bindgen compatibility and feature completeness
 // Note: While wasm-bindgen 0.2.100+ supports no_std, this codebase uses many std features
 // (HashMap, async/await, complex error types) that would require extensive refactoring

@@ -441,7 +441,7 @@ impl MemoryPool {
         let ptr_raw = ptr.as_ptr();
 
         let size = {
-            let mut allocated = self.allocated_blocks.lock().unwrap();
+            let mut allocated = self.allocated_blocks.lock().expect("lock should not be poisoned");
             if let Some(size) = allocated.remove(&ptr_raw) {
                 size
             } else {
@@ -452,7 +452,7 @@ impl MemoryPool {
 
         // Return to free blocks for reuse
         {
-            let mut free_blocks = self.free_blocks.write().unwrap();
+            let mut free_blocks = self.free_blocks.write().expect("lock should not be poisoned");
             free_blocks.entry(size).or_default().push(ptr);
         }
 
@@ -474,17 +474,20 @@ impl MemoryPool {
 
     /// Get memory statistics
     pub fn get_stats(&self) -> AllocationStats {
-        self.allocation_stats.lock().unwrap().clone()
+        self.allocation_stats.lock().expect("lock should not be poisoned").clone()
     }
 
     /// Get current memory usage
     pub fn memory_usage(&self) -> usize {
-        self.allocation_stats.lock().unwrap().current_memory_usage
+        self.allocation_stats
+            .lock()
+            .expect("lock should not be poisoned")
+            .current_memory_usage
     }
 
     /// Clear unused blocks to free memory
     pub fn clear_unused(&self) {
-        let mut free_blocks = self.free_blocks.write().unwrap();
+        let mut free_blocks = self.free_blocks.write().expect("lock should not be poisoned");
 
         for (size, blocks) in free_blocks.drain() {
             for block in blocks {
@@ -498,7 +501,7 @@ impl MemoryPool {
     }
 
     fn try_reuse_block(&self, size: usize) -> Option<NonNull<u8>> {
-        let mut free_blocks = self.free_blocks.write().unwrap();
+        let mut free_blocks = self.free_blocks.write().expect("lock should not be poisoned");
 
         // Try exact size first
         if let Some(blocks) = free_blocks.get_mut(&size) {
@@ -519,12 +522,12 @@ impl MemoryPool {
 
     fn record_allocation(&self, ptr: *mut u8, size: usize) {
         {
-            let mut allocated = self.allocated_blocks.lock().unwrap();
+            let mut allocated = self.allocated_blocks.lock().expect("lock should not be poisoned");
             allocated.insert(ptr, size);
         }
 
         {
-            let mut stats = self.allocation_stats.lock().unwrap();
+            let mut stats = self.allocation_stats.lock().expect("lock should not be poisoned");
             stats.total_allocations += 1;
             stats.current_memory_usage += size;
             if stats.current_memory_usage > stats.peak_memory_usage {
@@ -533,26 +536,26 @@ impl MemoryPool {
         }
 
         {
-            let mut total = self.total_allocated.lock().unwrap();
+            let mut total = self.total_allocated.lock().expect("lock should not be poisoned");
             *total += size;
         }
     }
 
     fn record_deallocation(&self, size: usize) {
         {
-            let mut stats = self.allocation_stats.lock().unwrap();
+            let mut stats = self.allocation_stats.lock().expect("lock should not be poisoned");
             stats.total_deallocations += 1;
             stats.current_memory_usage = stats.current_memory_usage.saturating_sub(size);
         }
 
         {
-            let mut total = self.total_allocated.lock().unwrap();
+            let mut total = self.total_allocated.lock().expect("lock should not be poisoned");
             *total = total.saturating_sub(size);
         }
     }
 
     fn record_allocation_failure(&self) {
-        let mut stats = self.allocation_stats.lock().unwrap();
+        let mut stats = self.allocation_stats.lock().expect("lock should not be poisoned");
         stats.allocation_failures += 1;
     }
 

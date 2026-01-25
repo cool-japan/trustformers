@@ -634,7 +634,7 @@ impl GemmaForCausalLM {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -658,7 +658,11 @@ impl GemmaForCausalLM {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {

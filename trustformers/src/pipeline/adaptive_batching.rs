@@ -107,7 +107,7 @@ impl AdaptiveBatchOptimizer {
 
     /// Get the current optimal batch size
     pub fn get_optimal_batch_size(&self) -> Option<usize> {
-        *self.optimal_batch_size.read().unwrap()
+        *self.optimal_batch_size.read().expect("lock should not be poisoned")
     }
 
     /// Record a performance sample for a given batch size
@@ -116,7 +116,7 @@ impl AdaptiveBatchOptimizer {
 
         // Add sample to performance data
         {
-            let mut data = self.performance_data.write().unwrap();
+            let mut data = self.performance_data.write().expect("lock should not be poisoned");
             let samples = data.entry(batch_size).or_default();
             samples.push_back(sample);
 
@@ -131,7 +131,7 @@ impl AdaptiveBatchOptimizer {
 
         // Check if we should re-evaluate optimal size
         let should_reevaluate = {
-            let last_eval = self.last_evaluation.read().unwrap();
+            let last_eval = self.last_evaluation.read().expect("lock should not be poisoned");
             last_eval.elapsed().as_secs() >= self.config.reevaluation_interval_secs
         };
 
@@ -144,8 +144,8 @@ impl AdaptiveBatchOptimizer {
 
     /// Get the next batch size to test (for exploration)
     pub fn get_next_test_size(&self) -> Option<usize> {
-        let mut current_test = self.current_test_size.write().unwrap();
-        let mut iteration = self.test_iteration.write().unwrap();
+        let mut current_test = self.current_test_size.write().expect("lock should not be poisoned");
+        let mut iteration = self.test_iteration.write().expect("lock should not be poisoned");
 
         match *current_test {
             None => {
@@ -159,7 +159,7 @@ impl AdaptiveBatchOptimizer {
 
                 // Check if we've collected enough samples for current size
                 let enough_samples = {
-                    let data = self.performance_data.read().unwrap();
+                    let data = self.performance_data.read().expect("lock should not be poisoned");
                     data.get(&size)
                         .map(|samples| samples.len() >= self.config.samples_per_size)
                         .unwrap_or(false)
@@ -204,7 +204,7 @@ impl AdaptiveBatchOptimizer {
     /// Update statistics for a specific batch size
     fn update_batch_stats(&self, batch_size: usize) -> Result<()> {
         let samples = {
-            let data = self.performance_data.read().unwrap();
+            let data = self.performance_data.read().expect("lock should not be poisoned");
             data.get(&batch_size).cloned().unwrap_or_default()
         };
 
@@ -258,7 +258,7 @@ impl AdaptiveBatchOptimizer {
 
         // Store stats
         {
-            let mut batch_stats = self.batch_stats.write().unwrap();
+            let mut batch_stats = self.batch_stats.write().expect("lock should not be poisoned");
             batch_stats.insert(batch_size, stats);
         }
 
@@ -295,7 +295,7 @@ impl AdaptiveBatchOptimizer {
 
     /// Evaluate and update the optimal batch size
     fn evaluate_optimal_batch_size(&self) -> Result<()> {
-        let stats = self.batch_stats.read().unwrap();
+        let stats = self.batch_stats.read().expect("lock should not be poisoned");
 
         if stats.is_empty() {
             return Ok(());
@@ -305,11 +305,12 @@ impl AdaptiveBatchOptimizer {
         let optimal = stats
             .values()
             .filter(|s| s.sample_count >= self.config.samples_per_size)
-            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap())
+            .max_by(|a, b| a.score.partial_cmp(&b.score).unwrap_or(std::cmp::Ordering::Equal))
             .map(|s| s.batch_size);
 
         if let Some(optimal_size) = optimal {
-            let mut current_optimal = self.optimal_batch_size.write().unwrap();
+            let mut current_optimal =
+                self.optimal_batch_size.write().expect("lock should not be poisoned");
             *current_optimal = Some(optimal_size);
 
             tracing::info!(
@@ -321,7 +322,7 @@ impl AdaptiveBatchOptimizer {
 
         // Update last evaluation time
         {
-            let mut last_eval = self.last_evaluation.write().unwrap();
+            let mut last_eval = self.last_evaluation.write().expect("lock should not be poisoned");
             *last_eval = Instant::now();
         }
 
@@ -330,8 +331,8 @@ impl AdaptiveBatchOptimizer {
 
     /// Get comprehensive performance report
     pub fn get_performance_report(&self) -> PerformanceReport {
-        let stats = self.batch_stats.read().unwrap();
-        let optimal = *self.optimal_batch_size.read().unwrap();
+        let stats = self.batch_stats.read().expect("lock should not be poisoned");
+        let optimal = *self.optimal_batch_size.read().expect("lock should not be poisoned");
 
         let mut batch_performances: Vec<_> = stats.values().cloned().collect();
         batch_performances.sort_by_key(|s| s.batch_size);
@@ -340,13 +341,13 @@ impl AdaptiveBatchOptimizer {
             optimal_batch_size: optimal,
             batch_performances,
             total_evaluations: stats.len(),
-            last_evaluation: *self.last_evaluation.read().unwrap(),
+            last_evaluation: *self.last_evaluation.read().expect("lock should not be poisoned"),
         }
     }
 
     /// Export performance data for analysis
     pub fn export_data(&self) -> Result<String> {
-        let stats = self.batch_stats.read().unwrap();
+        let stats = self.batch_stats.read().expect("lock should not be poisoned");
         let data = stats.values().collect::<Vec<_>>();
         serde_json::to_string_pretty(&data)
             .map_err(|e| TrustformersError::runtime_error(format!("Failed to export data: {}", e)))
@@ -359,7 +360,7 @@ impl AdaptiveBatchOptimizer {
         })?;
 
         {
-            let mut stats = self.batch_stats.write().unwrap();
+            let mut stats = self.batch_stats.write().expect("lock should not be poisoned");
             for stat in imported_stats {
                 stats.insert(stat.batch_size, stat);
             }

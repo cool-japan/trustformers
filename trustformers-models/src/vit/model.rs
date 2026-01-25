@@ -488,7 +488,7 @@ impl ViTModel {
             Ok(output.slice(s![.., 0, ..]).to_owned())
         } else {
             // Use mean of all patch tokens
-            Ok(output.mean_axis(Axis(1)).unwrap())
+            Ok(output.mean_axis(Axis(1)).expect("operation failed"))
         }
     }
 }

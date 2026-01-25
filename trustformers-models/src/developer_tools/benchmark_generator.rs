@@ -94,7 +94,8 @@ impl BenchmarkGenerator {
     /// Generate benchmark file header
     fn generate_header(&self) -> String {
         format!(
-            "//! Performance Benchmarks for {}\n//!\n//! This file is auto-generated. Do not edit manually.\n\nuse criterion::{{black_box, criterion_group, criterion_main, Criterion}};\nuse super::{{{}Config, {}Model}};\nuse trustformers_core::tensor::Tensor;\nuse std::time::Duration;\n\n",
+            "//! Performance Benchmarks for {}\n//!\n//! This file is auto-generated. Do not edit manually.\n\nuse criterion::{{criterion_group, criterion_main, Criterion}};
+use std::hint::black_box;\nuse super::{{{}Config, {}Model}};\nuse trustformers_core::tensor::Tensor;\nuse std::time::Duration;\n\n",
             self.config.model_name,
             self.config.model_name,
             self.config.model_name

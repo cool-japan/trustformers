@@ -372,19 +372,22 @@ mod tests {
         let config = XLSTMConfig::default();
 
         // Test CPU creation (default)
-        let model_cpu = XLSTMModel::new(config.clone()).unwrap();
+        let model_cpu = XLSTMModel::new(config.clone()).expect("operation failed");
         assert_eq!(model_cpu.device(), Device::CPU);
 
         // Test explicit CPU creation
-        let model_cpu_explicit = XLSTMModel::new_with_device(config.clone(), Device::CPU).unwrap();
+        let model_cpu_explicit =
+            XLSTMModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
         assert_eq!(model_cpu_explicit.device(), Device::CPU);
 
         // Test Metal device creation
-        let model_metal = XLSTMModel::new_with_device(config.clone(), Device::Metal(0)).unwrap();
+        let model_metal = XLSTMModel::new_with_device(config.clone(), Device::Metal(0))
+            .expect("operation failed");
         assert_eq!(model_metal.device(), Device::Metal(0));
 
         // Test CUDA device creation
-        let model_cuda = XLSTMModel::new_with_device(config.clone(), Device::CUDA(0)).unwrap();
+        let model_cuda =
+            XLSTMModel::new_with_device(config.clone(), Device::CUDA(0)).expect("operation failed");
         assert_eq!(model_cuda.device(), Device::CUDA(0));
     }
 
@@ -393,12 +396,12 @@ mod tests {
         let config = XLSTMConfig::default();
 
         // Test CPU creation (default)
-        let model_cpu = XLSTMForCausalLM::new(config.clone()).unwrap();
+        let model_cpu = XLSTMForCausalLM::new(config.clone()).expect("operation failed");
         assert_eq!(model_cpu.device(), Device::CPU);
 
         // Test explicit device creation
-        let model_metal =
-            XLSTMForCausalLM::new_with_device(config.clone(), Device::Metal(0)).unwrap();
+        let model_metal = XLSTMForCausalLM::new_with_device(config.clone(), Device::Metal(0))
+            .expect("operation failed");
         assert_eq!(model_metal.device(), Device::Metal(0));
     }
 
@@ -408,7 +411,8 @@ mod tests {
         let num_labels = 2;
 
         // Test CPU creation (default)
-        let model_cpu = XLSTMForSequenceClassification::new(config.clone(), num_labels).unwrap();
+        let model_cpu = XLSTMForSequenceClassification::new(config.clone(), num_labels)
+            .expect("operation failed");
         assert_eq!(model_cpu.device(), Device::CPU);
 
         // Test explicit device creation
@@ -417,7 +421,7 @@ mod tests {
             num_labels,
             Device::CUDA(0),
         )
-        .unwrap();
+        .expect("operation failed");
         assert_eq!(model_cuda.device(), Device::CUDA(0));
     }
 
@@ -482,13 +486,15 @@ mod tests {
         let config = XLSTMConfig::default();
 
         // Create model on Metal
-        let model = XLSTMModel::new_with_device(config.clone(), Device::Metal(0)).unwrap();
+        let model = XLSTMModel::new_with_device(config.clone(), Device::Metal(0))
+            .expect("operation failed");
 
         // Verify device is Metal
         assert_eq!(model.device(), Device::Metal(0));
 
         // Create causal LM model on CUDA
-        let causal_lm = XLSTMForCausalLM::new_with_device(config.clone(), Device::CUDA(1)).unwrap();
+        let causal_lm = XLSTMForCausalLM::new_with_device(config.clone(), Device::CUDA(1))
+            .expect("operation failed");
         assert_eq!(causal_lm.device(), Device::CUDA(1));
         assert_eq!(causal_lm.xlstm.device(), Device::CUDA(1));
     }
@@ -498,13 +504,14 @@ mod tests {
         let config = XLSTMConfig::default();
 
         // Old API should still work and default to CPU
-        let model = XLSTMModel::new(config.clone()).unwrap();
+        let model = XLSTMModel::new(config.clone()).expect("operation failed");
         assert_eq!(model.device(), Device::CPU);
 
-        let causal_lm = XLSTMForCausalLM::new(config.clone()).unwrap();
+        let causal_lm = XLSTMForCausalLM::new(config.clone()).expect("operation failed");
         assert_eq!(causal_lm.device(), Device::CPU);
 
-        let seq_class = XLSTMForSequenceClassification::new(config.clone(), 2).unwrap();
+        let seq_class =
+            XLSTMForSequenceClassification::new(config.clone(), 2).expect("operation failed");
         assert_eq!(seq_class.device(), Device::CPU);
     }
 }

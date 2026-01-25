@@ -137,7 +137,8 @@ impl GenerativeModel for Gpt2LMHeadModel {
                         // First apply top-k
                         let mut indexed_logits: Vec<(usize, f32)> =
                             logits.iter().copied().enumerate().collect();
-                        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                        indexed_logits
+                            .sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
                         indexed_logits.truncate(*k);
 
                         // Then apply top-p on the filtered logits
@@ -375,7 +376,7 @@ impl Gpt2LMHeadModel {
                 // Get top k tokens
                 let mut token_scores: Vec<(f32, usize)> =
                     log_probs.iter().enumerate().map(|(idx, &log_prob)| (log_prob, idx)).collect();
-                token_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                token_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("operation failed"));
 
                 // Create new candidates
                 for (log_prob, token_idx) in token_scores.iter().take(num_beams) {
@@ -398,7 +399,7 @@ impl Gpt2LMHeadModel {
             candidates.sort_by(|a, b| {
                 let a_score = a.normalized_score(config.length_penalty);
                 let b_score = b.normalized_score(config.length_penalty);
-                b_score.partial_cmp(&a_score).unwrap()
+                b_score.partial_cmp(&a_score).expect("operation failed")
             });
 
             beams = candidates.into_iter().take(num_beams).collect();
@@ -413,7 +414,7 @@ impl Gpt2LMHeadModel {
         beams.sort_by(|a, b| {
             let a_score = a.normalized_score(config.length_penalty);
             let b_score = b.normalized_score(config.length_penalty);
-            b_score.partial_cmp(&a_score).unwrap()
+            b_score.partial_cmp(&a_score).expect("operation failed")
         });
 
         let num_return = config.num_return_sequences.min(beams.len());

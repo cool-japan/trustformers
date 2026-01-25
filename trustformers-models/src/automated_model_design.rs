@@ -1323,7 +1323,7 @@ mod tests {
             .domain("scientific")
             .max_parameters(1_000_000_000)
             .build()
-            .unwrap();
+            .expect("operation failed");
 
         assert!(matches!(
             requirements.task_type,
@@ -1362,10 +1362,12 @@ mod tests {
     #[test]
     fn test_template_scaling() {
         let mut template = ArchitectureTemplate::decoder_transformer();
-        let original_hidden_size = *template.base_parameters.get("hidden_size").unwrap();
+        let original_hidden_size =
+            *template.base_parameters.get("hidden_size").expect("operation failed");
 
         template.scale_parameters("hidden_size", 1.5);
-        let new_hidden_size = *template.base_parameters.get("hidden_size").unwrap();
+        let new_hidden_size =
+            *template.base_parameters.get("hidden_size").expect("operation failed");
 
         assert_eq!(new_hidden_size, (original_hidden_size as f32 * 1.5) as i32);
     }
@@ -1388,10 +1390,10 @@ mod tests {
             .performance_target(PerformanceTarget::Balanced)
             .resource_constraints(ResourceConstraints::mobile())
             .build()
-            .unwrap();
+            .expect("operation failed");
 
         let designer = ModelDesigner::new();
-        let design = designer.design_model(requirements).unwrap();
+        let design = designer.design_model(requirements).expect("operation failed");
 
         assert!(!design.name.is_empty());
         assert!(!design.architecture.dimensions.is_empty());
@@ -1407,7 +1409,7 @@ mod tests {
             .task(TaskType::TextGeneration)
             .max_parameters(10_000) // Very small limit
             .build()
-            .unwrap();
+            .expect("operation failed");
 
         // Should fail due to parameter constraint
         assert!(solver.validate_constraints(&template, &requirements).is_err());
@@ -1418,7 +1420,7 @@ mod tests {
         let patterns = DesignPatternLibrary::default();
         let template = ArchitectureTemplate::decoder_transformer();
 
-        let enhanced = patterns.apply_efficiency_patterns(template).unwrap();
+        let enhanced = patterns.apply_efficiency_patterns(template).expect("operation failed");
         // Check if efficiency patterns were applied
         assert!(enhanced.component_choices.contains_key("attention_type"));
     }
@@ -1436,7 +1438,7 @@ mod tests {
     #[test]
     fn test_architecture_conversion() {
         let template = ArchitectureTemplate::vision_transformer();
-        let architecture = template.to_architecture().unwrap();
+        let architecture = template.to_architecture().expect("operation failed");
 
         assert!(!architecture.dimensions.is_empty());
         assert!(!architecture.choices.is_empty());

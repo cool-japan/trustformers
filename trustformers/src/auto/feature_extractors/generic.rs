@@ -803,6 +803,9 @@ mod tests {
         assert!(caps.contains_key("supported_modalities"));
         assert!(caps.contains_key("extraction_method"));
         assert!(caps.contains_key("normalization"));
-        assert_eq!(caps.get("feature_size").unwrap().as_u64().unwrap(), 256);
+        assert_eq!(
+            caps.get("feature_size").unwrap().as_u64().expect("expected u64 value"),
+            256
+        );
     }
 }

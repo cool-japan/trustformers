@@ -8,14 +8,14 @@
 
 [package]
 name = "trustformers-c"
-version = "0.1.0-alpha.2"
-edition = "2021"
-rust-version = "1.75"
-authors = ["TrustformeRS cool-japan Team (Team KitaSan)"]
-license = "MIT OR Apache-2.0"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "C API for TrustformeRS - High-performance transformer library (LEGACY - NOT MAINTAINED)"
-repository = "https://github.com/cool-japan/trustformers"
-homepage = "https://github.com/cool-japan/trustformers"
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/trustformers-c"
 readme = "README.md"
 keywords = ["transformers", "nlp", "ffi", "c-api", "language-bindings"]

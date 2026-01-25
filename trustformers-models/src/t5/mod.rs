@@ -81,7 +81,7 @@
 //! };
 //!
 //! let outputs = model.forward(input)?;
-//! let loss = outputs.loss.unwrap();
+//! let loss = outputs.loss.expect("operation failed");
 //! ```
 //!
 //! ## Pre-training Objective

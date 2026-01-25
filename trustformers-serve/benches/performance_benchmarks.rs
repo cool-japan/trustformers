@@ -8,8 +8,9 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use scirs2_core::random::*; // Replaces rand - SciRS2 Integration Policy
+use std::hint::black_box;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use trustformers_serve::batching::aggregator::RequestInput;

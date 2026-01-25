@@ -350,20 +350,20 @@ impl HubUiState {
 
     /// Add a model repository
     pub fn add_repository(&self, repository: ModelRepository) -> Result<(), TrustformersError> {
-        let mut repos = self.repositories.lock().unwrap();
+        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
         repos.insert(repository.model_id.clone(), repository);
         Ok(())
     }
 
     /// Get a model repository
     pub fn get_repository(&self, model_id: &str) -> Option<ModelRepository> {
-        let repos = self.repositories.lock().unwrap();
+        let repos = self.repositories.lock().expect("lock should not be poisoned");
         repos.get(model_id).cloned()
     }
 
     /// List all repositories
     pub fn list_repositories(&self) -> Vec<ModelRepository> {
-        let repos = self.repositories.lock().unwrap();
+        let repos = self.repositories.lock().expect("lock should not be poisoned");
         repos.values().cloned().collect()
     }
 
@@ -373,7 +373,7 @@ impl HubUiState {
         model_id: &str,
         version: ModelVersion,
     ) -> Result<(), TrustformersError> {
-        let mut repos = self.repositories.lock().unwrap();
+        let mut repos = self.repositories.lock().expect("lock should not be poisoned");
         if let Some(repo) = repos.get_mut(model_id) {
             repo.versions.insert(version.version.clone(), version.clone());
             repo.version_history.push(version.version);

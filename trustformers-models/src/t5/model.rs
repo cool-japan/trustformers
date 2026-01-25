@@ -1170,7 +1170,7 @@ impl T5LayerNorm {
 
     fn new_with_device(hidden_size: usize, epsilon: f32, device: Device) -> Self {
         Self {
-            weight: Tensor::ones(&[hidden_size]).unwrap(),
+            weight: Tensor::ones(&[hidden_size]).expect("operation failed"),
             epsilon,
             device,
         }
@@ -1190,7 +1190,7 @@ impl T5LayerNorm {
         match (&hidden_states, &self.weight) {
             (Tensor::F32(x), Tensor::F32(w)) => {
                 // Calculate RMS
-                let variance = x.mapv(|v| v * v).mean().unwrap() + self.epsilon;
+                let variance = x.mapv(|v| v * v).mean().expect("operation failed") + self.epsilon;
                 let x = x / variance.sqrt();
 
                 // Apply weight

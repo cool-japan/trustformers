@@ -13,7 +13,7 @@ mod tests {
         assert_eq!(config.num_patches(), 196); // (224/16)^2
         assert_eq!(config.seq_length(), 197); // 196 patches + 1 class token
 
-        config.validate().unwrap();
+        config.validate().expect("operation failed");
     }
 
     #[test]
@@ -59,7 +59,7 @@ mod tests {
         let result = patch_embedding.forward(&image);
 
         assert!(result.is_ok());
-        let patches = result.unwrap();
+        let patches = result.expect("operation failed");
         assert_eq!(patches.shape(), &[1, 4, 64]); // 1 batch, 4 patches (32/16)^2, 64 hidden
 
         // Explicit cleanup
@@ -87,7 +87,7 @@ mod tests {
 
         // Test with small 32x32x3 image and 16x16 patches to reduce memory usage
         let image = Array4::zeros((1, 32, 32, 3));
-        let result = patch_embedding.forward(&image).unwrap();
+        let result = patch_embedding.forward(&image).expect("operation failed");
 
         let expected_patches = (32 / 16) * (32 / 16); // 2x2 = 4 patches
         assert_eq!(result.shape(), &[1, expected_patches, 64]);
@@ -110,14 +110,14 @@ mod tests {
             num_hidden_layers: 2,
             ..ViTConfig::default()
         };
-        let model = ViTModel::new(config).unwrap();
+        let model = ViTModel::new(config).expect("operation failed");
 
         // Test with a single small image to reduce memory usage
         let images = Array4::zeros((1, 32, 32, 3));
         let result = model.forward(&images);
 
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.expect("operation failed");
         assert_eq!(output.shape(), &[1, 5, 64]); // batch, seq_len (4 patches + 1 class token), hidden_size
 
         // Explicit cleanup
@@ -139,13 +139,13 @@ mod tests {
             num_labels: 10, // Reduced from 1000
             ..ViTConfig::default()
         };
-        let model = ViTForImageClassification::new(config).unwrap();
+        let model = ViTForImageClassification::new(config).expect("operation failed");
 
         let images = Array4::zeros((1, 32, 32, 3));
         let result = model.forward(&images);
 
         assert!(result.is_ok());
-        let logits = result.unwrap();
+        let logits = result.expect("operation failed");
         assert_eq!(logits.shape(), &[1, 10]); // batch_size, num_classes
 
         // Explicit cleanup
@@ -166,13 +166,13 @@ mod tests {
             num_hidden_layers: 2,
             ..ViTConfig::default()
         };
-        let model = ViTModel::new(config).unwrap();
+        let model = ViTModel::new(config).expect("operation failed");
 
         let images = Array4::zeros((1, 32, 32, 3));
         let result = model.get_class_token_output(&images);
 
         assert!(result.is_ok());
-        let class_output = result.unwrap();
+        let class_output = result.expect("operation failed");
         assert_eq!(class_output.shape(), &[1, 64]); // batch_size, hidden_size
 
         // Explicit cleanup
@@ -195,16 +195,16 @@ mod tests {
         };
         config.use_class_token = false;
 
-        let model = ViTModel::new(config).unwrap();
+        let model = ViTModel::new(config).expect("operation failed");
 
         let images = Array4::zeros((1, 32, 32, 3));
-        let output = model.forward(&images).unwrap();
+        let output = model.forward(&images).expect("operation failed");
 
         // Should have 4 patches (no class token) (32/16)^2
         assert_eq!(output.shape(), &[1, 4, 64]);
 
         // Class token output should be mean of patches
-        let class_output = model.get_class_token_output(&images).unwrap();
+        let class_output = model.get_class_token_output(&images).expect("operation failed");
         assert_eq!(class_output.shape(), &[1, 64]);
 
         // Explicit cleanup

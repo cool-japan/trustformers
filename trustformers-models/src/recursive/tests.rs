@@ -199,20 +199,20 @@ fn test_memory_state_creation() {
     let memory = MemoryState::new(2, 1024, 768);
     // MemoryState created successfully - implementation details are private
 
-    let content = memory.get_content().unwrap();
+    let content = memory.get_content().expect("operation failed");
     assert_eq!(content.shape(), &[2, 1024, 768]);
 }
 
 #[test]
 fn test_memory_state_update() {
     let mut memory = MemoryState::new(1, 1024, 768);
-    let new_content = Tensor::ones(&[1, 256, 768]).unwrap();
+    let new_content = Tensor::ones(&[1, 256, 768]).expect("operation failed");
 
     assert!(memory.update(new_content).is_ok());
     // Memory update successful - write head position is internal
 
     // Test circular buffer behavior
-    let large_content = Tensor::ones(&[1, 1000, 768]).unwrap();
+    let large_content = Tensor::ones(&[1, 1000, 768]).expect("operation failed");
     assert!(memory.update(large_content).is_ok());
     // Large content update successful - circular buffer behavior handled internally
 }
@@ -220,7 +220,7 @@ fn test_memory_state_update() {
 #[test]
 fn test_memory_state_read() {
     let mut memory = MemoryState::new(1, 1024, 768);
-    let content = memory.read(256).unwrap();
+    let content = memory.read(256).expect("operation failed");
     assert_eq!(content.shape(), &[1, 256, 768]);
     // Read head position updated successfully - position is internal
 
@@ -312,9 +312,9 @@ fn test_universal_controller_creation() {
 #[test]
 fn test_recursive_transformer_forward() {
     let config = RecursiveConfig::default();
-    let model = RecursiveTransformer::new(config.clone()).unwrap();
+    let model = RecursiveTransformer::new(config.clone()).expect("operation failed");
 
-    let input_ids = Tensor::zeros(&[1, 100]).unwrap(); // batch=1, seq_len=100
+    let input_ids = Tensor::zeros(&[1, 100]).expect("operation failed"); // batch=1, seq_len=100
     let input = RecursiveInput {
         input_ids,
         attention_mask: None,
@@ -325,7 +325,7 @@ fn test_recursive_transformer_forward() {
     let result = model.forward(input);
     assert!(result.is_ok(), "Forward pass failed: {:?}", result.err());
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], 1); // batch size
     assert_eq!(output.last_hidden_state.shape()[1], 100); // sequence length
     assert_eq!(output.last_hidden_state.shape()[2], config.hidden_size); // hidden size
@@ -336,9 +336,9 @@ fn test_recursive_transformer_forward() {
 fn test_recursive_transformer_long_sequence() {
     let mut config = RecursiveConfig::long_document();
     config.overlap_size = 0; // No overlap to preserve sequence length exactly
-    let model = RecursiveTransformer::new(config.clone()).unwrap();
+    let model = RecursiveTransformer::new(config.clone()).expect("operation failed");
 
-    let input_ids = Tensor::zeros(&[1, 2048]).unwrap(); // Long sequence
+    let input_ids = Tensor::zeros(&[1, 2048]).expect("operation failed"); // Long sequence
     let input = RecursiveInput {
         input_ids,
         attention_mask: None,
@@ -353,7 +353,7 @@ fn test_recursive_transformer_long_sequence() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], 1);
     assert_eq!(output.last_hidden_state.shape()[1], 2048);
     assert!(output.recursion_depth > 0);
@@ -362,9 +362,9 @@ fn test_recursive_transformer_long_sequence() {
 #[test]
 fn test_recursive_transformer_with_memory() {
     let config = RecursiveConfig::default();
-    let model = RecursiveTransformer::new(config.clone()).unwrap();
+    let model = RecursiveTransformer::new(config.clone()).expect("operation failed");
 
-    let input_ids = Tensor::zeros(&[1, 100]).unwrap();
+    let input_ids = Tensor::zeros(&[1, 100]).expect("operation failed");
     let memory_state = MemoryState::new(1, config.memory_size, config.hidden_size);
 
     let input = RecursiveInput {
@@ -381,17 +381,17 @@ fn test_recursive_transformer_with_memory() {
         result.err()
     );
 
-    let _output = result.unwrap();
+    let _output = result.expect("operation failed");
     // Memory state initialized with correct capacity - capacity is internal
 }
 
 #[test]
 fn test_causal_lm_forward() {
     let config = RecursiveConfig::default();
-    let model = RecursiveForCausalLM::new(config.clone()).unwrap();
+    let model = RecursiveForCausalLM::new(config.clone()).expect("operation failed");
 
     // Use SIMD-friendly dimensions (seq_len multiple of 64)
-    let input_ids = Tensor::zeros(&[1, 64]).unwrap(); // batch=1, seq_len=64
+    let input_ids = Tensor::zeros(&[1, 64]).expect("operation failed"); // batch=1, seq_len=64
     let input = RecursiveInput {
         input_ids,
         attention_mask: None,
@@ -406,7 +406,7 @@ fn test_causal_lm_forward() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], 1);
     assert_eq!(output.last_hidden_state.shape()[1], 64);
     assert_eq!(output.logits.shape()[2], config.vocab_size);
@@ -416,9 +416,10 @@ fn test_causal_lm_forward() {
 fn test_sequence_classification_forward() {
     let config = RecursiveConfig::default();
     let num_labels = 5;
-    let model = RecursiveForSequenceClassification::new(config.clone(), num_labels).unwrap();
+    let model = RecursiveForSequenceClassification::new(config.clone(), num_labels)
+        .expect("operation failed");
 
-    let input_ids = Tensor::zeros(&[2, 100]).unwrap();
+    let input_ids = Tensor::zeros(&[2, 100]).expect("operation failed");
     let input = RecursiveInput {
         input_ids,
         attention_mask: None,
@@ -433,7 +434,7 @@ fn test_sequence_classification_forward() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.logits.shape()[0], 2); // batch size
     assert_eq!(output.logits.shape()[1], num_labels); // number of labels
 }
@@ -441,29 +442,29 @@ fn test_sequence_classification_forward() {
 #[test]
 fn test_depth_predictor_predict() {
     let config = RecursiveConfig::default();
-    let predictor = DepthPredictor::new(config).unwrap();
+    let predictor = DepthPredictor::new(config).expect("operation failed");
     let memory = MemoryState::new(1, 1024, 768);
 
     // Test short sequence
-    let short_seq = Tensor::zeros(&[1, 100]).unwrap();
-    let depth = predictor.predict_depth(&short_seq, &memory).unwrap();
+    let short_seq = Tensor::zeros(&[1, 100]).expect("operation failed");
+    let depth = predictor.predict_depth(&short_seq, &memory).expect("operation failed");
     assert!((1..=5).contains(&depth));
 
     // Test long sequence
-    let long_seq = Tensor::zeros(&[1, 5000]).unwrap();
-    let depth = predictor.predict_depth(&long_seq, &memory).unwrap();
+    let long_seq = Tensor::zeros(&[1, 5000]).expect("operation failed");
+    let depth = predictor.predict_depth(&long_seq, &memory).expect("operation failed");
     assert!(depth >= 3); // Should predict higher depth for longer sequences
 }
 
 #[test]
 fn test_model_info() {
-    let info = model_info("recursive-long-document").unwrap();
+    let info = model_info("recursive-long-document").expect("operation failed");
     assert_eq!(info.name, "Recursive Long Document");
     assert_eq!(info.max_sequence_length, 32768);
     assert!(info.memory_efficient);
     assert!(info.adaptive_depth);
 
-    let universal_info = model_info("recursive-universal").unwrap();
+    let universal_info = model_info("recursive-universal").expect("operation failed");
     assert!(universal_info.adaptive_depth);
     assert!(!universal_info.memory_efficient);
 }
@@ -551,9 +552,9 @@ fn test_performance_tips() {
 #[test]
 fn test_empty_sequence() {
     let config = RecursiveConfig::default();
-    let model = RecursiveTransformer::new(config).unwrap();
+    let model = RecursiveTransformer::new(config).expect("operation failed");
 
-    let input_ids = Tensor::zeros(&[1, 1]).unwrap(); // Single token
+    let input_ids = Tensor::zeros(&[1, 1]).expect("operation failed"); // Single token
     let input = RecursiveInput {
         input_ids,
         attention_mask: None,
@@ -568,12 +569,12 @@ fn test_empty_sequence() {
 #[test]
 fn test_batch_processing() {
     let config = RecursiveConfig::default();
-    let model = RecursiveTransformer::new(config).unwrap();
+    let model = RecursiveTransformer::new(config).expect("operation failed");
 
     let batch_size = 4;
     let seq_len = 200;
 
-    let input_ids = Tensor::zeros(&[batch_size, seq_len]).unwrap();
+    let input_ids = Tensor::zeros(&[batch_size, seq_len]).expect("operation failed");
     let input = RecursiveInput {
         input_ids,
         attention_mask: None,
@@ -584,7 +585,7 @@ fn test_batch_processing() {
     let result = model.forward(input);
     assert!(result.is_ok());
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], batch_size);
     assert_eq!(output.last_hidden_state.shape()[1], seq_len);
 }
@@ -600,9 +601,9 @@ fn test_very_long_sequence() {
     let mut config = RecursiveConfig::long_document();
     config.chunk_size = 512; // Smaller chunks for test
     config.overlap_size = 0; // No overlap to preserve sequence length exactly
-    let model = RecursiveTransformer::new(config).unwrap();
+    let model = RecursiveTransformer::new(config).expect("operation failed");
 
-    let input_ids = Tensor::zeros(&[1, 5000]).unwrap(); // Very long sequence
+    let input_ids = Tensor::zeros(&[1, 5000]).expect("operation failed"); // Very long sequence
     let input = RecursiveInput {
         input_ids,
         attention_mask: None,
@@ -613,7 +614,7 @@ fn test_very_long_sequence() {
     let result = model.forward(input);
     assert!(result.is_ok(), "Very long sequence processing failed");
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     // With no overlap, output sequence length matches input
     assert_eq!(output.last_hidden_state.shape()[1], 5000);
     assert!(output.recursion_depth > 1); // Should use multiple recursion levels

@@ -241,8 +241,8 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Get value from cache
     pub fn get(&self, key: &K) -> Option<V> {
-        let mut cache = self.cache.lock().unwrap();
-        let mut stats = self.stats.lock().unwrap();
+        let mut cache = self.cache.lock().expect("Lock poisoned");
+        let mut stats = self.stats.lock().expect("Lock poisoned");
 
         if let Some(entry) = cache.get_mut(key) {
             // Check if expired
@@ -257,7 +257,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
             entry.mark_accessed();
 
             // Update LRU order
-            let mut lru = self.lru_order.lock().unwrap();
+            let mut lru = self.lru_order.lock().expect("Lock poisoned");
             if let Some(pos) = lru.iter().position(|k| k == key) {
                 lru.remove(pos);
             }
@@ -290,14 +290,14 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         priority: u32,
     ) -> Result<()> {
         // Check if we need to evict
-        let mut current_mem = self.current_memory.lock().unwrap();
+        let mut current_mem = self.current_memory.lock().expect("Lock poisoned");
         let soft_limit =
             (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
 
         if *current_mem + size_bytes > soft_limit {
             drop(current_mem);
             self.evict_to_fit(size_bytes)?;
-            current_mem = self.current_memory.lock().unwrap();
+            current_mem = self.current_memory.lock().expect("Lock poisoned");
         }
 
         // Create cache entry
@@ -309,18 +309,18 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Insert into cache
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().expect("Lock poisoned");
         cache.insert(key.clone(), entry);
 
         // Update LRU order
-        let mut lru = self.lru_order.lock().unwrap();
+        let mut lru = self.lru_order.lock().expect("Lock poisoned");
         lru.push_back(key.clone());
 
         // Update memory tracking
         *current_mem += size_bytes;
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.inserts += 1;
         stats.item_count = cache.len();
         stats.memory_bytes = *current_mem;
@@ -331,21 +331,21 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Remove value from cache
     pub fn remove(&self, key: &K) -> Option<V> {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().expect("Lock poisoned");
 
         if let Some(entry) = cache.remove(key) {
             // Update LRU order
-            let mut lru = self.lru_order.lock().unwrap();
+            let mut lru = self.lru_order.lock().expect("Lock poisoned");
             if let Some(pos) = lru.iter().position(|k| k == key) {
                 lru.remove(pos);
             }
 
             // Update memory tracking
-            let mut current_mem = self.current_memory.lock().unwrap();
+            let mut current_mem = self.current_memory.lock().expect("Lock poisoned");
             *current_mem = current_mem.saturating_sub(entry.size_bytes);
 
             // Update statistics
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock().expect("Lock poisoned");
             stats.item_count = cache.len();
             stats.memory_bytes = *current_mem;
 
@@ -357,16 +357,16 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Clear all cache entries
     pub fn clear(&self) {
-        let mut cache = self.cache.lock().unwrap();
+        let mut cache = self.cache.lock().expect("Lock poisoned");
         cache.clear();
 
-        let mut lru = self.lru_order.lock().unwrap();
+        let mut lru = self.lru_order.lock().expect("Lock poisoned");
         lru.clear();
 
-        let mut current_mem = self.current_memory.lock().unwrap();
+        let mut current_mem = self.current_memory.lock().expect("Lock poisoned");
         *current_mem = 0;
 
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.item_count = 0;
         stats.memory_bytes = 0;
     }
@@ -375,7 +375,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
     fn evict_to_fit(&self, required_bytes: usize) -> Result<()> {
         let target_memory =
             (self.config.max_memory_bytes as f32 * self.config.soft_limit_fraction) as usize;
-        let current_mem = *self.current_memory.lock().unwrap();
+        let current_mem = *self.current_memory.lock().expect("Lock poisoned");
 
         if current_mem + required_bytes <= target_memory {
             return Ok(());
@@ -414,25 +414,25 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
     /// LRU eviction - evict least recently used
     fn evict_lru(&self, to_free: usize) -> Result<usize> {
         let mut freed = 0;
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
 
         while freed < to_free {
             let key = {
-                let mut lru = self.lru_order.lock().unwrap();
+                let mut lru = self.lru_order.lock().expect("Lock poisoned");
                 lru.pop_front()
             };
 
             if let Some(key) = key {
                 // Get the size BEFORE removing the entry
                 let entry_size = {
-                    let cache = self.cache.lock().unwrap();
+                    let cache = self.cache.lock().expect("Lock poisoned");
                     cache.get(&key).map(|e| e.size_bytes).unwrap_or(0)
                 };
 
                 drop(stats);
                 if self.remove(&key).is_some() {
                     freed += entry_size;
-                    stats = self.stats.lock().unwrap();
+                    stats = self.stats.lock().expect("Lock poisoned");
                     stats.evictions += 1;
                 } else {
                     break;
@@ -447,7 +447,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// LFU eviction - evict least frequently used
     fn evict_lfu(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock().expect("Lock poisoned");
 
         // Sort by access count (ascending)
         let mut entries: Vec<_> = cache.iter().collect();
@@ -473,7 +473,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -481,7 +481,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Adaptive eviction - combine LRU and LFU based on access patterns
     fn evict_adaptive(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock().expect("Lock poisoned");
 
         // Calculate adaptive score: combines recency and frequency
         let mut entries: Vec<_> = cache
@@ -498,7 +498,8 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
             .collect();
 
         // Sort by score (ascending - evict lowest scores first)
-        entries.sort_by(|(_, _, a), (_, _, b)| a.partial_cmp(b).unwrap());
+        entries
+            .sort_by(|(_, _, a), (_, _, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         // Collect keys to evict
         let mut keys_to_evict = Vec::new();
@@ -520,7 +521,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -528,7 +529,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Size-aware eviction - prioritize smaller items when under pressure
     fn evict_size_aware(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock().expect("Lock poisoned");
 
         // Prefer evicting larger items first to free more space quickly
         let mut entries: Vec<_> = cache.iter().collect();
@@ -554,7 +555,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -562,7 +563,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Priority-based eviction - evict lowest priority first
     fn evict_by_priority(&self, to_free: usize) -> Result<usize> {
-        let cache = self.cache.lock().unwrap();
+        let cache = self.cache.lock().expect("Lock poisoned");
 
         let mut entries: Vec<_> = cache.iter().collect();
         entries.sort_by_key(|(_, entry)| entry.priority);
@@ -587,7 +588,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
         }
 
         // Update stats after all removals (avoid deadlock)
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.evictions += keys_to_evict.len() as u64;
 
         Ok(freed)
@@ -595,7 +596,7 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Update access pattern statistics
     fn update_access_pattern(&self, key: &K) {
-        let mut patterns = self.patterns.lock().unwrap();
+        let mut patterns = self.patterns.lock().expect("Lock poisoned");
         let stats = patterns.entry(key.clone()).or_default();
 
         stats.total_accesses += 1;
@@ -611,8 +612,8 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
             let time_span = stats
                 .recent_accesses
                 .back()
-                .unwrap()
-                .duration_since(*stats.recent_accesses.front().unwrap())
+                .expect("Time went backwards")
+                .duration_since(*stats.recent_accesses.front().expect("No recent accesses"))
                 .as_secs_f64();
             stats.avg_frequency = stats.recent_accesses.len() as f64 / time_span.max(1.0);
         }
@@ -620,22 +621,22 @@ impl<K: Hash + Eq + Clone, V: Clone> AdaptiveCacheManager<K, V> {
 
     /// Get cache statistics
     pub fn stats(&self) -> CacheStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("Lock poisoned").clone()
     }
 
     /// Get current memory usage
     pub fn memory_usage(&self) -> usize {
-        *self.current_memory.lock().unwrap()
+        *self.current_memory.lock().expect("Lock poisoned")
     }
 
     /// Check if cache contains key
     pub fn contains(&self, key: &K) -> bool {
-        self.cache.lock().unwrap().contains_key(key)
+        self.cache.lock().expect("Lock poisoned").contains_key(key)
     }
 
     /// Get cache size (number of entries)
     pub fn len(&self) -> usize {
-        self.cache.lock().unwrap().len()
+        self.cache.lock().expect("Lock poisoned").len()
     }
 
     /// Check if cache is empty
@@ -661,13 +662,13 @@ mod tests {
         let cache: AdaptiveCacheManager<String, Vec<u8>> = AdaptiveCacheManager::new(config);
 
         // Insert items (300 * 3 = 900 bytes, under 1000 limit)
-        cache.insert("a".to_string(), vec![0u8; 300], 300).unwrap();
-        cache.insert("b".to_string(), vec![0u8; 300], 300).unwrap();
-        cache.insert("c".to_string(), vec![0u8; 300], 300).unwrap();
+        cache.insert("a".to_string(), vec![0u8; 300], 300).expect("Insert failed");
+        cache.insert("b".to_string(), vec![0u8; 300], 300).expect("Insert failed");
+        cache.insert("c".to_string(), vec![0u8; 300], 300).expect("Insert failed");
 
         // This should trigger eviction of "a" (oldest) to make room
         // 900 + 300 = 1200 > 1000, need to free at least 200 bytes -> evict "a" (300 bytes)
-        cache.insert("d".to_string(), vec![0u8; 300], 300).unwrap();
+        cache.insert("d".to_string(), vec![0u8; 300], 300).expect("Insert failed");
 
         assert!(!cache.contains(&"a".to_string()));
         assert!(cache.contains(&"b".to_string()));
@@ -688,9 +689,9 @@ mod tests {
         let cache: AdaptiveCacheManager<String, Vec<u8>> = AdaptiveCacheManager::new(config);
 
         // Insert items (300 * 3 = 900 bytes, under 1000 limit)
-        cache.insert("a".to_string(), vec![0u8; 300], 300).unwrap();
-        cache.insert("b".to_string(), vec![0u8; 300], 300).unwrap();
-        cache.insert("c".to_string(), vec![0u8; 300], 300).unwrap();
+        cache.insert("a".to_string(), vec![0u8; 300], 300).expect("Insert failed");
+        cache.insert("b".to_string(), vec![0u8; 300], 300).expect("Insert failed");
+        cache.insert("c".to_string(), vec![0u8; 300], 300).expect("Insert failed");
 
         // Access "a" multiple times to increase its frequency
         for _ in 0..10 {
@@ -698,7 +699,7 @@ mod tests {
         }
 
         // This should evict "b" or "c" (lower score), not "a"
-        cache.insert("d".to_string(), vec![0u8; 300], 300).unwrap();
+        cache.insert("d".to_string(), vec![0u8; 300], 300).expect("Insert failed");
 
         assert!(cache.contains(&"a".to_string()));
         assert!(cache.contains(&"d".to_string()));
@@ -709,7 +710,9 @@ mod tests {
         let config = AdaptiveCacheConfig::default();
         let cache: AdaptiveCacheManager<String, String> = AdaptiveCacheManager::new(config);
 
-        cache.insert("key1".to_string(), "value1".to_string(), 100).unwrap();
+        cache
+            .insert("key1".to_string(), "value1".to_string(), 100)
+            .expect("Insert failed");
 
         cache.get(&"key1".to_string());
         cache.get(&"key2".to_string());
@@ -733,14 +736,20 @@ mod tests {
         let cache: AdaptiveCacheManager<String, Vec<u8>> = AdaptiveCacheManager::new(config);
 
         // Insert with different priorities (300 * 3 = 900 bytes, under 1000 limit)
-        cache.insert_with_priority("low".to_string(), vec![0u8; 300], 300, 1).unwrap();
-        cache.insert_with_priority("high".to_string(), vec![0u8; 300], 300, 10).unwrap();
+        cache
+            .insert_with_priority("low".to_string(), vec![0u8; 300], 300, 1)
+            .expect("Insert failed");
+        cache
+            .insert_with_priority("high".to_string(), vec![0u8; 300], 300, 10)
+            .expect("Insert failed");
         cache
             .insert_with_priority("medium".to_string(), vec![0u8; 300], 300, 5)
-            .unwrap();
+            .expect("Insert failed");
 
         // This should evict "low" (lowest priority)
-        cache.insert_with_priority("new".to_string(), vec![0u8; 300], 300, 5).unwrap();
+        cache
+            .insert_with_priority("new".to_string(), vec![0u8; 300], 300, 5)
+            .expect("Insert failed");
 
         assert!(!cache.contains(&"low".to_string()));
         assert!(cache.contains(&"high".to_string()));

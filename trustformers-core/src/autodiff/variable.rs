@@ -30,7 +30,7 @@ impl Variable {
     pub fn new(tensor: Tensor, requires_grad: bool) -> Self {
         let graph = Arc::new(Mutex::new(ComputationGraph::new()));
         let node_id = {
-            let mut graph_guard = graph.lock().unwrap();
+            let mut graph_guard = graph.lock().expect("lock should not be poisoned");
             graph_guard.add_node(tensor, requires_grad, None)
         };
 
@@ -45,7 +45,7 @@ impl Variable {
     pub fn new_with_name(tensor: Tensor, requires_grad: bool, name: String) -> Self {
         let graph = Arc::new(Mutex::new(ComputationGraph::new()));
         let node_id = {
-            let mut graph_guard = graph.lock().unwrap();
+            let mut graph_guard = graph.lock().expect("lock should not be poisoned");
             graph_guard.add_node(tensor, requires_grad, Some(name))
         };
 
@@ -67,7 +67,7 @@ impl Variable {
 
     /// Get the tensor data
     pub fn data(&self) -> Result<Tensor> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         graph.get_value(self.node_id).cloned().ok_or_else(|| {
             TrustformersError::tensor_op_error(
                 &format!("Node {} not found in graph", self.node_id),
@@ -78,7 +78,7 @@ impl Variable {
 
     /// Get the gradient
     pub fn grad(&self) -> Result<Option<Tensor>> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         Ok(graph.get_gradient(self.node_id).cloned())
     }
 
@@ -99,7 +99,7 @@ impl Variable {
 
     /// Get the shape of the tensor
     pub fn shape(&self) -> Result<Vec<usize>> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         graph.get_value(self.node_id).map(|tensor| tensor.shape()).ok_or_else(|| {
             TrustformersError::tensor_op_error(
                 &format!("Node {} not found in graph", self.node_id),
@@ -116,19 +116,19 @@ impl Variable {
 
     /// Compute backward pass for this variable
     pub fn backward(&self) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(self.node_id, None)
     }
 
     /// Compute backward pass with custom gradient
     pub fn backward_with_grad(&self, grad: Tensor) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(self.node_id, Some(grad))
     }
 
     /// Zero the gradients
     pub fn zero_grad(&self) {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.zero_grad();
     }
 
@@ -146,7 +146,7 @@ impl Variable {
 
     /// Update the value of this variable
     pub fn set_data(&self, tensor: Tensor) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.update_value(self.node_id, tensor)
     }
 
@@ -309,7 +309,7 @@ impl Variable {
         // Add operation node to the graph
         let requires_grad = self.requires_grad || other.requires_grad;
         let node_id = {
-            let mut graph = self.graph.lock().unwrap();
+            let mut graph = self.graph.lock().expect("lock should not be poisoned");
             graph.add_operation_node(
                 result_tensor,
                 op,
@@ -333,7 +333,7 @@ impl Variable {
 
         // Add operation node to the graph
         let node_id = {
-            let mut graph = self.graph.lock().unwrap();
+            let mut graph = self.graph.lock().expect("lock should not be poisoned");
             graph.add_operation_node(
                 result_tensor,
                 op,

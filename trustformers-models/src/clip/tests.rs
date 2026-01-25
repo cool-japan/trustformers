@@ -127,14 +127,14 @@ fn test_clip_text_embeddings() {
     let embeddings = CLIPTextEmbeddings::new(&config);
     assert!(embeddings.is_ok());
 
-    let embeddings = embeddings.unwrap();
+    let embeddings = embeddings.expect("operation failed");
 
     // Test forward pass with token IDs
     let input_ids = vec![1, 2, 3, 4, 5];
     let output = embeddings.forward(input_ids);
     assert!(output.is_ok());
 
-    let output_tensor = output.unwrap();
+    let output_tensor = output.expect("operation failed");
     // Expected shape: [seq_len, hidden_size] = [5, 128]
     assert_eq!(output_tensor.shape(), &[5, 128]);
 }
@@ -176,14 +176,14 @@ fn test_clip_encoder_layer() {
     let layer = CLIPEncoderLayer::new(&layer_config);
     assert!(layer.is_ok());
 
-    let layer = layer.unwrap();
+    let layer = layer.expect("operation failed");
 
     // Test forward pass
-    let input = Tensor::randn(&[2, 10, 128]).unwrap(); // [batch, seq_len, hidden_size]
+    let input = Tensor::randn(&[2, 10, 128]).expect("operation failed"); // [batch, seq_len, hidden_size]
     let output = layer.forward(input);
     assert!(output.is_ok());
 
-    let output_tensor = output.unwrap();
+    let output_tensor = output.expect("operation failed");
     assert_eq!(output_tensor.shape(), &[2, 10, 128]);
 }
 
@@ -232,7 +232,7 @@ fn test_clip_parameter_count() {
         logit_scale_init_value: 2.6592,
     };
 
-    let model = CLIPModel::new(config).unwrap();
+    let model = CLIPModel::new(config).expect("operation failed");
     let param_count = model.num_parameters();
 
     // Should have non-zero parameters
@@ -289,7 +289,7 @@ fn test_clip_weight_loading_methods_exist() {
         logit_scale_init_value: 2.6592,
     };
 
-    let mut model = CLIPModel::new(config).unwrap();
+    let mut model = CLIPModel::new(config).expect("operation failed");
 
     // Test that load_from_path method exists (it will fail without actual weights, but should compile)
     let result = model.load_from_path("/nonexistent/path");
@@ -341,13 +341,13 @@ fn test_clip_logit_scale() {
         logit_scale_init_value: 2.6592,
     };
 
-    let model = CLIPModel::new(config).unwrap();
+    let model = CLIPModel::new(config).expect("operation failed");
 
     // Verify logit_scale is initialized correctly
     match &model.logit_scale {
         Tensor::F32(arr) => {
             assert_eq!(arr.len(), 1);
-            let value = arr.iter().next().unwrap();
+            let value = arr.iter().next().expect("operation failed");
             assert!((value - 2.6592).abs() < 1e-6);
         },
         _ => panic!("Expected F32 tensor for logit_scale"),

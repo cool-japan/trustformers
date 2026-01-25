@@ -132,7 +132,7 @@ impl super::profiler::MemoryProfiler {
     ) {
         // Update thresholds every 5 minutes
         let should_update = {
-            let thresholds = adaptive_thresholds.lock().unwrap();
+            let thresholds = adaptive_thresholds.lock().expect("operation failed");
             current_metrics
                 .timestamp
                 .duration_since(thresholds.last_updated)
@@ -142,7 +142,7 @@ impl super::profiler::MemoryProfiler {
         };
 
         if should_update {
-            let mut thresholds = adaptive_thresholds.lock().unwrap();
+            let mut thresholds = adaptive_thresholds.lock().expect("operation failed");
             // Simple adaptive update based on current usage
             let adaptation_factor = 0.1;
             thresholds.base_memory_threshold = thresholds.base_memory_threshold
@@ -170,11 +170,11 @@ impl super::profiler::MemoryProfiler {
     ) {
         if let Some(_prev) = previous_metrics {
             let growth_rate = current_metrics.memory_growth_rate_mb_per_sec;
-            let detection = leak_detection.lock().unwrap();
+            let detection = leak_detection.lock().expect("operation failed");
 
             // Check for sustained growth
             if growth_rate > detection.sustained_growth_threshold {
-                let mut alerts_vec = alerts.lock().unwrap();
+                let mut alerts_vec = alerts.lock().expect("operation failed");
                 alerts_vec.push(MemoryAlert {
                     id: uuid::Uuid::new_v4(),
                     timestamp: current_metrics.timestamp,
@@ -203,12 +203,12 @@ impl super::profiler::MemoryProfiler {
             std::sync::Mutex<std::collections::VecDeque<MemoryMetrics>>,
         >,
     ) {
-        let history = metrics_history.lock().unwrap();
+        let history = metrics_history.lock().expect("operation failed");
         if history.len() >= 10 {
             let recent_metrics: Vec<MemoryMetrics> = history.iter().cloned().collect();
             drop(history);
 
-            let mut predictor = memory_predictor.lock().unwrap();
+            let mut predictor = memory_predictor.lock().expect("operation failed");
             let _prediction = predictor.predict_memory_usage(&recent_metrics, Some(300));
             // 5 minutes
             // Prediction result would be stored or used for alerts in a real implementation
@@ -226,7 +226,7 @@ impl super::profiler::MemoryProfiler {
             std::sync::Mutex<super::analytics::AdaptiveThresholds>,
         >,
     ) {
-        let thresholds = adaptive_thresholds.lock().unwrap();
+        let thresholds = adaptive_thresholds.lock().expect("operation failed");
         let mut new_alerts = Vec::new();
 
         // High memory usage alert using adaptive threshold
@@ -283,7 +283,7 @@ impl super::profiler::MemoryProfiler {
 
         // Store alerts if any were generated
         if !new_alerts.is_empty() {
-            let mut alerts_vec = alerts.lock().unwrap();
+            let mut alerts_vec = alerts.lock().expect("operation failed");
             alerts_vec.extend(new_alerts);
 
             // Keep only recent alerts (last 1000)
@@ -300,7 +300,7 @@ impl super::profiler::MemoryProfiler {
         current_metrics: &MemoryMetrics,
         patterns: &std::sync::Arc<std::sync::Mutex<Vec<MemoryPattern>>>,
     ) {
-        let mut patterns_vec = patterns.lock().unwrap();
+        let mut patterns_vec = patterns.lock().expect("operation failed");
 
         // Simple pattern detection - in practice this would be much more sophisticated
         if current_metrics.total_memory_mb > 1000.0 {

@@ -46,7 +46,9 @@ impl DebertaEmbeddings {
 
     pub fn forward(&self, input_ids: &Array1<u32>) -> Result<Array2<f32>> {
         // Word embeddings
-        let embeddings = self.word_embeddings.forward_ids(input_ids.as_slice().unwrap())?;
+        let embeddings = self
+            .word_embeddings
+            .forward_ids(input_ids.as_slice().expect("operation failed"))?;
         let embeddings_2d = match embeddings {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()
@@ -173,7 +175,7 @@ impl DebertaDisentangledSelfAttention {
                 self.num_attention_heads,
                 self.attention_head_size,
             ))
-            .unwrap()
+            .expect("operation failed")
             .to_owned();
 
         // Transpose to (batch_size, num_heads, seq_len, head_size)
@@ -408,7 +410,7 @@ impl DebertaDisentangledSelfAttention {
         // Reshape to (batch_size, seq_len, all_head_size)
         let context_layer = context_layer
             .to_shape((batch_size, seq_len, self.all_head_size))
-            .unwrap()
+            .expect("operation failed")
             .to_owned();
 
         Ok(context_layer)

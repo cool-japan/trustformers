@@ -116,7 +116,7 @@ impl LTCLayer {
 
     /// Forward pass for a single timestep
     fn forward_timestep(&mut self, input: &Tensor) -> Result<Tensor> {
-        let neuron_state = self.neuron_state.as_mut().unwrap();
+        let neuron_state = self.neuron_state.as_mut().expect("operation failed");
         let dt = self.config.dt;
 
         // Project input

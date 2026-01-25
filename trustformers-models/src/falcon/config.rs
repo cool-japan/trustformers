@@ -288,12 +288,12 @@ mod tests {
     fn test_falcon_config_from_pretrained() {
         let config = FalconConfig::from_pretrained_name("tiiuae/falcon-7b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.model_type, "falcon-7b");
 
         let config = FalconConfig::from_pretrained_name("tiiuae/falcon-180b-chat");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert!(config.is_instruct_model());
 
         let config = FalconConfig::from_pretrained_name("unknown-model");

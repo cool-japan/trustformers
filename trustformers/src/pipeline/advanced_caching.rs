@@ -181,8 +181,8 @@ where
 
         // Insert the entry
         {
-            let mut entries = self.entries.write().unwrap();
-            let mut access_order = self.access_order.write().unwrap();
+            let mut entries = self.entries.write().expect("lock should not be poisoned");
+            let mut access_order = self.access_order.write().expect("lock should not be poisoned");
 
             // Remove from access order if already exists
             if let Some(pos) = access_order.iter().position(|k| k == &key) {
@@ -228,7 +228,7 @@ where
 
         // Check if entry exists and is not expired
         let (value, should_update_access) = {
-            let entries = self.entries.read().unwrap();
+            let entries = self.entries.read().expect("lock should not be poisoned");
             if let Some(entry) = entries.get(key) {
                 // Check expiry
                 if let Some(expiry) = entry.expiry {
@@ -245,7 +245,7 @@ where
         if should_update_access {
             // Update access information
             {
-                let mut entries = self.entries.write().unwrap();
+                let mut entries = self.entries.write().expect("lock should not be poisoned");
                 if let Some(entry) = entries.get_mut(key) {
                     entry.last_accessed = now;
                     entry.access_count += 1;
@@ -254,7 +254,8 @@ where
 
             // Update LRU order
             {
-                let mut access_order = self.access_order.write().unwrap();
+                let mut access_order =
+                    self.access_order.write().expect("lock should not be poisoned");
                 if let Some(pos) = access_order.iter().position(|k| k == key) {
                     access_order.remove(pos);
                     access_order.push(key.to_string());
@@ -273,20 +274,21 @@ where
     /// Remove a value from the cache
     pub fn remove(&self, key: &str) -> Option<T> {
         let value = {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().expect("lock should not be poisoned");
             entries.remove(key).map(|entry| entry.value)
         };
 
         if value.is_some() {
             // Update access order
-            let mut access_order = self.access_order.write().unwrap();
+            let mut access_order = self.access_order.write().expect("lock should not be poisoned");
             if let Some(pos) = access_order.iter().position(|k| k == key) {
                 access_order.remove(pos);
             }
 
             // Update access patterns
             if self.config.enable_access_pattern_analysis {
-                let mut patterns = self.access_patterns.write().unwrap();
+                let mut patterns =
+                    self.access_patterns.write().expect("lock should not be poisoned");
                 patterns.remove(key);
             }
 
@@ -300,20 +302,20 @@ where
     /// Clear all cache entries
     pub fn clear(&self) {
         {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().expect("lock should not be poisoned");
             entries.clear();
         }
         {
-            let mut access_order = self.access_order.write().unwrap();
+            let mut access_order = self.access_order.write().expect("lock should not be poisoned");
             access_order.clear();
         }
         {
-            let mut patterns = self.access_patterns.write().unwrap();
+            let mut patterns = self.access_patterns.write().expect("lock should not be poisoned");
             patterns.clear();
         }
 
         // Reset stats
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
         stats.total_entries = 0;
         stats.total_memory_bytes = 0;
         stats.eviction_count = 0;
@@ -322,13 +324,13 @@ where
     /// Get cache statistics
     pub fn get_stats(&self) -> CacheStats {
         self.update_comprehensive_stats();
-        self.stats.read().unwrap().clone()
+        self.stats.read().expect("lock should not be poisoned").clone()
     }
 
     /// Ensure cache has capacity for new entry
     fn ensure_capacity(&self, new_memory: u64) -> Result<()> {
         let (current_memory, current_entries) = {
-            let entries = self.entries.read().unwrap();
+            let entries = self.entries.read().expect("lock should not be poisoned");
             let memory = entries.values().map(|e| e.memory_size).sum::<u64>();
             (memory, entries.len())
         };
@@ -353,8 +355,8 @@ where
     fn lru_eviction(&self, needed_memory: u64) -> Result<()> {
         let mut freed_memory = 0u64;
         let keys_to_remove = {
-            let access_order = self.access_order.read().unwrap();
-            let entries = self.entries.read().unwrap();
+            let access_order = self.access_order.read().expect("lock should not be poisoned");
+            let entries = self.entries.read().expect("lock should not be poisoned");
 
             let mut to_remove = Vec::new();
 
@@ -377,7 +379,7 @@ where
         for key in keys_to_remove {
             self.remove(&key);
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.eviction_count += 1;
         }
 
@@ -389,8 +391,8 @@ where
         let mut candidates = Vec::new();
 
         {
-            let entries = self.entries.read().unwrap();
-            let patterns = self.access_patterns.read().unwrap();
+            let entries = self.entries.read().expect("lock should not be poisoned");
+            let patterns = self.access_patterns.read().expect("lock should not be poisoned");
 
             for (key, entry) in entries.iter() {
                 let age_score = entry.created_at.elapsed().as_secs() as f64 / 3600.0; // Hours
@@ -411,14 +413,14 @@ where
         }
 
         // Sort by eviction score (highest first = most likely to evict)
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut freed_memory = 0u64;
         for (key, _score, memory_size) in candidates {
             self.remove(&key);
             freed_memory += memory_size;
 
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.eviction_count += 1;
 
             if freed_memory >= needed_memory {
@@ -433,7 +435,7 @@ where
     fn update_access_pattern(&self, key: &str) {
         let now = Instant::now();
 
-        let mut patterns = self.access_patterns.write().unwrap();
+        let mut patterns = self.access_patterns.write().expect("lock should not be poisoned");
         let pattern = patterns.entry(key.to_string()).or_insert_with(|| AccessPattern {
             key: key.to_string(),
             access_times: Vec::new(),
@@ -460,14 +462,14 @@ where
 
     /// Update statistics after insert
     fn update_stats_after_insert(&self, memory_size: u64) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
         stats.total_entries += 1;
         stats.total_memory_bytes += memory_size;
     }
 
     /// Update statistics after remove
     fn update_stats_after_remove(&self) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
         if stats.total_entries > 0 {
             stats.total_entries -= 1;
         }
@@ -475,7 +477,7 @@ where
 
     /// Update access time statistics
     fn update_access_time(&self, access_time_ms: f64, was_hit: bool) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
 
         // Update hit/miss rates using exponential moving average
         let alpha = 0.1;
@@ -494,9 +496,9 @@ where
 
     /// Update comprehensive statistics
     fn update_comprehensive_stats(&self) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
 
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().expect("lock should not be poisoned");
 
         // Update memory usage
         stats.total_memory_bytes = entries.values().map(|e| e.memory_size).sum();
@@ -521,7 +523,7 @@ where
     fn cleanup_expired(&self) -> usize {
         let now = Instant::now();
         let expired_keys: Vec<String> = {
-            let entries = self.entries.read().unwrap();
+            let entries = self.entries.read().expect("lock should not be poisoned");
             entries
                 .iter()
                 .filter_map(|(key, entry)| {
@@ -549,7 +551,7 @@ where
     /// Maybe perform cleanup based on interval
     fn maybe_cleanup(&self) {
         let should_cleanup = {
-            let last_cleanup = self.last_cleanup.read().unwrap();
+            let last_cleanup = self.last_cleanup.read().expect("lock should not be poisoned");
             last_cleanup.elapsed().as_secs() >= self.config.cleanup_interval_seconds
         };
 
@@ -557,12 +559,13 @@ where
             let cleaned = self.cleanup_expired();
 
             {
-                let mut last_cleanup = self.last_cleanup.write().unwrap();
+                let mut last_cleanup =
+                    self.last_cleanup.write().expect("lock should not be poisoned");
                 *last_cleanup = Instant::now();
             }
 
             {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write().expect("lock should not be poisoned");
                 stats.cleanup_count += 1;
                 stats.last_cleanup = Instant::now();
             }
@@ -575,7 +578,7 @@ where
 
     /// Get entries by tag
     pub fn get_by_tag(&self, tag: &str) -> Vec<String> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().expect("lock should not be poisoned");
         entries
             .iter()
             .filter_map(
@@ -604,7 +607,7 @@ where
 
     /// Get cache size info
     pub fn size_info(&self) -> (usize, u64) {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().expect("lock should not be poisoned");
         let count = entries.len();
         let memory = entries.values().map(|e| e.memory_size).sum();
         (count, memory)

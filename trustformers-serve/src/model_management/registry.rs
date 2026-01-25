@@ -107,7 +107,10 @@ impl ModelRegistry {
     /// Update model metadata
     pub async fn update_model(&self, model_id: &str, metadata: ModelMetadata) -> ModelResult<()> {
         {
-            let mut models = self.models.write().unwrap();
+            let mut models = self
+                .models
+                .write()
+                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
             if !models.contains_key(model_id) {
                 return Err(ModelError::ModelNotFound {
                     id: model_id.to_string(),
@@ -118,7 +121,10 @@ impl ModelRegistry {
 
         // Update version index
         {
-            let mut by_name_version = self.by_name_version.write().unwrap();
+            let mut by_name_version = self
+                .by_name_version
+                .write()
+                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
             by_name_version
                 .entry(metadata.name.clone())
                 .or_default()
@@ -133,12 +139,12 @@ impl ModelRegistry {
 
     /// Get model metadata by ID
     pub fn get_model(&self, model_id: &str) -> Option<ModelMetadata> {
-        self.models.read().unwrap().get(model_id).cloned()
+        self.models.read().ok()?.get(model_id).cloned()
     }
 
     /// Get model by name and version
     pub fn get_model_by_name_version(&self, name: &str, version: &str) -> Option<ModelMetadata> {
-        let by_name_version = self.by_name_version.read().unwrap();
+        let by_name_version = self.by_name_version.read().ok()?;
         if let Some(versions) = by_name_version.get(name) {
             if let Some(model_id) = versions.get(version) {
                 return self.get_model(model_id);
@@ -149,7 +155,7 @@ impl ModelRegistry {
 
     /// Get latest version of a model by name
     pub fn get_latest_model(&self, name: &str) -> Option<ModelMetadata> {
-        let by_name_version = self.by_name_version.read().unwrap();
+        let by_name_version = self.by_name_version.read().ok()?;
         if let Some(versions) = by_name_version.get(name) {
             if let Some((_, model_id)) = versions.iter().last() {
                 return self.get_model(model_id);
@@ -160,12 +166,16 @@ impl ModelRegistry {
 
     /// List all models
     pub fn list_models(&self) -> Vec<ModelMetadata> {
-        self.models.read().unwrap().values().cloned().collect()
+        self.models
+            .read()
+            .ok()
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// List models by name
     pub fn list_models_by_name(&self, name: &str) -> Vec<ModelMetadata> {
-        let by_name_version = self.by_name_version.read().unwrap();
+        let by_name_version = self.by_name_version.read().ok()?;
         if let Some(versions) = by_name_version.get(name) {
             return versions.values().filter_map(|model_id| self.get_model(model_id)).collect();
         }
@@ -209,7 +219,10 @@ impl ModelRegistry {
             });
         }
 
-        let mut active_models = self.active_models.write().unwrap();
+        let mut active_models = self
+            .active_models
+            .write()
+            .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
         active_models.insert(name.to_string(), model_id.to_string());
 
         Ok(())
@@ -217,7 +230,7 @@ impl ModelRegistry {
 
     /// Get active model for a name
     pub fn get_active_model(&self, name: &str) -> Option<ModelMetadata> {
-        let active_models = self.active_models.read().unwrap();
+        let active_models = self.active_models.read().ok()?;
         if let Some(model_id) = active_models.get(name) {
             return self.get_model(model_id);
         }
@@ -227,14 +240,20 @@ impl ModelRegistry {
     /// Remove model from registry
     pub async fn remove_model(&self, model_id: &str) -> ModelResult<()> {
         let metadata = {
-            let mut models = self.models.write().unwrap();
+            let mut models = self
+                .models
+                .write()
+                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
             models.remove(model_id)
         };
 
         if let Some(metadata) = metadata {
             // Remove from version index
             {
-                let mut by_name_version = self.by_name_version.write().unwrap();
+                let mut by_name_version = self
+                    .by_name_version
+                    .write()
+                    .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
                 if let Some(versions) = by_name_version.get_mut(&metadata.name) {
                     versions.remove(&metadata.version);
                     if versions.is_empty() {
@@ -245,7 +264,10 @@ impl ModelRegistry {
 
             // Remove from active models if it was active
             {
-                let mut active_models = self.active_models.write().unwrap();
+                let mut active_models = self
+                    .active_models
+                    .write()
+                    .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
                 active_models.retain(|_, id| id != model_id);
             }
 
@@ -270,7 +292,7 @@ impl ModelRegistry {
     ) -> ModelResult<Vec<String>> {
         let mut removed_models = Vec::new();
         let models_by_name = {
-            let by_name_version = self.by_name_version.read().unwrap();
+            let by_name_version = self.by_name_version.read().ok()?;
             by_name_version.clone()
         };
 
@@ -299,33 +321,40 @@ impl ModelRegistry {
     pub fn get_models_by_status(&self, status: ModelStatus) -> Vec<ModelMetadata> {
         self.models
             .read()
-            .unwrap()
-            .values()
-            .filter(|m| m.status == status)
-            .cloned()
-            .collect()
+            .ok()
+            .map(|m| m.values().filter(|v| v.status == status).cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Get models by tags
     pub fn get_models_by_tags(&self, tags: &HashMap<String, String>) -> Vec<ModelMetadata> {
         self.models
             .read()
-            .unwrap()
-            .values()
-            .filter(|m| tags.iter().all(|(key, value)| m.tags.get(key) == Some(value)))
-            .cloned()
-            .collect()
+            .ok()
+            .map(|m| {
+                m.values()
+                    .filter(|v| tags.iter().all(|(key, value)| v.tags.get(key) == Some(value)))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Add model to internal indexes
     fn add_model_to_indexes(&self, metadata: ModelMetadata) -> ModelResult<()> {
         {
-            let mut models = self.models.write().unwrap();
+            let mut models = self
+                .models
+                .write()
+                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
             models.insert(metadata.id.clone(), metadata.clone());
         }
 
         {
-            let mut by_name_version = self.by_name_version.write().unwrap();
+            let mut by_name_version = self
+                .by_name_version
+                .write()
+                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
             by_name_version
                 .entry(metadata.name.clone())
                 .or_default()
@@ -351,10 +380,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_registry() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let registry = ModelRegistry::new(temp_dir.path().to_string_lossy().to_string());
 
-        registry.initialize().await.unwrap();
+        registry.initialize().await.expect("Failed to initialize");
 
         // Test model registration
         let model_id = registry
@@ -367,20 +396,24 @@ mod tests {
                 HashMap::new(),
             )
             .await
-            .unwrap();
+            .expect("Failed to register model");
 
         // Test model retrieval
-        let metadata = registry.get_model(&model_id).unwrap();
+        let metadata = registry.get_model(&model_id).expect("Failed to get model");
         assert_eq!(metadata.name, "test-model");
         assert_eq!(metadata.version, "1.0.0");
 
         // Test version lookup
-        let metadata2 = registry.get_model_by_name_version("test-model", "1.0.0").unwrap();
+        let metadata2 = registry
+            .get_model_by_name_version("test-model", "1.0.0")
+            .expect("Failed to get model by name/version");
         assert_eq!(metadata.id, metadata2.id);
 
         // Test active model setting
-        registry.set_active_model("test-model", &model_id).unwrap();
-        let active = registry.get_active_model("test-model").unwrap();
+        registry
+            .set_active_model("test-model", &model_id)
+            .expect("Failed to set active model");
+        let active = registry.get_active_model("test-model").expect("Failed to get active model");
         assert_eq!(active.id, model_id);
     }
 }

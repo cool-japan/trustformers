@@ -791,7 +791,8 @@ mod tests {
             ..Default::default()
         };
 
-        let schedule = ProgressiveTrainer::create_growth_schedule(&config).unwrap();
+        let schedule =
+            ProgressiveTrainer::create_growth_schedule(&config).expect("operation failed");
         assert!(!schedule.growth_points.is_empty());
         assert_eq!(schedule.growth_points.len(), 4);
     }
@@ -802,7 +803,7 @@ mod tests {
         let trainer = ProgressiveTrainer::new(config);
         assert!(trainer.is_ok());
 
-        let trainer = trainer.unwrap();
+        let trainer = trainer.expect("operation failed");
         assert_eq!(trainer.current_size(), 6);
         assert!(!trainer.is_in_warmup());
     }

@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-tokenizers"
 description = "Tokenizers for TrustformeRS"
+keywords = ["tokenizer", "nlp", "text-processing", "bpe", "wordpiece"]
+categories = ["science", "text-processing"]
+readme = "README.md"
 
 [lints]
 workspace = true

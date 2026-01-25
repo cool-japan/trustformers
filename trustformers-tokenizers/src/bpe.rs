@@ -29,7 +29,8 @@ pub struct BPETokenizer {
 // GPT-2 uses a special byte-level BPE
 static GPT2_PATTERN: Lazy<Regex> = Lazy::new(|| {
     // Simplified regex without lookahead - matches the same patterns but less precisely
-    Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+").unwrap()
+    Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+")
+        .expect("valid regex")
 });
 
 impl Clone for BPETokenizer {

@@ -663,7 +663,7 @@ impl GptJLMHeadModel {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -687,7 +687,11 @@ impl GptJLMHeadModel {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {
@@ -902,7 +906,7 @@ fn apply_top_k_filtering_gpt_j(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f
         logits.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
 
     // Sort by value in descending order
-    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
 
     // Set all values outside top-k to -inf
     for (idx, _) in indices_and_values.iter().skip(k) {
@@ -919,7 +923,7 @@ fn apply_top_p_filtering_gpt_j(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32
         probs.iter().enumerate().map(|(idx, &prob)| (idx, prob)).collect();
 
     // Sort by probability in descending order
-    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
 
     // Find the smallest set of tokens with cumulative probability > p
     let mut cumsum = 0.0;

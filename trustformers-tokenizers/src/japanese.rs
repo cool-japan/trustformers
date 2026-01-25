@@ -99,7 +99,7 @@ impl ThreadSafeTagger {
     }
 
     fn parse_to_node(&self, text: &str) -> Result<Vec<(String, String)>> {
-        let mut tagger = self.tagger.lock().unwrap();
+        let mut tagger = self.tagger.lock().expect("lock should not be poisoned");
         let node = tagger.parse_to_node(text);
         let mut result = Vec::new();
 

@@ -439,7 +439,7 @@ impl ModelGenerator {
     /// Generate test code
     fn generate_test_code(&self) -> String {
         format!(
-            "//! {} Tests\n\nuse super::{{{}Config, {}Model}};\n\n#[test]\nfn test_{}_creation() {{\n    let config = {}Config::default();\n    let model = {}Model::new(config).unwrap();\n    // Add assertions here\n}}\n",
+            "//! {} Tests\n\nuse super::{{{}Config, {}Model}};\n\n#[test]\nfn test_{}_creation() {{\n    let config = {}Config::default();\n    let model = {}Model::new(config).expect(\"operation failed\");\n    // Add assertions here\n}}\n",
             self.config.model_name,
             self.config.model_name,
             self.config.model_name,

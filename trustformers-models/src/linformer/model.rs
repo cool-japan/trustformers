@@ -802,7 +802,7 @@ impl LinformerModel {
                     "-L", // Follow redirects
                     "-f", // Fail silently on HTTP errors
                     "-o",
-                    output_path.to_str().unwrap(),
+                    output_path.to_str().expect("operation failed"),
                     &url,
                 ])
                 .output();
@@ -815,7 +815,7 @@ impl LinformerModel {
                         .args([
                             "-q", // Quiet mode
                             "-O",
-                            output_path.to_str().unwrap(),
+                            output_path.to_str().expect("operation failed"),
                             &url,
                         ])
                         .output();
@@ -912,7 +912,7 @@ impl Model for LinformerForSequenceClassification {
                         for h in 0..hidden_size {
                             // Take first token (index 0) for each batch
                             let idx = (b * shape[1]) * hidden_size + h;
-                            cls_data.push(arr.as_slice().unwrap()[idx]);
+                            cls_data.push(arr.as_slice().expect("operation failed")[idx]);
                         }
                     }
 

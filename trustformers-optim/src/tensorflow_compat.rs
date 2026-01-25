@@ -317,7 +317,7 @@ impl TensorFlowAdam {
 
     /// Add variable to optimizer
     pub fn add_variable(&mut self, name: String, var: Tensor) -> Result<()> {
-        let mut variables = self.variables.lock().unwrap();
+        let mut variables = self.variables.lock().expect("Mutex lock poisoned");
         variables.insert(name, var);
         Ok(())
     }
@@ -394,7 +394,7 @@ impl TensorFlowOptimizer for TensorFlowAdam {
         self.clip_gradients(&mut gradients)?;
 
         // Apply gradients using inner optimizer
-        let mut variables = self.variables.lock().unwrap();
+        let mut variables = self.variables.lock().expect("Mutex lock poisoned");
         for (grad, var_name) in grads_and_vars {
             if let Some(var) = variables.get_mut(var_name) {
                 self.inner.update(var, grad)?;
@@ -416,7 +416,7 @@ impl TensorFlowOptimizer for TensorFlowAdam {
         // Compute gradients (this would normally be done by automatic differentiation)
         let mut grads_and_vars = Vec::new();
         {
-            let mut variables = self.variables.lock().unwrap();
+            let mut variables = self.variables.lock().expect("Mutex lock poisoned");
 
             for var_name in var_list {
                 if let Some(var) = variables.get_mut(var_name) {
@@ -436,17 +436,17 @@ impl TensorFlowOptimizer for TensorFlowAdam {
     }
 
     fn variables(&self) -> Vec<String> {
-        let variables = self.variables.lock().unwrap();
+        let variables = self.variables.lock().expect("Mutex lock poisoned");
         variables.keys().cloned().collect()
     }
 
     fn get_weights(&self) -> Vec<Tensor> {
-        let variables = self.variables.lock().unwrap();
+        let variables = self.variables.lock().expect("Mutex lock poisoned");
         variables.values().cloned().collect()
     }
 
     fn set_weights(&mut self, weights: Vec<Tensor>) -> Result<()> {
-        let mut variables = self.variables.lock().unwrap();
+        let mut variables = self.variables.lock().expect("Mutex lock poisoned");
         let var_names: Vec<String> = variables.keys().cloned().collect();
 
         if weights.len() != var_names.len() {
@@ -642,7 +642,7 @@ impl TensorFlowAdamW {
 
     /// Add variable to optimizer
     pub fn add_variable(&mut self, name: String, var: Tensor) -> Result<()> {
-        let mut variables = self.variables.lock().unwrap();
+        let mut variables = self.variables.lock().expect("Mutex lock poisoned");
         variables.insert(name, var);
         Ok(())
     }
@@ -719,7 +719,7 @@ impl TensorFlowOptimizer for TensorFlowAdamW {
         self.clip_gradients(&mut gradients)?;
 
         // Apply gradients using inner optimizer
-        let mut variables = self.variables.lock().unwrap();
+        let mut variables = self.variables.lock().expect("Mutex lock poisoned");
         for (grad, var_name) in grads_and_vars {
             if let Some(var) = variables.get_mut(var_name) {
                 self.inner.update(var, grad)?;
@@ -741,7 +741,7 @@ impl TensorFlowOptimizer for TensorFlowAdamW {
         // Compute gradients (this would normally be done by automatic differentiation)
         let mut grads_and_vars = Vec::new();
         {
-            let mut variables = self.variables.lock().unwrap();
+            let mut variables = self.variables.lock().expect("Mutex lock poisoned");
 
             for var_name in var_list {
                 if let Some(var) = variables.get_mut(var_name) {
@@ -761,17 +761,17 @@ impl TensorFlowOptimizer for TensorFlowAdamW {
     }
 
     fn variables(&self) -> Vec<String> {
-        let variables = self.variables.lock().unwrap();
+        let variables = self.variables.lock().expect("Mutex lock poisoned");
         variables.keys().cloned().collect()
     }
 
     fn get_weights(&self) -> Vec<Tensor> {
-        let variables = self.variables.lock().unwrap();
+        let variables = self.variables.lock().expect("Mutex lock poisoned");
         variables.values().cloned().collect()
     }
 
     fn set_weights(&mut self, weights: Vec<Tensor>) -> Result<()> {
-        let mut variables = self.variables.lock().unwrap();
+        let mut variables = self.variables.lock().expect("Mutex lock poisoned");
         let var_names: Vec<String> = variables.keys().cloned().collect();
 
         if weights.len() != var_names.len() {

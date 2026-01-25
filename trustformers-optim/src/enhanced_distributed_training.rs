@@ -365,15 +365,19 @@ impl PerformanceMonitor {
         let step_time = now - self.last_collection;
         self.last_collection = now;
 
-        let gpu_utilization: Vec<f32> =
-            gpu_contexts.iter().map(|ctx| *ctx.utilization.lock().unwrap()).collect();
+        let gpu_utilization: Vec<f32> = gpu_contexts
+            .iter()
+            .map(|ctx| *ctx.utilization.lock().expect("GPU context lock poisoned"))
+            .collect();
 
-        let memory_usage: Vec<f32> =
-            gpu_contexts.iter().map(|ctx| *ctx.memory_usage.lock().unwrap()).collect();
+        let memory_usage: Vec<f32> = gpu_contexts
+            .iter()
+            .map(|ctx| *ctx.memory_usage.lock().expect("GPU context lock poisoned"))
+            .collect();
 
         let bandwidth_utilization: f32 = gpu_contexts
             .iter()
-            .map(|ctx| *ctx.communication_bandwidth.lock().unwrap())
+            .map(|ctx| *ctx.communication_bandwidth.lock().expect("GPU context lock poisoned"))
             .sum::<f32>()
             / gpu_contexts.len() as f32;
 
@@ -1257,8 +1261,11 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         let compressed_gradients = self.gradient_compressor.compress_gradients(&gradients)?;
 
         // Update dynamic batch sizes if needed
-        let gpu_utilizations: Vec<f32> =
-            self.gpu_contexts.iter().map(|ctx| *ctx.utilization.lock().unwrap()).collect();
+        let gpu_utilizations: Vec<f32> = self
+            .gpu_contexts
+            .iter()
+            .map(|ctx| *ctx.utilization.lock().expect("GPU context lock poisoned"))
+            .collect();
 
         let batch_size_adjusted = self.dynamic_batcher.update_batch_sizes(&gpu_utilizations)?;
 
@@ -1313,10 +1320,14 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
     fn update_gpu_metrics(&mut self) -> Result<()> {
         for ctx in &self.gpu_contexts {
             // Simulate GPU metrics (in real implementation, would query GPU)
-            *ctx.utilization.lock().unwrap() = 0.8 + (random::<f32>() - 0.5) * 0.3;
-            *ctx.memory_usage.lock().unwrap() = 0.7 + (random::<f32>() - 0.5) * 0.2;
-            *ctx.temperature.lock().unwrap() = 75.0 + (random::<f32>() - 0.5) * 10.0;
-            *ctx.communication_bandwidth.lock().unwrap() = 800.0 + (random::<f32>() - 0.5) * 200.0;
+            *ctx.utilization.lock().expect("GPU context lock poisoned") =
+                0.8 + (random::<f32>() - 0.5) * 0.3;
+            *ctx.memory_usage.lock().expect("GPU context lock poisoned") =
+                0.7 + (random::<f32>() - 0.5) * 0.2;
+            *ctx.temperature.lock().expect("GPU context lock poisoned") =
+                75.0 + (random::<f32>() - 0.5) * 10.0;
+            *ctx.communication_bandwidth.lock().expect("GPU context lock poisoned") =
+                800.0 + (random::<f32>() - 0.5) * 200.0;
         }
         Ok(())
     }
@@ -1326,11 +1337,17 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         let performance_analysis = self.performance_monitor.analyze_performance_trends();
         let compression_stats = self.gradient_compressor.get_compression_stats();
 
-        let memory_usage: Vec<f32> =
-            self.gpu_contexts.iter().map(|ctx| *ctx.memory_usage.lock().unwrap()).collect();
+        let memory_usage: Vec<f32> = self
+            .gpu_contexts
+            .iter()
+            .map(|ctx| *ctx.memory_usage.lock().expect("GPU context lock poisoned"))
+            .collect();
 
-        let gpu_utilization: Vec<f32> =
-            self.gpu_contexts.iter().map(|ctx| *ctx.utilization.lock().unwrap()).collect();
+        let gpu_utilization: Vec<f32> = self
+            .gpu_contexts
+            .iter()
+            .map(|ctx| *ctx.utilization.lock().expect("GPU context lock poisoned"))
+            .collect();
 
         DistributedTrainingStats {
             total_steps: self.step_count,

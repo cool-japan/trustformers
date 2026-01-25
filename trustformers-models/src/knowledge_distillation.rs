@@ -715,7 +715,7 @@ where
                 let log_probs = arr.mapv(|x| (x + epsilon).ln());
                 let entropy_contributions = arr * &log_probs;
                 let entropy = entropy_contributions.sum_axis(Axis(3)); // Sum over last dimension
-                let mean_entropy = entropy.mean().unwrap();
+                let mean_entropy = entropy.mean().expect("operation failed");
 
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[1]), -mean_entropy)))
             },

@@ -7,7 +7,7 @@ use trustformers_core::{
 #[test]
 fn test_t5_model_creation() {
     let config = T5Config::default();
-    let model = T5Model::new(config.clone()).unwrap();
+    let model = T5Model::new(config.clone()).expect("operation failed");
     assert_eq!(model.get_config().num_layers, 6);
     assert_eq!(model.get_config().num_heads, 8);
 }
@@ -24,7 +24,7 @@ fn test_t5_forward_pass() {
         ..Default::default()
     };
 
-    let model = T5Model::new(config).unwrap();
+    let model = T5Model::new(config).expect("operation failed");
     let input = super::T5Input {
         input_ids: TokenizedInput {
             input_ids: vec![1, 2, 3, 4, 5],
@@ -45,7 +45,7 @@ fn test_t5_forward_pass() {
         encoder_outputs: None,
     };
 
-    let output = model.forward(input).unwrap();
+    let output = model.forward(input).expect("operation failed");
     match &output.last_hidden_state {
         Tensor::F32(arr) => {
             println!("Output shape: {:?}", arr.shape());
@@ -77,7 +77,7 @@ fn test_t5_lm_forward_pass() {
         ..Default::default()
     };
 
-    let model = T5ForConditionalGeneration::new(config).unwrap();
+    let model = T5ForConditionalGeneration::new(config).expect("operation failed");
     let input = super::T5Input {
         input_ids: TokenizedInput {
             input_ids: vec![1, 2, 3, 4, 5],
@@ -98,7 +98,7 @@ fn test_t5_lm_forward_pass() {
         encoder_outputs: None,
     };
 
-    let output = model.forward(input).unwrap();
+    let output = model.forward(input).expect("operation failed");
     match &output.logits {
         Tensor::F32(arr) => {
             // Handle both 2D and 3D outputs
@@ -132,7 +132,7 @@ fn test_relative_position_bias() {
     // Test that the model works with relative position bias enabled
     // We can't directly test the bucketing algorithm from here, but we can
     // verify that the model runs correctly with the bias configuration
-    let model = T5Model::new(config).unwrap();
+    let model = T5Model::new(config).expect("operation failed");
 
     // Run a forward pass to ensure relative position bias is computed
     let input = super::T5Input {
@@ -155,7 +155,7 @@ fn test_relative_position_bias() {
         encoder_outputs: None,
     };
 
-    let output = model.forward(input).unwrap();
+    let output = model.forward(input).expect("operation failed");
 
     // Verify output shape
     match &output.last_hidden_state {
@@ -187,7 +187,7 @@ fn test_t5_encoder_decoder_separation() {
         ..Default::default()
     };
 
-    let model = T5Model::new(config).unwrap();
+    let model = T5Model::new(config).expect("operation failed");
 
     // Test encoder-only forward pass
     let encoder_input = super::T5Input {
@@ -203,6 +203,6 @@ fn test_t5_encoder_decoder_separation() {
         encoder_outputs: None,
     };
 
-    let encoder_output = model.forward(encoder_input).unwrap();
+    let encoder_output = model.forward(encoder_input).expect("operation failed");
     assert!(encoder_output.encoder_last_hidden_state.is_some());
 }

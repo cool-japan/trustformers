@@ -198,7 +198,7 @@ impl DistributedWeightLoader {
             self.local_loaders.insert(loader_key.clone(), loader);
         }
 
-        let loader = self.local_loaders.get_mut(&loader_key).unwrap();
+        let loader = self.local_loaders.get_mut(&loader_key).expect("operation failed");
         loader.load_tensor(name)
     }
 

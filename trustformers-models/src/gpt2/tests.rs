@@ -9,7 +9,7 @@ use trustformers_core::{
 #[test]
 fn test_gpt2_model_creation() {
     let config = Gpt2Config::default();
-    let model = Gpt2Model::new(config.clone()).unwrap();
+    let model = Gpt2Model::new(config.clone()).expect("operation failed");
     assert_eq!(model.get_config().n_layer, 12);
     assert_eq!(model.get_config().n_head, 12);
 }
@@ -17,7 +17,7 @@ fn test_gpt2_model_creation() {
 #[test]
 fn test_gpt2_lm_head_model_creation() {
     let config = Gpt2Config::default();
-    let model = Gpt2LMHeadModel::new(config.clone()).unwrap();
+    let model = Gpt2LMHeadModel::new(config.clone()).expect("operation failed");
     assert_eq!(model.get_config().n_layer, 12);
 }
 
@@ -32,7 +32,7 @@ fn test_gpt2_forward_pass() {
         ..Default::default()
     };
 
-    let model = Gpt2Model::new(config).unwrap();
+    let model = Gpt2Model::new(config).expect("operation failed");
     let input = TokenizedInput {
         input_ids: vec![1, 2, 3, 4, 5],
         attention_mask: vec![1u8; 5],
@@ -42,7 +42,7 @@ fn test_gpt2_forward_pass() {
         overflowing_tokens: None,
     };
 
-    let output = model.forward(input).unwrap();
+    let output = model.forward(input).expect("operation failed");
     match &output.last_hidden_state {
         Tensor::F32(arr) => {
             assert_eq!(arr.shape(), &[1, 5, 32]);
@@ -62,7 +62,7 @@ fn test_gpt2_lm_forward_pass() {
         ..Default::default()
     };
 
-    let model = Gpt2LMHeadModel::new(config).unwrap();
+    let model = Gpt2LMHeadModel::new(config).expect("operation failed");
     let input = TokenizedInput {
         input_ids: vec![1, 2, 3, 4, 5],
         attention_mask: vec![1u8; 5],
@@ -72,7 +72,7 @@ fn test_gpt2_lm_forward_pass() {
         overflowing_tokens: None,
     };
 
-    let output = model.forward(input).unwrap();
+    let output = model.forward(input).expect("operation failed");
     match &output.logits {
         Tensor::F32(arr) => {
             assert_eq!(arr.shape(), &[1, 5, 100]);
@@ -92,9 +92,9 @@ fn test_gpt2_generate_greedy() {
         ..Default::default()
     };
 
-    let model = Gpt2LMHeadModel::new(config).unwrap();
+    let model = Gpt2LMHeadModel::new(config).expect("operation failed");
     let input_ids = vec![1, 2, 3];
-    let generated = model.generate_greedy(input_ids.clone(), 10).unwrap();
+    let generated = model.generate_greedy(input_ids.clone(), 10).expect("operation failed");
 
     assert!(generated.len() >= input_ids.len());
     assert!(generated.len() <= 10);
@@ -112,9 +112,9 @@ fn test_gpt2_beam_search() {
         ..Default::default()
     };
 
-    let model = Gpt2LMHeadModel::new(config).unwrap();
+    let model = Gpt2LMHeadModel::new(config).expect("operation failed");
     let input_ids = vec![1, 2];
-    let generated = model.generate_beam_search(input_ids.clone(), 10, 3).unwrap();
+    let generated = model.generate_beam_search(input_ids.clone(), 10, 3).expect("operation failed");
 
     assert!(generated.len() >= input_ids.len());
     assert!(generated.len() <= 10);
@@ -141,7 +141,7 @@ fn test_gpt2_metal_sampling() {
     println!("Using device: {:?}", device);
 
     // Create model with device
-    let model = Gpt2LMHeadModel::new_with_device(config.clone(), device).unwrap();
+    let model = Gpt2LMHeadModel::new_with_device(config.clone(), device).expect("operation failed");
 
     // Test input
     let input_ids = vec![1, 2, 3];
@@ -151,7 +151,9 @@ fn test_gpt2_metal_sampling() {
 
     // Measure generation time
     let start = Instant::now();
-    let generated = model.generate_top_k(input_ids.clone(), max_length, k, temperature).unwrap();
+    let generated = model
+        .generate_top_k(input_ids.clone(), max_length, k, temperature)
+        .expect("operation failed");
     let elapsed = start.elapsed();
 
     println!(
@@ -192,10 +194,12 @@ fn test_gpt2_metal_vs_cpu_performance() {
 
     // CPU benchmark
     println!("\n=== CPU Benchmark ===");
-    let cpu_model = Gpt2LMHeadModel::new_with_device(config.clone(), Device::CPU).unwrap();
+    let cpu_model =
+        Gpt2LMHeadModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
     let cpu_start = Instant::now();
-    let cpu_generated =
-        cpu_model.generate_top_k(input_ids.clone(), max_length, k, temperature).unwrap();
+    let cpu_generated = cpu_model
+        .generate_top_k(input_ids.clone(), max_length, k, temperature)
+        .expect("operation failed");
     let cpu_elapsed = cpu_start.elapsed();
     let cpu_tokens = cpu_generated.len() - input_ids.len();
     let cpu_tok_per_sec = cpu_tokens as f64 / cpu_elapsed.as_secs_f64();
@@ -207,11 +211,12 @@ fn test_gpt2_metal_vs_cpu_performance() {
     let device = Device::metal_if_available(0);
     if matches!(device, Device::Metal(_)) {
         println!("\n=== Metal GPU Benchmark ===");
-        let metal_model = Gpt2LMHeadModel::new_with_device(config.clone(), device).unwrap();
+        let metal_model =
+            Gpt2LMHeadModel::new_with_device(config.clone(), device).expect("operation failed");
         let metal_start = Instant::now();
         let metal_generated = metal_model
             .generate_top_k(input_ids.clone(), max_length, k, temperature)
-            .unwrap();
+            .expect("operation failed");
         let metal_elapsed = metal_start.elapsed();
         let metal_tokens = metal_generated.len() - input_ids.len();
         let metal_tok_per_sec = metal_tokens as f64 / metal_elapsed.as_secs_f64();

@@ -3,8 +3,9 @@
 //! This benchmark suite tests the performance of different tokenizers
 //! to identify potential bottlenecks and optimization opportunities.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;
+use std::hint::black_box;
 use trustformers_core::traits::Tokenizer;
 use trustformers_tokenizers::{
     bpe::BPETokenizer, char::CharTokenizer, wordpiece::WordPieceTokenizer,

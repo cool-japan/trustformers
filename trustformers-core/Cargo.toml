@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-core"
 description = "Core traits and utilities for TrustformeRS"
+keywords = ["transformers", "machine-learning", "nlp", "deep-learning", "rust"]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true

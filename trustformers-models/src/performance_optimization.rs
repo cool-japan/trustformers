@@ -62,7 +62,7 @@ impl LruCache {
         if self.cache.contains_key(key) {
             self.access_order += 1;
             // Get a clone to avoid borrow checker issues
-            let (tensor, _) = self.cache.get(key).unwrap().clone();
+            let (tensor, _) = self.cache.get(key).expect("operation failed").clone();
             self.cache.insert(key.to_string(), (tensor, self.access_order));
             self.hits += 1;
             self.cache.get(key).map(|(tensor, _)| tensor)
@@ -822,10 +822,10 @@ mod tests {
     #[test]
     fn test_memory_optimizer_estimate() {
         // Create a simple test tensor
-        let tensor = Tensor::zeros(&[2, 3]).unwrap();
+        let tensor = Tensor::zeros(&[2, 3]).expect("operation failed");
         let tensors = vec![tensor];
 
-        let estimated = MemoryOptimizer::estimate_memory_usage(&tensors).unwrap();
+        let estimated = MemoryOptimizer::estimate_memory_usage(&tensors).expect("operation failed");
         // 2 * 3 elements * 4 bytes per f32 element = 24 bytes
         assert_eq!(estimated, 24);
     }
@@ -835,15 +835,15 @@ mod tests {
         let strategy = BatchingStrategy::Fixed(2);
         let mut manager = DynamicBatchManager::new(strategy);
 
-        let tensor1 = Tensor::zeros(&[1, 2]).unwrap();
-        let tensor2 = Tensor::zeros(&[1, 2]).unwrap();
+        let tensor1 = Tensor::zeros(&[1, 2]).expect("operation failed");
+        let tensor2 = Tensor::zeros(&[1, 2]).expect("operation failed");
 
-        manager.add_tensor(tensor1, 1).unwrap();
-        manager.add_tensor(tensor2, 2).unwrap();
+        manager.add_tensor(tensor1, 1).expect("operation failed");
+        manager.add_tensor(tensor2, 2).expect("operation failed");
 
-        let batch = manager.get_next_batch().unwrap();
+        let batch = manager.get_next_batch().expect("operation failed");
         assert!(batch.is_some());
-        assert_eq!(batch.unwrap().len(), 2);
+        assert_eq!(batch.expect("operation failed").len(), 2);
     }
 
     #[test]
@@ -900,9 +900,9 @@ mod tests {
     fn test_lru_cache() {
         let mut cache = LruCache::new(2);
 
-        let tensor1 = Tensor::zeros(&[1, 2]).unwrap();
-        let tensor2 = Tensor::zeros(&[1, 3]).unwrap();
-        let tensor3 = Tensor::zeros(&[1, 4]).unwrap();
+        let tensor1 = Tensor::zeros(&[1, 2]).expect("operation failed");
+        let tensor2 = Tensor::zeros(&[1, 3]).expect("operation failed");
+        let tensor3 = Tensor::zeros(&[1, 4]).expect("operation failed");
 
         // Add tensors
         cache.put("key1".to_string(), tensor1);
@@ -964,16 +964,16 @@ mod tests {
         let mut manager = DynamicBatchManager::new(strategy);
 
         // Add tensors with different priorities
-        let tensor = Tensor::zeros(&[1, 2]).unwrap();
-        manager.add_tensor(tensor.clone(), 90).unwrap(); // High priority
-        manager.add_tensor(tensor.clone(), 50).unwrap(); // Normal priority
-        manager.add_tensor(tensor.clone(), 90).unwrap(); // High priority
-        manager.add_tensor(tensor.clone(), 20).unwrap(); // Low priority
+        let tensor = Tensor::zeros(&[1, 2]).expect("operation failed");
+        manager.add_tensor(tensor.clone(), 90).expect("operation failed"); // High priority
+        manager.add_tensor(tensor.clone(), 50).expect("operation failed"); // Normal priority
+        manager.add_tensor(tensor.clone(), 90).expect("operation failed"); // High priority
+        manager.add_tensor(tensor.clone(), 20).expect("operation failed"); // Low priority
 
         // Should get high priority batch first
-        let batch = manager.get_next_batch().unwrap();
+        let batch = manager.get_next_batch().expect("operation failed");
         assert!(batch.is_some());
-        assert_eq!(batch.unwrap().len(), 2); // High priority batch size
+        assert_eq!(batch.expect("operation failed").len(), 2); // High priority batch size
 
         let stats = manager.get_batch_statistics();
         assert_eq!(stats.strategy_type, "PriorityBased");
@@ -1562,13 +1562,13 @@ mod gpu_memory_tests {
         let mut pool = GpuMemoryPool::new(1024 * 1024); // 1MB limit
 
         // Test allocation
-        let chunk = pool.allocate(1024).unwrap();
+        let chunk = pool.allocate(1024).expect("operation failed");
         assert_eq!(chunk.size_bytes, 1024);
         assert!(chunk.in_use);
         assert_eq!(pool.get_statistics().active_allocations, 1);
 
         // Test deallocation
-        pool.deallocate(chunk).unwrap();
+        pool.deallocate(chunk).expect("operation failed");
         assert_eq!(pool.get_statistics().active_allocations, 0);
     }
 
@@ -1577,12 +1577,12 @@ mod gpu_memory_tests {
         let mut pool = GpuMemoryPool::new(1024 * 1024);
 
         // Allocate and deallocate
-        let chunk = pool.allocate(1024).unwrap();
-        pool.deallocate(chunk).unwrap();
+        let chunk = pool.allocate(1024).expect("operation failed");
+        pool.deallocate(chunk).expect("operation failed");
 
         // Allocate same size - should reuse
         let stats_before = pool.get_statistics();
-        let _chunk2 = pool.allocate(1024).unwrap();
+        let _chunk2 = pool.allocate(1024).expect("operation failed");
         let stats_after = pool.get_statistics();
 
         assert_eq!(stats_after.cache_hits, stats_before.cache_hits + 1);

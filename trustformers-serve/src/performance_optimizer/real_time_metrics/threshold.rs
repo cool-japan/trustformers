@@ -371,7 +371,7 @@ impl SimpleThresholdEvaluator {
 
     /// Get evaluator statistics
     pub fn get_stats(&self) -> EvaluatorStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("Stats lock poisoned").clone()
     }
 }
 
@@ -429,7 +429,7 @@ impl ThresholdEvaluator for SimpleThresholdEvaluator {
 
         // Update statistics
         if self.config.track_performance {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock().expect("Stats lock poisoned");
             stats.total_evaluations += 1;
             stats.total_evaluation_time += start_time.elapsed();
             if violated {
@@ -550,7 +550,7 @@ impl StatisticalThresholdEvaluator {
 
     /// Add data point to history
     pub fn add_data_point(&self, value: f64, quality: f32) {
-        let mut history = self.history.lock().unwrap();
+        let mut history = self.history.lock().expect("History lock poisoned");
 
         let data_point = StatisticalDataPoint {
             value,
@@ -568,7 +568,7 @@ impl StatisticalThresholdEvaluator {
 
     /// Calculate statistical confidence
     fn calculate_confidence(&self, config: &ThresholdConfig, value: f64) -> f32 {
-        let history = self.history.lock().unwrap();
+        let history = self.history.lock().expect("History lock poisoned");
 
         if history.len() < self.config.min_data_points {
             return 0.5; // Low confidence with insufficient data
@@ -775,7 +775,7 @@ impl ThresholdEvaluator for StatisticalThresholdEvaluator {
         );
         context.insert(
             "history_size".to_string(),
-            self.history.lock().unwrap().len().to_string(),
+            self.history.lock().expect("History lock poisoned").len().to_string(),
         );
 
         Ok(ThresholdEvaluation {
@@ -1180,7 +1180,8 @@ impl AdaptiveThresholdEvaluator {
         // Check minimum adaptation period
         let time_since_adaptation = Utc::now().signed_duration_since(adaptation.last_adapted);
         if time_since_adaptation
-            < chrono::Duration::from_std(self.config.min_adaptation_period).unwrap()
+            < chrono::Duration::from_std(self.config.min_adaptation_period)
+                .expect("Duration conversion failed")
         {
             return false;
         }
@@ -1691,7 +1692,7 @@ impl AlertManager {
 
     /// Process an alert
     pub async fn process_alert(&self, alert: AlertEvent) -> Result<()> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("Config RwLock poisoned");
         let mut queue = self.alert_queue.lock().await;
 
         // Check queue size limits
@@ -1726,7 +1727,11 @@ impl AlertManager {
             alerts_suppressed: AtomicU64::new(self.stats.alerts_suppressed.load(Ordering::Relaxed)),
             alerts_correlated: AtomicU64::new(self.stats.alerts_correlated.load(Ordering::Relaxed)),
             avg_processing_time: Arc::new(Mutex::new(
-                *self.stats.avg_processing_time.lock().unwrap(),
+                *self
+                    .stats
+                    .avg_processing_time
+                    .lock()
+                    .expect("Avg processing time lock poisoned"),
             )),
             queue_size: AtomicU64::new(self.stats.queue_size.load(Ordering::Relaxed)),
             peak_queue_size: AtomicU64::new(self.stats.peak_queue_size.load(Ordering::Relaxed)),
@@ -1750,7 +1755,7 @@ impl AlertManager {
             interval.tick().await;
 
             let (batch_size, enable_suppression, enable_correlation) = {
-                let config_read = config.read().unwrap();
+                let config_read = config.read().expect("Config RwLock poisoned");
                 (
                     config_read.batch_size,
                     config_read.enable_suppression,
@@ -1809,7 +1814,8 @@ impl AlertManager {
 
                 // Update processing time statistics
                 let processing_time = start_time.elapsed();
-                let mut avg_time = stats.avg_processing_time.lock().unwrap();
+                let mut avg_time =
+                    stats.avg_processing_time.lock().expect("Avg time lock poisoned");
                 *avg_time = (*avg_time + processing_time) / 2; // Simple moving average
             }
         }
@@ -1822,7 +1828,7 @@ impl AlertManager {
         channels: &Arc<Mutex<Vec<Box<dyn NotificationChannel + Send + Sync>>>>,
     ) -> Result<()> {
         let all_notifications = {
-            let processors_guard = processors.lock().unwrap();
+            let processors_guard = processors.lock().expect("Processors lock poisoned");
             let mut notifications = Vec::new();
 
             // Find and run appropriate processors
@@ -1860,7 +1866,7 @@ impl AlertManager {
         notifications: &[Notification],
         channels: &Arc<Mutex<Vec<Box<dyn NotificationChannel + Send + Sync>>>>,
     ) -> Result<()> {
-        let channels_guard = channels.lock().unwrap();
+        let channels_guard = channels.lock().expect("Channels lock poisoned");
 
         for notification in notifications {
             for channel in channels_guard.iter() {
@@ -1891,7 +1897,7 @@ impl AlertManager {
 
     /// Initialize alert processors
     async fn initialize_processors(&self) -> Result<()> {
-        let mut processors = self.processors.lock().unwrap();
+        let mut processors = self.processors.lock().expect("Processors lock poisoned");
         processors.push(Box::new(DefaultAlertProcessor::new()));
         processors.push(Box::new(PerformanceAlertProcessor::new()));
         processors.push(Box::new(ResourceAlertProcessor::new()));
@@ -1901,7 +1907,7 @@ impl AlertManager {
 
     /// Initialize notification channels
     async fn initialize_channels(&self) -> Result<()> {
-        let mut channels = self.channels.lock().unwrap();
+        let mut channels = self.channels.lock().expect("Channels lock poisoned");
         channels.push(Box::new(LogNotificationChannel::new()));
         channels.push(Box::new(EmailNotificationChannel::new()));
         channels.push(Box::new(WebhookNotificationChannel::new()));
@@ -2116,7 +2122,7 @@ impl AlertSuppressor {
         self.stats.total_processed.fetch_add(1, Ordering::Relaxed);
 
         let suppressed_by_rule = {
-            let rules = self.rules.read().unwrap();
+            let rules = self.rules.read().expect("Rules RwLock poisoned");
             let mut suppressed = false;
 
             for rule in rules.iter() {
@@ -2143,7 +2149,7 @@ impl AlertSuppressor {
 
         // Check deduplication
         let enable_deduplication = {
-            let config = self.config.read().unwrap();
+            let config = self.config.read().expect("Config RwLock poisoned");
             config.enable_deduplication
         };
 
@@ -2166,7 +2172,7 @@ impl AlertSuppressor {
 
         // Update fingerprint if deduplication is enabled
         let enable_deduplication = {
-            let config = self.config.read().unwrap();
+            let config = self.config.read().expect("Config RwLock poisoned");
             config.enable_deduplication
         };
 
@@ -2232,9 +2238,10 @@ impl AlertSuppressor {
 
             // Check if within deduplication window
             let time_diff = existing.last_seen.signed_duration_since(existing.first_seen);
-            let dedup_window =
-                chrono::Duration::from_std(self.config.read().unwrap().deduplication_window)
-                    .unwrap();
+            let dedup_window = chrono::Duration::from_std(
+                self.config.read().expect("Config RwLock poisoned").deduplication_window,
+            )
+            .expect("Duration conversion failed");
 
             return time_diff <= dedup_window;
         }
@@ -2252,7 +2259,8 @@ impl AlertSuppressor {
         fingerprints.insert(fingerprint_hash, fingerprint);
 
         // Maintain cache size
-        let max_cache_size = self.config.read().unwrap().max_fingerprint_cache;
+        let max_cache_size =
+            self.config.read().expect("Config RwLock poisoned").max_fingerprint_cache;
         if fingerprints.len() > max_cache_size {
             // Remove oldest entries - collect keys first to avoid borrow conflict
             let mut entries: Vec<_> =
@@ -2307,13 +2315,14 @@ impl AlertSuppressor {
 
     /// Update rule statistics
     fn update_rule_stats(&self, rule_id: &str) {
-        let mut stats = self.stats.suppression_by_rule.lock().unwrap();
+        let mut stats =
+            self.stats.suppression_by_rule.lock().expect("Suppression stats lock poisoned");
         *stats.entry(rule_id.to_string()).or_insert(0) += 1;
     }
 
     /// Add suppression rule
     pub fn add_rule(&self, rule: SuppressionRule) {
-        let mut rules = self.rules.write().unwrap();
+        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
         rules.push(rule);
 
         // Sort by priority (higher priority first)
@@ -2322,7 +2331,7 @@ impl AlertSuppressor {
 
     /// Remove suppression rule
     pub fn remove_rule(&self, rule_id: &str) {
-        let mut rules = self.rules.write().unwrap();
+        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
         rules.retain(|rule| rule.id != rule_id);
     }
 
@@ -2332,13 +2341,25 @@ impl AlertSuppressor {
             total_processed: AtomicU64::new(self.stats.total_processed.load(Ordering::Relaxed)),
             total_suppressed: AtomicU64::new(self.stats.total_suppressed.load(Ordering::Relaxed)),
             suppression_by_rule: Arc::new(Mutex::new(
-                self.stats.suppression_by_rule.lock().unwrap().clone(),
+                self.stats
+                    .suppression_by_rule
+                    .lock()
+                    .expect("Suppression stats lock poisoned")
+                    .clone(),
             )),
             avg_suppression_rate: Arc::new(Mutex::new(
-                *self.stats.avg_suppression_rate.lock().unwrap(),
+                *self
+                    .stats
+                    .avg_suppression_rate
+                    .lock()
+                    .expect("Avg suppression rate lock poisoned"),
             )),
             peak_suppression_rate: Arc::new(Mutex::new(
-                *self.stats.peak_suppression_rate.lock().unwrap(),
+                *self
+                    .stats
+                    .peak_suppression_rate
+                    .lock()
+                    .expect("Peak suppression rate lock poisoned"),
             )),
         }
     }
@@ -2557,7 +2578,7 @@ impl AlertCorrelator {
         self.stats.total_processed.fetch_add(1, Ordering::Relaxed);
 
         let rules_snapshot = {
-            let rules = self.rules.read().unwrap();
+            let rules = self.rules.read().expect("Rules RwLock poisoned");
             rules.clone()
         };
 
@@ -2684,7 +2705,8 @@ impl AlertCorrelator {
     ) -> bool {
         // Check time window
         let time_diff = alert.timestamp.signed_duration_since(correlation.updated_at);
-        let time_window = chrono::Duration::from_std(rule.time_window).unwrap();
+        let time_window =
+            chrono::Duration::from_std(rule.time_window).expect("Duration conversion failed");
 
         if time_diff > time_window {
             return false;
@@ -2696,7 +2718,8 @@ impl AlertCorrelator {
         }
 
         // Check maximum correlations per alert
-        let max_correlations = self.config.read().unwrap().max_correlations_per_alert;
+        let max_correlations =
+            self.config.read().expect("Config RwLock poisoned").max_correlations_per_alert;
         if correlation.correlated_alerts.len() >= max_correlations {
             return false;
         }
@@ -2719,27 +2742,32 @@ impl AlertCorrelator {
     /// Update correlation statistics
     fn update_correlation_stats(&self, rule_type: &CorrelationRuleType) {
         let type_name = format!("{:?}", rule_type);
-        let mut stats = self.stats.correlations_by_type.lock().unwrap();
+        let mut stats = self
+            .stats
+            .correlations_by_type
+            .lock()
+            .expect("Correlations stats lock poisoned");
         *stats.entry(type_name).or_insert(0) += 1;
     }
 
     /// Clean up old correlations
     async fn cleanup_old_correlations(&self, correlations: &mut HashMap<String, AlertCorrelation>) {
-        let max_window = self.config.read().unwrap().max_correlation_window;
-        let cutoff_time = Utc::now() - chrono::Duration::from_std(max_window).unwrap();
+        let max_window = self.config.read().expect("Config RwLock poisoned").max_correlation_window;
+        let cutoff_time = Utc::now()
+            - chrono::Duration::from_std(max_window).expect("Duration conversion failed");
 
         correlations.retain(|_, correlation| correlation.updated_at > cutoff_time);
     }
 
     /// Add correlation rule
     pub fn add_rule(&self, rule: CorrelationRule) {
-        let mut rules = self.rules.write().unwrap();
+        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
         rules.push(rule);
     }
 
     /// Remove correlation rule
     pub fn remove_rule(&self, rule_id: &str) {
-        let mut rules = self.rules.write().unwrap();
+        let mut rules = self.rules.write().expect("Rules RwLock poisoned");
         rules.retain(|rule| rule.id != rule_id);
     }
 
@@ -2751,10 +2779,18 @@ impl AlertCorrelator {
                 self.stats.total_correlations.load(Ordering::Relaxed),
             ),
             correlations_by_type: Arc::new(Mutex::new(
-                self.stats.correlations_by_type.lock().unwrap().clone(),
+                self.stats
+                    .correlations_by_type
+                    .lock()
+                    .expect("Correlations stats lock poisoned")
+                    .clone(),
             )),
             avg_correlation_strength: Arc::new(Mutex::new(
-                *self.stats.avg_correlation_strength.lock().unwrap(),
+                *self
+                    .stats
+                    .avg_correlation_strength
+                    .lock()
+                    .expect("Avg correlation strength lock poisoned"),
             )),
             active_correlations: AtomicU64::new(
                 self.stats.active_correlations.load(Ordering::Relaxed),
@@ -3061,7 +3097,7 @@ impl EscalationManager {
 
     /// Start escalation for an alert
     pub async fn start_escalation(&self, alert: &AlertEvent, policy_name: &str) -> Result<()> {
-        let policies = self.policies.read().unwrap();
+        let policies = self.policies.read().expect("Policies RwLock poisoned");
         let policy = policies.get(policy_name).ok_or_else(|| {
             ThresholdError::EscalationError(format!("Policy {} not found", policy_name))
         })?;
@@ -3082,7 +3118,8 @@ impl EscalationManager {
             current_level: 0,
             started_at: Utc::now(),
             next_escalation: Utc::now()
-                + chrono::Duration::from_std(policy.levels[0].time_to_escalate).unwrap(),
+                + chrono::Duration::from_std(policy.levels[0].time_to_escalate)
+                    .expect("Duration conversion failed"),
             escalation_history: vec![EscalationEvent {
                 timestamp: Utc::now(),
                 event_type: EscalationEventType::Started,
@@ -3157,7 +3194,7 @@ impl EscalationManager {
 
             let mut state_guard = state.lock().await;
             let auto_escalation_enabled = {
-                let config_read = config.read().unwrap();
+                let config_read = config.read().expect("Config RwLock poisoned");
                 config_read.enable_auto_escalation
             };
 
@@ -3190,7 +3227,7 @@ impl EscalationManager {
         policies: &Arc<RwLock<HashMap<String, EscalationPolicy>>>,
         stats: &Arc<EscalationStats>,
     ) {
-        let policies_guard = policies.read().unwrap();
+        let policies_guard = policies.read().expect("Policies RwLock poisoned");
 
         // Find appropriate policy (simplified - in practice, this would be more sophisticated)
         if let Some(policy) = policies_guard.values().next() {
@@ -3204,8 +3241,9 @@ impl EscalationManager {
                     let level = &policy.levels[level_index];
 
                     // Schedule next escalation
-                    escalation_state.next_escalation =
-                        Utc::now() + chrono::Duration::from_std(level.time_to_escalate).unwrap();
+                    escalation_state.next_escalation = Utc::now()
+                        + chrono::Duration::from_std(level.time_to_escalate)
+                            .expect("Duration conversion failed");
 
                     // Record escalation event
                     escalation_state.escalation_history.push(EscalationEvent {
@@ -3221,7 +3259,8 @@ impl EscalationManager {
                     }
 
                     // Update statistics
-                    let mut level_stats = stats.escalations_by_level.lock().unwrap();
+                    let mut level_stats =
+                        stats.escalations_by_level.lock().expect("Escalation stats lock poisoned");
                     *level_stats.entry(escalation_state.current_level).or_insert(0) += 1;
                 }
             }
@@ -3325,7 +3364,7 @@ impl EscalationManager {
             enabled: true,
         };
 
-        let mut policies = self.policies.write().unwrap();
+        let mut policies = self.policies.write().expect("Policies RwLock poisoned");
         policies.insert(default_policy.name.clone(), default_policy);
         policies.insert(performance_policy.name.clone(), performance_policy);
 
@@ -3334,13 +3373,13 @@ impl EscalationManager {
 
     /// Add escalation policy
     pub fn add_policy(&self, policy: EscalationPolicy) {
-        let mut policies = self.policies.write().unwrap();
+        let mut policies = self.policies.write().expect("Policies RwLock poisoned");
         policies.insert(policy.name.clone(), policy);
     }
 
     /// Remove escalation policy
     pub fn remove_policy(&self, policy_name: &str) {
-        let mut policies = self.policies.write().unwrap();
+        let mut policies = self.policies.write().expect("Policies RwLock poisoned");
         policies.remove(policy_name);
     }
 
@@ -3352,13 +3391,25 @@ impl EscalationManager {
                 self.stats.active_escalations.load(Ordering::Relaxed),
             ),
             escalations_by_level: Arc::new(Mutex::new(
-                self.stats.escalations_by_level.lock().unwrap().clone(),
+                self.stats
+                    .escalations_by_level
+                    .lock()
+                    .expect("Escalation stats lock poisoned")
+                    .clone(),
             )),
             avg_escalation_time: Arc::new(Mutex::new(
-                *self.stats.avg_escalation_time.lock().unwrap(),
+                *self
+                    .stats
+                    .avg_escalation_time
+                    .lock()
+                    .expect("Avg escalation time lock poisoned"),
             )),
             acknowledgment_rate: Arc::new(Mutex::new(
-                *self.stats.acknowledgment_rate.lock().unwrap(),
+                *self
+                    .stats
+                    .acknowledgment_rate
+                    .lock()
+                    .expect("Acknowledgment rate lock poisoned"),
             )),
         }
     }
@@ -3579,7 +3630,7 @@ impl AdaptiveThresholdController {
         metrics_history: &[TimestampedMetrics],
         alert_history: &[AlertEvent],
     ) -> Result<f64> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("Config RwLock poisoned");
         if !config.enabled {
             return Ok(current_threshold);
         }
@@ -3647,7 +3698,11 @@ impl AdaptiveThresholdController {
 
             // Update statistics
             self.stats.total_adaptations.fetch_add(1, Ordering::Relaxed);
-            let mut algo_stats = self.stats.adaptations_by_algorithm.lock().unwrap();
+            let mut algo_stats = self
+                .stats
+                .adaptations_by_algorithm
+                .lock()
+                .expect("Algorithm stats lock poisoned");
             *algo_stats.entry(best_algorithm).or_insert(0) += 1;
         }
 
@@ -3715,7 +3770,7 @@ impl AdaptiveThresholdController {
             interval.tick().await;
 
             let enabled = {
-                let config_read = config.read().unwrap();
+                let config_read = config.read().expect("Config RwLock poisoned");
                 config_read.enabled
             };
 
@@ -3757,8 +3812,9 @@ impl AdaptiveThresholdController {
             let avg_effectiveness = effectiveness_sum / count as f32;
             let avg_confidence = confidence_sum / count as f32;
 
-            *stats.avg_effectiveness.lock().unwrap() = avg_effectiveness;
-            *stats.avg_confidence.lock().unwrap() = avg_confidence;
+            *stats.avg_effectiveness.lock().expect("Avg effectiveness lock poisoned") =
+                avg_effectiveness;
+            *stats.avg_confidence.lock().expect("Avg confidence lock poisoned") = avg_confidence;
         }
     }
 
@@ -3782,10 +3838,18 @@ impl AdaptiveThresholdController {
                 self.stats.failed_adaptations.load(Ordering::Relaxed),
             ),
             adaptations_by_algorithm: Arc::new(Mutex::new(
-                self.stats.adaptations_by_algorithm.lock().unwrap().clone(),
+                self.stats
+                    .adaptations_by_algorithm
+                    .lock()
+                    .expect("Algorithm stats lock poisoned")
+                    .clone(),
             )),
-            avg_effectiveness: Arc::new(Mutex::new(*self.stats.avg_effectiveness.lock().unwrap())),
-            avg_confidence: Arc::new(Mutex::new(*self.stats.avg_confidence.lock().unwrap())),
+            avg_effectiveness: Arc::new(Mutex::new(
+                *self.stats.avg_effectiveness.lock().expect("Avg effectiveness lock poisoned"),
+            )),
+            avg_confidence: Arc::new(Mutex::new(
+                *self.stats.avg_confidence.lock().expect("Avg confidence lock poisoned"),
+            )),
         }
     }
 
@@ -3883,7 +3947,7 @@ impl DefaultAlertProcessor {
     }
 
     pub fn get_stats(&self) -> ProcessorStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("Stats lock poisoned").clone()
     }
 }
 
@@ -4347,7 +4411,7 @@ impl LogNotificationChannel {
     }
 
     pub fn get_stats(&self) -> ChannelStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("Stats lock poisoned").clone()
     }
 }
 
@@ -4806,7 +4870,7 @@ impl ThresholdMonitor {
     /// Begins continuous threshold monitoring with real-time evaluation
     /// and intelligent alerting based on configured thresholds.
     pub async fn start_monitoring(&self) -> Result<()> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("Config RwLock poisoned");
         if !config.enable_monitoring {
             return Ok(());
         }
@@ -4892,7 +4956,7 @@ impl ThresholdMonitor {
     ) -> Result<Vec<AlertEvent>> {
         let start_time = Instant::now();
 
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("Config RwLock poisoned");
         if !config.enable_monitoring {
             return Ok(Vec::new());
         }
@@ -4900,8 +4964,8 @@ impl ThresholdMonitor {
         let performance_tracking = config.enable_performance_analysis;
         drop(config);
 
-        let thresholds = self.thresholds.read().unwrap();
-        let evaluators = self.evaluators.lock().unwrap();
+        let thresholds = self.thresholds.read().expect("Thresholds RwLock poisoned");
+        let evaluators = self.evaluators.lock().expect("Evaluators lock poisoned");
         let mut alerts = Vec::new();
 
         // Track performance if enabled
@@ -4914,7 +4978,12 @@ impl ThresholdMonitor {
             if let Some(metric_value) = self.extract_metric_value(metrics, &threshold_config.metric)
             {
                 // Apply adaptive threshold adjustment if enabled
-                let adjusted_threshold = if self.config.read().unwrap().enable_adaptive_thresholds {
+                let adjusted_threshold = if self
+                    .config
+                    .read()
+                    .expect("Config RwLock poisoned")
+                    .enable_adaptive_thresholds
+                {
                     let history = self.collect_metrics_history(&threshold_config.metric).await;
                     let alert_hist =
                         self.get_alert_history_for_metric(&threshold_config.metric).await;
@@ -4958,7 +5027,11 @@ impl ThresholdMonitor {
                                     .await?;
 
                                 // Apply suppression if enabled
-                                if self.config.read().unwrap().enable_alert_suppression
+                                if self
+                                    .config
+                                    .read()
+                                    .expect("Config RwLock poisoned")
+                                    .enable_alert_suppression
                                     && self.alert_suppressor.should_suppress(&alert).await
                                 {
                                     self.alert_suppressor.suppress_alert(&mut alert).await;
@@ -4966,7 +5039,12 @@ impl ThresholdMonitor {
                                 }
 
                                 // Apply correlation if enabled
-                                if self.config.read().unwrap().enable_alert_correlation {
+                                if self
+                                    .config
+                                    .read()
+                                    .expect("Config RwLock poisoned")
+                                    .enable_alert_correlation
+                                {
                                     self.alert_correlator.correlate_alert(&mut alert).await;
                                 }
 
@@ -5029,7 +5107,7 @@ impl ThresholdMonitor {
 
     /// Add a new threshold configuration
     pub async fn add_threshold(&self, threshold: ThresholdConfig) -> Result<()> {
-        let mut thresholds = self.thresholds.write().unwrap();
+        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
         thresholds.insert(threshold.name.clone(), threshold);
         info!("Added threshold configuration: {}", thresholds.len());
         Ok(())
@@ -5037,7 +5115,7 @@ impl ThresholdMonitor {
 
     /// Remove a threshold configuration
     pub async fn remove_threshold(&self, threshold_name: &str) -> Result<()> {
-        let mut thresholds = self.thresholds.write().unwrap();
+        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
         thresholds.remove(threshold_name);
         info!("Removed threshold configuration: {}", threshold_name);
         Ok(())
@@ -5045,7 +5123,7 @@ impl ThresholdMonitor {
 
     /// Update threshold configuration
     pub async fn update_threshold(&self, threshold: ThresholdConfig) -> Result<()> {
-        let mut thresholds = self.thresholds.write().unwrap();
+        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
         thresholds.insert(threshold.name.clone(), threshold);
         info!("Updated threshold configuration: {}", thresholds.len());
         Ok(())
@@ -5053,7 +5131,7 @@ impl ThresholdMonitor {
 
     /// Get current monitoring state
     pub async fn get_monitoring_state(&self) -> ThresholdMonitoringState {
-        (*self.monitoring_state.read().unwrap()).clone()
+        (*self.monitoring_state.read().expect("Monitoring state RwLock poisoned")).clone()
     }
 
     /// Get alert history
@@ -5062,7 +5140,7 @@ impl ThresholdMonitor {
         start_time: DateTime<Utc>,
         end_time: DateTime<Utc>,
     ) -> Result<Vec<AlertEvent>> {
-        let history = self.alert_history.lock().unwrap();
+        let history = self.alert_history.lock().expect("Alert history lock poisoned");
         let filtered_alerts = history
             .iter()
             .filter(|alert| alert.timestamp >= start_time && alert.timestamp <= end_time)
@@ -5111,7 +5189,7 @@ impl ThresholdMonitor {
     ) {
         let mut interval = {
             let monitoring_interval = {
-                let config_read = config.read().unwrap();
+                let config_read = config.read().expect("Config RwLock poisoned");
                 config_read.monitoring_interval
             };
             interval(monitoring_interval)
@@ -5121,7 +5199,7 @@ impl ThresholdMonitor {
             interval.tick().await;
 
             let monitoring_enabled = {
-                let config_read = config.read().unwrap();
+                let config_read = config.read().expect("Config RwLock poisoned");
                 config_read.enable_monitoring
             };
 
@@ -5147,20 +5225,20 @@ impl ThresholdMonitor {
         drop(config_read);
 
         // Clean up old alerts from history
-        let mut history = alert_history.lock().unwrap();
+        let mut history = alert_history.lock().expect("Alert history lock poisoned");
         while history.len() > max_history {
             history.pop_front();
         }
         drop(history);
 
         // Update monitoring state
-        let mut state = monitoring_state.write().unwrap();
+        let mut state = monitoring_state.write().expect("Monitoring state RwLock poisoned");
         state.last_evaluation = Some(Utc::now());
         drop(state);
     }
 
     async fn initialize_evaluators(&self) -> Result<()> {
-        let mut evaluators = self.evaluators.lock().unwrap();
+        let mut evaluators = self.evaluators.lock().expect("Evaluators lock poisoned");
         evaluators.push(Box::new(SimpleThresholdEvaluator::new()));
         evaluators.push(Box::new(StatisticalThresholdEvaluator::new()));
         evaluators.push(Box::new(AdaptiveThresholdEvaluator::new().await));
@@ -5207,7 +5285,7 @@ impl ThresholdMonitor {
             },
         ];
 
-        let mut thresholds = self.thresholds.write().unwrap();
+        let mut thresholds = self.thresholds.write().expect("Thresholds RwLock poisoned");
         for threshold in default_thresholds {
             thresholds.insert(threshold.name.clone(), threshold);
         }
@@ -5331,7 +5409,7 @@ impl ThresholdMonitor {
         alerts: &[AlertEvent],
         evaluation_duration: Duration,
     ) -> Result<()> {
-        let mut state = self.monitoring_state.write().unwrap();
+        let mut state = self.monitoring_state.write().expect("Monitoring state RwLock poisoned");
 
         state.last_evaluation = Some(Utc::now());
 
@@ -5382,7 +5460,7 @@ impl ThresholdMonitor {
         }
 
         // Maintain history size
-        let max_history = self.config.read().unwrap().max_alert_history;
+        let max_history = self.config.read().expect("Config RwLock poisoned").max_alert_history;
         while history.len() > max_history {
             history.pop_front();
         }
@@ -5395,7 +5473,7 @@ impl ThresholdMonitor {
     }
 
     async fn get_alert_history_for_metric(&self, metric_name: &str) -> Vec<AlertEvent> {
-        let history = self.alert_history.lock().unwrap();
+        let history = self.alert_history.lock().expect("Alert history lock poisoned");
         history
             .iter()
             .filter(|alert| alert.threshold.metric == metric_name)
@@ -5599,7 +5677,7 @@ impl MachineLearningAdaptationAlgorithm {
             ));
         }
 
-        let mut model = self.model_state.lock().unwrap();
+        let mut model = self.model_state.lock().expect("Model state lock poisoned");
 
         // Simple gradient descent implementation
         for (feature_vec, target) in features.iter().zip(targets.iter()) {
@@ -5714,7 +5792,7 @@ impl ThresholdAdaptationAlgorithm for MachineLearningAdaptationAlgorithm {
         }
 
         // Make prediction
-        let model = self.model_state.lock().unwrap();
+        let model = self.model_state.lock().expect("Model state lock poisoned");
         let predicted_threshold = self.predict_with_features(&model, &features);
 
         // Apply some bounds checking
@@ -5729,7 +5807,7 @@ impl ThresholdAdaptationAlgorithm for MachineLearningAdaptationAlgorithm {
     }
 
     fn confidence(&self, data_quality: f32) -> f32 {
-        let model = self.model_state.lock().unwrap();
+        let model = self.model_state.lock().expect("Model state lock poisoned");
         model.model_accuracy * data_quality
     }
 }
@@ -5919,7 +5997,7 @@ impl ThresholdAdaptationAlgorithm for TrendAnalysisAlgorithm {
 
         // Update trend state
         {
-            let mut state = self.trend_state.lock().unwrap();
+            let mut state = self.trend_state.lock().expect("Trend state lock poisoned");
             state.current_trend = trend_direction;
             state.trend_strength = trend_strength;
             state.seasonal_patterns = seasonal_patterns;
@@ -5927,12 +6005,13 @@ impl ThresholdAdaptationAlgorithm for TrendAnalysisAlgorithm {
         }
 
         // Adapt threshold based on trend
-        let adaptation_factor = match self.trend_state.lock().unwrap().current_trend {
-            TrendDirection::Increasing => 1.0 + trend_strength as f64 * 0.2,
-            TrendDirection::Decreasing => 1.0 - trend_strength as f64 * 0.1,
-            TrendDirection::Stable => 1.0,
-            TrendDirection::Cyclical => 1.0 + trend_strength as f64 * 0.1,
-        };
+        let adaptation_factor =
+            match self.trend_state.lock().expect("Trend state lock poisoned").current_trend {
+                TrendDirection::Increasing => 1.0 + trend_strength as f64 * 0.2,
+                TrendDirection::Decreasing => 1.0 - trend_strength as f64 * 0.1,
+                TrendDirection::Stable => 1.0,
+                TrendDirection::Cyclical => 1.0 + trend_strength as f64 * 0.1,
+            };
 
         let adapted_threshold = current_threshold * adaptation_factor;
 
@@ -5944,7 +6023,7 @@ impl ThresholdAdaptationAlgorithm for TrendAnalysisAlgorithm {
     }
 
     fn confidence(&self, data_quality: f32) -> f32 {
-        let state = self.trend_state.lock().unwrap();
+        let state = self.trend_state.lock().expect("Trend state lock poisoned");
         let trend_confidence = state.trend_strength.min(1.0);
         let seasonal_confidence =
             state.seasonal_patterns.iter().map(|p| p.confidence).fold(0.0f32, f32::max);
@@ -6127,7 +6206,7 @@ impl PerformanceAnalyzer {
 
     /// Start performance analyzer
     pub async fn start(&self) -> Result<()> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("Config RwLock poisoned");
         if !config.enabled {
             return Ok(());
         }
@@ -6168,7 +6247,7 @@ impl PerformanceAnalyzer {
 
     /// Start tracking an evaluation
     pub async fn start_evaluation_tracking(&self) -> String {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("Config RwLock poisoned");
         if !config.enable_detailed_tracking {
             return String::new();
         }
@@ -6190,7 +6269,7 @@ impl PerformanceAnalyzer {
 
     /// Complete evaluation tracking
     pub async fn complete_evaluation_tracking(&self, alerts_generated: usize, duration: Duration) {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().expect("Config RwLock poisoned");
         if !config.enable_detailed_tracking {
             return;
         }
@@ -6289,7 +6368,7 @@ impl PerformanceAnalyzer {
     ) {
         let mut interval = {
             let analysis_interval = {
-                let config_read = config.read().unwrap();
+                let config_read = config.read().expect("Config RwLock poisoned");
                 config_read.analysis_interval
             };
             interval(analysis_interval)
@@ -6299,7 +6378,7 @@ impl PerformanceAnalyzer {
             interval.tick().await;
 
             let enabled = {
-                let config_read = config.read().unwrap();
+                let config_read = config.read().expect("Config RwLock poisoned");
                 config_read.enabled
             };
 
@@ -6573,13 +6652,14 @@ mod tests {
         let result = evaluator.evaluate(&config, 0.9);
         assert!(result.is_ok());
 
-        let evaluation = result.unwrap();
+        let evaluation = result.expect("Evaluation should succeed");
         assert!(!evaluation.violated); // 0.9 < 0.95 (critical threshold)
 
         let result_violation = evaluator.evaluate(&config, 0.96);
         assert!(result_violation.is_ok());
 
-        let evaluation_violation = result_violation.unwrap();
+        let evaluation_violation =
+            result_violation.expect("Evaluation with violation should succeed");
         assert!(evaluation_violation.violated); // 0.96 > 0.95 (critical threshold)
     }
 
@@ -6588,7 +6668,7 @@ mod tests {
         let manager = AlertManager::new().await;
         assert!(manager.is_ok());
 
-        let manager = manager.unwrap();
+        let manager = manager.expect("AlertManager creation should succeed");
         let stats = manager.get_stats();
         assert_eq!(stats.alerts_processed.load(Ordering::Relaxed), 0);
     }

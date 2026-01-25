@@ -142,8 +142,11 @@ impl DalleModel {
             };
 
         // U-Net noise prediction
-        let noise_pred =
-            self.unet.forward(&noisy_latents, timesteps.as_ref().unwrap(), &text_embeds)?;
+        let noise_pred = self.unet.forward(
+            &noisy_latents,
+            timesteps.as_ref().expect("operation failed"),
+            &text_embeds,
+        )?;
 
         Ok(DalleModelOutput {
             text_embeds: Some(text_embeds),
@@ -1385,17 +1388,18 @@ mod tests {
     #[ignore] // Heavy test - large encoder, run with --ignored
     fn test_dalle_text_encoder() {
         let config = DalleTextConfig::clip_base();
-        let encoder = DalleTextEncoder::new(config).unwrap();
+        let encoder = DalleTextEncoder::new(config).expect("operation failed");
 
         let batch_size = 2;
         let seq_len = 77;
-        let input_ids = Tensor::randint(0, 1000, &[batch_size, seq_len], TensorType::I64).unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
+        let input_ids = Tensor::randint(0, 1000, &[batch_size, seq_len], TensorType::I64)
+            .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
 
         let output = encoder.forward(&input_ids, &attention_mask);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, encoder.config.hidden_size]);
     }
 
@@ -1403,15 +1407,15 @@ mod tests {
     #[ignore] // Heavy test - large encoder, run with --ignored
     fn test_dalle_image_encoder() {
         let config = DalleVisionConfig::clip_vit_b();
-        let encoder = DalleImageEncoder::new(config).unwrap();
+        let encoder = DalleImageEncoder::new(config).expect("operation failed");
 
         let batch_size = 2;
-        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).unwrap();
+        let pixel_values = Tensor::randn(&[batch_size, 3, 224, 224]).expect("operation failed");
 
         let output = encoder.forward(&pixel_values);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, encoder.config.hidden_size]);
     }
 
@@ -1419,22 +1423,22 @@ mod tests {
     #[ignore] // Heavy test - VAE requires significant memory, run with --ignored
     fn test_dalle_vae() {
         let config = DalleImageConfig::dalle_mini();
-        let vae = DalleVAE::new(config.clone()).unwrap();
+        let vae = DalleVAE::new(config.clone()).expect("operation failed");
 
         let batch_size = 1;
-        let images = Tensor::randn(&[batch_size, 3, 256, 256]).unwrap();
+        let images = Tensor::randn(&[batch_size, 3, 256, 256]).expect("operation failed");
 
         // Test encoding
         let latents = vae.encode(&images);
         assert!(latents.is_ok());
-        let latents = latents.unwrap();
+        let latents = latents.expect("operation failed");
         assert_eq!(latents.shape()[0], batch_size);
         assert_eq!(latents.shape()[1], config.latent_channels);
 
         // Test decoding
         let reconstructed = vae.decode(&latents);
         assert!(reconstructed.is_ok());
-        let reconstructed = reconstructed.unwrap();
+        let reconstructed = reconstructed.expect("operation failed");
         assert_eq!(reconstructed.shape(), images.shape());
     }
 
@@ -1443,7 +1447,8 @@ mod tests {
     fn test_dalle_unet() {
         let image_config = DalleImageConfig::dalle_mini();
         let diffusion_config = DalleDiffusionConfig::dalle_mini();
-        let unet = DalleUNet::new(image_config.clone(), diffusion_config).unwrap();
+        let unet =
+            DalleUNet::new(image_config.clone(), diffusion_config).expect("operation failed");
 
         let batch_size = 1;
         let latents = Tensor::randn(&[
@@ -1452,29 +1457,32 @@ mod tests {
             image_config.latent_size(),
             image_config.latent_size(),
         ])
-        .unwrap();
-        let timestep = Tensor::randint(0, 1000, &[batch_size], TensorType::I64).unwrap();
-        let text_embeds = Tensor::randn(&[batch_size, image_config.hidden_size]).unwrap();
+        .expect("operation failed");
+        let timestep =
+            Tensor::randint(0, 1000, &[batch_size], TensorType::I64).expect("operation failed");
+        let text_embeds =
+            Tensor::randn(&[batch_size, image_config.hidden_size]).expect("operation failed");
 
         let output = unet.forward(&latents, &timestep, &text_embeds);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), latents.shape());
     }
 
     #[test]
     fn test_time_embedding() {
         let embedding_dim = 512;
-        let time_emb = DalleTimeEmbedding::new(embedding_dim).unwrap();
+        let time_emb = DalleTimeEmbedding::new(embedding_dim).expect("operation failed");
 
         let batch_size = 2;
-        let timestep = Tensor::randint(0, 1000, &[batch_size], TensorType::I64).unwrap();
+        let timestep =
+            Tensor::randint(0, 1000, &[batch_size], TensorType::I64).expect("operation failed");
 
         let output = time_emb.forward(&timestep);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, embedding_dim]);
     }
 
@@ -1482,18 +1490,19 @@ mod tests {
     #[ignore] // Very heavy test - full generation pipeline, run with --ignored
     fn test_dalle_generation_pipeline() {
         let config = DalleConfig::dalle_mini();
-        let model = DalleModel::new(config.clone()).unwrap();
+        let model = DalleModel::new(config.clone()).expect("operation failed");
 
         let batch_size = 1;
         let seq_len = 77;
-        let input_ids = Tensor::randint(0, 1000, &[batch_size, seq_len], TensorType::I64).unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
+        let input_ids = Tensor::randint(0, 1000, &[batch_size, seq_len], TensorType::I64)
+            .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
 
         // Test generation (simplified)
         let result = model.generate(&input_ids, &attention_mask, Some(10), Some(5.0), Some(42));
         assert!(result.is_ok());
 
-        let images = result.unwrap();
+        let images = result.expect("operation failed");
         assert_eq!(images.shape()[0], batch_size);
         assert_eq!(images.shape()[1], 3); // RGB channels
         assert_eq!(images.shape()[2], config.image_size);
@@ -1504,19 +1513,20 @@ mod tests {
     #[ignore] // Very heavy test - training forward pass, run with --ignored
     fn test_dalle_training_forward() {
         let config = DalleConfig::dalle_mini();
-        let model = DalleModel::new(config.clone()).unwrap();
+        let model = DalleModel::new(config.clone()).expect("operation failed");
 
         let batch_size = 1;
         let seq_len = 77;
-        let input_ids = Tensor::randint(0, 1000, &[batch_size, seq_len], TensorType::I64).unwrap();
-        let attention_mask = Tensor::ones(&[batch_size, seq_len]).unwrap();
-        let pixel_values =
-            Tensor::randn(&[batch_size, 3, config.image_size, config.image_size]).unwrap();
+        let input_ids = Tensor::randint(0, 1000, &[batch_size, seq_len], TensorType::I64)
+            .expect("operation failed");
+        let attention_mask = Tensor::ones(&[batch_size, seq_len]).expect("operation failed");
+        let pixel_values = Tensor::randn(&[batch_size, 3, config.image_size, config.image_size])
+            .expect("operation failed");
 
         let output = model.forward_train(&input_ids, &attention_mask, &pixel_values, None, None);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert!(output.text_embeds.is_some());
         assert!(output.image_embeds.is_some());
         assert!(output.logits_per_image.is_some());

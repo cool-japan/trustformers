@@ -148,7 +148,7 @@ impl FusedOptimizer {
         gradient: Tensor,
     ) -> Result<()> {
         let should_execute = {
-            let mut pending = self.pending_operations.lock().unwrap();
+            let mut pending = self.pending_operations.lock().expect("Mutex lock poisoned");
             pending.push((param_name, operation, parameter, gradient));
             pending.len() >= self.config.batch_size
         };
@@ -163,7 +163,7 @@ impl FusedOptimizer {
 
     /// Execute all pending operations in a fused manner
     pub fn execute_fused_batch(&mut self) -> Result<()> {
-        let mut pending = self.pending_operations.lock().unwrap();
+        let mut pending = self.pending_operations.lock().expect("Mutex lock poisoned");
         if pending.is_empty() {
             return Ok(());
         }
@@ -216,7 +216,7 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Mutex lock poisoned");
         let batch_size = operations.len();
 
         for (param_name, op, param, grad) in operations {
@@ -272,7 +272,7 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Mutex lock poisoned");
         let batch_size = operations.len();
 
         for (param_name, op, param, grad) in operations {
@@ -321,7 +321,7 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Mutex lock poisoned");
         let batch_size = operations.len();
 
         for (param_name, op, param, grad) in operations {
@@ -369,7 +369,7 @@ impl FusedOptimizer {
         &mut self,
         operations: Vec<(String, FusedOperation, Tensor, Tensor)>,
     ) -> Result<()> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Mutex lock poisoned");
         let batch_size = operations.len();
 
         // Collect all gradients for global norm computation
@@ -611,13 +611,13 @@ impl FusedOptimizer {
 
     /// Get fusion statistics
     pub fn get_fusion_stats(&self) -> FusionStats {
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().expect("Mutex lock poisoned");
         state.fusion_stats.clone()
     }
 
     /// Reset fusion statistics
     pub fn reset_stats(&mut self) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock().expect("Mutex lock poisoned");
         state.fusion_stats = FusionStats::default();
     }
 

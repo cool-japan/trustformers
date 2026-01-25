@@ -451,8 +451,8 @@ mod tests {
     #[test]
     fn test_blip2_config_serialization() {
         let config = Blip2Config::opt_2_7b();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: Blip2Config = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("operation failed");
+        let deserialized: Blip2Config = serde_json::from_str(&json).expect("operation failed");
 
         assert_eq!(config.num_query_tokens, deserialized.num_query_tokens);
         assert_eq!(

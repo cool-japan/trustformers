@@ -51,11 +51,19 @@ fn blas_sgemm(
     k: usize,
     n: usize,
 ) {
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    // Safe unwrap: shape and vector length are guaranteed to match by caller
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).expect("BLAS input shape mismatch");
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).expect("BLAS input shape mismatch");
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).expect("BLAS output shape mismatch");
     f32::simd_gemm(alpha, &a_arr.view(), &b_arr.view(), beta, &mut c_arr);
-    c.copy_from_slice(c_arr.as_slice().unwrap());
+    if let Some(slice) = c_arr.as_slice() {
+        c.copy_from_slice(slice);
+    } else {
+        // Fallback: copy element by element
+        for (i, &val) in c_arr.iter().enumerate() {
+            c[i] = val;
+        }
+    }
 }
 
 /// Optimized Scaled Dot-Product Attention (SDPA) kernels
@@ -175,7 +183,8 @@ impl SDPA {
                                 head_dim,
                                 seq_k,
                             );
-                            Array2::from_shape_vec((seq_q, seq_k), result_vec).unwrap()
+                            Array2::from_shape_vec((seq_q, seq_k), result_vec)
+                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
                         } else {
                             // Use ndarray dot for smaller matrices
                             let mut result = q_2d.dot(&k_t_owned);
@@ -255,7 +264,8 @@ impl SDPA {
                                 seq_k,
                                 head_dim,
                             );
-                            Array2::from_shape_vec((seq_q, head_dim), result_vec).unwrap()
+                            Array2::from_shape_vec((seq_q, head_dim), result_vec)
+                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
                         } else {
                             // Use ndarray dot for smaller matrices
                             scores.dot(&v_2d)
@@ -345,7 +355,8 @@ impl SDPA {
                                 head_dim,
                                 seq_k,
                             );
-                            Array2::from_shape_vec((seq_q, seq_k), result_vec).unwrap()
+                            Array2::from_shape_vec((seq_q, seq_k), result_vec)
+                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
                         } else {
                             let mut result = q_2d.dot(&k_t_owned);
                             result.mapv_inplace(|x| x * scale);
@@ -425,7 +436,8 @@ impl SDPA {
                                 seq_k,
                                 head_dim,
                             );
-                            Array2::from_shape_vec((seq_q, head_dim), result_vec).unwrap()
+                            Array2::from_shape_vec((seq_q, head_dim), result_vec)
+                                .map_err(|e| TrustformersError::shape_error(e.to_string()))?
                         } else {
                             scores.dot(&v_2d)
                         };
@@ -537,7 +549,7 @@ impl SDPA {
                                         k_tile_size,
                                     );
                                     Array2::from_shape_vec((q_tile_size, k_tile_size), result_vec)
-                                        .unwrap()
+                                        .map_err(|e| TrustformersError::shape_error(e.to_string()))?
                                 } else {
                                     let mut result = q_tile_2d.dot(&k_tile_t);
                                     result.mapv_inplace(|x| x * scale);
@@ -621,7 +633,12 @@ impl SDPA {
                                     // Use direct BLAS with beta=1.0 to add to existing o_tile
                                     let exp_vec: Vec<f32> = exp_scores.iter().copied().collect();
                                     let v_vec: Vec<f32> = v_tile_2d.iter().copied().collect();
-                                    let o_slice = o_tile.as_slice_mut().unwrap();
+                                    let o_slice = o_tile.as_slice_mut().ok_or_else(|| {
+                                        TrustformersError::tensor_op_error(
+                                            "Failed to get mutable slice from output tile",
+                                            "SDPA::tiled_attention",
+                                        )
+                                    })?;
                                     blas_sgemm(
                                         1.0,
                                         &exp_vec,

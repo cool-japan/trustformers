@@ -89,7 +89,7 @@ fn test_s4_layer_discretization() {
     config.d_state = 4;
     config.d_model = 8;
 
-    let mut _layer = S4Layer::new(&config).unwrap();
+    let mut _layer = S4Layer::new(&config).expect("operation failed");
 
     // Discretization is handled internally during forward pass
 
@@ -107,7 +107,7 @@ fn test_s4_block_forward() {
         ..Default::default()
     };
 
-    let block = S4Block::new(&config).unwrap();
+    let block = S4Block::new(&config).expect("operation failed");
 
     // Create input tensor
     let batch_size = 2;
@@ -119,7 +119,7 @@ fn test_s4_block_forward() {
     let output = block.forward(input);
     assert!(output.is_ok());
 
-    let output_tensor = output.unwrap();
+    let output_tensor = output.expect("operation failed");
     match &output_tensor {
         Tensor::F32(arr) => {
             assert_eq!(arr.ndim(), 3);
@@ -143,7 +143,7 @@ fn test_s4_model_shapes() {
         ..Default::default()
     };
 
-    let _model = S4Model::new(config.clone()).unwrap();
+    let _model = S4Model::new(config.clone()).expect("operation failed");
 
     // Model created successfully - internal structure verification removed
 }
@@ -159,7 +159,7 @@ fn test_s4_lm_forward() {
         ..Default::default()
     };
 
-    let model = S4ForLanguageModeling::new(config.clone()).unwrap();
+    let model = S4ForLanguageModeling::new(config.clone()).expect("operation failed");
 
     // Create input token ids
     let batch_size = 2;
@@ -171,7 +171,7 @@ fn test_s4_lm_forward() {
     let output = model.forward(input);
     assert!(output.is_ok());
 
-    let output_tensor = output.unwrap();
+    let output_tensor = output.expect("operation failed");
     match &output_tensor {
         Tensor::F32(arr) => {
             assert_eq!(arr.ndim(), 3);
@@ -202,7 +202,7 @@ fn test_config_variants() {
         let loaded = S4Config::from_pretrained_name(name);
         assert!(loaded.is_some(), "Should load config for {}", name);
 
-        let loaded_config = loaded.unwrap();
+        let loaded_config = loaded.expect("operation failed");
         assert_eq!(loaded_config.d_model, config.d_model);
         assert_eq!(loaded_config.d_state, config.d_state);
         assert_eq!(loaded_config.n_layer, config.n_layer);

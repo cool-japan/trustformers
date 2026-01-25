@@ -1101,7 +1101,7 @@ mod tests {
         let filter = HyenaFilter::new(&config, seq_len);
         assert!(filter.is_ok());
 
-        let filter = filter.unwrap();
+        let filter = filter.expect("operation failed");
         assert_eq!(filter.filter_order, config.filter_order);
         assert_eq!(filter.hidden_size, config.hidden_size);
         assert_eq!(filter.seq_len, seq_len);
@@ -1117,39 +1117,39 @@ mod tests {
         let seq_len = 32;
         let batch_size = 2;
 
-        let filter = HyenaFilter::new(&config, seq_len).unwrap();
+        let filter = HyenaFilter::new(&config, seq_len).expect("operation failed");
 
         // Create test input
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = filter.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
     }
 
     #[test]
     fn test_local_convolution() {
         let config = create_test_config();
-        let local_conv = LocalConvolution::new(&config).unwrap();
+        let local_conv = LocalConvolution::new(&config).expect("operation failed");
 
         let batch_size = 2;
         let seq_len = 16;
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = local_conv.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
     }
 
@@ -1159,18 +1159,18 @@ mod tests {
         let seq_len = 16;
         let batch_size = 1;
 
-        let hyena_op = HyenaOperator::new(&config, seq_len).unwrap();
+        let hyena_op = HyenaOperator::new(&config, seq_len).expect("operation failed");
 
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = hyena_op.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
 
         // Test parameter count
@@ -1181,20 +1181,20 @@ mod tests {
     #[test]
     fn test_hyena_mlp() {
         let config = create_test_config();
-        let mlp = HyenaMLp::new(&config).unwrap();
+        let mlp = HyenaMLp::new(&config).expect("operation failed");
 
         let batch_size = 2;
         let seq_len = 8;
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = mlp.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
 
         // Test parameter count
@@ -1205,13 +1205,13 @@ mod tests {
     #[test]
     fn test_hyena_embeddings() {
         let config = create_test_config();
-        let embeddings = HyenaEmbeddings::new(&config).unwrap();
+        let embeddings = HyenaEmbeddings::new(&config).expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25, 50, 100];
         let output = embeddings.forward(input_tokens.clone());
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // The embedding output shape should be [seq_len, hidden_size]
         assert_eq!(output.shape(), &[input_tokens.len(), config.hidden_size]);
 
@@ -1224,19 +1224,19 @@ mod tests {
     fn test_hyena_block() {
         let config = create_test_config();
         let seq_len = 16;
-        let block = HyenaBlock::new(&config, seq_len).unwrap();
+        let block = HyenaBlock::new(&config, seq_len).expect("operation failed");
 
         let batch_size = 1;
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = block.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
 
         // Test parameter count
@@ -1247,7 +1247,7 @@ mod tests {
     #[test]
     fn test_hyena_model() {
         let config = create_test_config();
-        let model = HyenaModel::new(config.clone()).unwrap();
+        let model = HyenaModel::new(config.clone()).expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25, 50];
         let output = model.forward(input_tokens.clone());
@@ -1257,7 +1257,7 @@ mod tests {
             Err(e) => panic!("Model forward failed: {}", e),
         }
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // Model output should be [seq_len, hidden_size] after processing
         assert_eq!(output.shape(), &[input_tokens.len(), config.hidden_size]);
 
@@ -1276,13 +1276,13 @@ mod tests {
     #[test]
     fn test_hyena_for_language_modeling() {
         let config = create_test_config();
-        let model = HyenaForLanguageModeling::new(config.clone()).unwrap();
+        let model = HyenaForLanguageModeling::new(config.clone()).expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25];
         let output = model.forward(input_tokens.clone());
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // Output should have vocab_size as last dimension for logits [seq_len, vocab_size]
         assert_eq!(output.shape(), &[input_tokens.len(), config.vocab_size]);
 
@@ -1295,13 +1295,14 @@ mod tests {
     fn test_hyena_for_sequence_classification() {
         let config = create_test_config();
         let num_labels = 10;
-        let model = HyenaForSequenceClassification::new(config.clone(), num_labels).unwrap();
+        let model = HyenaForSequenceClassification::new(config.clone(), num_labels)
+            .expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25, 50, 100];
         let output = model.forward(input_tokens.clone());
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // Output should be [num_labels] for classification after pooling
         assert_eq!(output.shape(), &[num_labels]);
 

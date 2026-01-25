@@ -583,7 +583,7 @@ mod tests {
     #[test]
     fn test_forward_pass_shape() {
         let config = MambaConfig::default();
-        let model = MambaModel::new(config).unwrap();
+        let model = MambaModel::new(config).expect("operation failed");
 
         // Create dummy input as i64 tensor (batch_size=1, seq_len=10)
         let input_data = vec![1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -596,21 +596,23 @@ mod tests {
     fn test_device_support() {
         // Test CPU device
         let config = MambaConfig::default();
-        let model_cpu = MambaModel::new_with_device(config.clone(), Device::CPU).unwrap();
+        let model_cpu =
+            MambaModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
         assert_eq!(model_cpu.device(), Device::CPU);
 
         // Test predefined models with device
-        let model_130m = MambaModel::mamba_130m_with_device(Device::CPU).unwrap();
+        let model_130m = MambaModel::mamba_130m_with_device(Device::CPU).expect("operation failed");
         assert_eq!(model_130m.device(), Device::CPU);
 
         // Test all components have device support
-        let block = MambaBlock::new_with_device(&config, Device::CPU).unwrap();
+        let block = MambaBlock::new_with_device(&config, Device::CPU).expect("operation failed");
         assert_eq!(block.device(), Device::CPU);
 
-        let norm = RMSNorm::new_with_device(768, 1e-5, Device::CPU).unwrap();
+        let norm = RMSNorm::new_with_device(768, 1e-5, Device::CPU).expect("operation failed");
         assert_eq!(norm.device(), Device::CPU);
 
-        let conv = CausalConv1d::new_with_device(768, 768, 4, true, Device::CPU).unwrap();
+        let conv = CausalConv1d::new_with_device(768, 768, 4, true, Device::CPU)
+            .expect("operation failed");
         assert_eq!(conv.device(), Device::CPU);
     }
 
@@ -619,7 +621,7 @@ mod tests {
         // Test Metal device creation (will use Metal or fall back to CPU)
         let device = Device::Metal(0);
         let config = MambaConfig::default();
-        let model = MambaModel::new_with_device(config, device).unwrap();
+        let model = MambaModel::new_with_device(config, device).expect("operation failed");
         // Device should be set (either Metal or CPU depending on availability)
         assert!(model.device() == Device::Metal(0) || model.device() == Device::CPU);
     }

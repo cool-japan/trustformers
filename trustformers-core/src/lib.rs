@@ -1,3 +1,63 @@
+//! # TrustformeRS Core
+//!
+//! Core traits, types, and utilities for the TrustformeRS transformer library.
+//!
+//! This crate provides the foundational building blocks for implementing transformer models
+//! in pure Rust with zero-cost abstractions. It includes:
+//!
+//! - **Tensor operations**: High-performance tensor abstractions with GPU acceleration
+//! - **Neural network layers**: Attention mechanisms, feed-forward networks, normalization
+//! - **Model traits**: Unified interfaces for models, tokenizers, and configurations
+//! - **Device management**: CPU, CUDA, Metal, and other hardware backend support
+//! - **Quantization**: INT4/INT8/FP16 quantization for efficient inference
+//! - **Memory management**: Caching, checkpointing, and memory-efficient operations
+//! - **Hardware acceleration**: SIMD, BLAS, GPU kernels, and compiler optimizations
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use trustformers_core::{
+//!     tensor::Tensor,
+//!     device::Device,
+//!     layers::Linear,
+//! };
+//!
+//! // Create a tensor and move to GPU if available
+//! let device = Device::cuda_if_available().unwrap_or(Device::cpu());
+//! let input = Tensor::randn(&[32, 512])?;
+//! let input = input.to_device(&device)?;
+//!
+//! // Create a linear layer
+//! let linear = Linear::new(512, 768, true)?;
+//! let output = linear.forward(input)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ## Architecture
+//!
+//! TrustformeRS Core follows a dual-layer architecture:
+//! - High-level ML abstractions (tensors, layers, models)
+//! - Low-level scientific computing via SciRS2 (SIMD, parallel ops, BLAS)
+//!
+//! All external dependencies (PyTorch, ONNX Runtime, tokenizers) are abstracted
+//! through unified interfaces to maintain flexibility and testability.
+//!
+//! ## Features
+//!
+//! - `cuda`: NVIDIA GPU support via CUDA
+//! - `metal`: Apple GPU support via Metal
+//! - `opencl`: OpenCL GPU support
+//! - `mkl`: Intel MKL BLAS backend
+//! - `quantization`: Model quantization support
+//! - `distributed`: Distributed training utilities
+//!
+//! ## Safety and Performance
+//!
+//! - **Memory-safe**: Pure Rust with no unsafe code in critical paths
+//! - **Zero-cost abstractions**: Performance comparable to C++ implementations
+//! - **GPU-accelerated**: Automatic dispatch to GPU when available
+//! - **SIMD-optimized**: Vectorized operations for CPU performance
+
 #![allow(clippy::excessive_nesting)] // Algorithm-heavy code often requires deep nesting
 #![allow(clippy::result_large_err)] // Large error enums are intentional for rich error context
 #![allow(clippy::excessive_precision)] // High-precision floats needed for ML computations

@@ -565,8 +565,8 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = DalleConfig::dalle_2();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: DalleConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("operation failed");
+        let deserialized: DalleConfig = serde_json::from_str(&json).expect("operation failed");
 
         assert_eq!(config.text_vocab_size, deserialized.text_vocab_size);
         assert_eq!(config.image_size, deserialized.image_size);

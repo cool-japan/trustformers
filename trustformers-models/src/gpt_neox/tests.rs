@@ -111,7 +111,7 @@ mod tests {
             ..GPTNeoXConfig::default()
         };
 
-        let model = GPTNeoXModel::new(config.clone()).unwrap();
+        let model = GPTNeoXModel::new(config.clone()).expect("operation failed");
         assert_eq!(model.get_config().num_hidden_layers, 2);
         assert_eq!(model.get_config().hidden_size, 32);
         assert_eq!(model.get_config().num_attention_heads, 4);
@@ -134,7 +134,7 @@ mod tests {
             ..GPTNeoXConfig::default()
         };
 
-        let model = GPTNeoXForCausalLM::new(config.clone()).unwrap();
+        let model = GPTNeoXForCausalLM::new(config.clone()).expect("operation failed");
         assert_eq!(model.get_config().num_hidden_layers, 2);
         assert_eq!(model.get_config().vocab_size, 100);
 
@@ -159,10 +159,10 @@ mod tests {
             ..GPTNeoXConfig::default()
         };
 
-        let model = GPTNeoXModel::new(config).unwrap();
+        let model = GPTNeoXModel::new(config).expect("operation failed");
         let input_ids = vec![1, 2, 3, 4, 5];
 
-        let output = model.forward(input_ids.clone()).unwrap();
+        let output = model.forward(input_ids.clone()).expect("operation failed");
         match &output {
             Tensor::F32(arr) => {
                 // Should be [seq_len, hidden_size]
@@ -194,7 +194,7 @@ mod tests {
             ..GPTNeoXConfig::default()
         };
 
-        let model = GPTNeoXModel::new(config).unwrap();
+        let model = GPTNeoXModel::new(config).expect("operation failed");
         let param_count = model.num_parameters();
 
         // Basic sanity check: should have more than 0 parameters
@@ -245,12 +245,12 @@ mod tests {
             ..GPTNeoXConfig::default()
         };
 
-        let model = GPTNeoXModel::new(config).unwrap();
+        let model = GPTNeoXModel::new(config).expect("operation failed");
 
         // Test with different sequence lengths
         for seq_len in [1, 5, 10, 20] {
             let input_ids: Vec<u32> = (0..seq_len).map(|i| (i % 100) as u32).collect();
-            let output = model.forward(input_ids.clone()).unwrap();
+            let output = model.forward(input_ids.clone()).expect("operation failed");
 
             match &output {
                 Tensor::F32(arr) => {
@@ -282,7 +282,7 @@ mod tests {
 
         assert!(config.validate().is_ok());
 
-        let model = GPTNeoXModel::new(config).unwrap();
+        let model = GPTNeoXModel::new(config).expect("operation failed");
         // Just verify it can be created without errors
 
         // Explicit cleanup

@@ -607,7 +607,7 @@ impl Gpt2LMHeadModel {
                             IxDyn(&[vocab_size]),
                             slice.iter().cloned().collect(),
                         )
-                        .unwrap()
+                        .expect("operation failed")
                     }
                 },
                 _ => {
@@ -703,8 +703,9 @@ impl Gpt2LMHeadModel {
 
                         // Find top 5 predictions
                         let mut top_indices: Vec<usize> = (0..vocab_size).collect();
-                        top_indices
-                            .sort_by(|&a, &b| logits_vec[b].partial_cmp(&logits_vec[a]).unwrap());
+                        top_indices.sort_by(|&a, &b| {
+                            logits_vec[b].partial_cmp(&logits_vec[a]).expect("operation failed")
+                        });
                         eprintln!("   Top 5 predictions:");
                         for &idx in &top_indices[..5.min(vocab_size)] {
                             eprintln!("      token {} → logit {:.4}", idx, logits_vec[idx]);
@@ -766,8 +767,9 @@ impl Gpt2LMHeadModel {
 
                         // Find top 5 predictions
                         let mut top_indices: Vec<usize> = (0..vocab_size).collect();
-                        top_indices
-                            .sort_by(|&a, &b| last_logits[b].partial_cmp(&last_logits[a]).unwrap());
+                        top_indices.sort_by(|&a, &b| {
+                            last_logits[b].partial_cmp(&last_logits[a]).expect("operation failed")
+                        });
                         eprintln!("   Top 5 predictions:");
                         for &idx in &top_indices[..5.min(vocab_size)] {
                             eprintln!("      token {} → logit {:.4}", idx, last_logits[idx]);
@@ -849,7 +851,7 @@ impl Gpt2LMHeadModel {
                 // First iteration: process full prompt
                 vec![generated.clone()]
             } else {
-                let last_token = *generated.last().unwrap();
+                let last_token = *generated.last().expect("operation failed");
                 eprintln!(
                     "📤 Subsequent iteration: processing last token [{}]",
                     last_token
@@ -1065,7 +1067,7 @@ impl Gpt2LMHeadModel {
                                 IxDyn(&[vocab_size]),
                                 slice.iter().cloned().collect(),
                             )
-                            .unwrap()
+                            .expect("operation failed")
                         }
                     },
                     _ => {
@@ -1082,7 +1084,7 @@ impl Gpt2LMHeadModel {
                 // Get top k tokens for this beam
                 let mut token_scores: Vec<(f32, usize)> =
                     log_probs.iter().enumerate().map(|(idx, &log_prob)| (log_prob, idx)).collect();
-                token_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                token_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("operation failed"));
 
                 // Add top candidates
                 for (log_prob, token_idx) in token_scores.iter().take(num_beams) {
@@ -1094,7 +1096,7 @@ impl Gpt2LMHeadModel {
             }
 
             // Select top beams for next iteration
-            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("operation failed"));
             beams = candidates.into_iter().take(num_beams).collect();
 
             // Check if all beams ended with EOS
@@ -2174,7 +2176,7 @@ fn apply_top_k_filtering(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f32>> {
         logits.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
 
     // Sort by value in descending order
-    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
 
     // Set all values outside top-k to -inf
     for (idx, _) in indices_and_values.iter().skip(k) {
@@ -2193,7 +2195,7 @@ fn apply_top_p_filtering(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32>> {
         probs.iter().enumerate().map(|(idx, &prob)| (idx, prob)).collect();
 
     // Sort by probability in descending order
-    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
 
     // Find the smallest set of tokens with cumulative probability > p
     let mut cumsum = 0.0;

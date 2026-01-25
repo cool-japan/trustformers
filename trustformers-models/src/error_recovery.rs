@@ -774,7 +774,7 @@ impl ErrorRecoveryManager {
 
     /// Get current recovery metrics
     pub fn get_metrics(&self) -> RecoveryMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock().expect("operation failed").clone()
     }
 
     /// Generate recovery report

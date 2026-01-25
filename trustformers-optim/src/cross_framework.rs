@@ -234,19 +234,31 @@ impl CrossFrameworkConverter {
         let mut parameters = HashMap::new();
         parameters.insert(
             "beta_1".to_string(),
-            Value::Number(serde_json::Number::from_f64(betas.0 as f64).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(betas.0 as f64)
+                    .ok_or_else(|| anyhow!("Invalid beta_1"))?,
+            ),
         );
         parameters.insert(
             "beta_2".to_string(),
-            Value::Number(serde_json::Number::from_f64(betas.1 as f64).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(betas.1 as f64)
+                    .ok_or_else(|| anyhow!("Invalid beta_2"))?,
+            ),
         );
         parameters.insert(
             "epsilon".to_string(),
-            Value::Number(serde_json::Number::from_f64(eps as f64).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(eps as f64)
+                    .ok_or_else(|| anyhow!("Invalid epsilon"))?,
+            ),
         );
         parameters.insert(
             "weight_decay".to_string(),
-            Value::Number(serde_json::Number::from_f64(weight_decay as f64).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(weight_decay as f64)
+                    .ok_or_else(|| anyhow!("Invalid weight_decay"))?,
+            ),
         );
 
         Ok(TensorFlowOptimizerConfig {
@@ -270,17 +282,29 @@ impl CrossFrameworkConverter {
         parameters.insert(
             "betas".to_string(),
             Value::Array(vec![
-                Value::Number(serde_json::Number::from_f64(beta_1 as f64).unwrap()),
-                Value::Number(serde_json::Number::from_f64(beta_2 as f64).unwrap()),
+                Value::Number(
+                    serde_json::Number::from_f64(beta_1 as f64)
+                        .ok_or_else(|| anyhow!("Invalid beta_1"))?,
+                ),
+                Value::Number(
+                    serde_json::Number::from_f64(beta_2 as f64)
+                        .ok_or_else(|| anyhow!("Invalid beta_2"))?,
+                ),
             ]),
         );
         parameters.insert(
             "eps".to_string(),
-            Value::Number(serde_json::Number::from_f64(epsilon as f64).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(epsilon as f64)
+                    .ok_or_else(|| anyhow!("Invalid epsilon"))?,
+            ),
         );
         parameters.insert(
             "weight_decay".to_string(),
-            Value::Number(serde_json::Number::from_f64(weight_decay as f64).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(weight_decay as f64)
+                    .ok_or_else(|| anyhow!("Invalid weight_decay"))?,
+            ),
         );
 
         Ok(PyTorchOptimizerConfig {
@@ -302,13 +326,20 @@ impl CrossFrameworkConverter {
         parameters.insert(
             "betas".to_string(),
             Value::Array(vec![
-                Value::Number(serde_json::Number::from_f64(b1 as f64).unwrap()),
-                Value::Number(serde_json::Number::from_f64(b2 as f64).unwrap()),
+                Value::Number(
+                    serde_json::Number::from_f64(b1 as f64).ok_or_else(|| anyhow!("Invalid b1"))?,
+                ),
+                Value::Number(
+                    serde_json::Number::from_f64(b2 as f64).ok_or_else(|| anyhow!("Invalid b2"))?,
+                ),
             ]),
         );
         parameters.insert(
             "eps".to_string(),
-            Value::Number(serde_json::Number::from_f64(eps as f64).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(eps as f64)
+                    .ok_or_else(|| anyhow!("Invalid epsilon"))?,
+            ),
         );
 
         Ok(PyTorchOptimizerConfig {
@@ -593,7 +624,9 @@ mod tests {
         let mut params = HashMap::new();
         params.insert(
             "lr".to_string(),
-            Value::Number(serde_json::Number::from_f64(0.001).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(0.001).ok_or_else(|| anyhow!("Invalid constant"))?,
+            ),
         );
 
         let mapped = converter
@@ -631,7 +664,9 @@ mod tests {
         let mut params = HashMap::new();
         params.insert(
             "lr".to_string(),
-            Value::Number(serde_json::Number::from_f64(0.001).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(0.001).ok_or_else(|| anyhow!("Invalid constant"))?,
+            ),
         );
 
         utils::validate_parameters("Adam", &params).unwrap();
@@ -639,7 +674,9 @@ mod tests {
         // Test invalid learning rate
         params.insert(
             "lr".to_string(),
-            Value::Number(serde_json::Number::from_f64(-0.001).unwrap()),
+            Value::Number(
+                serde_json::Number::from_f64(-0.001).ok_or_else(|| anyhow!("Invalid constant"))?,
+            ),
         );
         assert!(utils::validate_parameters("Adam", &params).is_err());
     }

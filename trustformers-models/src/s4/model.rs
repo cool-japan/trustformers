@@ -1099,7 +1099,7 @@ mod tests {
         let layer = S4Layer::new(&config);
         assert!(layer.is_ok());
 
-        let layer = layer.unwrap();
+        let layer = layer.expect("operation failed");
         assert_eq!(layer.a_real.shape(), &[config.d_state, config.d_state]);
         assert_eq!(layer.b_real.shape(), &[config.d_state]);
         assert_eq!(layer.c_real.shape(), &[config.d_state]);
@@ -1109,7 +1109,7 @@ mod tests {
     #[test]
     fn test_s4_model_creation() {
         let config = S4Config::s4_small();
-        let model = S4Model::new(config.clone()).unwrap();
+        let model = S4Model::new(config.clone()).expect("operation failed");
 
         assert_eq!(model.config.d_model, config.d_model);
         assert_eq!(model.blocks.len(), config.n_layer);
@@ -1118,7 +1118,7 @@ mod tests {
     #[test]
     fn test_s4_lm_creation() {
         let config = S4Config::s4_base();
-        let _model = S4ForLanguageModeling::new(config).unwrap();
+        let _model = S4ForLanguageModeling::new(config).expect("operation failed");
 
         // S4 language model created successfully - LM head dimensions are internal
     }

@@ -22,7 +22,10 @@ impl RMSNorm {
     }
 
     pub fn new_with_device(hidden_size: usize, eps: f32, device: Device) -> Self {
-        let weight = Tensor::ones(&[hidden_size]).unwrap().to_device_enum(&device).unwrap();
+        let weight = Tensor::ones(&[hidden_size])
+            .expect("operation failed")
+            .to_device_enum(&device)
+            .expect("operation failed");
         Self {
             weight,
             eps,
@@ -113,8 +116,12 @@ impl RotaryEmbedding {
         let cos_arr =
             Array2::from_shape_fn((max_seq_len, rotary_dim / 2), |(i, j)| freqs[[i, j]].cos());
 
-        let sin_cached = Tensor::F32(sin_arr.into_dyn()).to_device_enum(&device).unwrap();
-        let cos_cached = Tensor::F32(cos_arr.into_dyn()).to_device_enum(&device).unwrap();
+        let sin_cached = Tensor::F32(sin_arr.into_dyn())
+            .to_device_enum(&device)
+            .expect("operation failed");
+        let cos_cached = Tensor::F32(cos_arr.into_dyn())
+            .to_device_enum(&device)
+            .expect("operation failed");
 
         Self {
             sin_cached,
@@ -852,7 +859,7 @@ impl StableLMForCausalLM {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -876,7 +883,11 @@ impl StableLMForCausalLM {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {
@@ -938,7 +949,7 @@ mod tests {
     #[ignore] // Heavy test - StableLM 3B model creation, run with --ignored
     fn test_stablelm_model_creation() {
         let config = StableLMConfig::stablelm_3b();
-        let model = StableLMModel::new(config.clone()).unwrap();
+        let model = StableLMModel::new(config.clone()).expect("operation failed");
 
         assert_eq!(model.layers.len(), config.num_hidden_layers);
         assert_eq!(model.config.hidden_size, 2560);
@@ -948,7 +959,7 @@ mod tests {
     #[ignore] // Heavy test - StableLM 3B CausalLM, run with --ignored
     fn test_stablelm_causal_lm() {
         let config = StableLMConfig::stablelm_3b();
-        let _model = StableLMForCausalLM::new(config.clone()).unwrap();
+        let _model = StableLMForCausalLM::new(config.clone()).expect("operation failed");
 
         // StableLM for CausalLM created successfully - LM head dimensions are internal
     }
@@ -971,12 +982,12 @@ mod tests {
         let config = StableLMConfig::stablelm_3b();
 
         // Test CPU device (default)
-        let model_cpu = StableLMModel::new(config.clone()).unwrap();
+        let model_cpu = StableLMModel::new(config.clone()).expect("operation failed");
         assert_eq!(*model_cpu.device(), Device::CPU);
 
         // Test explicit CPU device
         let model_cpu_explicit =
-            StableLMModel::new_with_device(config.clone(), Device::CPU).unwrap();
+            StableLMModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
         assert_eq!(*model_cpu_explicit.device(), Device::CPU);
 
         // Test that all components have the correct device
@@ -995,12 +1006,13 @@ mod tests {
         let config = StableLMConfig::stablelm_3b();
 
         // Test CPU device
-        let model = StableLMForCausalLM::new(config.clone()).unwrap();
+        let model = StableLMForCausalLM::new(config.clone()).expect("operation failed");
         assert_eq!(*model.device(), Device::CPU);
         assert_eq!(*model.model.device(), Device::CPU);
 
         // Test explicit device
-        let model_explicit = StableLMForCausalLM::new_with_device(config, Device::CPU).unwrap();
+        let model_explicit =
+            StableLMForCausalLM::new_with_device(config, Device::CPU).expect("operation failed");
         assert_eq!(*model_explicit.device(), Device::CPU);
     }
 }

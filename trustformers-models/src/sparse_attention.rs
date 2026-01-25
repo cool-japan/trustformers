@@ -812,8 +812,8 @@ mod tests {
         let config =
             SparseAttentionConfig::new().with_pattern(SparsePattern::Local { window_size: 4 });
 
-        let attention = SparseAttention::new(config).unwrap();
-        let mask = attention.generate_mask(8).unwrap();
+        let attention = SparseAttention::new(config).expect("operation failed");
+        let mask = attention.generate_mask(8).expect("operation failed");
 
         assert_eq!(mask.shape, (8, 8));
         assert!(mask.sparsity() > 0.0);
@@ -828,8 +828,8 @@ mod tests {
             random_blocks: 1,
         });
 
-        let attention = SparseAttention::new(config).unwrap();
-        let mask = attention.generate_mask(32).unwrap(); // Larger sequence for more sparsity
+        let attention = SparseAttention::new(config).expect("operation failed");
+        let mask = attention.generate_mask(32).expect("operation failed"); // Larger sequence for more sparsity
 
         assert_eq!(mask.shape, (32, 32));
         // With 8 blocks of size 4, not all blocks are covered by diagonal/global/random
@@ -844,16 +844,16 @@ mod tests {
             .with_num_heads(4)
             .with_pattern(SparsePattern::Local { window_size: 4 });
 
-        let attention = SparseAttention::new(config).unwrap();
+        let attention = SparseAttention::new(config).expect("operation failed");
 
         // Create dummy input
-        let input = Tensor::randn(&[8, 64]).unwrap();
+        let input = Tensor::randn(&[8, 64]).expect("operation failed");
         let attention_input = AttentionInput {
             hidden_states: input,
             attention_mask: None,
         };
 
-        let output = attention.forward(attention_input).unwrap();
+        let output = attention.forward(attention_input).expect("operation failed");
 
         match output {
             Tensor::F32(arr) => {

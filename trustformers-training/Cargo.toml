@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-training"
 description = "Training infrastructure for TrustformeRS"
+keywords = ["training", "distributed", "machine-learning", "transformers", "optimization"]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true

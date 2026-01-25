@@ -699,12 +699,12 @@ impl NeuralArchitectureSearcher {
                 println!(
                     "Random search iteration {}, best fitness: {:.4}",
                     i,
-                    self.best_architecture.as_ref().unwrap().fitness
+                    self.best_architecture.as_ref().expect("operation failed").fitness
                 );
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        Ok(self.best_architecture.clone().expect("operation failed"))
     }
 
     #[allow(deprecated)]
@@ -742,11 +742,11 @@ impl NeuralArchitectureSearcher {
             println!(
                 "Generation {}, best fitness: {:.4}",
                 generation,
-                self.best_architecture.as_ref().unwrap().fitness
+                self.best_architecture.as_ref().expect("operation failed").fitness
             );
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        Ok(self.best_architecture.clone().expect("operation failed"))
     }
 
     fn rl_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -763,12 +763,12 @@ impl NeuralArchitectureSearcher {
                 println!(
                     "RL search iteration {}, best fitness: {:.4}",
                     i,
-                    self.best_architecture.as_ref().unwrap().fitness
+                    self.best_architecture.as_ref().expect("operation failed").fitness
                 );
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        Ok(self.best_architecture.clone().expect("operation failed"))
     }
 
     fn darts_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -785,12 +785,12 @@ impl NeuralArchitectureSearcher {
                 println!(
                     "DARTS iteration {}, best fitness: {:.4}",
                     i,
-                    self.best_architecture.as_ref().unwrap().fitness
+                    self.best_architecture.as_ref().expect("operation failed").fitness
                 );
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        Ok(self.best_architecture.clone().expect("operation failed"))
     }
 
     fn progressive_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -822,13 +822,13 @@ impl NeuralArchitectureSearcher {
                         "Progressive search stage {}, iteration {}, best fitness: {:.4}",
                         stage,
                         i,
-                        self.best_architecture.as_ref().unwrap().fitness
+                        self.best_architecture.as_ref().expect("operation failed").fitness
                     );
                 }
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        Ok(self.best_architecture.clone().expect("operation failed"))
     }
 
     fn bayesian_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -840,7 +840,8 @@ impl NeuralArchitectureSearcher {
                 Architecture::random(&self.search_space, &mut self.rng)
             } else {
                 // Use best architecture as guidance (simplified acquisition function)
-                let mut arch = self.best_architecture.as_ref().unwrap().architecture.clone();
+                let mut arch =
+                    self.best_architecture.as_ref().expect("operation failed").architecture.clone();
                 arch.mutate(&self.search_space, 0.2, &mut self.rng);
                 arch
             };
@@ -853,12 +854,12 @@ impl NeuralArchitectureSearcher {
                 println!(
                     "Bayesian search iteration {}, best fitness: {:.4}",
                     i,
-                    self.best_architecture.as_ref().unwrap().fitness
+                    self.best_architecture.as_ref().expect("operation failed").fitness
                 );
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        Ok(self.best_architecture.clone().expect("operation failed"))
     }
 
     #[allow(deprecated)]
@@ -894,7 +895,7 @@ impl NeuralArchitectureSearcher {
         }
 
         // Return the best overall architecture
-        Ok(self.best_architecture.clone().unwrap())
+        Ok(self.best_architecture.clone().expect("operation failed"))
     }
 
     fn initialize_population(&mut self) -> Result<()> {
@@ -907,8 +908,10 @@ impl NeuralArchitectureSearcher {
         }
 
         // Update best architecture
-        if let Some(best) =
-            self.population.iter().max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
+        if let Some(best) = self
+            .population
+            .iter()
+            .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).expect("operation failed"))
         {
             self.best_architecture = Some(best.clone());
         }
@@ -931,8 +934,8 @@ impl NeuralArchitectureSearcher {
 
             let winner = tournament
                 .into_iter()
-                .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
-                .unwrap();
+                .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).expect("operation failed"))
+                .expect("operation failed");
             parents.push(winner);
         }
 
@@ -945,7 +948,7 @@ impl NeuralArchitectureSearcher {
         combined.extend(offspring);
 
         // Sort by fitness
-        combined.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+        combined.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).expect("operation failed"));
 
         // Keep top individuals
         self.population = combined.into_iter().take(self.config.population_size).collect();
@@ -953,7 +956,7 @@ impl NeuralArchitectureSearcher {
         // Update best architecture
         if let Some(best) = self.population.first() {
             if self.best_architecture.is_none()
-                || best.fitness > self.best_architecture.as_ref().unwrap().fitness
+                || best.fitness > self.best_architecture.as_ref().expect("operation failed").fitness
             {
                 self.best_architecture = Some(best.clone());
             }
@@ -1034,7 +1037,8 @@ impl NeuralArchitectureSearcher {
 
     fn update_best(&mut self, evaluation: &ArchitectureEvaluation) {
         if self.best_architecture.is_none()
-            || evaluation.fitness > self.best_architecture.as_ref().unwrap().fitness
+            || evaluation.fitness
+                > self.best_architecture.as_ref().expect("operation failed").fitness
         {
             self.best_architecture = Some(evaluation.clone());
         }

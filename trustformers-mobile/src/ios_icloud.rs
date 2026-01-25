@@ -264,7 +264,7 @@ impl iCloudModelSync {
 
         // Store in local registry
         {
-            let mut local_models = self.local_models.lock().unwrap();
+            let mut local_models = self.local_models.lock().expect("Lock poisoned");
             local_models.insert(
                 updated_metadata.model_id.clone(),
                 updated_metadata.clone().into(),
@@ -278,7 +278,7 @@ impl iCloudModelSync {
 
         // Update statistics
         {
-            let mut stats = self.statistics.lock().unwrap();
+            let mut stats = self.statistics.lock().expect("Lock poisoned");
             stats.total_models_registered += 1;
         }
 
@@ -288,7 +288,7 @@ impl iCloudModelSync {
     /// Manually sync a specific model
     pub fn sync_model(&mut self, model_id: &str) -> MobileResult<ModelSyncResult> {
         let metadata = {
-            let local_models = self.local_models.lock().unwrap();
+            let local_models = self.local_models.lock().expect("Lock poisoned");
             local_models
                 .get(model_id)
                 .cloned()
@@ -308,7 +308,7 @@ impl iCloudModelSync {
         let mut bytes_transferred = 0;
 
         let model_ids: Vec<String> = {
-            let local_models = self.local_models.lock().unwrap();
+            let local_models = self.local_models.lock().expect("Lock poisoned");
             local_models.keys().cloned().collect()
         };
 
@@ -354,7 +354,7 @@ impl iCloudModelSync {
 
     /// Download models from iCloud
     pub fn download_available_models(&mut self) -> MobileResult<Vec<ModelMetadata>> {
-        let cloud_manager = self.cloud_manager.lock().unwrap();
+        let cloud_manager = self.cloud_manager.lock().expect("Lock poisoned");
         cloud_manager.fetch_available_models()
     }
 
@@ -362,10 +362,10 @@ impl iCloudModelSync {
     pub fn check_for_updates(&mut self) -> MobileResult<Vec<String>> {
         let mut updated_models = Vec::new();
 
-        let cloud_manager = self.cloud_manager.lock().unwrap();
+        let cloud_manager = self.cloud_manager.lock().expect("Lock poisoned");
         let remote_models = cloud_manager.fetch_model_list()?;
 
-        let local_models = self.local_models.lock().unwrap();
+        let local_models = self.local_models.lock().expect("Lock poisoned");
 
         for remote_model in remote_models {
             if let Some(local_model) = local_models.get(&remote_model.model_id) {
@@ -385,7 +385,7 @@ impl iCloudModelSync {
         resolution: ConflictResolution,
     ) -> MobileResult<()> {
         let mut metadata = {
-            let local_models = self.local_models.lock().unwrap();
+            let local_models = self.local_models.lock().expect("Lock poisoned");
             local_models
                 .get(model_id)
                 .cloned()
@@ -402,7 +402,7 @@ impl iCloudModelSync {
         match resolution {
             ConflictResolution::UseNewest => {
                 // Compare timestamps and use the newer version
-                let cloud_manager = self.cloud_manager.lock().unwrap();
+                let cloud_manager = self.cloud_manager.lock().expect("Lock poisoned");
                 let remote_metadata = cloud_manager.fetch_model_metadata(model_id)?;
 
                 if remote_metadata.last_modified > metadata.last_modified {
@@ -422,7 +422,10 @@ impl iCloudModelSync {
                 let backup_id = format!(
                     "{}_backup_{}",
                     model_id,
-                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_secs()
                 );
 
                 let mut backup_metadata = metadata.clone();
@@ -431,7 +434,7 @@ impl iCloudModelSync {
 
                 // Register backup and upload
                 {
-                    let mut local_models = self.local_models.lock().unwrap();
+                    let mut local_models = self.local_models.lock().expect("Lock poisoned");
                     local_models.insert(backup_id, backup_metadata);
                 }
 
@@ -441,7 +444,7 @@ impl iCloudModelSync {
             ConflictResolution::Manual => {
                 // Mark for manual resolution
                 metadata.sync_status = SyncStatus::Failed;
-                let mut local_models = self.local_models.lock().unwrap();
+                let mut local_models = self.local_models.lock().expect("Lock poisoned");
                 local_models.insert(model_id.to_string(), metadata);
                 return Ok(());
             },
@@ -457,13 +460,13 @@ impl iCloudModelSync {
 
     /// Get sync statistics
     pub fn get_sync_statistics(&self) -> SyncStatistics {
-        let stats = self.statistics.lock().unwrap();
+        let stats = self.statistics.lock().expect("Lock poisoned");
         stats.clone()
     }
 
     /// Get list of registered models
     pub fn get_registered_models(&self) -> Vec<ModelMetadata> {
-        let local_models = self.local_models.lock().unwrap();
+        let local_models = self.local_models.lock().expect("Lock poisoned");
         local_models.values().cloned().collect()
     }
 
@@ -471,13 +474,13 @@ impl iCloudModelSync {
     pub fn remove_model(&mut self, model_id: &str, delete_remote: bool) -> MobileResult<()> {
         // Remove from local registry
         {
-            let mut local_models = self.local_models.lock().unwrap();
+            let mut local_models = self.local_models.lock().expect("Lock poisoned");
             local_models.remove(model_id);
         }
 
         // Remove from remote if requested
         if delete_remote {
-            let cloud_manager = self.cloud_manager.lock().unwrap();
+            let cloud_manager = self.cloud_manager.lock().expect("Lock poisoned");
             cloud_manager.delete_model(model_id)?;
         }
 
@@ -489,7 +492,7 @@ impl iCloudModelSync {
         let start_time = std::time::Instant::now();
 
         // Check if model exists remotely
-        let cloud_manager = self.cloud_manager.lock().unwrap();
+        let cloud_manager = self.cloud_manager.lock().expect("Lock poisoned");
         let remote_exists = cloud_manager.model_exists(&metadata.model_id)?;
 
         let operation = if remote_exists {
@@ -520,7 +523,7 @@ impl iCloudModelSync {
 
         // Update statistics
         {
-            let mut stats = self.statistics.lock().unwrap();
+            let mut stats = self.statistics.lock().expect("Lock poisoned");
             stats.total_sync_operations += 1;
             stats.total_bytes_transferred += bytes_transferred;
             stats.last_sync_time = SystemTime::now();
@@ -537,7 +540,7 @@ impl iCloudModelSync {
 
     fn upload_model(&self, model_id: &str) -> MobileResult<()> {
         let metadata = {
-            let local_models = self.local_models.lock().unwrap();
+            let local_models = self.local_models.lock().expect("Lock poisoned");
             local_models
                 .get(model_id)
                 .cloned()
@@ -551,7 +554,7 @@ impl iCloudModelSync {
         // Compress and encrypt if enabled
         let processed_data = self.process_model_for_upload(&local_path)?;
 
-        let cloud_manager = self.cloud_manager.lock().unwrap();
+        let cloud_manager = self.cloud_manager.lock().expect("Lock poisoned");
         cloud_manager.upload_model(&metadata, &processed_data)?;
 
         // Update local status
@@ -561,7 +564,7 @@ impl iCloudModelSync {
     }
 
     fn download_model(&self, model_id: &str) -> MobileResult<()> {
-        let cloud_manager = self.cloud_manager.lock().unwrap();
+        let cloud_manager = self.cloud_manager.lock().expect("Lock poisoned");
         let (metadata, model_data) = cloud_manager.download_model(model_id)?;
 
         // Process downloaded data (decrypt, decompress)
@@ -578,7 +581,7 @@ impl iCloudModelSync {
         updated_metadata.sync_status = SyncStatus::Synced;
 
         {
-            let mut local_models = self.local_models.lock().unwrap();
+            let mut local_models = self.local_models.lock().expect("Lock poisoned");
             local_models.insert(model_id.to_string(), updated_metadata);
         }
 
@@ -604,7 +607,7 @@ impl iCloudModelSync {
             scheduled_time: SystemTime::now(),
         };
 
-        let mut sync_queue = self.sync_queue.lock().unwrap();
+        let mut sync_queue = self.sync_queue.lock().expect("Lock poisoned");
         sync_queue.push(task);
 
         Ok(())
@@ -612,7 +615,7 @@ impl iCloudModelSync {
 
     fn start_background_sync(&self) -> MobileResult<()> {
         {
-            let mut active = self.background_sync_active.lock().unwrap();
+            let mut active = self.background_sync_active.lock().expect("Lock poisoned");
             *active = true;
         }
 
@@ -622,7 +625,7 @@ impl iCloudModelSync {
     }
 
     fn stop_background_sync(&self) -> MobileResult<()> {
-        let mut active = self.background_sync_active.lock().unwrap();
+        let mut active = self.background_sync_active.lock().expect("Lock poisoned");
         *active = false;
         Ok(())
     }
@@ -839,7 +842,10 @@ impl iCloudModelSync {
         // Simple pseudo-random generation (NOT secure for production)
         // Use proper cryptographic random number generation in production
         use std::time::{SystemTime, UNIX_EPOCH};
-        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_nanos() as u64;
 
         let mut rng_state = seed;
         for i in 0..16 {
@@ -962,7 +968,8 @@ impl CloudKitManager {
         #[cfg(target_os = "ios")]
         {
             let container = unsafe {
-                let container_id = CString::new(config.container_id.clone()).unwrap();
+                let container_id =
+                    CString::new(config.container_id.clone()).expect("Invalid container ID");
                 CKContainer_containerWithIdentifier(container_id.as_ptr())
             };
 
@@ -1004,8 +1011,8 @@ impl CloudKitManager {
             use std::ffi::CString;
 
             // Create record ID for the model
-            let record_type = CString::new("TrustformersModel").unwrap();
-            let record_id_str = CString::new(model_id).unwrap();
+            let record_type = CString::new("TrustformersModel").expect("Invalid record type");
+            let record_id_str = CString::new(model_id).expect("Invalid model ID");
 
             // This is a simplified implementation
             // In a real CloudKit implementation, you would:

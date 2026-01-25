@@ -1,3 +1,74 @@
+//! # TrustformeRS Training
+//!
+//! Training infrastructure and utilities for transformer models in Rust.
+//!
+//! This crate provides comprehensive tools for training transformer models, including:
+//!
+//! - **Distributed training**: Data parallelism, model parallelism, pipeline parallelism
+//! - **Memory optimization**: Gradient checkpointing, mixed precision, ZeRO optimizer
+//! - **Training strategies**: Few-shot learning, continual learning, curriculum learning
+//! - **Stability**: Gradient clipping, loss scaling, NaN detection and recovery
+//! - **Monitoring**: Real-time metrics, experiment tracking, resource monitoring
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use trustformers_training::{
+//!     Trainer, TrainingConfig,
+//!     distributed::DistributedConfig,
+//! };
+//! use trustformers_core::tensor::Tensor;
+//!
+//! // Configure training
+//! let config = TrainingConfig {
+//!     batch_size: 32,
+//!     learning_rate: 1e-4,
+//!     num_epochs: 10,
+//!     gradient_accumulation_steps: 4,
+//!     ..Default::default()
+//! };
+//!
+//! // Create trainer
+//! let mut trainer = Trainer::new(model, optimizer, config)?;
+//!
+//! // Train model
+//! trainer.train(train_dataset, val_dataset)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ## Distributed Training
+//!
+//! ```rust,no_run
+//! use trustformers_training::distributed::{
+//!     DistributedConfig, DistributedStrategy,
+//! };
+//!
+//! let dist_config = DistributedConfig {
+//!     strategy: DistributedStrategy::DataParallel,
+//!     world_size: 8,
+//!     backend: "nccl",
+//!     ..Default::default()
+//! };
+//!
+//! let trainer = Trainer::new_distributed(model, optimizer, config, dist_config)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ## Memory Optimization
+//!
+//! - **Gradient Checkpointing**: Trade compute for memory
+//! - **Mixed Precision**: FP16/BF16 training with loss scaling
+//! - **ZeRO**: Sharded optimizer states and gradients
+//! - **Activation Checkpointing**: Recompute activations during backward
+//!
+//! ## Features
+//!
+//! - `distributed`: Multi-GPU and multi-node training
+//! - `mixed-precision`: FP16/BF16 training support
+//! - `gradient-checkpointing`: Memory-efficient training
+//! - `wandb`: Weights & Biases integration
+//! - `tensorboard`: TensorBoard logging
+
 // Allow large error types in Result (TrustformersError is large by design)
 #![allow(clippy::result_large_err)]
 // Allow common patterns in training code

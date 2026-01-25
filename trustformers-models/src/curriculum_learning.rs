@@ -402,7 +402,8 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
 
     /// Sort examples by difficulty
     fn sort_examples_by_difficulty(&mut self) {
-        self.examples.sort_by(|a, b| a.difficulty.partial_cmp(&b.difficulty).unwrap());
+        self.examples
+            .sort_by(|a, b| a.difficulty.partial_cmp(&b.difficulty).expect("operation failed"));
     }
 
     /// Get current curriculum subset
@@ -1085,8 +1086,8 @@ mod tests {
 
     #[test]
     fn test_curriculum_example() {
-        let input = Tensor::zeros(&[1, 10]).unwrap();
-        let target = Tensor::zeros(&[1]).unwrap();
+        let input = Tensor::zeros(&[1, 10]).expect("operation failed");
+        let target = Tensor::zeros(&[1]).expect("operation failed");
         let example = CurriculumExample::new(input, target, 0.5);
 
         assert_eq!(example.difficulty, 0.5);
@@ -1096,20 +1097,23 @@ mod tests {
 
     #[test]
     fn test_curriculum_example_with_metadata() {
-        let input = Tensor::zeros(&[1, 10]).unwrap();
-        let target = Tensor::zeros(&[1]).unwrap();
+        let input = Tensor::zeros(&[1, 10]).expect("operation failed");
+        let target = Tensor::zeros(&[1]).expect("operation failed");
         let mut metadata = HashMap::new();
         metadata.insert("source".to_string(), "test".to_string());
 
         let example = CurriculumExample::with_metadata(input, target, 0.7, metadata);
         assert_eq!(example.difficulty, 0.7);
-        assert_eq!(example.metadata.get("source").unwrap(), "test");
+        assert_eq!(
+            example.metadata.get("source").expect("operation failed"),
+            "test"
+        );
     }
 
     #[test]
     fn test_curriculum_example_with_weight() {
-        let input = Tensor::zeros(&[1, 10]).unwrap();
-        let target = Tensor::zeros(&[1]).unwrap();
+        let input = Tensor::zeros(&[1, 10]).expect("operation failed");
+        let target = Tensor::zeros(&[1]).expect("operation failed");
         let example = CurriculumExample::new(input, target, 0.3).with_weight(2.0);
 
         assert_eq!(example.difficulty, 0.3);
@@ -1208,13 +1212,17 @@ mod tests {
     #[test]
     fn test_create_manual_examples() {
         let inputs = vec![
-            Tensor::zeros(&[1, 10]).unwrap(),
-            Tensor::ones(&[1, 10]).unwrap(),
+            Tensor::zeros(&[1, 10]).expect("operation failed"),
+            Tensor::ones(&[1, 10]).expect("operation failed"),
         ];
-        let targets = vec![Tensor::zeros(&[1]).unwrap(), Tensor::ones(&[1]).unwrap()];
+        let targets = vec![
+            Tensor::zeros(&[1]).expect("operation failed"),
+            Tensor::ones(&[1]).expect("operation failed"),
+        ];
         let difficulties = vec![0.2, 0.8];
 
-        let examples = utils::create_manual_examples(inputs, targets, difficulties).unwrap();
+        let examples =
+            utils::create_manual_examples(inputs, targets, difficulties).expect("operation failed");
         assert_eq!(examples.len(), 2);
         assert_eq!(examples[0].difficulty, 0.2);
         assert_eq!(examples[1].difficulty, 0.8);
@@ -1222,8 +1230,8 @@ mod tests {
 
     #[test]
     fn test_create_manual_examples_mismatched_lengths() {
-        let inputs = vec![Tensor::zeros(&[1, 10]).unwrap()];
-        let targets = vec![Tensor::zeros(&[1]).unwrap()];
+        let inputs = vec![Tensor::zeros(&[1, 10]).expect("operation failed")];
+        let targets = vec![Tensor::zeros(&[1]).expect("operation failed")];
         let difficulties = vec![0.2, 0.8]; // Different length
 
         let result = utils::create_manual_examples(inputs, targets, difficulties);

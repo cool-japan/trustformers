@@ -5,9 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers"
 description = "TrustformeRS - Rust port of Hugging Face Transformers"
 keywords = ["transformers", "machine-learning", "nlp", "ai", "bert"]
 categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true

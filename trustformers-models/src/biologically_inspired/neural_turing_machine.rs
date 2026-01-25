@@ -203,7 +203,7 @@ impl NTMLayer {
     fn forward_timestep(&mut self, input: &Tensor) -> Result<Tensor> {
         // Read from memory (simplified to avoid borrowing conflicts)
         let read_vectors = {
-            let memory_bank = self.memory_bank.as_ref().unwrap();
+            let memory_bank = self.memory_bank.as_ref().expect("operation failed");
             // Simple read operation - average of memory rows weighted by attention
             let mut vectors = Vec::new();
             for head in &memory_bank.read_heads {
@@ -228,7 +228,7 @@ impl NTMLayer {
 
         // Generate head control signals and write to memory (simplified)
         {
-            let memory_bank = self.memory_bank.as_mut().unwrap();
+            let memory_bank = self.memory_bank.as_mut().expect("operation failed");
 
             // Simple uniform attention weights for heads
             let memory_size = memory_bank.memory_size.0;

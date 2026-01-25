@@ -1252,7 +1252,9 @@ mod tests {
     #[tokio::test]
     async fn test_monitoring_system_creation() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         assert!(!monitoring_system.is_monitoring_active());
 
@@ -1263,26 +1265,39 @@ mod tests {
     #[tokio::test]
     async fn test_start_stop_monitoring() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         // Start monitoring
-        monitoring_system.start_monitoring().await.unwrap();
+        monitoring_system
+            .start_monitoring()
+            .await
+            .expect("Start monitoring should succeed");
         assert!(monitoring_system.is_monitoring_active());
 
         // Stop monitoring
-        monitoring_system.stop_monitoring().await.unwrap();
+        monitoring_system
+            .stop_monitoring()
+            .await
+            .expect("Stop monitoring should succeed");
         assert!(!monitoring_system.is_monitoring_active());
     }
 
     #[tokio::test]
     async fn test_metrics_update_and_retrieval() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         let test_metrics = create_test_metrics(0);
 
         // Update metrics
-        monitoring_system.update_metrics(0, test_metrics.clone()).await.unwrap();
+        monitoring_system
+            .update_metrics(0, test_metrics.clone())
+            .await
+            .expect("Update metrics should succeed");
 
         // Retrieve real-time metrics
         let realtime = monitoring_system.get_realtime_metrics().await;
@@ -1298,7 +1313,9 @@ mod tests {
     #[tokio::test]
     async fn test_historical_metrics() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         let test_metrics = create_test_metrics(0);
 
@@ -1308,7 +1325,10 @@ mod tests {
             metrics.utilization_percent = 50.0 + (i as f32 * 10.0);
             metrics.timestamp = Utc::now();
 
-            monitoring_system.update_metrics(0, metrics).await.unwrap();
+            monitoring_system
+                .update_metrics(0, metrics)
+                .await
+                .expect("Update metrics should succeed");
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
@@ -1334,13 +1354,18 @@ mod tests {
     #[tokio::test]
     async fn test_metrics_summary() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         // Add test data
         for i in 0..10 {
             let mut metrics = create_test_metrics(0);
             metrics.utilization_percent = 50.0 + (i as f32 * 5.0);
-            monitoring_system.update_metrics(0, metrics).await.unwrap();
+            monitoring_system
+                .update_metrics(0, metrics)
+                .await
+                .expect("Update metrics should succeed");
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
 
@@ -1350,7 +1375,7 @@ mod tests {
             .await;
 
         assert!(summary.is_some());
-        let summary = summary.unwrap();
+        let summary = summary.expect("Should get summary");
         assert_eq!(summary.device_id, 0);
         assert_eq!(summary.sample_count, 10);
         assert!(summary.average > 50.0);
@@ -1375,13 +1400,18 @@ mod tests {
     #[tokio::test]
     async fn test_configuration_update() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         let mut new_config = create_test_config();
         new_config.monitoring_interval = Duration::from_secs(10);
         new_config.enable_performance_tracking = false;
 
-        monitoring_system.update_config(new_config.clone()).await.unwrap();
+        monitoring_system
+            .update_config(new_config.clone())
+            .await
+            .expect("Update config should succeed");
 
         let current_config = monitoring_system.get_config().await;
         assert_eq!(current_config.monitoring_interval, Duration::from_secs(10));
@@ -1391,14 +1421,22 @@ mod tests {
     #[tokio::test]
     async fn test_monitoring_statistics() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         // Start monitoring
-        monitoring_system.start_monitoring().await.unwrap();
+        monitoring_system
+            .start_monitoring()
+            .await
+            .expect("Start monitoring should succeed");
 
         // Add some metrics
         let metrics = create_test_metrics(0);
-        monitoring_system.update_metrics(0, metrics).await.unwrap();
+        monitoring_system
+            .update_metrics(0, metrics)
+            .await
+            .expect("Update metrics should succeed");
 
         let stats = monitoring_system.get_monitoring_statistics().await;
         assert!(stats.is_active);
@@ -1406,16 +1444,24 @@ mod tests {
         assert!(stats.historical_entries > 0);
         assert!(stats.alerts_enabled);
 
-        monitoring_system.stop_monitoring().await.unwrap();
+        monitoring_system
+            .stop_monitoring()
+            .await
+            .expect("Stop monitoring should succeed");
     }
 
     #[tokio::test]
     async fn test_background_tasks() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         // Start monitoring to activate background tasks
-        monitoring_system.start_monitoring().await.unwrap();
+        monitoring_system
+            .start_monitoring()
+            .await
+            .expect("Start monitoring should succeed");
 
         // Wait briefly for tasks to initialize
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1424,7 +1470,10 @@ mod tests {
         assert!(stats.background_tasks > 0);
 
         // Stop monitoring
-        monitoring_system.stop_monitoring().await.unwrap();
+        monitoring_system
+            .stop_monitoring()
+            .await
+            .expect("Stop monitoring should succeed");
 
         // Verify tasks are cleaned up
         let stats = monitoring_system.get_monitoring_statistics().await;
@@ -1434,7 +1483,9 @@ mod tests {
     #[tokio::test]
     async fn test_error_handling() {
         let config = create_test_config();
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
 
         // Test mismatched device ID
         let mut metrics = create_test_metrics(0);
@@ -1456,14 +1507,22 @@ mod tests {
         let mut config = create_test_config();
         config.monitoring_interval = Duration::from_millis(100); // Fast interval for testing
 
-        let monitoring_system = GpuMonitoringSystem::new(config).await.unwrap();
-        monitoring_system.start_monitoring().await.unwrap();
+        let monitoring_system = GpuMonitoringSystem::new(config)
+            .await
+            .expect("Monitoring system creation should succeed");
+        monitoring_system
+            .start_monitoring()
+            .await
+            .expect("Start monitoring should succeed");
 
         // Add many metrics to trigger cleanup
         for i in 0..1000 {
             let mut metrics = create_test_metrics(0);
             metrics.timestamp = Utc::now();
-            monitoring_system.update_metrics(0, metrics).await.unwrap();
+            monitoring_system
+                .update_metrics(0, metrics)
+                .await
+                .expect("Update metrics should succeed");
 
             if i % 100 == 0 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1482,16 +1541,26 @@ mod tests {
 
         assert!(historical.len() <= max_expected * 2); // Allow some buffer for test timing
 
-        monitoring_system.stop_monitoring().await.unwrap();
+        monitoring_system
+            .stop_monitoring()
+            .await
+            .expect("Stop monitoring should succeed");
     }
 
     #[tokio::test]
     async fn test_concurrent_metrics_updates() {
         let config = create_test_config();
-        let monitoring_system = Arc::new(GpuMonitoringSystem::new(config).await.unwrap());
+        let monitoring_system = Arc::new(
+            GpuMonitoringSystem::new(config)
+                .await
+                .expect("Monitoring system creation should succeed"),
+        );
 
         // Start monitoring
-        monitoring_system.start_monitoring().await.unwrap();
+        monitoring_system
+            .start_monitoring()
+            .await
+            .expect("Start monitoring should succeed");
 
         // Launch concurrent update tasks
         let mut handles = Vec::new();
@@ -1501,7 +1570,9 @@ mod tests {
                 for i in 0..10 {
                     let mut metrics = create_test_metrics(device_id);
                     metrics.utilization_percent = 50.0 + (i as f32 * 2.0);
-                    ms.update_metrics(device_id, metrics).await.unwrap();
+                    ms.update_metrics(device_id, metrics)
+                        .await
+                        .expect("Update metrics should succeed");
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             });
@@ -1510,7 +1581,7 @@ mod tests {
 
         // Wait for all tasks to complete
         for handle in handles {
-            handle.await.unwrap();
+            handle.await.expect("Join handle should succeed");
         }
 
         // Verify all devices have metrics
@@ -1521,6 +1592,9 @@ mod tests {
             assert!(realtime.contains_key(&device_id));
         }
 
-        monitoring_system.stop_monitoring().await.unwrap();
+        monitoring_system
+            .stop_monitoring()
+            .await
+            .expect("Stop monitoring should succeed");
     }
 }

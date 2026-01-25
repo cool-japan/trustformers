@@ -128,7 +128,7 @@ impl MemoryProfiler {
 
                 // Store metrics
                 {
-                    let mut history = metrics_history.lock().unwrap();
+                    let mut history = metrics_history.lock().expect("operation failed");
                     history.push_back(final_metrics.clone());
 
                     // Keep only max_data_points
@@ -192,25 +192,25 @@ impl MemoryProfiler {
 
     /// Get current metrics snapshot
     pub async fn get_current_metrics(&self) -> Result<Option<MemoryMetrics>> {
-        let history = self.metrics_history.lock().unwrap();
+        let history = self.metrics_history.lock().expect("operation failed");
         Ok(history.back().cloned())
     }
 
     /// Get all alerts
     pub async fn get_alerts(&self) -> Result<Vec<MemoryAlert>> {
-        let alerts = self.alerts.lock().unwrap();
+        let alerts = self.alerts.lock().expect("operation failed");
         Ok(alerts.clone())
     }
 
     /// Get memory patterns
     pub async fn get_patterns(&self) -> Result<Vec<MemoryPattern>> {
-        let patterns = self.patterns.lock().unwrap();
+        let patterns = self.patterns.lock().expect("operation failed");
         Ok(patterns.clone())
     }
 
     /// Get adaptive thresholds
     pub async fn get_adaptive_thresholds(&self) -> Result<AdaptiveThresholds> {
-        let thresholds = self.adaptive_thresholds.lock().unwrap();
+        let thresholds = self.adaptive_thresholds.lock().expect("operation failed");
         Ok(thresholds.clone())
     }
 
@@ -233,7 +233,7 @@ impl MemoryProfiler {
 
     /// Configure leak detection parameters
     pub async fn configure_leak_detection(&self, config: LeakDetectionConfig) -> Result<()> {
-        let mut detection = self.leak_detection.lock().unwrap();
+        let mut detection = self.leak_detection.lock().expect("operation failed");
         *detection = LeakDetectionHeuristics {
             sustained_growth_threshold: config.growth_threshold,
             growth_duration_threshold: Duration::from_secs(config.duration_secs),
@@ -245,7 +245,7 @@ impl MemoryProfiler {
 
     /// Get current leak detection configuration
     pub async fn get_leak_detection_config(&self) -> Result<LeakDetectionConfig> {
-        let detection = self.leak_detection.lock().unwrap();
+        let detection = self.leak_detection.lock().expect("operation failed");
         Ok(LeakDetectionConfig {
             growth_threshold: detection.sustained_growth_threshold,
             duration_secs: detection.growth_duration_threshold.as_secs(),
@@ -259,11 +259,11 @@ impl MemoryProfiler {
         &self,
         horizon_secs: u64,
     ) -> Result<Option<MemoryPrediction>> {
-        let metrics_history = self.metrics_history.lock().unwrap();
+        let metrics_history = self.metrics_history.lock().expect("operation failed");
         let metrics: Vec<MemoryMetrics> = metrics_history.iter().cloned().collect();
         drop(metrics_history);
 
-        let mut predictor = self.memory_predictor.lock().unwrap();
+        let mut predictor = self.memory_predictor.lock().expect("operation failed");
         Ok(predictor.predict_memory_usage(&metrics, Some(horizon_secs)))
     }
 

@@ -280,7 +280,7 @@ impl ParallelAdam {
         let chunk_size = self.state.config.chunk_size;
 
         // Lock the parameter state
-        let mut param_state = state_arc.lock().unwrap();
+        let mut param_state = state_arc.lock().expect("Parallel optimizer state lock poisoned");
         param_state.step += 1;
         param_state.last_update = std::time::Instant::now();
 
@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(state.get_step(), 1);
 
         let param_state = state.get_or_create_state("test_param".to_string(), 100);
-        let locked_state = param_state.lock().unwrap();
+        let locked_state = param_state.lock().expect("Parallel optimizer state lock poisoned");
         assert_eq!(locked_state.momentum.len(), 100);
         assert_eq!(locked_state.variance.len(), 100);
     }

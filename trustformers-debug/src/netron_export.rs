@@ -1,7 +1,7 @@
 //! Netron export functionality for model visualization
 //!
 //! This module provides tools to export TrustformeRS models to formats compatible with
-//! Netron (https://netron.app/), a powerful neural network visualizer.
+//! Netron (<https://netron.app/>), a powerful neural network visualizer.
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

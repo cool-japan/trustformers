@@ -3,8 +3,9 @@
 //! Focused benchmarks for core functionality that doesn't require
 //! complex service interactions or mocking.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::json;
+use std::hint::black_box;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use trustformers_serve::{Device, ModelConfig, ServerConfig, TrustformerServer};

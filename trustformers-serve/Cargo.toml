@@ -5,10 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 description = "High-performance inference server for TrustformeRS models"
-homepage = "https://github.com/cool-japan/trustformers"
+homepage.workspace = true
 repository.workspace = true
+documentation = "https://docs.rs/trustformers-serve"
 keywords = ["inference", "server", "batching", "llm", "optimization"]
 categories = ["web-programming", "science"]
+readme = "README.md"
 
 [lints]
 workspace = true

@@ -259,33 +259,33 @@ mod tests {
     #[test]
     fn test_electra_sequence_classification() {
         let config = ElectraConfig::small();
-        let model = ElectraForSequenceClassification::new(config, 2).unwrap();
+        let model = ElectraForSequenceClassification::new(config, 2).expect("operation failed");
 
         let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]); // [CLS] I love ELECTRA [SEP]
         let result = model.forward(&input_ids, None, None, None);
 
         assert!(result.is_ok());
-        let logits = result.unwrap();
+        let logits = result.expect("operation failed");
         assert_eq!(logits.shape(), &[1, 2]);
     }
 
     #[test]
     fn test_electra_token_classification() {
         let config = ElectraConfig::small();
-        let model = ElectraForTokenClassification::new(config, 9).unwrap(); // BIO tagging
+        let model = ElectraForTokenClassification::new(config, 9).expect("operation failed"); // BIO tagging
 
         let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]);
         let result = model.forward(&input_ids, None, None, None);
 
         assert!(result.is_ok());
-        let logits = result.unwrap();
+        let logits = result.expect("operation failed");
         assert_eq!(logits.shape(), &[1, input_ids.len(), 9]);
     }
 
     #[test]
     fn test_electra_question_answering() {
         let config = ElectraConfig::small();
-        let model = ElectraForQuestionAnswering::new(config).unwrap();
+        let model = ElectraForQuestionAnswering::new(config).expect("operation failed");
 
         let input_ids = Array1::from_vec(vec![
             101, 2054, 2003, 7570, 1029, 102, 7570, 2003, 2307, 102,
@@ -293,7 +293,7 @@ mod tests {
         let result = model.forward(&input_ids, None, None, None);
 
         assert!(result.is_ok());
-        let (start_logits, end_logits) = result.unwrap();
+        let (start_logits, end_logits) = result.expect("operation failed");
         assert_eq!(start_logits.shape(), &[1, input_ids.len()]);
         assert_eq!(end_logits.shape(), &[1, input_ids.len()]);
     }
@@ -301,13 +301,13 @@ mod tests {
     #[test]
     fn test_electra_pretraining() {
         let config = ElectraConfig::small();
-        let model = ElectraForPreTraining::new(config.clone()).unwrap();
+        let model = ElectraForPreTraining::new(config.clone()).expect("operation failed");
 
         let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]);
         let result = model.forward(&input_ids, None, None, None);
 
         assert!(result.is_ok());
-        let (generator_logits, discriminator_logits) = result.unwrap();
+        let (generator_logits, discriminator_logits) = result.expect("operation failed");
         assert_eq!(
             generator_logits.shape(),
             &[1, input_ids.len(), config.vocab_size]

@@ -306,21 +306,21 @@ impl ChemicalTokenizer {
     fn create_smiles_patterns() -> Vec<Regex> {
         vec![
             // Atomic symbols with properties
-            Regex::new(r"\[[^]]+\]").unwrap(),
+            Regex::new(r"\[[^]]+\]").expect("valid regex"),
             // Common functional groups (must come before individual atoms)
-            Regex::new(r"COOH|CHO|NH2|CF3|PO4|SO4|NO2").unwrap(),
+            Regex::new(r"COOH|CHO|NH2|CF3|PO4|SO4|NO2").expect("valid regex"),
             // Two-letter elements (only actual elements, not groups)
-            Regex::new(r"Br|Cl").unwrap(),
+            Regex::new(r"Br|Cl").expect("valid regex"),
             // Single organic atoms
-            Regex::new(r"[BCNOPSFIbcnops]").unwrap(),
+            Regex::new(r"[BCNOPSFIbcnops]").expect("valid regex"),
             // Bonds
-            Regex::new(r"[=#:]").unwrap(),
+            Regex::new(r"[=#:]").expect("valid regex"),
             // Ring closures
-            Regex::new(r"%\d+|\d").unwrap(),
+            Regex::new(r"%\d+|\d").expect("valid regex"),
             // Branches
-            Regex::new(r"[()]").unwrap(),
+            Regex::new(r"[()]").expect("valid regex"),
             // Stereochemistry
-            Regex::new(r"@@?").unwrap(),
+            Regex::new(r"@@?").expect("valid regex"),
         ]
     }
 
@@ -328,17 +328,17 @@ impl ChemicalTokenizer {
     fn create_inchi_patterns() -> Vec<Regex> {
         vec![
             // InChI prefix
-            Regex::new(r"InChI=").unwrap(),
+            Regex::new(r"InChI=").expect("valid regex"),
             // Version
-            Regex::new(r"1S?").unwrap(),
+            Regex::new(r"1S?").expect("valid regex"),
             // Layers
-            Regex::new(r"/[a-z]").unwrap(),
+            Regex::new(r"/[a-z]").expect("valid regex"),
             // Chemical formula layer
-            Regex::new(r"[A-Z][a-z]?\d*").unwrap(),
+            Regex::new(r"[A-Z][a-z]?\d*").expect("valid regex"),
             // Connection layer
-            Regex::new(r"\d+-\d+").unwrap(),
+            Regex::new(r"\d+-\d+").expect("valid regex"),
             // Special characters
-            Regex::new(r"[(),;-]").unwrap(),
+            Regex::new(r"[(),;-]").expect("valid regex"),
         ]
     }
 
@@ -346,13 +346,13 @@ impl ChemicalTokenizer {
     fn create_formula_patterns() -> Vec<Regex> {
         vec![
             // Element with count
-            Regex::new(r"[A-Z][a-z]?\d*").unwrap(),
+            Regex::new(r"[A-Z][a-z]?\d*").expect("valid regex"),
             // Hydrates
-            Regex::new(r"·\d*H2O").unwrap(),
+            Regex::new(r"·\d*H2O").expect("valid regex"),
             // Ionic charges
-            Regex::new(r"\d*[+-]").unwrap(),
+            Regex::new(r"\d*[+-]").expect("valid regex"),
             // Parentheses with multipliers
-            Regex::new(r"\([^)]+\)\d*").unwrap(),
+            Regex::new(r"\([^)]+\)\d*").expect("valid regex"),
         ]
     }
 

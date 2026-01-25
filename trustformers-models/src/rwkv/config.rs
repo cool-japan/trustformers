@@ -250,7 +250,7 @@ mod tests {
     fn test_from_pretrained_name() {
         let config = RwkvConfig::from_pretrained_name("RWKV/rwkv-4-169m-pile");
         assert!(config.is_some());
-        assert_eq!(config.unwrap().n_embd, 768);
+        assert_eq!(config.expect("operation failed").n_embd, 768);
 
         let config = RwkvConfig::from_pretrained_name("unknown-model");
         assert!(config.is_none());

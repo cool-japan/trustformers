@@ -262,39 +262,39 @@ mod tests {
     #[test]
     fn test_deberta_sequence_classification() {
         let config = DebertaConfig::base();
-        let model = DebertaForSequenceClassification::new(config, 2).unwrap();
+        let model = DebertaForSequenceClassification::new(config, 2).expect("operation failed");
 
         let input_ids = Array1::from_vec(vec![0, 1, 2, 3, 2]); // [CLS] tokens [SEP]
         let result = model.forward(&input_ids, None);
 
         assert!(result.is_ok());
-        let logits = result.unwrap();
+        let logits = result.expect("operation failed");
         assert_eq!(logits.shape(), &[1, 2]);
     }
 
     #[test]
     fn test_deberta_token_classification() {
         let config = DebertaConfig::base();
-        let model = DebertaForTokenClassification::new(config, 9).unwrap(); // BIO tagging
+        let model = DebertaForTokenClassification::new(config, 9).expect("operation failed"); // BIO tagging
 
         let input_ids = Array1::from_vec(vec![0, 1, 2, 3, 2]);
         let result = model.forward(&input_ids, None);
 
         assert!(result.is_ok());
-        let logits = result.unwrap();
+        let logits = result.expect("operation failed");
         assert_eq!(logits.shape(), &[1, input_ids.len(), 9]);
     }
 
     #[test]
     fn test_deberta_question_answering() {
         let config = DebertaConfig::base();
-        let model = DebertaForQuestionAnswering::new(config).unwrap();
+        let model = DebertaForQuestionAnswering::new(config).expect("operation failed");
 
         let input_ids = Array1::from_vec(vec![0, 1, 2, 3, 2, 4, 5, 6, 7, 2]);
         let result = model.forward(&input_ids, None);
 
         assert!(result.is_ok());
-        let (start_logits, end_logits) = result.unwrap();
+        let (start_logits, end_logits) = result.expect("operation failed");
         assert_eq!(start_logits.shape(), &[1, input_ids.len()]);
         assert_eq!(end_logits.shape(), &[1, input_ids.len()]);
     }
@@ -302,26 +302,26 @@ mod tests {
     #[test]
     fn test_deberta_masked_lm() {
         let config = DebertaConfig::base();
-        let model = DebertaForMaskedLM::new(config.clone()).unwrap();
+        let model = DebertaForMaskedLM::new(config.clone()).expect("operation failed");
 
         let input_ids = Array1::from_vec(vec![0, 1, 2, 3, 2]);
         let result = model.forward(&input_ids, None);
 
         assert!(result.is_ok());
-        let logits = result.unwrap();
+        let logits = result.expect("operation failed");
         assert_eq!(logits.shape(), &[1, input_ids.len(), config.vocab_size]);
     }
 
     #[test]
     fn test_deberta_multiple_choice() {
         let config = DebertaConfig::base();
-        let model = DebertaForMultipleChoice::new(config).unwrap();
+        let model = DebertaForMultipleChoice::new(config).expect("operation failed");
 
         let input_ids = Array1::from_vec(vec![0, 1, 2, 3, 2]);
         let result = model.forward(&input_ids, None);
 
         assert!(result.is_ok());
-        let logits = result.unwrap();
+        let logits = result.expect("operation failed");
         assert_eq!(logits.shape(), &[1, 1]);
     }
 }

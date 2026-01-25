@@ -72,7 +72,7 @@ fn test_command_r_model_creation() {
     let model = CommandRModel::new(&config);
     assert!(model.is_ok());
 
-    let _model = model.unwrap();
+    let _model = model.expect("operation failed");
     // Command-R model created successfully - model configuration is internal
 }
 
@@ -83,7 +83,7 @@ fn test_command_r_plus_model_creation() {
     let model = CommandRModel::new(&config);
     assert!(model.is_ok());
 
-    let _model = model.unwrap();
+    let _model = model.expect("operation failed");
     // Command-R Plus model created successfully - model configuration is internal
 }
 
@@ -109,7 +109,7 @@ fn test_command_r_attention_creation() {
     let attention = CommandRAttention::new(&config);
     assert!(attention.is_ok());
 
-    let _attention = attention.unwrap();
+    let _attention = attention.expect("operation failed");
     // Command-R attention created successfully - dimensions are internal
     // Grouped query attention created successfully - head configuration is internal
 }
@@ -120,7 +120,7 @@ fn test_command_r_mlp_creation() {
     let mlp = CommandRMLP::new(&config);
     assert!(mlp.is_ok());
 
-    let _mlp = mlp.unwrap();
+    let _mlp = mlp.expect("operation failed");
     // MLP created successfully - configuration details are internal
 }
 
@@ -130,7 +130,7 @@ fn test_command_r_decoder_layer_creation() {
     let layer = CommandRDecoderLayer::new(&config);
     assert!(layer.is_ok());
 
-    let _layer = layer.unwrap();
+    let _layer = layer.expect("operation failed");
     // Decoder layer created successfully - hidden size is internal
 }
 
@@ -139,7 +139,7 @@ fn test_command_r_rope_creation() {
     let rope = CommandRRoPE::new(128, 4096, 10000.0);
     assert!(rope.is_ok());
 
-    let _rope = rope.unwrap();
+    let _rope = rope.expect("operation failed");
     // Rotary embedding created successfully - dimensions are internal
     // Rotary embedding created successfully - base frequency is internal
 }
@@ -148,16 +148,16 @@ fn test_command_r_rope_creation() {
 #[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_model_forward() {
     let config = CommandRConfig::command_r();
-    let mut model = CommandRModel::new(&config).unwrap();
+    let mut model = CommandRModel::new(&config).expect("operation failed");
 
     // Create dummy input
-    let input_ids = Tensor::new(vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-    let input_ids = input_ids.reshape(&[1, 4]).unwrap();
+    let input_ids = Tensor::new(vec![1.0, 2.0, 3.0, 4.0]).expect("operation failed");
+    let input_ids = input_ids.reshape(&[1, 4]).expect("operation failed");
 
     let result = model.forward(&input_ids, None, None, None);
     assert!(result.is_ok());
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape(), vec![1, 4, 8192]);
 }
 
@@ -165,16 +165,16 @@ fn test_command_r_model_forward() {
 #[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_causal_lm_forward() {
     let config = CommandRConfig::command_r();
-    let mut model = CommandRForCausalLM::new(&config).unwrap();
+    let mut model = CommandRForCausalLM::new(&config).expect("operation failed");
 
     // Create dummy input
-    let input_ids = Tensor::new(vec![1.0, 2.0, 3.0, 4.0]).unwrap();
-    let input_ids = input_ids.reshape(&[1, 4]).unwrap();
+    let input_ids = Tensor::new(vec![1.0, 2.0, 3.0, 4.0]).expect("operation failed");
+    let input_ids = input_ids.reshape(&[1, 4]).expect("operation failed");
 
     let result = model.forward(&input_ids, None, None, None, None);
     assert!(result.is_ok());
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.logits.shape(), vec![1, 4, 256000]);
 }
 
@@ -202,7 +202,7 @@ fn test_command_r_config_validation() {
 #[ignore] // Heavy test - allocates ~4GB for model weights, run with --ignored
 fn test_command_r_model_shapes() {
     let config = CommandRConfig::command_r();
-    let _model = CommandRModel::new(&config).unwrap();
+    let _model = CommandRModel::new(&config).expect("operation failed");
 
     // Command-R model created successfully - embedding and layer details are internal
 }
@@ -211,7 +211,7 @@ fn test_command_r_model_shapes() {
 #[ignore] // Very slow test (allocates ~8GB for model weights) - run with --ignored if needed
 fn test_command_r_plus_model_shapes() {
     let config = CommandRConfig::command_r_plus();
-    let _model = CommandRModel::new(&config).unwrap();
+    let _model = CommandRModel::new(&config).expect("operation failed");
 
     // Command-R Plus model created successfully - embedding and layer details are internal
 }
@@ -219,7 +219,7 @@ fn test_command_r_plus_model_shapes() {
 #[test]
 fn test_command_r_attention_shapes() {
     let config = CommandRConfig::command_r();
-    let _attention = CommandRAttention::new(&config).unwrap();
+    let _attention = CommandRAttention::new(&config).expect("operation failed");
 
     // Attention projections created successfully - projection dimensions are internal
 }
@@ -227,7 +227,7 @@ fn test_command_r_attention_shapes() {
 #[test]
 fn test_command_r_mlp_shapes() {
     let config = CommandRConfig::command_r();
-    let _mlp = CommandRMLP::new(&config).unwrap();
+    let _mlp = CommandRMLP::new(&config).expect("operation failed");
 
     // MLP projections created successfully - projection dimensions are internal
 }

@@ -119,8 +119,14 @@ impl AdaBound {
                 self.variance_states.insert(name.clone(), zeros);
             }
 
-            let momentum_state = self.momentum_states.get_mut(name).unwrap();
-            let variance_state = self.variance_states.get_mut(name).unwrap();
+            let momentum_state = self
+                .momentum_states
+                .get_mut(name)
+                .ok_or_else(|| anyhow::anyhow!("Momentum state not found"))?;
+            let variance_state = self
+                .variance_states
+                .get_mut(name)
+                .ok_or_else(|| anyhow::anyhow!("Variance state not found"))?;
 
             for i in 0..param_data.len() {
                 let mut grad_val = grad_data[i];
@@ -282,9 +288,18 @@ impl AMSBound {
                 self.max_variance_states.insert(name.clone(), zeros);
             }
 
-            let momentum_state = self.momentum_states.get_mut(name).unwrap();
-            let variance_state = self.variance_states.get_mut(name).unwrap();
-            let max_variance_state = self.max_variance_states.get_mut(name).unwrap();
+            let momentum_state = self
+                .momentum_states
+                .get_mut(name)
+                .ok_or_else(|| anyhow::anyhow!("Momentum state not found"))?;
+            let variance_state = self
+                .variance_states
+                .get_mut(name)
+                .ok_or_else(|| anyhow::anyhow!("Variance state not found"))?;
+            let max_variance_state = self
+                .max_variance_states
+                .get_mut(name)
+                .ok_or_else(|| anyhow::anyhow!("Max variance state not found"))?;
 
             for i in 0..param_data.len() {
                 let mut grad_val = grad_data[i];

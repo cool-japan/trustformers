@@ -23,10 +23,10 @@ pub struct MemorySummary {
 impl super::profiler::MemoryProfiler {
     /// Generate a comprehensive memory report
     pub async fn generate_report(&self) -> Result<MemoryDashboardReport> {
-        let metrics_history = self.get_metrics_history().lock().unwrap().clone();
-        let allocations = self.get_allocations().lock().unwrap().clone();
-        let alerts = self.get_alerts_internal().lock().unwrap().clone();
-        let patterns = self.get_patterns_internal().lock().unwrap().clone();
+        let metrics_history = self.get_metrics_history().lock().expect("operation failed").clone();
+        let allocations = self.get_allocations().lock().expect("operation failed").clone();
+        let alerts = self.get_alerts_internal().lock().expect("operation failed").clone();
+        let patterns = self.get_patterns_internal().lock().expect("operation failed").clone();
 
         // Calculate summary statistics
         let summary = if !metrics_history.is_empty() {
@@ -376,9 +376,9 @@ impl super::profiler::MemoryProfiler {
 
     /// Get current memory usage summary
     pub fn get_current_summary(&self) -> Option<MemorySummary> {
-        let history = self.get_metrics_history().lock().unwrap();
-        let alerts = self.get_alerts_internal().lock().unwrap();
-        let allocations = self.get_allocations().lock().unwrap();
+        let history = self.get_metrics_history().lock().expect("operation failed");
+        let alerts = self.get_alerts_internal().lock().expect("operation failed");
+        let allocations = self.get_allocations().lock().expect("operation failed");
 
         if let Some(latest) = history.back() {
             let total_memory: f64 = history.iter().map(|m| m.total_memory_mb).sum();

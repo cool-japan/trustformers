@@ -1,6 +1,7 @@
 //! Memory usage benchmarks
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId};
+use std::hint::black_box;
 use trustformers_core::{
     tensor::Tensor,
     cache::{InferenceCache, CacheConfig},

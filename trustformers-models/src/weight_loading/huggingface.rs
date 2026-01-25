@@ -243,7 +243,7 @@ impl HuggingFaceLoader {
             self.file_handles.insert(filename.to_string(), reader);
         }
 
-        Ok(self.file_handles.get_mut(filename).unwrap())
+        Ok(self.file_handles.get_mut(filename).expect("operation failed"))
     }
 
     /// Load tensor from PyTorch .bin file

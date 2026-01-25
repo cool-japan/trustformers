@@ -395,23 +395,23 @@ impl DynamicPruner {
     ) -> Result<PruningResult> {
         match &self.strategy {
             PruningStrategy::AttentionBased => {
-                let config = self.attention_config.as_ref().unwrap();
+                let config = self.attention_config.as_ref().expect("operation failed");
                 self.attention_based_pruning(hidden_states, attention_scores, config)
             },
             PruningStrategy::ConfidenceBased => {
-                let config = self.confidence_config.as_ref().unwrap();
+                let config = self.confidence_config.as_ref().expect("operation failed");
                 self.confidence_based_pruning(hidden_states, config)
             },
             PruningStrategy::LearnedGates => {
-                let config = self.learned_gate_config.as_ref().unwrap();
+                let config = self.learned_gate_config.as_ref().expect("operation failed");
                 self.learned_gate_pruning(hidden_states, config)
             },
             PruningStrategy::LayerAdaptive => {
-                let config = self.layer_adaptive_config.as_ref().unwrap();
+                let config = self.layer_adaptive_config.as_ref().expect("operation failed");
                 self.layer_adaptive_pruning(hidden_states, layer_index.unwrap_or(0), config)
             },
             PruningStrategy::Progressive => {
-                let config = self.progressive_config.as_ref().unwrap();
+                let config = self.progressive_config.as_ref().expect("operation failed");
                 self.progressive_pruning(
                     hidden_states,
                     layer_index.unwrap_or(0),
@@ -549,7 +549,7 @@ impl DynamicPruner {
         hidden_states: &Tensor,
         _config: &LearnedGatePruningConfig,
     ) -> Result<PruningResult> {
-        let gate_network = self.gate_network.as_ref().unwrap();
+        let gate_network = self.gate_network.as_ref().expect("operation failed");
 
         // Compute gate probabilities
         let gate_probs = gate_network.forward(hidden_states)?;
@@ -1006,7 +1006,7 @@ impl DynamicPruner {
             importance_scores.iter().enumerate().map(|(i, &score)| (i, score)).collect();
 
         // Sort by importance (descending)
-        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
 
         let mut keep_mask = vec![false; seq_len];
         let mut pruning_reasons = vec![PruningReason::LowAttention; seq_len];
@@ -1633,8 +1633,8 @@ mod tests {
     #[test]
     fn test_pruning_statistics() {
         let results = vec![PruningResult {
-            pruned_hidden_states: Tensor::zeros(&[1, 5, 768]).unwrap(),
-            pruned_attention_mask: Tensor::ones(&[1, 5]).unwrap(),
+            pruned_hidden_states: Tensor::zeros(&[1, 5, 768]).expect("operation failed"),
+            pruned_attention_mask: Tensor::ones(&[1, 5]).expect("operation failed"),
             token_importance: TokenImportance {
                 importance_scores: vec![0.9, 0.8, 0.3, 0.2, 0.1],
                 token_indices: vec![0, 1, 2, 3, 4],

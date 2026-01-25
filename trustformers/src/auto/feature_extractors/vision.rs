@@ -916,16 +916,22 @@ mod tests {
         assert_eq!(output.shape, vec![768]);
 
         // Check metadata preservation
-        assert_eq!(output.metadata.get("width").unwrap().as_u64().unwrap(), 640);
         assert_eq!(
-            output.metadata.get("height").unwrap().as_u64().unwrap(),
+            output.metadata.get("width").unwrap().as_u64().expect("expected u64 value"),
+            640
+        );
+        assert_eq!(
+            output.metadata.get("height").unwrap().as_u64().expect("expected u64 value"),
             480
         );
         assert_eq!(
-            output.metadata.get("channels").unwrap().as_u64().unwrap(),
+            output.metadata.get("channels").unwrap().as_u64().expect("expected u64 value"),
             3
         );
-        assert_eq!(output.metadata.get("dpi").unwrap().as_u64().unwrap(), 96);
+        assert_eq!(
+            output.metadata.get("dpi").unwrap().as_u64().expect("expected u64 value"),
+            96
+        );
     }
 
     #[test]
@@ -1037,9 +1043,18 @@ mod tests {
         let extractor = VisionFeatureExtractor::new(config);
         let caps = extractor.capabilities();
 
-        assert_eq!(caps.get("modality").unwrap().as_str().unwrap(), "vision");
-        assert_eq!(caps.get("feature_size").unwrap().as_u64().unwrap(), 768);
-        assert_eq!(caps.get("image_size").unwrap().as_u64().unwrap(), 224);
+        assert_eq!(
+            caps.get("modality").unwrap().as_str().expect("expected str value"),
+            "vision"
+        );
+        assert_eq!(
+            caps.get("feature_size").unwrap().as_u64().expect("expected u64 value"),
+            768
+        );
+        assert_eq!(
+            caps.get("image_size").unwrap().as_u64().expect("expected u64 value"),
+            224
+        );
         assert!(caps.get("supports_batching").unwrap().as_bool().unwrap());
         assert!(caps.contains_key("supported_formats"));
     }

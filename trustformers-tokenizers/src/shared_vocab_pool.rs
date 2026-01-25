@@ -179,10 +179,12 @@ impl SharedVocabPool {
 
         // Check for existing vocabulary with same content
         if self.config.enable_deduplication {
-            if let Some(existing_id) = self.hash_to_id.read().unwrap().get(&content_hash) {
+            if let Some(existing_id) =
+                self.hash_to_id.read().expect("lock should not be poisoned").get(&content_hash)
+            {
                 if let Some(existing_vocab) = self.get_by_id(existing_id) {
                     // Update statistics
-                    let mut stats = self.stats.write().unwrap();
+                    let mut stats = self.stats.write().expect("lock should not be poisoned");
                     stats.cache_hits += 1;
                     stats.memory_saved_bytes += VocabEntry::estimate_size(&vocab_arc);
 
@@ -193,9 +195,9 @@ impl SharedVocabPool {
 
         // Check if vocabulary with this ID already exists
         {
-            let pool = self.pool.read().unwrap();
+            let pool = self.pool.read().expect("lock should not be poisoned");
             if let Some(entry) = pool.get(&id) {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write().expect("lock should not be poisoned");
                 stats.cache_hits += 1;
                 return Ok(entry.vocab.clone());
             }
@@ -206,7 +208,7 @@ impl SharedVocabPool {
 
         // Check if we need to make room in the pool
         {
-            let pool = self.pool.read().unwrap();
+            let pool = self.pool.read().expect("lock should not be poisoned");
             if pool.len() >= self.config.max_pool_size {
                 drop(pool);
                 self.evict_least_recently_used()?;
@@ -215,8 +217,8 @@ impl SharedVocabPool {
 
         // Insert into pool
         {
-            let mut pool = self.pool.write().unwrap();
-            let mut hash_to_id = self.hash_to_id.write().unwrap();
+            let mut pool = self.pool.write().expect("lock should not be poisoned");
+            let mut hash_to_id = self.hash_to_id.write().expect("lock should not be poisoned");
 
             pool.insert(id.clone(), entry);
             if self.config.enable_deduplication {
@@ -226,7 +228,7 @@ impl SharedVocabPool {
 
         // Update statistics
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.vocabulary_count += 1;
             stats.memory_usage_bytes += VocabEntry::estimate_size(&vocab_arc);
             stats.cache_misses += 1;
@@ -239,7 +241,7 @@ impl SharedVocabPool {
 
     /// Get vocabulary by ID
     pub fn get_by_id(&self, id: &str) -> Option<Arc<Vocab>> {
-        let mut pool = self.pool.write().unwrap();
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
         if let Some(entry) = pool.get_mut(id) {
             entry.access_count += 1;
             entry.last_accessed = std::time::Instant::now();
@@ -248,13 +250,13 @@ impl SharedVocabPool {
             entry.add_weak_ref(&vocab);
 
             // Update statistics
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.cache_hits += 1;
 
             Some(vocab)
         } else {
             // Update statistics
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.cache_misses += 1;
             None
         }
@@ -262,19 +264,19 @@ impl SharedVocabPool {
 
     /// Check if vocabulary exists in pool
     pub fn contains(&self, id: &str) -> bool {
-        self.pool.read().unwrap().contains_key(id)
+        self.pool.read().expect("lock should not be poisoned").contains_key(id)
     }
 
     /// Remove vocabulary from pool
     pub fn remove(&self, id: &str) -> Option<Arc<Vocab>> {
-        let mut pool = self.pool.write().unwrap();
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
         if let Some(entry) = pool.remove(id) {
             // Remove from hash mapping
-            let mut hash_to_id = self.hash_to_id.write().unwrap();
+            let mut hash_to_id = self.hash_to_id.write().expect("lock should not be poisoned");
             hash_to_id.remove(&entry.content_hash);
 
             // Update statistics
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.vocabulary_count -= 1;
             stats.memory_usage_bytes = stats.memory_usage_bytes.saturating_sub(entry.size_bytes);
             stats.average_vocab_size = if stats.vocabulary_count > 0 {
@@ -291,14 +293,14 @@ impl SharedVocabPool {
 
     /// Clear all vocabularies from pool
     pub fn clear(&self) {
-        let mut pool = self.pool.write().unwrap();
-        let mut hash_to_id = self.hash_to_id.write().unwrap();
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
+        let mut hash_to_id = self.hash_to_id.write().expect("lock should not be poisoned");
 
         pool.clear();
         hash_to_id.clear();
 
         // Reset statistics
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
         stats.vocabulary_count = 0;
         stats.memory_usage_bytes = 0;
         stats.active_references = 0;
@@ -307,13 +309,13 @@ impl SharedVocabPool {
 
     /// Get pool statistics
     pub fn get_stats(&self) -> VocabPoolStats {
-        self.stats.read().unwrap().clone()
+        self.stats.read().expect("lock should not be poisoned").clone()
     }
 
     /// Force cleanup of unused vocabularies
     pub fn cleanup(&self) -> Result<usize> {
-        let mut pool = self.pool.write().unwrap();
-        let mut hash_to_id = self.hash_to_id.write().unwrap();
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
+        let mut hash_to_id = self.hash_to_id.write().expect("lock should not be poisoned");
         let mut removed_count = 0;
         let mut memory_freed = 0;
 
@@ -335,7 +337,7 @@ impl SharedVocabPool {
         }
 
         // Update statistics
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
         stats.vocabulary_count = pool.len();
         stats.memory_usage_bytes = stats.memory_usage_bytes.saturating_sub(memory_freed);
         stats.average_vocab_size = if stats.vocabulary_count > 0 {
@@ -345,14 +347,15 @@ impl SharedVocabPool {
         };
 
         // Update last cleanup time
-        *self.last_cleanup.write().unwrap() = std::time::Instant::now();
+        *self.last_cleanup.write().expect("lock should not be poisoned") =
+            std::time::Instant::now();
 
         Ok(removed_count)
     }
 
     /// Try to perform cleanup if needed
     fn try_cleanup(&self) {
-        let last_cleanup = *self.last_cleanup.read().unwrap();
+        let last_cleanup = *self.last_cleanup.read().expect("lock should not be poisoned");
         let now = std::time::Instant::now();
 
         let should_cleanup = if let Ok(stats) = self.stats.read() {
@@ -369,8 +372,8 @@ impl SharedVocabPool {
 
     /// Evict least recently used vocabulary
     fn evict_least_recently_used(&self) -> Result<()> {
-        let mut pool = self.pool.write().unwrap();
-        let mut hash_to_id = self.hash_to_id.write().unwrap();
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
+        let mut hash_to_id = self.hash_to_id.write().expect("lock should not be poisoned");
 
         // Find the least recently used entry
         let mut oldest_time = std::time::Instant::now();
@@ -392,7 +395,7 @@ impl SharedVocabPool {
             hash_to_id.remove(&oldest_hash);
 
             // Update statistics
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.vocabulary_count -= 1;
             stats.memory_usage_bytes = stats.memory_usage_bytes.saturating_sub(oldest_size);
             stats.average_vocab_size = if stats.vocabulary_count > 0 {
@@ -407,19 +410,23 @@ impl SharedVocabPool {
 
     /// Get list of all vocabulary IDs in the pool
     pub fn list_vocabularies(&self) -> Vec<String> {
-        self.pool.read().unwrap().keys().cloned().collect()
+        self.pool.read().expect("lock should not be poisoned").keys().cloned().collect()
     }
 
     /// Get memory usage for a specific vocabulary
     pub fn get_vocab_memory_usage(&self, id: &str) -> Option<usize> {
-        self.pool.read().unwrap().get(id).map(|entry| entry.size_bytes)
+        self.pool
+            .read()
+            .expect("lock should not be poisoned")
+            .get(id)
+            .map(|entry| entry.size_bytes)
     }
 
     /// Get access statistics for a specific vocabulary
     pub fn get_vocab_access_stats(&self, id: &str) -> Option<(usize, std::time::Instant)> {
         self.pool
             .read()
-            .unwrap()
+            .expect("lock should not be poisoned")
             .get(id)
             .map(|entry| (entry.access_count, entry.last_accessed))
     }

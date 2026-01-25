@@ -81,8 +81,13 @@ impl QuantumRecurrentNN {
             let input_t = input.slice(1, t, t + 1)?.squeeze(1)?;
 
             // Combine input with hidden state
-            let combined =
-                Tensor::concat(&[input_t, self.hidden_state.as_ref().unwrap().clone()], 1)?;
+            let combined = Tensor::concat(
+                &[
+                    input_t,
+                    self.hidden_state.as_ref().expect("operation failed").clone(),
+                ],
+                1,
+            )?;
 
             // Process through RNN layers
             let mut hidden = combined;

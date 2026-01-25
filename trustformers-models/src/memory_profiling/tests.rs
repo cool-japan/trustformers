@@ -12,13 +12,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[tokio::test]
 async fn test_profiler_creation() {
     let config = types::ProfilerConfig::default();
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("failed to create profiler");
     assert!(profiler.get_current_summary().is_none());
 }
 
 #[tokio::test]
 async fn test_metrics_collection() {
-    let metrics = profiler::MemoryProfiler::collect_memory_metrics().await.unwrap();
+    let metrics = profiler::MemoryProfiler::collect_memory_metrics()
+        .await
+        .expect("operation failed");
     assert!(metrics.total_memory_mb > 0.0);
     assert!(metrics.timestamp > UNIX_EPOCH);
 }
@@ -44,9 +46,9 @@ fn test_fragmentation_calculation() {
 #[tokio::test]
 async fn test_report_generation() {
     let config = types::ProfilerConfig::default();
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
-    let report = profiler.generate_report().await.unwrap();
+    let report = profiler.generate_report().await.expect("operation failed");
     assert!(report.summary.peak_memory_mb >= 0.0);
     assert!(!report.recommendations.is_empty());
 }
@@ -54,28 +56,28 @@ async fn test_report_generation() {
 #[tokio::test]
 async fn test_atomic_monitoring_control() {
     let config = types::ProfilerConfig::default();
-    let mut profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let mut profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Test initial state
     assert!(!profiler.is_monitoring());
 
     // Test atomic start
-    profiler.start_monitoring().await.unwrap();
+    profiler.start_monitoring().await.expect("operation failed");
     assert!(profiler.is_monitoring());
 
     // Test double start doesn't fail
-    profiler.start_monitoring().await.unwrap();
+    profiler.start_monitoring().await.expect("operation failed");
     assert!(profiler.is_monitoring());
 
     // Test atomic stop
-    profiler.stop_monitoring().await.unwrap();
+    profiler.stop_monitoring().await.expect("operation failed");
     assert!(!profiler.is_monitoring());
 }
 
 #[test]
 fn test_cached_recommendations_performance() {
     let config = types::ProfilerConfig::default();
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Verify cached recommendations are pre-allocated
     let cached = profiler.get_cached_recommendations();
@@ -125,14 +127,14 @@ async fn test_alert_analysis_optimization() {
     .await;
 
     // Verify alerts were generated efficiently
-    let alerts_vec = alerts.lock().unwrap();
+    let alerts_vec = alerts.lock().expect("operation failed");
     assert!(alerts_vec.len() >= 2); // High memory + rapid growth alerts
 
     // Verify cached recommendations were used
     let high_mem_alert = alerts_vec
         .iter()
         .find(|a| matches!(a.alert_type, types::MemoryAlertType::HighMemoryUsage))
-        .unwrap();
+        .expect("operation failed");
     assert_eq!(
         high_mem_alert.recommendations,
         cached_recommendations.high_memory
@@ -146,10 +148,10 @@ async fn test_concurrent_monitoring() {
         max_data_points: 10,        // Reduced from 100
         ..types::ProfilerConfig::default()
     };
-    let mut profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let mut profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Start monitoring
-    profiler.start_monitoring().await.unwrap();
+    profiler.start_monitoring().await.expect("operation failed");
 
     // Let it run for a shorter time
     tokio::time::sleep(Duration::from_millis(30)).await;
@@ -159,7 +161,7 @@ async fn test_concurrent_monitoring() {
     assert!(summary.is_some());
 
     // Stop monitoring
-    profiler.stop_monitoring().await.unwrap();
+    profiler.stop_monitoring().await.expect("operation failed");
 
     // Verify it stops cleanly
     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -176,8 +178,8 @@ fn test_metrics_history_bounded() {
         max_data_points: 5,
         ..types::ProfilerConfig::default()
     };
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
-    let mut history = profiler.get_metrics_history().lock().unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
+    let mut history = profiler.get_metrics_history().lock().expect("operation failed");
 
     // Add more than max_data_points
     for i in 0..10 {
@@ -205,16 +207,19 @@ fn test_metrics_history_bounded() {
 
     // Verify it's bounded correctly
     assert_eq!(history.len(), 5);
-    assert_eq!(history.back().unwrap().total_memory_mb, 9.0);
+    assert_eq!(
+        history.back().expect("operation failed").total_memory_mb,
+        9.0
+    );
 }
 
 #[tokio::test]
 async fn test_adaptive_thresholds_system() {
     let config = types::ProfilerConfig::default();
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Test initial adaptive thresholds
-    let initial_thresholds = profiler.get_adaptive_thresholds().await.unwrap();
+    let initial_thresholds = profiler.get_adaptive_thresholds().await.expect("operation failed");
     assert_eq!(initial_thresholds.base_memory_threshold, 1024.0);
     assert_eq!(initial_thresholds.growth_rate_threshold, 50.0);
     assert_eq!(initial_thresholds.fragmentation_threshold, 0.3);
@@ -246,7 +251,7 @@ async fn test_adaptive_thresholds_system() {
     .await;
 
     // Verify thresholds adapted upward
-    let updated_thresholds = profiler.get_adaptive_thresholds().await.unwrap();
+    let updated_thresholds = profiler.get_adaptive_thresholds().await.expect("operation failed");
     assert!(updated_thresholds.base_memory_threshold > initial_thresholds.base_memory_threshold);
     assert!(
         updated_thresholds.fragmentation_threshold > initial_thresholds.fragmentation_threshold
@@ -257,16 +262,16 @@ async fn test_adaptive_thresholds_system() {
 #[tokio::test]
 async fn test_memory_prediction_system() {
     let config = types::ProfilerConfig::default();
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Test no prediction with insufficient data
-    let initial_prediction = profiler.predict_memory_usage(300).await.unwrap(); // 5 minutes ahead
+    let initial_prediction = profiler.predict_memory_usage(300).await.expect("operation failed"); // 5 minutes ahead
     assert!(initial_prediction.is_none());
 
     // Simulate a trend by adding metrics with increasing memory usage
     let base_time = SystemTime::now();
     {
-        let mut history = profiler.get_metrics_history().lock().unwrap();
+        let mut history = profiler.get_metrics_history().lock().expect("operation failed");
 
         for i in 0..70 {
             // More than trend_window (60) for good prediction
@@ -314,10 +319,10 @@ async fn test_memory_prediction_system() {
     .await;
 
     // Test prediction with sufficient data
-    let prediction = profiler.predict_memory_usage(300).await.unwrap(); // 5 minutes ahead
+    let prediction = profiler.predict_memory_usage(300).await.expect("operation failed"); // 5 minutes ahead
     assert!(prediction.is_some());
 
-    let pred = prediction.unwrap();
+    let pred = prediction.expect("operation failed");
     assert!(pred.predicted_memory_mb > 1140.0); // Should predict growth
     assert!(pred.confidence > 0.0 && pred.confidence <= 1.0);
     assert_eq!(pred.horizon_secs, 300);
@@ -330,10 +335,10 @@ async fn test_memory_leak_detection() {
         enable_leak_detection: true,
         ..types::ProfilerConfig::default()
     };
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Test leak detection configuration
-    let initial_config = profiler.get_leak_detection_config().await.unwrap();
+    let initial_config = profiler.get_leak_detection_config().await.expect("operation failed");
     assert_eq!(initial_config.growth_threshold, 10.0);
     assert_eq!(initial_config.duration_secs, 300);
     assert_eq!(initial_config.allocation_threshold, 1000);
@@ -346,9 +351,12 @@ async fn test_memory_leak_detection() {
         allocation_threshold: 2000,
         confidence_threshold: 0.9,
     };
-    profiler.configure_leak_detection(new_config.clone()).await.unwrap();
+    profiler
+        .configure_leak_detection(new_config.clone())
+        .await
+        .expect("operation failed");
 
-    let updated_config = profiler.get_leak_detection_config().await.unwrap();
+    let updated_config = profiler.get_leak_detection_config().await.expect("operation failed");
     assert_eq!(updated_config.growth_threshold, 15.0);
     assert_eq!(updated_config.duration_secs, 600);
     assert_eq!(updated_config.allocation_threshold, 2000);
@@ -362,27 +370,27 @@ async fn test_monitoring_performance_stats() {
         max_data_points: 5,         // Reduced data points
         ..types::ProfilerConfig::default()
     };
-    let mut profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let mut profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Initial stats should be zero
-    let initial_stats = profiler.get_monitoring_stats().await.unwrap();
+    let initial_stats = profiler.get_monitoring_stats().await.expect("operation failed");
     assert_eq!(initial_stats.total_collections, 0);
     assert_eq!(initial_stats.average_overhead_us, 0);
     assert_eq!(initial_stats.uptime_secs, 0);
 
     // Start monitoring and let it collect some data for shorter time
-    profiler.start_monitoring().await.unwrap();
+    profiler.start_monitoring().await.expect("operation failed");
     tokio::time::sleep(Duration::from_millis(30)).await;
 
     // Check stats after some collections
-    let stats = profiler.get_monitoring_stats().await.unwrap();
+    let stats = profiler.get_monitoring_stats().await.expect("operation failed");
     assert!(stats.total_collections > 0);
     assert!(stats.average_overhead_us > 0);
     // uptime_secs may be 0 since we only slept 30ms (< 1 second)
     // Just verify it's a valid value (stats is collected correctly)
     let _ = stats.uptime_secs;
 
-    profiler.stop_monitoring().await.unwrap();
+    profiler.stop_monitoring().await.expect("operation failed");
 
     // Explicit cleanup
     drop(profiler);
@@ -427,7 +435,7 @@ fn test_linear_regression_calculation() {
 #[tokio::test]
 async fn test_adaptive_threshold_edge_cases() {
     let config = types::ProfilerConfig::default();
-    let profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Test with extremely high memory usage
     // Use a timestamp 6 minutes in the future to trigger threshold update (requires > 300 seconds)
@@ -453,7 +461,7 @@ async fn test_adaptive_threshold_edge_cases() {
     )
     .await;
 
-    let updated_thresholds = profiler.get_adaptive_thresholds().await.unwrap();
+    let updated_thresholds = profiler.get_adaptive_thresholds().await.expect("operation failed");
 
     // Thresholds should adapt but remain reasonable
     assert!(updated_thresholds.base_memory_threshold > 1024.0);
@@ -484,7 +492,7 @@ async fn test_adaptive_threshold_edge_cases() {
     )
     .await;
 
-    let minimal_thresholds = profiler.get_adaptive_thresholds().await.unwrap();
+    let minimal_thresholds = profiler.get_adaptive_thresholds().await.expect("operation failed");
 
     // Thresholds should adapt downward but remain usable
     assert!(minimal_thresholds.base_memory_threshold > 10.0); // Not too low
@@ -501,18 +509,18 @@ async fn test_comprehensive_analytics_integration() {
         max_data_points: 5,               // Reduced data points
         ..types::ProfilerConfig::default()
     };
-    let mut profiler = profiler::MemoryProfiler::new(config).unwrap();
+    let mut profiler = profiler::MemoryProfiler::new(config).expect("operation failed");
 
     // Start monitoring
-    profiler.start_monitoring().await.unwrap();
+    profiler.start_monitoring().await.expect("operation failed");
 
     // Let it run for much shorter time
     tokio::time::sleep(Duration::from_millis(40)).await;
 
     // Test all analytics features work together
-    let thresholds = profiler.get_adaptive_thresholds().await.unwrap();
-    let stats = profiler.get_monitoring_stats().await.unwrap();
-    let leak_config = profiler.get_leak_detection_config().await.unwrap();
+    let thresholds = profiler.get_adaptive_thresholds().await.expect("operation failed");
+    let stats = profiler.get_monitoring_stats().await.expect("operation failed");
+    let leak_config = profiler.get_leak_detection_config().await.expect("operation failed");
 
     // Verify basic functioning
     assert!(thresholds.base_memory_threshold > 0.0);
@@ -520,11 +528,11 @@ async fn test_comprehensive_analytics_integration() {
     assert!(leak_config.growth_threshold > 0.0);
 
     // Test analytics summary
-    let summary = profiler.get_analytics_summary().await.unwrap();
+    let summary = profiler.get_analytics_summary().await.expect("operation failed");
     assert!(summary.adaptive_thresholds.base_memory_threshold > 0.0);
     assert!(summary.monitoring_stats.total_collections > 0);
 
-    profiler.stop_monitoring().await.unwrap();
+    profiler.stop_monitoring().await.expect("operation failed");
 
     // Explicit cleanup
     drop(profiler);

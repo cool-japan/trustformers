@@ -1211,7 +1211,7 @@ mod tests {
 
     #[test]
     fn test_inference_request_creation() {
-        let tensor = Tensor::zeros(&[1, 2]).unwrap();
+        let tensor = Tensor::zeros(&[1, 2]).expect("operation failed");
         let request = InferenceRequest::new(tensor, RequestPriority::Normal);
 
         assert_eq!(request.priority, RequestPriority::Normal);
@@ -1245,10 +1245,10 @@ mod tests {
 
         assert_eq!(balancer.healthy_instances_count(), 2);
 
-        let selected1 = balancer.select_instance().unwrap();
+        let selected1 = balancer.select_instance().expect("operation failed");
         assert_eq!(selected1.id, "instance1");
 
-        let selected2 = balancer.select_instance().unwrap();
+        let selected2 = balancer.select_instance().expect("operation failed");
         assert_eq!(selected2.id, "instance2");
     }
 
@@ -1256,9 +1256,9 @@ mod tests {
     fn test_request_queue() {
         let mut queue = RequestQueue::new(2);
 
-        let tensor1 = Tensor::zeros(&[1, 2]).unwrap();
-        let tensor2 = Tensor::zeros(&[1, 2]).unwrap();
-        let tensor3 = Tensor::zeros(&[1, 2]).unwrap();
+        let tensor1 = Tensor::zeros(&[1, 2]).expect("operation failed");
+        let tensor2 = Tensor::zeros(&[1, 2]).expect("operation failed");
+        let tensor3 = Tensor::zeros(&[1, 2]).expect("operation failed");
 
         let req1 = InferenceRequest::new(tensor1, RequestPriority::Normal);
         let req2 = InferenceRequest::new(tensor2, RequestPriority::High);
@@ -1271,7 +1271,7 @@ mod tests {
         assert_eq!(queue.size(), 2);
 
         // Higher priority request should be dequeued first
-        let dequeued = queue.dequeue().unwrap();
+        let dequeued = queue.dequeue().expect("operation failed");
         assert_eq!(dequeued.priority, RequestPriority::High);
     }
 
@@ -1295,14 +1295,14 @@ mod tests {
         let manager = ModelServingManager::new(config);
 
         let instance = ModelInstance::new("test-instance".to_string(), 1.0);
-        manager.add_instance(instance).unwrap();
+        manager.add_instance(instance).expect("operation failed");
 
-        let tensor = Tensor::zeros(&[1, 2]).unwrap();
+        let tensor = Tensor::zeros(&[1, 2]).expect("operation failed");
         let request = InferenceRequest::new(tensor, RequestPriority::Normal);
 
-        manager.submit_request(request).await.unwrap();
+        manager.submit_request(request).await.expect("operation failed");
 
-        let response = manager.process_next_request().await.unwrap();
+        let response = manager.process_next_request().await.expect("operation failed");
         assert!(response.is_some());
 
         let metrics = manager.get_metrics().await;
@@ -1389,10 +1389,10 @@ mod tests {
 
         // Add an instance to the base manager
         let instance = ModelInstance::new("test-instance".to_string(), 1.0);
-        manager.base_manager().add_instance(instance).unwrap();
+        manager.base_manager().add_instance(instance).expect("operation failed");
 
         // Test rate limiting
-        let tensor = Tensor::zeros(&[1, 2]).unwrap();
+        let tensor = Tensor::zeros(&[1, 2]).expect("operation failed");
 
         // Should be able to submit requests within rate limit
         for _ in 0..5 {
@@ -1407,7 +1407,7 @@ mod tests {
         assert!(result.is_err());
 
         // Test enhanced metrics
-        let enhanced_metrics = manager.get_enhanced_metrics().await.unwrap();
+        let enhanced_metrics = manager.get_enhanced_metrics().await.expect("operation failed");
         assert_eq!(enhanced_metrics.current_instance_count, 1);
         assert!(enhanced_metrics.available_rate_limit_tokens < 5);
     }
@@ -1430,17 +1430,17 @@ mod tests {
             EnhancedServingManager::new(serving_config, rate_limit_config, auto_scaling_config);
 
         // Add multiple requests to trigger scaling
-        let tensor = Tensor::zeros(&[1, 2]).unwrap();
+        let tensor = Tensor::zeros(&[1, 2]).expect("operation failed");
         for _ in 0..10 {
             let request = InferenceRequest::new(tensor.clone(), RequestPriority::Normal);
-            manager.base_manager().submit_request(request).await.unwrap();
+            manager.base_manager().submit_request(request).await.expect("operation failed");
         }
 
         // Check for scaling decision
-        let scaling_action = manager.check_auto_scaling().await.unwrap();
+        let scaling_action = manager.check_auto_scaling().await.expect("operation failed");
         assert_eq!(scaling_action, Some(ScalingAction::ScaleUp));
 
-        let enhanced_metrics = manager.get_enhanced_metrics().await.unwrap();
+        let enhanced_metrics = manager.get_enhanced_metrics().await.expect("operation failed");
         assert_eq!(enhanced_metrics.current_instance_count, 2);
     }
 }

@@ -175,7 +175,7 @@ impl TopKRouter {
             }
 
             // Sort and select top-k
-            expert_probs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+            expert_probs.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("operation failed"));
             expert_probs.truncate(self.config.num_experts_per_token);
 
             // Renormalize selected probabilities

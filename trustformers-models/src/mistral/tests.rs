@@ -143,7 +143,7 @@ mod tests {
         // Create experts
         let mut experts = Vec::new();
         for i in 0..4 {
-            experts.push(MixtralExpert::new(i, &config).unwrap());
+            experts.push(MixtralExpert::new(i, &config).expect("operation failed"));
         }
 
         // Create MoE config
