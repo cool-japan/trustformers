@@ -1472,7 +1472,7 @@ mod uuid {
             let mut hasher = DefaultHasher::new();
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
                 .as_nanos()
                 .hash(&mut hasher);
             Uuid(hasher.finish() as u128)

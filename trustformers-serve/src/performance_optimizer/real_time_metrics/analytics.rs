@@ -2584,8 +2584,8 @@ impl StatisticalAnalyzer {
         // Calculate mode (most frequent value)
         let mode = self.calculate_mode(&sorted_values);
 
-        let min = *sorted_values.first().unwrap();
-        let max = *sorted_values.last().unwrap();
+        let min = *sorted_values.first().ok_or_else(|| anyhow!("No values for min"))?;
+        let max = *sorted_values.last().ok_or_else(|| anyhow!("No values for max"))?;
         let range = max - min;
 
         Ok(BasicStatistics {
@@ -2615,7 +2615,7 @@ impl StatisticalAnalyzer {
             return Vec::new();
         }
 
-        let max_frequency = *frequency_map.values().max().unwrap();
+        let max_frequency = *frequency_map.values().max().unwrap_or(&0);
 
         frequency_map
             .into_iter()

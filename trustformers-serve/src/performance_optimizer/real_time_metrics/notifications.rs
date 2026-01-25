@@ -940,7 +940,7 @@ impl NotificationManager {
             let handle = tokio::spawn(async move {
                 loop {
                     // Acquire processing permit
-                    let _permit = semaphore.acquire().await.unwrap();
+                    let _permit = semaphore.acquire().await.expect("Semaphore closed");
 
                     // Get next notification from queue
                     let notification = {
@@ -4254,7 +4254,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_alert_processor() {
-        let processor = DefaultAlertProcessor::new().await.unwrap();
+        let processor = DefaultAlertProcessor::new().await.expect("Failed to create processor");
 
         let alert = AlertEvent {
             timestamp: Utc::now(),
@@ -4282,14 +4282,14 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        let notifications = processor.process_alert(&alert).await.unwrap();
+        let notifications = processor.process_alert(&alert).await.expect("Failed to process alert");
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].alert_id, "test_alert");
     }
 
     #[tokio::test]
     async fn test_log_notification_channel() {
-        let channel = LogNotificationChannel::new().await.unwrap();
+        let channel = LogNotificationChannel::new().await.expect("Failed to create channel");
 
         let notification = Notification {
             id: "test_notification".to_string(),
@@ -4311,7 +4311,7 @@ mod tests {
             correlation_id: None,
         };
 
-        let result = channel.send_notification(&notification).await.unwrap();
+        let result = channel.send_notification(&notification).await.expect("Failed to send notification");
         assert!(result.success);
         assert!(result.delivered_at.is_some());
     }

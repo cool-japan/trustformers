@@ -1151,7 +1151,7 @@ impl AnalysisOrchestrator {
                 .orchestration_stats
                 .phase_execution_counts
                 .lock()
-                .map_err(|_| anyhow!("Lock poisoned"))?;
+                .expect("Lock poisoned");
             *counts.entry(phase.clone()).or_insert(0) += 1;
         }
 
@@ -1160,7 +1160,7 @@ impl AnalysisOrchestrator {
                 .orchestration_stats
                 .phase_average_durations
                 .lock()
-                .map_err(|_| anyhow!("Lock poisoned"))?;
+                .expect("Lock poisoned");
             let current_avg = durations.get(phase).cloned().unwrap_or(0);
             let new_avg = if current_avg == 0 {
                 duration.as_millis() as u64

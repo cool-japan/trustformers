@@ -5252,7 +5252,7 @@ impl ThresholdMonitor {
     ) {
         let config_read = config
             .read()
-            .map_err(|_| ThresholdError::InternalError("RwLock poisoned".to_string()))?;
+            .expect("RwLock poisoned");
         let max_history = config_read.max_alert_history;
         drop(config_read);
 
@@ -5488,7 +5488,7 @@ impl ThresholdMonitor {
         let mut history = self
             .alert_history
             .lock()
-            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
+            .expect("Lock poisoned");
 
         for alert in alerts {
             history.push_back(alert.clone());
@@ -6437,7 +6437,7 @@ impl PerformanceAnalyzer {
         let mut metrics_guard = metrics.lock().await;
         let config_read = config
             .read()
-            .map_err(|_| ThresholdError::InternalError("RwLock poisoned".to_string()))?;
+            .expect("RwLock poisoned");
 
         // Clean up old completed evaluations
         let retention = config_read.history_retention;

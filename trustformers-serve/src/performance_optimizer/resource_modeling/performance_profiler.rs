@@ -1171,7 +1171,7 @@ impl CpuProfiler {
 
         let handle = thread::spawn(move || {
             for _ in 0..iterations {
-                tx.send(()).map_err(|_| anyhow::anyhow!("Channel send failed"))?;
+                let _ = tx.send(());
                 thread::yield_now();
             }
         });

@@ -3134,7 +3134,7 @@ impl MovingAverageTrendDetector {
         }
 
         let first = moving_averages[0];
-        let last = *moving_averages.last().unwrap();
+        let last = *moving_averages.last().unwrap_or(&0.0);
         let change_ratio = if first != 0.0 { (last - first) / first } else { 0.0 };
 
         let direction = if change_ratio > self.change_threshold {

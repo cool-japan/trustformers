@@ -1419,7 +1419,7 @@ mod tests {
     #[tokio::test]
     async fn test_optimization_recommendations() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         let metrics = PerformanceMeasurement {
             throughput: 100.0,
@@ -1439,7 +1439,7 @@ mod tests {
         let recommendations = optimizer.optimize_performance(&metrics, &characteristics).await;
         assert!(recommendations.is_ok());
 
-        let recommendations = recommendations.unwrap();
+        let recommendations = recommendations.expect("No recommendations");
         assert!(recommendations.parallelism.confidence > 0.0);
         assert!(recommendations.expected_improvement >= 0.0);
     }
@@ -1447,19 +1447,19 @@ mod tests {
     #[tokio::test]
     async fn test_adaptive_parallelism_controller() {
         let config = AdaptiveParallelismConfig::default();
-        let controller = AdaptiveParallelismController::new(config).await.unwrap();
+        let controller = AdaptiveParallelismController::new(config).await.expect("Failed to create controller");
 
         let initial_parallelism = controller.get_current_parallelism();
         assert!(initial_parallelism >= 1);
 
-        controller.set_parallelism_level(4).await.unwrap();
+        controller.set_parallelism_level(4).await.expect("Failed to set parallelism");
         assert_eq!(controller.get_current_parallelism(), 4);
     }
 
     #[tokio::test]
     async fn test_real_time_metrics_updates() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         let metrics = PerformanceMeasurement {
             throughput: 150.0,
@@ -1474,9 +1474,9 @@ mod tests {
             latency: Duration::from_millis(30),
         };
 
-        optimizer.update_real_time_metrics(&metrics).await.unwrap();
+        optimizer.update_real_time_metrics(&metrics).await.expect("Failed to update metrics");
 
-        let current_metrics = optimizer.get_current_metrics().await.unwrap();
+        let current_metrics = optimizer.get_current_metrics().await.expect("Failed to get metrics");
         assert_eq!(current_metrics.current_throughput, 150.0);
         assert_eq!(current_metrics.current_cpu_utilization, 0.8);
     }
@@ -1484,7 +1484,7 @@ mod tests {
     #[tokio::test]
     async fn test_optimization_history_recording() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         optimizer.record_optimization_event(
             OptimizationEventType::ParallelismAdjustment,
@@ -1492,16 +1492,16 @@ mod tests {
             None,
             None,
             HashMap::new(),
-        ).await.unwrap();
+        ).await.expect("Failed to apply recommendations");
 
-        let history = optimizer.get_optimization_history().await.unwrap();
+        let history = optimizer.get_optimization_history().await.expect("Failed to get history");
         assert!(history.events.len() >= 1);
     }
 
     #[tokio::test]
     async fn test_configuration_updates() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         let new_config = PerformanceOptimizationConfig::default();
         let result = optimizer.update_configuration(new_config).await;
@@ -1511,7 +1511,7 @@ mod tests {
     #[tokio::test]
     async fn test_resource_optimization_recommendations() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         let metrics = PerformanceMeasurement {
             throughput: 50.0,
@@ -1531,7 +1531,7 @@ mod tests {
         let recommendations = optimizer
             .generate_resource_optimization_recommendations(&metrics, &characteristics)
             .await
-            .unwrap();
+            .expect("Failed operation");
 
         assert!(!recommendations.is_empty());
         assert!(recommendations.iter().any(|r| r.resource_type == "cpu"));
@@ -1540,7 +1540,7 @@ mod tests {
     #[tokio::test]
     async fn test_batching_recommendations() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         let characteristics = TestCharacteristics {
             average_duration: Duration::from_secs(1), // Fast tests
@@ -1550,7 +1550,7 @@ mod tests {
         let recommendation = optimizer
             .generate_batching_recommendations(&characteristics)
             .await
-            .unwrap();
+            .expect("Failed operation");
 
         assert!(recommendation.batch_size >= 1);
         assert!(!recommendation.strategy.is_empty());
@@ -1559,7 +1559,7 @@ mod tests {
     #[tokio::test]
     async fn test_priority_calculation() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         let low_efficiency_metrics = PerformanceMeasurement {
             throughput: 50.0,
@@ -1579,7 +1579,7 @@ mod tests {
         let priority = optimizer
             .calculate_optimization_priority(&low_efficiency_metrics, &characteristics)
             .await
-            .unwrap();
+            .expect("Failed operation");
 
         assert!(priority > 0.0);
         assert!(priority <= 1.0);
@@ -1588,7 +1588,7 @@ mod tests {
     #[tokio::test]
     async fn test_improvement_potential_estimation() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).await.unwrap();
+        let optimizer = PerformanceOptimizer::new(config).await.expect("Failed to create optimizer");
 
         let metrics = PerformanceMeasurement {
             throughput: 100.0,
@@ -1608,7 +1608,7 @@ mod tests {
         let potential = optimizer
             .estimate_improvement_potential(&metrics, &characteristics)
             .await
-            .unwrap();
+            .expect("Failed operation");
 
         assert!(potential >= 0.0);
         assert!(potential <= 0.5);

@@ -939,7 +939,7 @@ impl ProfilingSessionManager {
             }
         });
 
-        *self.cleanup_handle.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))? = Some(handle);
+        *self.cleanup_handle.lock().expect("Lock poisoned") = Some(handle);
     }
 
     /// Update completion metrics
