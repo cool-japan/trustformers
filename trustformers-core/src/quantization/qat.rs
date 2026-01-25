@@ -726,7 +726,8 @@ mod tests {
         let config = ObserverConfig::default();
         let mut observer = MovingAverageObserver::new(config);
 
-        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let tensor =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Tensor from_vec failed");
         observer.update(&tensor).unwrap();
 
         assert_eq!(observer.num_observations, 4);
@@ -746,11 +747,12 @@ mod tests {
         // Update to after warmup
         layer.update_epoch(10);
 
-        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let tensor =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Tensor from_vec failed");
 
         // Simulate training to collect statistics
         for _ in 0..100 {
-            layer.forward(&tensor, true).unwrap();
+            layer.forward(&tensor, true).expect("Forward pass failed");
         }
 
         // Should be enabled and ready now
@@ -812,8 +814,10 @@ mod tests {
 
     #[test]
     fn test_quantization_noise_calculation() {
-        let original = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
-        let quantized = Tensor::from_vec(vec![1.1, 1.9, 3.1, 3.9], &[4]).unwrap();
+        let original =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Tensor from_vec failed");
+        let quantized =
+            Tensor::from_vec(vec![1.1, 1.9, 3.1, 3.9], &[4]).expect("Tensor from_vec failed");
 
         let noise = QATUtils::calculate_quantization_noise(&original, &quantized).unwrap();
         assert!(noise > 0.0);

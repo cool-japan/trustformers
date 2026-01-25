@@ -846,7 +846,7 @@ mod tests {
         let flash_attn = FlashAttention::new(768, 12, 0.1, true, Some(64), false);
         assert!(flash_attn.is_ok());
 
-        let flash_attn = flash_attn.unwrap();
+        let flash_attn = flash_attn.expect("Failed to create FlashAttention");
         assert_eq!(flash_attn.num_heads, 12);
         assert_eq!(flash_attn.hidden_size, 768);
         assert_eq!(flash_attn.head_dim, 64);
@@ -856,10 +856,11 @@ mod tests {
 
     #[test]
     fn test_flash_attention_forward_pass() {
-        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), false).unwrap();
+        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), false)
+            .expect("Failed to create FlashAttention");
 
         // Create test input
-        let hidden_states = Tensor::randn(&[2, 128, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[2, 128, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -868,7 +869,7 @@ mod tests {
         let output = flash_attn.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 128, 256]);
     }
 
@@ -877,7 +878,7 @@ mod tests {
         let mqa = MultiQueryAttention::new(768, 12, 0.1, true);
         assert!(mqa.is_ok());
 
-        let mqa = mqa.unwrap();
+        let mqa = mqa.expect("Failed to create MultiQueryAttention");
         assert_eq!(mqa.num_heads, 12);
         assert_eq!(mqa.hidden_size, 768);
         assert_eq!(mqa.head_dim, 64);
@@ -888,7 +889,7 @@ mod tests {
         let gqa = GroupedQueryAttention::new(768, 12, 4, 0.1, true);
         assert!(gqa.is_ok());
 
-        let gqa = gqa.unwrap();
+        let gqa = gqa.expect("Failed to create GroupedQueryAttention");
         assert_eq!(gqa.num_query_heads, 12);
         assert_eq!(gqa.num_key_value_heads, 4);
         assert_eq!(gqa.hidden_size, 768);
@@ -897,9 +898,10 @@ mod tests {
 
     #[test]
     fn test_flash_attention_causal() {
-        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), true).unwrap();
+        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), true)
+            .expect("Failed to create FlashAttention");
 
-        let hidden_states = Tensor::randn(&[1, 64, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[1, 64, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -908,26 +910,27 @@ mod tests {
         let output = flash_attn.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
     }
 
     #[test]
     fn test_flash_attention_deterministic() {
-        let flash_attn = FlashAttention::new(128, 4, 0.0, true, Some(16), false).unwrap();
+        let flash_attn = FlashAttention::new(128, 4, 0.0, true, Some(16), false)
+            .expect("Failed to create FlashAttention");
 
-        let hidden_states = Tensor::ones(&[1, 32, 128]).unwrap();
+        let hidden_states = Tensor::ones(&[1, 32, 128]).expect("Failed to create ones tensor");
         let input = FlashAttentionInput {
             hidden_states: hidden_states.clone(),
             attention_mask: None,
         };
 
-        let output1 = flash_attn.forward(input.clone()).unwrap();
-        let output2 = flash_attn.forward(input).unwrap();
+        let output1 = flash_attn.forward(input.clone()).expect("Forward pass failed");
+        let output2 = flash_attn.forward(input).expect("Forward pass failed");
 
         // With same input and no dropout, outputs should be identical
-        let data1 = output1.data().unwrap();
-        let data2 = output2.data().unwrap();
+        let data1 = output1.data().expect("Failed to get data");
+        let data2 = output2.data().expect("Failed to get data");
 
         for (a, b) in data1.iter().zip(data2.iter()) {
             assert!((a - b).abs() < 1e-6, "Outputs should be deterministic");
@@ -940,7 +943,7 @@ mod tests {
             FlashAttention::new_with_version(768, 12, 0.1, true, Some(64), false, true);
         assert!(flash_attn_2.is_ok());
 
-        let flash_attn_2 = flash_attn_2.unwrap();
+        let flash_attn_2 = flash_attn_2.expect("Failed to create FlashAttention-2");
         assert_eq!(flash_attn_2.num_heads, 12);
         assert_eq!(flash_attn_2.hidden_size, 768);
         assert_eq!(flash_attn_2.head_dim, 64);
@@ -952,10 +955,11 @@ mod tests {
     #[test]
     fn test_flash_attention_2_forward_pass() {
         let flash_attn_2 =
-            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), false, true).unwrap();
+            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), false, true)
+                .expect("Failed to create FlashAttention-2");
 
         // Create test input
-        let hidden_states = Tensor::randn(&[2, 128, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[2, 128, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -964,7 +968,7 @@ mod tests {
         let output = flash_attn_2.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 128, 256]);
     }
 
@@ -972,22 +976,24 @@ mod tests {
     fn test_flash_attention_2_vs_1_consistency() {
         // Test that FlashAttention-2 produces similar results to FlashAttention-1
         let flash_attn_1 =
-            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, false).unwrap();
+            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, false)
+                .expect("Failed to create FlashAttention-1");
         let flash_attn_2 =
-            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, true).unwrap();
+            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, true)
+                .expect("Failed to create FlashAttention-2");
 
-        let hidden_states = Tensor::ones(&[1, 32, 128]).unwrap();
+        let hidden_states = Tensor::ones(&[1, 32, 128]).expect("Failed to create ones tensor");
         let input = FlashAttentionInput {
             hidden_states: hidden_states.clone(),
             attention_mask: None,
         };
 
-        let output1 = flash_attn_1.forward(input.clone()).unwrap();
-        let output2 = flash_attn_2.forward(input).unwrap();
+        let output1 = flash_attn_1.forward(input.clone()).expect("Forward pass failed");
+        let output2 = flash_attn_2.forward(input).expect("Forward pass failed");
 
         // Results should be very close (allowing for small numerical differences)
-        let data1 = output1.data().unwrap();
-        let data2 = output2.data().unwrap();
+        let data1 = output1.data().expect("Failed to get data");
+        let data2 = output2.data().expect("Failed to get data");
 
         let mut max_diff: f32 = 0.0;
         for (a, b) in data1.iter().zip(data2.iter()) {
@@ -1006,9 +1012,10 @@ mod tests {
     #[test]
     fn test_flash_attention_2_causal() {
         let flash_attn_2 =
-            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), true, true).unwrap();
+            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), true, true)
+                .expect("Failed to create FlashAttention-2");
 
-        let hidden_states = Tensor::randn(&[1, 64, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[1, 64, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -1017,7 +1024,7 @@ mod tests {
         let output = flash_attn_2.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
     }
 }

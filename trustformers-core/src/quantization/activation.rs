@@ -626,7 +626,8 @@ mod tests {
     #[test]
     fn test_activation_stats_update() {
         let mut stats = ActivationStats::new();
-        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]).unwrap();
+        let tensor =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]).expect("Tensor from_vec failed");
 
         stats.update(&tensor, 0.01).unwrap();
 
@@ -639,7 +640,8 @@ mod tests {
     #[test]
     fn test_activation_stats_quantization_params() {
         let mut stats = ActivationStats::new();
-        let tensor = Tensor::from_vec(vec![-2.0, -1.0, 0.0, 1.0, 2.0], &[5]).unwrap();
+        let tensor = Tensor::from_vec(vec![-2.0, -1.0, 0.0, 1.0, 2.0], &[5])
+            .expect("Tensor from_vec failed");
 
         stats.update(&tensor, 0.01).unwrap();
 
@@ -656,8 +658,8 @@ mod tests {
         };
         let mut quantizer = ActivationQuantizer::new(config);
 
-        let tensor1 = Tensor::randn(&[10, 20]).unwrap();
-        let tensor2 = Tensor::randn(&[10, 20]).unwrap();
+        let tensor1 = Tensor::randn(&[10, 20]).expect("Failed to create random tensor");
+        let tensor2 = Tensor::randn(&[10, 20]).expect("Failed to create random tensor");
 
         // Calibration phase
         assert!(quantizer.calibrating);
@@ -678,7 +680,8 @@ mod tests {
 
         let mut quantizer = ActivationQuantizer::new(config);
 
-        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let tensor =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Tensor from_vec failed");
 
         // Calibrate
         quantizer.quantize_activation(&tensor, "test_layer", false).unwrap();
@@ -706,7 +709,7 @@ mod tests {
         // Disable another layer
         quantizer.disable_layer("disabled_layer");
 
-        let tensor = Tensor::randn(&[8, 8]).unwrap();
+        let tensor = Tensor::randn(&[8, 8]).expect("Failed to create random tensor");
 
         // Disabled layer should return original tensor
         let result = quantizer.quantize_activation(&tensor, "disabled_layer", false).unwrap();
@@ -724,7 +727,8 @@ mod tests {
 
         let mut quantizer = ActivationQuantizer::new(config);
 
-        let tensor = Tensor::from_vec(vec![0.1, 0.2, 0.15, 0.18, 10.0], &[5]).unwrap(); // One outlier
+        let tensor = Tensor::from_vec(vec![0.1, 0.2, 0.15, 0.18, 10.0], &[5])
+            .expect("Tensor from_vec failed"); // One outlier
 
         // Calibrate
         quantizer.quantize_activation(&tensor, "adaptive_layer", false).unwrap();
@@ -754,7 +758,7 @@ mod tests {
             8,
         );
 
-        let dequantized = quant_activation.dequantize().unwrap();
+        let dequantized = quant_activation.dequantize().expect("Dequantization failed");
         assert_eq!(dequantized.shape(), shape);
     }
 
@@ -784,8 +788,9 @@ mod tests {
     #[test]
     fn test_serialization() {
         let config = ActivationQuantConfig::default();
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: ActivationQuantConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: ActivationQuantConfig =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(config.scheme, deserialized.scheme);
         assert_eq!(config.symmetric, deserialized.symmetric);

@@ -579,7 +579,7 @@ impl NumaAllocator {
         access_pattern: AccessPattern,
     ) -> Result<Vec<String>> {
         let mut optimized_allocations = Vec::new();
-        let allocations_map = self.allocations.lock().unwrap();
+        let allocations_map = self.allocations.lock().expect("Lock poisoned");
 
         match access_pattern {
             AccessPattern::Sequential => {

@@ -1021,7 +1021,7 @@ impl MlxEngine {
         for (i, node) in nodes.iter().enumerate() {
             if reachable[i] {
                 let mut updated_node = node.clone();
-                updated_node.id = *id_mapping.get(&i).unwrap();
+                updated_node.id = *id_mapping.get(&i).expect("Operation failed");
                 filtered_nodes.push(updated_node);
             }
         }
@@ -1031,8 +1031,9 @@ impl MlxEngine {
         for edge in &*edges {
             if reachable[edge.source] && reachable[edge.destination] {
                 let mut updated_edge = edge.clone();
-                updated_edge.source = *id_mapping.get(&edge.source).unwrap();
-                updated_edge.destination = *id_mapping.get(&edge.destination).unwrap();
+                updated_edge.source = *id_mapping.get(&edge.source).expect("Operation failed");
+                updated_edge.destination =
+                    *id_mapping.get(&edge.destination).expect("Operation failed");
                 filtered_edges.push(updated_edge);
             }
         }
@@ -1866,7 +1867,7 @@ mod tests {
         let capabilities = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M4);
         assert!(capabilities.is_ok());
 
-        let caps = capabilities.unwrap();
+        let caps = capabilities.expect("Operation failed");
         assert_eq!(caps.performance_cores, 4);
         assert_eq!(caps.efficiency_cores, 6);
         assert!(caps.amx_support);
@@ -1890,7 +1891,7 @@ mod tests {
             return;
         }
 
-        let mut engine = engine_result.unwrap();
+        let mut engine = engine_result.expect("Operation failed");
 
         let model_graph = vec![
             (MlxOperation::MatMul, vec![0, 1], HashMap::new()),
@@ -1905,7 +1906,7 @@ mod tests {
             engine.compile_model("test_model".to_string(), model_graph, OptimizationLevel::O2);
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "test_model");
+        assert_eq!(result.expect("Operation failed"), "test_model");
         assert!(engine.compiled_models.contains_key("test_model"));
     }
 
@@ -1927,23 +1928,23 @@ mod tests {
             return;
         }
 
-        let mut engine = engine_result.unwrap();
+        let mut engine = engine_result.expect("Operation failed");
 
         // Compile a simple model
         let model_graph = vec![(MlxOperation::MatMul, vec![0, 0], HashMap::new())];
 
         engine
             .compile_model("test_model".to_string(), model_graph, OptimizationLevel::O1)
-            .unwrap();
+            .expect("Operation failed");
 
         // Execute the model
-        let input1 = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        let input2 = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let input1 = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Operation failed");
+        let input2 = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Operation failed");
 
         let result = engine.execute_model("test_model", &[input1, input2]);
         assert!(result.is_ok());
 
-        let outputs = result.unwrap();
+        let outputs = result.expect("Operation failed");
         assert!(!outputs.is_empty());
     }
 
@@ -1974,7 +1975,7 @@ mod tests {
             return;
         }
 
-        let engine = engine_result.unwrap();
+        let engine = engine_result.expect("Operation failed");
 
         let metrics = engine.get_performance_metrics();
         assert_eq!(metrics.ops_per_second, 0.0);
@@ -1983,9 +1984,12 @@ mod tests {
 
     #[test]
     fn test_apple_silicon_variants() {
-        let m1_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M1).unwrap();
-        let m4_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M4).unwrap();
-        let a18_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::A18Pro).unwrap();
+        let m1_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M1)
+            .expect("Operation failed");
+        let m4_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::M4)
+            .expect("Operation failed");
+        let a18_caps = MlxEngine::detect_device_capabilities(&AppleSiliconDevice::A18Pro)
+            .expect("Operation failed");
 
         // M4 should have better capabilities than M1
         assert!(m4_caps.neural_engine_tops > m1_caps.neural_engine_tops);
@@ -2014,7 +2018,7 @@ mod tests {
             return;
         }
 
-        let engine = engine_result.unwrap();
+        let engine = engine_result.expect("Operation failed");
 
         let report = engine.export_performance_report();
         assert!(report.contains("MLX Framework Performance Report"));

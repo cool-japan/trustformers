@@ -269,7 +269,7 @@ impl MobileQuantizationEngine {
     pub fn quantize_model(&self, model_id: &str, model_data: &[u8]) -> Result<QuantizedModel> {
         // Check cache first
         {
-            let cache = self.quantization_cache.lock().unwrap();
+            let cache = self.quantization_cache.lock().expect("Operation failed");
             if let Some(cached_model) = cache.get(model_id) {
                 return Ok(cached_model.clone());
             }
@@ -296,7 +296,7 @@ impl MobileQuantizationEngine {
 
         // Cache the result
         {
-            let mut cache = self.quantization_cache.lock().unwrap();
+            let mut cache = self.quantization_cache.lock().expect("Operation failed");
             cache.insert(model_id.to_string(), final_model.clone());
         }
 
@@ -1056,27 +1056,27 @@ mod tests {
 
         // Test SafeTensors format
         let safetensors_data = b"STFR\x00\x00\x00\x00test data";
-        let format = engine.detect_model_format(safetensors_data).unwrap();
+        let format = engine.detect_model_format(safetensors_data).expect("Operation failed");
         assert_eq!(format, ModelFormat::SafeTensors);
 
         // Test PyTorch pickle format
         let pytorch_data = b"\x80\x02test data";
-        let format = engine.detect_model_format(pytorch_data).unwrap();
+        let format = engine.detect_model_format(pytorch_data).expect("Operation failed");
         assert_eq!(format, ModelFormat::PyTorchPickle);
 
         // Test TensorFlow format
         let tf_data = b"TFtest data";
-        let format = engine.detect_model_format(tf_data).unwrap();
+        let format = engine.detect_model_format(tf_data).expect("Operation failed");
         assert_eq!(format, ModelFormat::TensorFlow);
 
         // Test ONNX format
         let onnx_data = b"\x08\x01test data";
-        let format = engine.detect_model_format(onnx_data).unwrap();
+        let format = engine.detect_model_format(onnx_data).expect("Operation failed");
         assert_eq!(format, ModelFormat::ONNX);
 
         // Test custom format
         let custom_data = b"custom test data";
-        let format = engine.detect_model_format(custom_data).unwrap();
+        let format = engine.detect_model_format(custom_data).expect("Operation failed");
         assert_eq!(format, ModelFormat::Custom);
     }
 
@@ -1085,7 +1085,7 @@ mod tests {
         let engine = create_test_engine();
         let weights = create_test_quantized_weights();
 
-        let params = engine.calculate_quantization_parameters(&weights).unwrap();
+        let params = engine.calculate_quantization_parameters(&weights).expect("Operation failed");
 
         assert!(params.global_scale > 0.0);
         assert!(!params.layer_scales.is_empty());
@@ -1098,7 +1098,7 @@ mod tests {
         let engine = create_test_engine();
         let weights = create_test_quantized_weights();
 
-        let quality = engine.estimate_quality_score(&weights).unwrap();
+        let quality = engine.estimate_quality_score(&weights).expect("Operation failed");
 
         assert!(quality >= 0.0 && quality <= 1.0);
     }
@@ -1128,11 +1128,17 @@ mod tests {
     fn test_inference_time_estimation() {
         let engine = create_test_engine();
 
-        let time = engine.estimate_inference_time(1000, MobilePrecision::INT8).unwrap();
+        let time = engine
+            .estimate_inference_time(1000, MobilePrecision::INT8)
+            .expect("Operation failed");
         assert!(time > 0.0);
 
-        let time_fp16 = engine.estimate_inference_time(1000, MobilePrecision::FP16).unwrap();
-        let time_int4 = engine.estimate_inference_time(1000, MobilePrecision::INT4).unwrap();
+        let time_fp16 = engine
+            .estimate_inference_time(1000, MobilePrecision::FP16)
+            .expect("Operation failed");
+        let time_int4 = engine
+            .estimate_inference_time(1000, MobilePrecision::INT4)
+            .expect("Operation failed");
 
         // INT4 should be faster than FP16
         assert!(time_int4 < time_fp16);
@@ -1143,7 +1149,7 @@ mod tests {
         let engine = create_test_engine();
         let weights = create_test_quantized_weights();
 
-        let power_reduction = engine.estimate_power_reduction(&weights).unwrap();
+        let power_reduction = engine.estimate_power_reduction(&weights).expect("Operation failed");
         assert!(power_reduction >= 0.0);
     }
 
@@ -1183,7 +1189,7 @@ mod tests {
 
         // Test valid calibration data
         let valid_dataset = CalibrationDataset {
-            samples: vec![Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap()],
+            samples: vec![Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Operation failed")],
             weights: None,
             statistics: DatasetStatistics::default(),
         };
@@ -1269,7 +1275,7 @@ mod tests {
             }
         });
 
-        MobileQuantizationEngine::new(config, device_info, None).unwrap()
+        MobileQuantizationEngine::new(config, device_info, None).expect("Operation failed")
     }
 
     fn create_test_quantized_weights() -> HashMap<String, QuantizedTensor> {
@@ -1315,11 +1321,11 @@ mod tests {
 
         weights.insert(
             "layer1.weight".to_string(),
-            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]).unwrap(),
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]).expect("Operation failed"),
         );
         weights.insert(
             "layer2.weight".to_string(),
-            Tensor::from_vec(vec![6.0, 7.0, 8.0, 9.0, 10.0], &[5]).unwrap(),
+            Tensor::from_vec(vec![6.0, 7.0, 8.0, 9.0, 10.0], &[5]).expect("Operation failed"),
         );
 
         weights

@@ -907,7 +907,7 @@ mod tests {
     #[test]
     fn test_fp16_quantization() {
         let quantizer = FP16Quantizer::new();
-        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Operation failed");
 
         // FP16 doesn't require calibration
         assert!(!quantizer.requires_calibration());
@@ -926,10 +926,11 @@ mod tests {
         let mut quantizer = DynamicQuantizer::new();
 
         // Small range tensor - should use INT8
-        let small_range = Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[4]).unwrap();
+        let small_range =
+            Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[4]).expect("Operation failed");
 
-        quantizer.calibrate(&[small_range.clone()]).unwrap();
-        let quantized = quantizer.quantize_tensor(&small_range).unwrap();
+        quantizer.calibrate(&[small_range.clone()]).expect("Operation failed");
+        let quantized = quantizer.quantize_tensor(&small_range).expect("Operation failed");
 
         // Test external storage functionality
         let tensor_id = QuantizationSchemeStorage::generate_tensor_id(&small_range, None);
@@ -940,14 +941,14 @@ mod tests {
             .set_tensor_scheme(tensor_id.clone(), QuantizationScheme::FP16);
 
         // Quantize again - should now use FP16 due to external storage
-        let quantized_fp16 = quantizer.quantize_tensor(&small_range).unwrap();
+        let quantized_fp16 = quantizer.quantize_tensor(&small_range).expect("Operation failed");
 
         // Verify the storage can retrieve the scheme
         let stored_scheme = quantizer.scheme_storage_mut().determine_scheme(&tensor_id, None, None);
         assert_eq!(stored_scheme, QuantizationScheme::FP16);
 
         // Test default fallback
-        let unknown_tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let unknown_tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Operation failed");
         let unknown_id = QuantizationSchemeStorage::generate_tensor_id(&unknown_tensor, None);
         let default_scheme =
             quantizer.scheme_storage_mut().determine_scheme(&unknown_id, None, None);

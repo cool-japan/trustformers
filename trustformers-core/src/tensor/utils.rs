@@ -1106,7 +1106,7 @@ impl Tensor {
     /// ```
     /// use trustformers_core::tensor::Tensor;
     ///
-    /// let tensor = Tensor::ones(&[10, 4]).unwrap();
+    /// let tensor = Tensor::ones(&[10, 4]).expect("Failed to create ones tensor");
     /// let batches = tensor.batch_split(3).unwrap();
     /// assert_eq!(batches.len(), 4); // [3, 3, 3, 1]
     /// assert_eq!(batches[0].shape(), &[3, 4]);
@@ -1155,9 +1155,9 @@ impl Tensor {
     /// ```
     /// use trustformers_core::tensor::Tensor;
     ///
-    /// let t1 = Tensor::ones(&[3, 4]).unwrap();
-    /// let t2 = Tensor::zeros(&[3, 4]).unwrap();
-    /// let t3 = Tensor::ones(&[3, 4]).unwrap();
+    /// let t1 = Tensor::ones(&[3, 4]).expect("Failed to create ones tensor");
+    /// let t2 = Tensor::zeros(&[3, 4]).expect("Failed to create zero tensor");
+    /// let t3 = Tensor::ones(&[3, 4]).expect("Failed to create ones tensor");
     ///
     /// let batched = Tensor::batch_stack(&[&t1, &t2, &t3]).unwrap();
     /// assert_eq!(batched.shape(), &[3, 3, 4]);
@@ -1218,7 +1218,7 @@ impl Tensor {
     /// ```
     /// use trustformers_core::tensor::Tensor;
     ///
-    /// let batched = Tensor::ones(&[3, 4, 5]).unwrap();
+    /// let batched = Tensor::ones(&[3, 4, 5]).expect("Failed to create ones tensor");
     /// let unbatched = batched.unbatch().unwrap();
     /// assert_eq!(unbatched.len(), 3);
     /// assert_eq!(unbatched[0].shape(), &[4, 5]);
@@ -1255,8 +1255,9 @@ mod tests {
         // Test basic gradient functionality
         enable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let grad = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let grad = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+            .expect("Tensor from_vec failed");
 
         // Set gradient
         assert!(x.set_grad(grad.clone()).is_ok());
@@ -1273,8 +1274,8 @@ mod tests {
         // Test that gradients fail when tracking is disabled
         disable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let grad = Tensor::ones(&[2, 3]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let grad = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
 
         // Should fail when gradient tracking is disabled
         assert!(x.set_grad(grad).is_err());
@@ -1285,8 +1286,8 @@ mod tests {
     fn test_gradient_shape_validation() {
         enable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let wrong_shape_grad = Tensor::ones(&[3, 2]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let wrong_shape_grad = Tensor::ones(&[3, 2]).expect("Failed to create ones tensor");
 
         // Should fail when gradient shape doesn't match tensor shape
         assert!(x.set_grad(wrong_shape_grad).is_err());
@@ -1298,8 +1299,8 @@ mod tests {
     fn test_clear_gradients() {
         enable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let grad = Tensor::ones(&[2, 3]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let grad = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
 
         // Set gradient
         x.set_grad(grad).unwrap();

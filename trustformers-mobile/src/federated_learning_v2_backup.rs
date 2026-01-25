@@ -332,7 +332,7 @@ mod tests {
     #[test]
     fn test_participant_addition() {
         let config = FederatedLearningV2Config::default();
-        let mut engine = FederatedLearningV2Engine::new(config).unwrap();
+        let mut engine = FederatedLearningV2Engine::new(config).expect("Operation failed");
 
         let participant = ParticipantInfo {
             id: "client_1".to_string(),
@@ -355,18 +355,18 @@ mod tests {
     #[test]
     fn test_differential_privacy_mechanisms() {
         let config = FederatedLearningV2Config::default();
-        let mut engine = FederatedLearningV2Engine::new(config).unwrap();
+        let mut engine = FederatedLearningV2Engine::new(config).expect("Operation failed");
 
-        let update = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
+        let update = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Operation failed");
         let result = engine.apply_differential_privacy(&update, 100.0);
 
         assert!(result.is_ok());
-        let private_update = result.unwrap();
+        let private_update = result.expect("Operation failed");
         assert_eq!(private_update.shape(), &[4]);
 
         // Verify that noise was added (values should be different)
-        let original_data = update.data().unwrap();
-        let private_data = private_update.data().unwrap();
+        let original_data = update.data().expect("Operation failed");
+        let private_data = private_update.data().expect("Operation failed");
         let mut differences = 0;
         for (&orig, &priv_val) in original_data.iter().zip(private_data.iter()) {
             if (orig - priv_val).abs() > 1e-6 {
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn test_privacy_budget_tracking() {
         let config = FederatedLearningV2Config::default();
-        let engine = FederatedLearningV2Engine::new(config).unwrap();
+        let engine = FederatedLearningV2Engine::new(config).expect("Operation failed");
 
         let (epsilon, delta) = engine.get_privacy_budget();
         assert_eq!(epsilon, 0.0); // Should start at 0
@@ -397,16 +397,16 @@ mod tests {
     #[test]
     fn test_attack_detection() {
         let config = SecurityConfig::default();
-        let mut detector = AttackDetector::new(&config).unwrap();
+        let mut detector = AttackDetector::new(&config).expect("Operation failed");
 
         // Test with normal update
-        let normal_update = Tensor::from_vec(vec![0.1, 0.2, 0.1, 0.15], &[4]).unwrap();
+        let normal_update = Tensor::from_vec(vec![0.1, 0.2, 0.1, 0.15], &[4]).expect("Operation failed");
         let result = detector.analyze_update("client_1", &normal_update);
         assert!(result.is_ok());
         assert_eq!(detector.get_detection_history().len(), 0);
 
         // Test with suspicious update (large gradients)
-        let suspicious_update = Tensor::from_vec(vec![100.0, 200.0, 150.0, 180.0], &[4]).unwrap();
+        let suspicious_update = Tensor::from_vec(vec![100.0, 200.0, 150.0, 180.0], &[4]).expect("Operation failed");
         let result = detector.analyze_update("client_2", &suspicious_update);
         assert!(result.is_ok());
         assert_eq!(detector.get_detection_history().len(), 1);
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn test_privacy_report_generation() {
         let config = FederatedLearningV2Config::default();
-        let engine = FederatedLearningV2Engine::new(config).unwrap();
+        let engine = FederatedLearningV2Engine::new(config).expect("Operation failed");
 
         let report = engine.export_privacy_report();
         assert!(report.contains("Federated Learning v2.0"));

@@ -352,7 +352,7 @@ impl RocmImpl {
     ) -> Result<RocmKernel> {
         // Check cache first
         {
-            let cache = self.kernel_cache.lock().unwrap();
+            let cache = self.kernel_cache.lock().expect("Lock poisoned");
             if let Some(kernel) = cache.get(name) {
                 return Ok(kernel.clone());
             }
@@ -399,7 +399,7 @@ impl RocmImpl {
 
         // Cache the kernel
         {
-            let mut cache = self.kernel_cache.lock().unwrap();
+            let mut cache = self.kernel_cache.lock().expect("Lock poisoned");
             cache.insert(name.to_string(), kernel.clone());
         }
 
@@ -417,7 +417,7 @@ impl RocmImpl {
     pub fn allocate_memory(&self, size: usize) -> Result<*mut std::ffi::c_void> {
         // Try to get from pool first
         {
-            let mut pool = self.memory_pool.lock().unwrap();
+            let mut pool = self.memory_pool.lock().expect("Lock poisoned");
             if let Some(block) = pool.get_block(size) {
                 return Ok(block.ptr);
             }
@@ -435,7 +435,7 @@ impl RocmImpl {
 
         // Update memory tracking
         {
-            let mut pool = self.memory_pool.lock().unwrap();
+            let mut pool = self.memory_pool.lock().expect("Lock poisoned");
             pool.total_allocated += size;
             pool.peak_memory = pool.peak_memory.max(pool.total_allocated);
         }
@@ -836,7 +836,7 @@ extern "C" __global__ void rocm_flash_attention(
 
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> (usize, usize) {
-        let pool = self.memory_pool.lock().unwrap();
+        let pool = self.memory_pool.lock().expect("Lock poisoned");
         (pool.total_allocated, pool.peak_memory)
     }
 
@@ -1255,9 +1255,9 @@ mod tests {
     #[cfg(all(feature = "rocm", target_os = "linux"))]
     fn test_rocm_matmul() {
         if let Ok(rocm) = RocmImpl::global() {
-            let a = Tensor::ones(&[4, 4]).unwrap();
-            let b = Tensor::ones(&[4, 4]).unwrap();
-            let mut c = Tensor::zeros(&[4, 4]).unwrap();
+            let a = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+            let b = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+            let mut c = Tensor::zeros(&[4, 4]).expect("Failed to create zero tensor");
 
             // This will use actual implementation if ROCm is available
             let result = rocm.matmul(&a, &b, &mut c);

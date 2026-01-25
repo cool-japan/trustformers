@@ -254,7 +254,7 @@ impl SmoothQuantizer {
         // Calculate percentiles
         let mut percentile_vals = vec![0.0f32; num_channels];
         for (channel, values) in all_values.iter_mut().enumerate() {
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let percentile_idx = ((values.len() as f32 * self.config.activation_percentile / 100.0)
                 as usize)
                 .min(values.len() - 1);
@@ -874,14 +874,16 @@ mod tests {
         let mut quantizer = SmoothQuantizer::new(config);
 
         // Create test data
-        let weights = Tensor::randn(&[64, 64]).unwrap();
+        let weights = Tensor::randn(&[64, 64]).expect("Failed to create random tensor");
         let activations = vec![
-            Tensor::randn(&[32, 64]).unwrap(),
-            Tensor::randn(&[32, 64]).unwrap(),
+            Tensor::randn(&[32, 64]).expect("Failed to create random tensor"),
+            Tensor::randn(&[32, 64]).expect("Failed to create random tensor"),
         ];
 
         // Calibrate
-        quantizer.calibrate("test_layer", &activations, &weights).unwrap();
+        quantizer
+            .calibrate("test_layer", &activations, &weights)
+            .expect("Calibration failed");
 
         // Check that smoothing scales were calculated
         assert!(quantizer.smoothing_scales.contains_key("test_layer"));
@@ -893,25 +895,27 @@ mod tests {
         let mut quantizer = SmoothQuantizer::new(config);
 
         // Setup
-        let weights = Tensor::ones(&[64, 64]).unwrap();
-        let scales = Tensor::from_vec(vec![2.0; 64], &[64]).unwrap();
+        let weights = Tensor::ones(&[64, 64]).expect("Failed to create ones tensor");
+        let scales = Tensor::from_vec(vec![2.0; 64], &[64]).expect("Tensor from_vec failed");
         quantizer.smoothing_scales.insert("test_layer".to_string(), scales);
 
         // Apply smoothing
-        let smoothed = quantizer.smooth_weights("test_layer", &weights).unwrap();
+        let smoothed = quantizer
+            .smooth_weights("test_layer", &weights)
+            .expect("Failed to smooth weights");
 
         // Verify
         match smoothed {
             Tensor::F32(data) => {
-                let values = data.as_slice().unwrap();
+                let values = data.as_slice().expect("Failed to get F32 data");
                 assert!((values[0] - 0.5).abs() < 1e-5);
             },
             Tensor::F64(data) => {
-                let values = data.as_slice().unwrap();
+                let values = data.as_slice().expect("Failed to get F64 data");
                 assert!((values[0] as f32 - 0.5).abs() < 1e-5);
             },
             Tensor::I64(data) => {
-                let values = data.as_slice().unwrap();
+                let values = data.as_slice().expect("Failed to get I64 data");
                 assert!((values[0] as f32 - 0.5).abs() < 1e-5);
             },
             Tensor::F16(_) => panic!("F16 tensor type not expected in smoothing test"),
@@ -937,21 +941,22 @@ mod tests {
         let quantizer = SmoothQuantizer::new(SmoothQuantConfig::default());
 
         // Create test tensor
-        let tensor = Tensor::from_vec(vec![0.0, 1.0, 2.0, 3.0, 4.0], &[5]).unwrap();
+        let tensor =
+            Tensor::from_vec(vec![0.0, 1.0, 2.0, 3.0, 4.0], &[5]).expect("Tensor from_vec failed");
 
         // Quantize
-        let quantized = quantizer.quantize_weights(&tensor).unwrap();
+        let quantized = quantizer.quantize_weights(&tensor).expect("Quantization failed");
 
         // Verify
         assert_eq!(quantized.shape, vec![5]);
         assert_eq!(quantized.data.len(), 5);
 
         // Dequantize and check reconstruction
-        let reconstructed = quantized.dequantize().unwrap();
+        let reconstructed = quantized.dequantize().expect("Dequantization failed");
         match (tensor, reconstructed) {
             (Tensor::F32(orig), Tensor::F32(recon)) => {
-                let orig_vals = orig.as_slice().unwrap();
-                let recon_vals = recon.as_slice().unwrap();
+                let orig_vals = orig.as_slice().expect("Failed to get original values");
+                let recon_vals = recon.as_slice().expect("Failed to get reconstructed values");
 
                 for (o, r) in orig_vals.iter().zip(recon_vals.iter()) {
                     assert!((o - r).abs() < 0.1); // Allow small quantization error
@@ -967,17 +972,22 @@ mod tests {
         let quantizer = SmoothQuantizer::new(SmoothQuantConfig::default());
 
         // Create F64 test tensor by converting from F32
-        let base_tensor = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0, 4.0], &[5]).unwrap();
-        let tensor = base_tensor.to_dtype(DType::F64).unwrap();
+        let base_tensor = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0, 4.0], &[5])
+            .expect("Tensor from_vec failed");
+        let tensor = base_tensor.to_dtype(DType::F64).expect("Failed to convert to F64");
 
         // Test get_tensor_range with F64
-        let (min, max) = quantizer.get_tensor_range(&tensor).unwrap();
+        let (min, max) = quantizer.get_tensor_range(&tensor).expect("Failed to get tensor range");
         assert!((min - 0.0).abs() < 1e-5);
         assert!((max - 4.0).abs() < 1e-5);
 
         // Test tensor_to_u8 with F64
-        let quantized = tensor.add_scalar(1.0).unwrap().clamp(0.0, 255.0).unwrap();
-        let u8_data = quantizer.tensor_to_u8(quantized).unwrap();
+        let quantized = tensor
+            .add_scalar(1.0)
+            .expect("Failed to add scalar")
+            .clamp(0.0, 255.0)
+            .expect("Failed to clamp");
+        let u8_data = quantizer.tensor_to_u8(quantized).expect("Failed to convert to u8");
         assert_eq!(u8_data, vec![1, 2, 3, 4, 5]);
     }
 
@@ -987,18 +997,23 @@ mod tests {
         let quantizer = SmoothQuantizer::new(SmoothQuantConfig::default());
 
         // Create I64 test tensor by converting from F32
-        let base_tensor = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0, 4.0], &[5]).unwrap();
-        let tensor = base_tensor.to_dtype(DType::I64).unwrap();
+        let base_tensor = Tensor::from_vec(vec![0.0f32, 1.0, 2.0, 3.0, 4.0], &[5])
+            .expect("Tensor from_vec failed");
+        let tensor = base_tensor.to_dtype(DType::I64).expect("Failed to convert to I64");
 
         // Test get_tensor_range with I64
-        let (min, max) = quantizer.get_tensor_range(&tensor).unwrap();
+        let (min, max) = quantizer.get_tensor_range(&tensor).expect("Failed to get tensor range");
         assert!((min - 0.0).abs() < 1e-5);
         assert!((max - 4.0).abs() < 1e-5);
 
         // Test tensor_to_u8 with I64 - convert to F32 for clamp operation
-        let f32_tensor = tensor.to_dtype(DType::F32).unwrap();
-        let quantized = f32_tensor.add_scalar(1.0).unwrap().clamp(0.0, 255.0).unwrap();
-        let u8_data = quantizer.tensor_to_u8(quantized).unwrap();
+        let f32_tensor = tensor.to_dtype(DType::F32).expect("Failed to convert to F32");
+        let quantized = f32_tensor
+            .add_scalar(1.0)
+            .expect("Failed to add scalar")
+            .clamp(0.0, 255.0)
+            .expect("Failed to clamp");
+        let u8_data = quantizer.tensor_to_u8(quantized).expect("Failed to convert to u8");
         assert_eq!(u8_data, vec![1, 2, 3, 4, 5]);
     }
 }

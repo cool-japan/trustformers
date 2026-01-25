@@ -504,20 +504,23 @@ mod tests {
     fn test_hardware_serialization() {
         // Test HardwareType serialization
         let hardware_type = HardwareType::Custom("TestAccelerator".to_string());
-        let serialized = serde_json::to_string(&hardware_type).unwrap();
-        let deserialized: HardwareType = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&hardware_type).expect("JSON serialization failed");
+        let deserialized: HardwareType =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(hardware_type, deserialized);
 
         // Test DataType serialization
         let data_type = DataType::Custom(12);
-        let serialized = serde_json::to_string(&data_type).unwrap();
-        let deserialized: DataType = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&data_type).expect("JSON serialization failed");
+        let deserialized: DataType =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(data_type, deserialized);
 
         // Test OperationMode serialization
         let operation_mode = OperationMode::Performance;
-        let serialized = serde_json::to_string(&operation_mode).unwrap();
-        let deserialized: OperationMode = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&operation_mode).expect("JSON serialization failed");
+        let deserialized: OperationMode =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(operation_mode, deserialized);
     }
 

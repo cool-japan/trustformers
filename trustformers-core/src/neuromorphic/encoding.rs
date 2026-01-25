@@ -210,9 +210,9 @@ mod tests {
     #[test]
     fn test_rate_encoding() {
         let encoder = SpikeEncoder::new(SpikeEncoding::RateCode);
-        let input = Tensor::from_vec(vec![0.5, 1.0, 0.0], &[3]).unwrap();
+        let input = Tensor::from_vec(vec![0.5, 1.0, 0.0], &[3]).expect("Tensor from_vec failed");
 
-        let spikes = encoder.encode(&input, 1.0).unwrap();
+        let spikes = encoder.encode(&input, 1.0).expect("Encoding failed");
         assert!(!spikes.is_empty());
 
         // Check that spikes are generated for non-zero inputs
@@ -225,9 +225,9 @@ mod tests {
     #[test]
     fn test_temporal_encoding() {
         let encoder = SpikeEncoder::new(SpikeEncoding::TemporalCode);
-        let input = Tensor::from_vec(vec![1.0, 0.0, -1.0], &[3]).unwrap();
+        let input = Tensor::from_vec(vec![1.0, 0.0, -1.0], &[3]).expect("Tensor from_vec failed");
 
-        let spikes = encoder.encode(&input, 1.0).unwrap();
+        let spikes = encoder.encode(&input, 1.0).expect("Encoding failed");
         assert_eq!(spikes.len(), 3); // One spike per input
 
         // Higher values should spike earlier
@@ -239,9 +239,9 @@ mod tests {
     #[test]
     fn test_population_encoding() {
         let encoder = SpikeEncoder::new(SpikeEncoding::PopulationCode);
-        let input = Tensor::from_vec(vec![0.5], &[1]).unwrap();
+        let input = Tensor::from_vec(vec![0.5], &[1]).expect("Tensor from_vec failed");
 
-        let spikes = encoder.encode(&input, 1.0).unwrap();
+        let spikes = encoder.encode(&input, 1.0).expect("Encoding failed");
         assert!(!spikes.is_empty());
     }
 
@@ -260,7 +260,7 @@ mod tests {
             SpikeEvent::new(1, 3.0, 1.0),
         ];
 
-        let result = decoder.decode(&spikes, 3, 100.0).unwrap();
+        let result = decoder.decode(&spikes, 3, 100.0).expect("Decoding failed");
         let data = result.data().unwrap();
 
         assert_eq!(data.len(), 3);
@@ -277,7 +277,7 @@ mod tests {
             SpikeEvent::new(0, 20.0, 1.0), // Later spike, should be ignored
         ];
 
-        let result = decoder.decode(&spikes, 3, 100.0).unwrap();
+        let result = decoder.decode(&spikes, 3, 100.0).expect("Decoding failed");
         let data = result.data().unwrap();
 
         assert_eq!(data.len(), 3);
@@ -290,15 +290,15 @@ mod tests {
         let encoder = SpikeEncoder::new(SpikeEncoding::RateCode);
         let decoder = SpikeDecoder::new(SpikeDecoding::RateCode);
 
-        let input = Tensor::from_vec(vec![0.0, 0.5, 1.0], &[3]).unwrap();
+        let input = Tensor::from_vec(vec![0.0, 0.5, 1.0], &[3]).expect("Tensor from_vec failed");
 
         // Run multiple trials to account for randomness in spike encoding
         let mut monotonic_count = 0;
         let trials = 10;
 
         for _ in 0..trials {
-            let spikes = encoder.encode(&input, 1.0).unwrap();
-            let output = decoder.decode(&spikes, 3, 100.0).unwrap();
+            let spikes = encoder.encode(&input, 1.0).expect("Encoding failed");
+            let output = decoder.decode(&spikes, 3, 100.0).expect("Decoding failed");
 
             assert_eq!(output.shape(), &[3]);
 

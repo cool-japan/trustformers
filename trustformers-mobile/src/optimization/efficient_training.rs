@@ -351,7 +351,7 @@ impl MobileTrainingEngine {
 
         // Initialize training state
         {
-            let mut state = self.training_state.lock().unwrap();
+            let mut state = self.training_state.lock().expect("Operation failed");
             state.start_time = Instant::now();
             state.is_paused = false;
             state.pause_reason = None;
@@ -388,7 +388,7 @@ impl MobileTrainingEngine {
 
             // Update training state
             {
-                let mut state = self.training_state.lock().unwrap();
+                let mut state = self.training_state.lock().expect("Operation failed");
                 state.current_epoch = epoch;
             }
         }
@@ -419,7 +419,7 @@ impl MobileTrainingEngine {
 
             // Update training state
             {
-                let mut state = self.training_state.lock().unwrap();
+                let mut state = self.training_state.lock().expect("Operation failed");
                 state.current_step += 1;
                 state.loss_history.push_back(batch_result.loss);
                 state.memory_history.push_back(batch_result.memory_usage_mb);
@@ -544,7 +544,7 @@ impl MobileTrainingEngine {
 
     fn update_learning_rate(&mut self, epoch: usize) -> Result<()> {
         let new_lr = self.calculate_learning_rate(epoch);
-        let mut state = self.training_state.lock().unwrap();
+        let mut state = self.training_state.lock().expect("Operation failed");
         state.current_lr = new_lr;
         state.lr_history.push_back(new_lr);
         if state.lr_history.len() > 1000 {
@@ -621,7 +621,7 @@ impl MobileTrainingEngine {
     }
 
     fn pause_training(&mut self) -> Result<()> {
-        let mut state = self.training_state.lock().unwrap();
+        let mut state = self.training_state.lock().expect("Operation failed");
         state.is_paused = true;
         Ok(())
     }

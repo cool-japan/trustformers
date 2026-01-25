@@ -476,7 +476,7 @@ impl AdvancedProfiler {
             "prof_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs()
         );
 
@@ -498,7 +498,7 @@ impl AdvancedProfiler {
             "session_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs()
         );
 
@@ -716,7 +716,7 @@ impl AdvancedProfiler {
         Ok(PerformanceMetrics {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs(),
             cpu_usage: self.get_cpu_usage(),
             memory_usage: self.get_memory_usage(),
@@ -1658,7 +1658,7 @@ mod tests {
         let high_memory_metrics = PerformanceMetrics {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs(),
             cpu_usage: 50.0,
             memory_usage: 5 * 1024 * 1024 * 1024, // 5GB - exceeds 4GB threshold

@@ -770,9 +770,11 @@ mod tests {
     fn test_matmul_basic() {
         if let Ok(mut vulkan) = VulkanImpl::new() {
             // Create test matrices
-            let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-            let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
-            let mut result = Tensor::zeros(&[2, 2]).unwrap();
+            let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2])
+                .expect("Tensor from_vec failed");
+            let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2])
+                .expect("Tensor from_vec failed");
+            let mut result = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
 
             let matmul_result = vulkan.matmul(&a, &b, &mut result);
 

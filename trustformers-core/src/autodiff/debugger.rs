@@ -906,8 +906,9 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = DebuggerConfig::default();
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: DebuggerConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: DebuggerConfig =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(config.max_display_nodes, deserialized.max_display_nodes);
         assert_eq!(config.show_gradients, deserialized.show_gradients);

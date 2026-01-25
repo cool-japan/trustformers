@@ -912,7 +912,9 @@ impl DynamicArchitectureManager {
                 let best_idx = metrics
                     .iter()
                     .enumerate()
-                    .max_by(|(_, a), (_, b)| a.confidence.partial_cmp(&b.confidence).unwrap())
+                    .max_by(|(_, a), (_, b)| {
+                        a.confidence.partial_cmp(&b.confidence).expect("Partial comparison failed")
+                    })
                     .map(|(idx, _)| idx)
                     .unwrap_or(0);
 
@@ -1420,8 +1422,11 @@ impl PathRouter {
         let mut selected = match strategy {
             PathSelectionStrategy::ConfidenceBased => {
                 let mut sorted_paths = paths.to_vec();
-                sorted_paths
-                    .sort_by(|a, b| b.expected_accuracy.partial_cmp(&a.expected_accuracy).unwrap());
+                sorted_paths.sort_by(|a, b| {
+                    b.expected_accuracy
+                        .partial_cmp(&a.expected_accuracy)
+                        .expect("Partial comparison failed")
+                });
                 sorted_paths
             },
             PathSelectionStrategy::CostEffectiveness => {
@@ -1429,7 +1434,7 @@ impl PathRouter {
                 sorted_paths.sort_by(|a, b| {
                     let cost_a = a.expected_latency.as_millis() as f32 / a.expected_accuracy;
                     let cost_b = b.expected_latency.as_millis() as f32 / b.expected_accuracy;
-                    cost_a.partial_cmp(&cost_b).unwrap()
+                    cost_a.partial_cmp(&cost_b).expect("Partial comparison failed")
                 });
                 sorted_paths
             },
@@ -1553,10 +1558,11 @@ mod tests {
         let estimator = EntropyBasedComplexityEstimator;
 
         // Create a low-entropy input (concentrated distribution after softmax)
-        let low_entropy_input = Tensor::from_vec(vec![10.0, 0.0, 0.0, 0.0, 0.0], &[1, 5]).unwrap();
+        let low_entropy_input = Tensor::from_vec(vec![10.0, 0.0, 0.0, 0.0, 0.0], &[1, 5])
+            .expect("Tensor from_vec failed");
 
         // Create a high-entropy input (uniform distribution after softmax)
-        let high_entropy_input = Tensor::ones(&[1, 5]).unwrap();
+        let high_entropy_input = Tensor::ones(&[1, 5]).expect("Failed to create ones tensor");
 
         let low_complexity = estimator.estimate_complexity(&low_entropy_input).unwrap();
         let high_complexity = estimator.estimate_complexity(&high_entropy_input).unwrap();

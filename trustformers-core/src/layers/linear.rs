@@ -174,8 +174,13 @@ impl Linear {
         bias: bool,
         device: Device,
     ) -> Self {
-        let weight = Tensor::randn(&[out_features, in_features]).unwrap();
-        let bias = if bias { Some(Tensor::zeros(&[out_features]).unwrap()) } else { None };
+        let weight =
+            Tensor::randn(&[out_features, in_features]).expect("Failed to create random tensor");
+        let bias = if bias {
+            Some(Tensor::zeros(&[out_features]).expect("Failed to create zero tensor"))
+        } else {
+            None
+        };
 
         Self {
             weight,

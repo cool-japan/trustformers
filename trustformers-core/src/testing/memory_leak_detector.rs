@@ -988,30 +988,30 @@ pub mod test_utils {
 
         // Test basic tensor operations
         detector.track_tensor_operation("tensor_creation", || {
-            let _tensor = Tensor::zeros(&[100, 100]).unwrap();
+            let _tensor = Tensor::zeros(&[100, 100]).expect("Failed to create zero tensor");
         });
 
         detector.track_tensor_operation("tensor_addition", || {
-            let a = Tensor::ones(&[50, 50]).unwrap();
-            let b = Tensor::ones(&[50, 50]).unwrap();
-            let _result = a.add(&b).unwrap();
+            let a = Tensor::ones(&[50, 50]).expect("Failed to create ones tensor");
+            let b = Tensor::ones(&[50, 50]).expect("Failed to create ones tensor");
+            let _result = a.add(&b).expect("Addition failed");
         });
 
         detector.track_tensor_operation("matrix_multiplication", || {
-            let a = Tensor::randn(&[32, 64]).unwrap();
-            let b = Tensor::randn(&[64, 32]).unwrap();
-            let _result = a.matmul(&b).unwrap();
+            let a = Tensor::randn(&[32, 64]).expect("Failed to create random tensor");
+            let b = Tensor::randn(&[64, 32]).expect("Failed to create random tensor");
+            let _result = a.matmul(&b).expect("Matrix multiplication failed");
         });
 
         detector.track_tensor_operation("activation_functions", || {
-            let tensor = Tensor::randn(&[100, 768]).unwrap();
-            let _relu = tensor.relu().unwrap();
-            let _sigmoid = tensor.sigmoid().unwrap();
-            let _tanh = tensor.tanh().unwrap();
+            let tensor = Tensor::randn(&[100, 768]).expect("Failed to create random tensor");
+            let _relu = tensor.relu().expect("ReLU failed");
+            let _sigmoid = tensor.sigmoid().expect("Sigmoid failed");
+            let _tanh = tensor.tanh().expect("Tanh failed");
         });
 
         detector.track_tensor_operation("quantization", || {
-            let tensor = Tensor::randn(&[50, 50]).unwrap();
+            let tensor = Tensor::randn(&[50, 50]).expect("Failed to create random tensor");
             // Note: quantization test would require actual quantization implementation
             let _result = tensor.clone();
         });
@@ -1030,18 +1030,22 @@ pub mod test_utils {
         // Test 2: Complex operations
         let detector = MemoryLeakDetector::new();
         for _i in 0..10 {
-            let tensor = Tensor::randn(&[100, 100]).unwrap();
-            let _result = tensor.transpose(1, 0).unwrap().matmul(&tensor).unwrap();
+            let tensor = Tensor::randn(&[100, 100]).expect("Failed to create random tensor");
+            let _result = tensor
+                .transpose(1, 0)
+                .expect("Transpose failed")
+                .matmul(&tensor)
+                .expect("Matrix multiplication failed");
         }
         reports.push(detector.generate_report("complex_operations_test"));
 
         // Test 3: Memory-intensive operations
         let detector = MemoryLeakDetector::new();
         for _i in 0..5 {
-            let large_tensor = Tensor::zeros(&[1000, 1000]).unwrap();
+            let large_tensor = Tensor::zeros(&[1000, 1000]).expect("Failed to create zero tensor");
             let shape = large_tensor.shape().len();
             let axes: Vec<usize> = (0..shape).collect();
-            let _result = large_tensor.sum_axes(&axes).unwrap();
+            let _result = large_tensor.sum_axes(&axes).expect("Sum operation failed");
         }
         reports.push(detector.generate_report("memory_intensive_test"));
 

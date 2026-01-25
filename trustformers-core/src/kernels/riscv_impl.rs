@@ -573,7 +573,7 @@ impl RiscVBackend {
 
     /// Get current performance metrics
     pub fn get_metrics(&self) -> HardwareMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock().expect("Lock poisoned").clone()
     }
 
     /// Optimize vector operations for specific VLEN
@@ -867,7 +867,7 @@ impl RiscVBackend {
         execution_time: Duration,
         metadata: &VectorOperationMetadata,
     ) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock().expect("Lock poisoned");
         let execution_ms = execution_time.as_millis() as f64;
 
         metrics.ops_per_second = metadata.estimated_cycles as f64 / (execution_ms / 1000.0);
@@ -1095,8 +1095,9 @@ mod tests {
     #[test]
     fn test_riscv_vector_version_serialization() {
         let version = RiscVVectorVersion::V1_0;
-        let serialized = serde_json::to_string(&version).unwrap();
-        let deserialized: RiscVVectorVersion = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&version).expect("JSON serialization failed");
+        let deserialized: RiscVVectorVersion =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(version, deserialized);
     }
 

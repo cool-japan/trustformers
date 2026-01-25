@@ -1155,7 +1155,7 @@ impl CpuProfiler {
             let handle = thread::spawn(|| {
                 std::hint::black_box(42);
             });
-            handle.join().unwrap();
+            handle.join().map_err(|_| anyhow::anyhow!("Thread join failed"))?;
         }
 
         Ok(start.elapsed() / iterations)
@@ -1171,17 +1171,17 @@ impl CpuProfiler {
 
         let handle = thread::spawn(move || {
             for _ in 0..iterations {
-                tx.send(()).unwrap();
+                tx.send(()).map_err(|_| anyhow::anyhow!("Channel send failed"))?;
                 thread::yield_now();
             }
         });
 
         for _ in 0..iterations {
-            rx.recv().unwrap();
+            rx.recv().map_err(|_| anyhow::anyhow!("Channel recv failed"))?;
             thread::yield_now();
         }
 
-        handle.join().unwrap();
+        handle.join().map_err(|_| anyhow::anyhow!("Thread join failed"))?;
         Ok(start.elapsed() / (iterations * 2))
     }
 
@@ -2564,7 +2564,11 @@ impl ProfileResultsProcessor {
         }
 
         // Sort by severity
-        bottlenecks.sort_by(|a, b| b.severity_score.partial_cmp(&a.severity_score).unwrap());
+        bottlenecks.sort_by(|a, b| {
+            b.severity_score
+                .partial_cmp(&a.severity_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let primary_bottleneck = bottlenecks
             .first()
@@ -3827,7 +3831,7 @@ mod tests {
     #[test]
     async fn test_performance_profiler_creation() {
         let config = ProfilingConfig::default();
-        let profiler = PerformanceProfiler::new(config).await.unwrap();
+        let profiler = PerformanceProfiler::new(config).await.expect("Failed to create profiler");
 
         let status = profiler.get_profiling_status().await;
         assert!(matches!(status.current_phase, ProfilingPhase::Initializing));
@@ -3836,18 +3840,22 @@ mod tests {
     #[test]
     async fn test_cpu_profiler_basic_functionality() {
         let config = CpuProfilingConfig::default();
-        let cpu_profiler = CpuProfiler::new(config).await.unwrap();
+        let cpu_profiler = CpuProfiler::new(config).await.expect("Failed to create CPU profiler");
 
-        let ipc = cpu_profiler.measure_ipc().await.unwrap();
+        let ipc = cpu_profiler.measure_ipc().await.expect("Failed to measure IPC");
         assert!(ipc > 0.0);
     }
 
     #[test]
     async fn test_memory_profiler_allocation_performance() {
         let config = MemoryProfilingConfig::default();
-        let memory_profiler = MemoryProfiler::new(config).await.unwrap();
+        let memory_profiler =
+            MemoryProfiler::new(config).await.expect("Failed to create memory profiler");
 
-        let allocation_perf = memory_profiler.measure_allocation_performance().await.unwrap();
+        let allocation_perf = memory_profiler
+            .measure_allocation_performance()
+            .await
+            .expect("Failed to measure allocation performance");
         assert!(allocation_perf.allocation_overhead > Duration::ZERO);
     }
 }

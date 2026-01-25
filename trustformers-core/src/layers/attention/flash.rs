@@ -798,8 +798,8 @@ mod tests {
     #[test]
     fn test_flash_attention_forward() {
         let attention = FlashAttention::new(512, 8, 0.1, true, None, false).unwrap();
-        let input = Tensor::randn(&[2, 10, 512]).unwrap();
-        let output = attention.forward(input).unwrap();
+        let input = Tensor::randn(&[2, 10, 512]).expect("Failed to create random tensor");
+        let output = attention.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 10, 512]);
     }
 
@@ -822,8 +822,8 @@ mod tests {
     fn test_causal_attention() {
         // Use default block size like the working test
         let attention = FlashAttention::new(512, 8, 0.1, true, None, true).unwrap();
-        let input = Tensor::randn(&[2, 10, 512]).unwrap();
-        let output = attention.forward(input).unwrap();
+        let input = Tensor::randn(&[2, 10, 512]).expect("Failed to create random tensor");
+        let output = attention.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 10, 512]);
     }
 }

@@ -1085,10 +1085,13 @@ mod tests {
 
         // Load model first
         let mut weights = HashMap::new();
-        weights.insert("embedding".to_string(), Tensor::ones(&[100, 512]).unwrap());
+        weights.insert(
+            "embedding".to_string(),
+            Tensor::ones(&[100, 512]).expect("Operation failed"),
+        );
         weights.insert(
             "layer.0.weight".to_string(),
-            Tensor::ones(&[512, 512]).unwrap(),
+            Tensor::ones(&[512, 512]).expect("Operation failed"),
         );
         engine.load_model(weights).expect("Failed to load model");
 
@@ -1147,12 +1150,12 @@ mod tests {
         let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Set to high performance mode
-        engine.set_performance_mode(2).unwrap();
+        engine.set_performance_mode(2).expect("Operation failed");
         // In high performance mode, fp16 should be disabled and backend should be GPU
         // (Note: These assertions verify the implementation logic)
 
         // Set to power saving mode
-        engine.set_performance_mode(0).unwrap();
+        engine.set_performance_mode(0).expect("Operation failed");
         // In power saving mode, fp16 should be enabled and backend should be CPU
 
         // The engine should still be functional after mode changes

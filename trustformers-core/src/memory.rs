@@ -675,7 +675,7 @@ impl TensorMemoryPool {
 
     /// Reset statistics counters
     pub fn reset_statistics(&self) {
-        let mut stats = self.statistics.lock().unwrap();
+        let mut stats = self.statistics.lock().expect("Lock poisoned");
         *stats = PoolStatistics::default();
     }
 

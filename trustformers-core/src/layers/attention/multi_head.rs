@@ -613,8 +613,8 @@ mod tests {
     #[test]
     fn test_self_attention_forward() {
         let attention = MultiHeadAttention::new(512, 8, 0.1, true).unwrap();
-        let input = Tensor::randn(&[2, 10, 512]).unwrap();
-        let output = attention.forward(input).unwrap();
+        let input = Tensor::randn(&[2, 10, 512]).expect("Failed to create random tensor");
+        let output = attention.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 10, 512]);
     }
 

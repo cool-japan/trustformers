@@ -724,9 +724,9 @@ mod tests {
     fn test_accelerated_matmul() {
         let _ = api::init_hardware_acceleration();
 
-        let a = Tensor::ones(&[4, 4]).unwrap();
-        let b = Tensor::ones(&[4, 4]).unwrap();
-        let mut c = Tensor::zeros(&[4, 4]).unwrap();
+        let a = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+        let mut c = Tensor::zeros(&[4, 4]).expect("Failed to create zero tensor");
 
         let result = api::accelerated_matmul(&a, &b, &mut c);
         assert!(result.is_ok());

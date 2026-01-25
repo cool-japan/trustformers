@@ -577,8 +577,9 @@ mod tests {
             elapsed_time_secs: 120,
         };
 
-        let serialized = serde_json::to_string(&progress).unwrap();
-        let deserialized: ExportProgress = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&progress).expect("JSON serialization failed");
+        let deserialized: ExportProgress =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(deserialized.progress_percentage, 50.0);
         assert_eq!(deserialized.bytes_processed, 1000000);

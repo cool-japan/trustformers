@@ -367,7 +367,7 @@ impl iOSAppExtensionManager {
 
         // Update resource monitor
         {
-            let mut monitor = self.resource_monitor.lock().unwrap();
+            let mut monitor = self.resource_monitor.lock().expect("Operation failed");
             monitor.update_context(context);
         }
 
@@ -446,7 +446,7 @@ impl iOSAppExtensionManager {
         let input_tensor = Tensor::from_vec(request.input_data, &request.input_shape)?;
 
         let inference_result = {
-            let mut engine = self.inference_engine.lock().unwrap();
+            let mut engine = self.inference_engine.lock().expect("Operation failed");
             engine.inference(&request.model_id, &input_tensor)
         };
 
@@ -515,17 +515,17 @@ impl iOSAppExtensionManager {
         if self.config.performance.aggressive_memory_cleanup {
             // Clear model cache if memory pressure
             if self.is_under_memory_pressure() {
-                let mut cache = self.model_cache.lock().unwrap();
+                let mut cache = self.model_cache.lock().expect("Operation failed");
                 cache.clear_cache();
             }
 
             // Unload models from inference engine
-            let mut engine = self.inference_engine.lock().unwrap();
+            let mut engine = self.inference_engine.lock().expect("Operation failed");
             engine.cleanup_memory()?;
         }
 
         // Update cleanup statistics
-        let mut cache = self.model_cache.lock().unwrap();
+        let mut cache = self.model_cache.lock().expect("Operation failed");
         cache.perform_cleanup(&self.config.model_cache);
 
         Ok(())
@@ -533,7 +533,7 @@ impl iOSAppExtensionManager {
 
     /// Get extension statistics
     pub fn get_extension_statistics(&self) -> Result<String> {
-        let stats = self.statistics.lock().unwrap();
+        let stats = self.statistics.lock().expect("Operation failed");
 
         let stats_json = serde_json::json!({
             "total_requests": stats.total_requests,
@@ -589,7 +589,7 @@ impl iOSAppExtensionManager {
         }
 
         // Check thermal state
-        let monitor = self.resource_monitor.lock().unwrap();
+        let monitor = self.resource_monitor.lock().expect("Operation failed");
         if monitor.thermal_state > self.config.resource_management.thermal_throttling_threshold {
             return Err(
                 TrustformersError::runtime_error("Thermal throttling active".into()).into(),
@@ -600,7 +600,7 @@ impl iOSAppExtensionManager {
     }
 
     fn should_process_request(&self, request: &ExtensionInferenceRequest) -> bool {
-        let monitor = self.resource_monitor.lock().unwrap();
+        let monitor = self.resource_monitor.lock().expect("Operation failed");
 
         // Always process critical requests
         if request.priority == ExtensionPriority::Critical {
@@ -633,10 +633,10 @@ impl iOSAppExtensionManager {
     async fn ensure_model_loaded(&self, model_id: &str) -> Result<bool> {
         // Check if model is already loaded in inference engine
         {
-            let engine = self.inference_engine.lock().unwrap();
+            let engine = self.inference_engine.lock().expect("Operation failed");
             if engine.is_model_loaded(model_id) {
                 // Update cache access
-                let mut cache = self.model_cache.lock().unwrap();
+                let mut cache = self.model_cache.lock().expect("Operation failed");
                 cache.update_access(model_id);
                 return Ok(false); // Model was already loaded
             }
@@ -644,10 +644,10 @@ impl iOSAppExtensionManager {
 
         // Try to load from cache
         {
-            let mut cache = self.model_cache.lock().unwrap();
+            let mut cache = self.model_cache.lock().expect("Operation failed");
             if let Some(cached_model) = cache.get_model(model_id) {
                 // Load model from cache into inference engine
-                let mut engine = self.inference_engine.lock().unwrap();
+                let mut engine = self.inference_engine.lock().expect("Operation failed");
                 engine.load_model_from_data(model_id, &cached_model.model_data)?;
                 cache.update_access(model_id);
                 return Ok(true); // Model was loaded from cache
@@ -664,22 +664,22 @@ impl iOSAppExtensionManager {
     fn get_current_memory_usage(&self) -> usize {
         // Platform-specific memory usage detection would go here
         // For now, return a placeholder value
-        let monitor = self.resource_monitor.lock().unwrap();
+        let monitor = self.resource_monitor.lock().expect("Operation failed");
         monitor.memory_usage_mb
     }
 
     fn get_current_cpu_usage(&self) -> f64 {
-        let monitor = self.resource_monitor.lock().unwrap();
+        let monitor = self.resource_monitor.lock().expect("Operation failed");
         monitor.cpu_usage_percent
     }
 
     fn is_under_memory_pressure(&self) -> bool {
-        let monitor = self.resource_monitor.lock().unwrap();
+        let monitor = self.resource_monitor.lock().expect("Operation failed");
         monitor.memory_usage_mb > self.config.resource_management.memory_warning_threshold_mb
     }
 
     fn update_statistics(&self, success: bool, response_time_ms: f64, cache_hit: bool) {
-        let mut stats = self.statistics.lock().unwrap();
+        let mut stats = self.statistics.lock().expect("Operation failed");
 
         stats.total_requests += 1;
         if success {

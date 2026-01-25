@@ -1329,8 +1329,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_int8_per_tensor_quantization() {
-        let tensor = Tensor::randn(&[10, 20]).unwrap();
+    fn test_int8_per_tensor_quantization() -> Result<()> {
+        let tensor = Tensor::randn(&[10, 20])?;
         let config = QuantizationConfig {
             scheme: QuantizationScheme::Int8,
             symmetric: true,
@@ -1340,19 +1340,19 @@ mod tests {
             bnb_config: None,
         };
 
-        let quantized = Quantizer::quantize(&tensor, &config).unwrap();
+        let quantized = Quantizer::quantize(&tensor, &config)?;
         assert_eq!(quantized.scheme, QuantizationScheme::Int8);
         assert!(!quantized.per_channel);
         assert_eq!(quantized.scale.len(), 1);
         assert_eq!(quantized.zero_point.len(), 1);
 
-        let dequantized = quantized.dequantize().unwrap();
+        let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
     }
 
     #[test]
-    fn test_int4_per_tensor_quantization() {
-        let tensor = Tensor::randn(&[8, 16]).unwrap();
+    fn test_int4_per_tensor_quantization() -> Result<()> {
+        let tensor = Tensor::randn(&[8, 16])?;
         let config = QuantizationConfig {
             scheme: QuantizationScheme::Int4,
             symmetric: false,
@@ -1362,17 +1362,18 @@ mod tests {
             bnb_config: None,
         };
 
-        let quantized = Quantizer::quantize(&tensor, &config).unwrap();
+        let quantized = Quantizer::quantize(&tensor, &config)?;
         assert_eq!(quantized.scheme, QuantizationScheme::Int4);
         assert!(!quantized.per_channel);
 
-        let dequantized = quantized.dequantize().unwrap();
+        let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_per_channel_quantization() {
-        let tensor = Tensor::randn(&[4, 32]).unwrap();
+    fn test_per_channel_quantization() -> Result<()> {
+        let tensor = Tensor::randn(&[4, 32])?;
         let config = QuantizationConfig {
             scheme: QuantizationScheme::Int8,
             symmetric: true,
@@ -1382,18 +1383,19 @@ mod tests {
             bnb_config: None,
         };
 
-        let quantized = Quantizer::quantize(&tensor, &config).unwrap();
+        let quantized = Quantizer::quantize(&tensor, &config)?;
         assert!(quantized.per_channel);
         assert_eq!(quantized.scale.len(), 4); // Number of channels
         assert_eq!(quantized.zero_point.len(), 4);
 
-        let dequantized = quantized.dequantize().unwrap();
+        let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_dynamic_quantization() {
-        let tensor = Tensor::randn(&[16, 32]).unwrap();
+    fn test_dynamic_quantization() -> Result<()> {
+        let tensor = Tensor::randn(&[16, 32])?;
         let config = QuantizationConfig {
             scheme: QuantizationScheme::Dynamic,
             symmetric: false,
@@ -1403,56 +1405,60 @@ mod tests {
             bnb_config: None,
         };
 
-        let quantized = Quantizer::quantize(&tensor, &config).unwrap();
-        let dequantized = quantized.dequantize().unwrap();
+        let quantized = Quantizer::quantize(&tensor, &config)?;
+        let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_quantization_params_computation() {
+    fn test_quantization_params_computation() -> Result<()> {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
         // Symmetric quantization
-        let (scale, zero_point) = Quantizer::compute_quantization_params(&data, true, 8).unwrap();
+        let (scale, zero_point) = Quantizer::compute_quantization_params(&data, true, 8)?;
         assert_eq!(zero_point, 0);
         assert!(scale > 0.0);
 
         // Asymmetric quantization
-        let (scale, zero_point) = Quantizer::compute_quantization_params(&data, false, 8).unwrap();
+        let (scale, zero_point) = Quantizer::compute_quantization_params(&data, false, 8)?;
         assert!(scale > 0.0);
+        Ok(())
     }
 
     #[test]
-    fn test_gptq_quantizer() {
-        let tensor = Tensor::randn(&[16, 32]).unwrap();
+    fn test_gptq_quantizer() -> Result<()> {
+        let tensor = Tensor::randn(&[16, 32])?;
         let config = QuantizationConfig::default();
         let gptq = GPTQQuantizer::new(config);
 
-        let quantized = gptq.quantize(&tensor, None).unwrap();
-        let dequantized = quantized.dequantize().unwrap();
+        let quantized = gptq.quantize(&tensor, None)?;
+        let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_awq_quantizer() {
-        let tensor = Tensor::randn(&[16, 32]).unwrap();
+    fn test_awq_quantizer() -> Result<()> {
+        let tensor = Tensor::randn(&[16, 32])?;
         let config = QuantizationConfig::default();
         let mut awq = AWQQuantizer::new(config);
 
         let scales = vec![1.0; 16];
         awq.set_activation_scales(scales);
 
-        let quantized = awq.quantize(&tensor).unwrap();
-        let dequantized = quantized.dequantize().unwrap();
+        let quantized = awq.quantize(&tensor)?;
+        let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_calibration() {
+    fn test_calibration() -> Result<()> {
         let samples = vec![
-            Tensor::randn(&[16, 32]).unwrap(),
-            Tensor::randn(&[16, 32]).unwrap(),
-            Tensor::randn(&[16, 32]).unwrap(),
+            Tensor::randn(&[16, 32])?,
+            Tensor::randn(&[16, 32])?,
+            Tensor::randn(&[16, 32])?,
         ];
 
         let config = QuantizationConfig {
@@ -1460,13 +1466,14 @@ mod tests {
             ..Default::default()
         };
 
-        let calibrated = Quantizer::calibrate(&samples, &config).unwrap();
+        let calibrated = Quantizer::calibrate(&samples, &config)?;
         assert_eq!(calibrated.scheme, config.scheme);
+        Ok(())
     }
 
     #[test]
-    fn test_bnb_nf4_quantization() {
-        let tensor = Tensor::randn(&[128]).unwrap();
+    fn test_bnb_nf4_quantization() -> Result<()> {
+        let tensor = Tensor::randn(&[128])?;
         let config = BnBConfig {
             quant_type: BnBQuantType::NF4,
             compute_dtype: BnBComputeType::Float16,
@@ -1475,16 +1482,17 @@ mod tests {
         };
 
         let bnb = BnBQuantizer::new(config);
-        let quantized = bnb.quantize(&tensor).unwrap();
+        let quantized = bnb.quantize(&tensor)?;
         assert_eq!(quantized.scheme, QuantizationScheme::BnB4bit);
 
-        let dequantized = bnb.dequantize(&quantized).unwrap();
+        let dequantized = bnb.dequantize(&quantized)?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_bnb_fp4_quantization() {
-        let tensor = Tensor::randn(&[128]).unwrap();
+    fn test_bnb_fp4_quantization() -> Result<()> {
+        let tensor = Tensor::randn(&[128])?;
         let config = BnBConfig {
             quant_type: BnBQuantType::FP4,
             compute_dtype: BnBComputeType::Float16,
@@ -1493,16 +1501,17 @@ mod tests {
         };
 
         let bnb = BnBQuantizer::new(config);
-        let quantized = bnb.quantize(&tensor).unwrap();
+        let quantized = bnb.quantize(&tensor)?;
         assert_eq!(quantized.scheme, QuantizationScheme::BnB4bitFP4);
 
-        let dequantized = bnb.dequantize(&quantized).unwrap();
+        let dequantized = bnb.dequantize(&quantized)?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_bnb_int8_quantization() {
-        let tensor = Tensor::randn(&[64, 64]).unwrap();
+    fn test_bnb_int8_quantization() -> Result<()> {
+        let tensor = Tensor::randn(&[64, 64])?;
         let config = BnBConfig {
             quant_type: BnBQuantType::Int8,
             compute_dtype: BnBComputeType::Float32,
@@ -1511,43 +1520,46 @@ mod tests {
         };
 
         let bnb = BnBQuantizer::new(config);
-        let quantized = bnb.quantize(&tensor).unwrap();
+        let quantized = bnb.quantize(&tensor)?;
         assert_eq!(quantized.scheme, QuantizationScheme::BnB8bit);
 
-        let dequantized = quantized.dequantize().unwrap();
+        let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_qat_fake_quantize() {
-        let tensor = Tensor::randn(&[32, 32]).unwrap();
+    fn test_qat_fake_quantize() -> Result<()> {
+        let tensor = Tensor::randn(&[32, 32])?;
         let config = QATConfig::default();
         let mut fake_quant = FakeQuantize::new(config);
 
         // First pass should build observer statistics
-        let result1 = fake_quant.forward(&tensor).unwrap();
+        let result1 = fake_quant.forward(&tensor)?;
         assert_eq!(result1.shape(), tensor.shape());
 
         // Second pass should apply fake quantization
-        let result2 = fake_quant.forward(&tensor).unwrap();
+        let result2 = fake_quant.forward(&tensor)?;
         assert_eq!(result2.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
-    fn test_observer_statistics() {
+    fn test_observer_statistics() -> Result<()> {
         let mut observer = Observer::new();
-        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]).unwrap();
+        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5])?;
 
         observer.update(&tensor);
         assert_eq!(observer.count, 5);
 
-        let (scale, zero_point) = observer.get_quantization_params(true, 8).unwrap();
+        let (scale, zero_point) = observer.get_quantization_params(true, 8)?;
         assert!(scale > 0.0);
         assert_eq!(zero_point, 0); // Symmetric quantization
+        Ok(())
     }
 
     #[test]
-    fn test_bnb_config_serialization() {
+    fn test_bnb_config_serialization() -> Result<()> {
         let config = BnBConfig {
             quant_type: BnBQuantType::NF4,
             compute_dtype: BnBComputeType::Float16,
@@ -1555,11 +1567,14 @@ mod tests {
             bnb_4bit_quant_storage: Some(BnBStorageType::UInt8),
         };
 
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: BnBConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config)
+            .map_err(|e| TrustformersError::serialization_error(&e.to_string()))?;
+        let deserialized: BnBConfig = serde_json::from_str(&serialized)
+            .map_err(|e| TrustformersError::serialization_error(&e.to_string()))?;
 
         assert_eq!(config.quant_type, deserialized.quant_type);
         assert_eq!(config.compute_dtype, deserialized.compute_dtype);
         assert_eq!(config.use_double_quant, deserialized.use_double_quant);
+        Ok(())
     }
 }

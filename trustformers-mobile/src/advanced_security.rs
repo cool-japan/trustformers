@@ -654,7 +654,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::ZkSNARKs,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime before UNIX_EPOCH")
                 .as_secs(),
         })
     }
@@ -669,7 +669,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::ZkSTARKs,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime before UNIX_EPOCH")
                 .as_secs(),
         })
     }
@@ -684,7 +684,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::Bulletproofs,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime before UNIX_EPOCH")
                 .as_secs(),
         })
     }
@@ -699,7 +699,7 @@ impl ZeroKnowledgeProofEngine {
             system: ZKProofSystem::Plonk,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime before UNIX_EPOCH")
                 .as_secs(),
         })
     }
@@ -1137,11 +1137,11 @@ mod tests {
             },
         };
 
-        let engine = HomomorphicEncryptionEngine::new(config).unwrap();
-        let input = Tensor::randn(&[2, 2]).unwrap();
+        let engine = HomomorphicEncryptionEngine::new(config).expect("Operation failed");
+        let input = Tensor::randn(&[2, 2]).expect("Operation failed");
 
-        let encrypted = engine.encrypt(&input).unwrap();
-        let decrypted = engine.decrypt(&encrypted).unwrap();
+        let encrypted = engine.encrypt(&input).expect("Operation failed");
+        let decrypted = engine.decrypt(&encrypted).expect("Operation failed");
 
         assert_eq!(input.shape(), decrypted.shape());
     }
@@ -1161,13 +1161,16 @@ mod tests {
             },
         };
 
-        let mut engine = SecureMultipartyEngine::new(config, 0).unwrap();
-        let input = Tensor::ones(&[2]).unwrap();
+        let mut engine = SecureMultipartyEngine::new(config, 0).expect("Operation failed");
+        let input = Tensor::ones(&[2]).expect("Operation failed");
 
-        let shares = engine.create_shares(&input, "test_secret".to_string()).unwrap();
+        let shares = engine
+            .create_shares(&input, "test_secret".to_string())
+            .expect("Operation failed");
         assert_eq!(shares.len(), 3);
 
-        let reconstructed = engine.reconstruct_secret(&shares, "test_secret").unwrap();
+        let reconstructed =
+            engine.reconstruct_secret(&shares, "test_secret").expect("Operation failed");
         assert_eq!(reconstructed.shape(), &[2]);
     }
 
@@ -1184,12 +1187,12 @@ mod tests {
             },
         };
 
-        let engine = ZeroKnowledgeProofEngine::new(config).unwrap();
+        let engine = ZeroKnowledgeProofEngine::new(config).expect("Operation failed");
         let model_hash = b"test_model_hash";
         let witness = b"test_witness";
 
-        let proof = engine.prove_model_integrity(model_hash, witness).unwrap();
-        let verification = engine.verify_proof(&proof, model_hash).unwrap();
+        let proof = engine.prove_model_integrity(model_hash, witness).expect("Operation failed");
+        let verification = engine.verify_proof(&proof, model_hash).expect("Operation failed");
 
         assert!(verification);
     }
@@ -1203,27 +1206,27 @@ mod tests {
             key_exchange: QuantumResistantKeyExchange::KyberKEM,
         };
 
-        let engine = QuantumResistantEngine::new(config).unwrap();
+        let engine = QuantumResistantEngine::new(config).expect("Operation failed");
         let data = b"test_data";
 
-        let encrypted = engine.encrypt(data).unwrap();
-        let decrypted = engine.decrypt(&encrypted).unwrap();
+        let encrypted = engine.encrypt(data).expect("Operation failed");
+        let decrypted = engine.decrypt(&encrypted).expect("Operation failed");
         assert_eq!(data, &decrypted[..]);
 
-        let signature = engine.sign(data).unwrap();
-        let verification = engine.verify(data, &signature).unwrap();
+        let signature = engine.sign(data).expect("Operation failed");
+        let verification = engine.verify(data, &signature).expect("Operation failed");
         assert!(verification);
     }
 
     #[test]
     fn test_advanced_security_manager() {
         let config = AdvancedSecurityConfig::default();
-        let manager = AdvancedSecurityManager::new(config).unwrap();
+        let manager = AdvancedSecurityManager::new(config).expect("Operation failed");
 
-        let input = Tensor::randn(&[1, 10]).unwrap();
+        let input = Tensor::randn(&[1, 10]).expect("Operation failed");
         let model_fn = |x: &Tensor| -> Result<Tensor> { x.scalar_mul(0.5) };
 
-        let result = manager.secure_inference(&input, model_fn).unwrap();
+        let result = manager.secure_inference(&input, model_fn).expect("Operation failed");
         assert_eq!(result.result.shape(), input.shape());
         assert!(result.security_level >= 0.0);
     }

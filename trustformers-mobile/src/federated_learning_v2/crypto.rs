@@ -392,8 +392,8 @@ mod tests {
         ];
 
         for system in &systems {
-            let serialized = serde_json::to_string(system).unwrap();
-            let deserialized: ZKProofSystem = serde_json::from_str(&serialized).unwrap();
+            let serialized = serde_json::to_string(system).expect("Operation failed");
+            let deserialized: ZKProofSystem = serde_json::from_str(&serialized).expect("Operation failed");
             assert_eq!(*system, deserialized);
         }
     }
@@ -408,8 +408,8 @@ mod tests {
         ];
 
         for scheme in &schemes {
-            let serialized = serde_json::to_string(scheme).unwrap();
-            let deserialized: HomomorphicScheme = serde_json::from_str(&serialized).unwrap();
+            let serialized = serde_json::to_string(scheme).expect("Operation failed");
+            let deserialized: HomomorphicScheme = serde_json::from_str(&serialized).expect("Operation failed");
             assert_eq!(*scheme, deserialized);
         }
     }
@@ -426,8 +426,8 @@ mod tests {
         ];
 
         for protocol in &protocols {
-            let serialized = serde_json::to_string(protocol).unwrap();
-            let deserialized: MPCProtocol = serde_json::from_str(&serialized).unwrap();
+            let serialized = serde_json::to_string(protocol).expect("Operation failed");
+            let deserialized: MPCProtocol = serde_json::from_str(&serialized).expect("Operation failed");
             assert_eq!(*protocol, deserialized);
         }
     }

@@ -751,7 +751,7 @@ impl VulkanKernel {
     /// Get memory statistics
     pub fn get_memory_stats(&self, device_id: usize) -> Result<(u64, u64, u64)> {
         if let Some(pool) = self.memory_pools.get(&device_id) {
-            let pool = pool.lock().unwrap();
+            let pool = pool.lock().expect("Lock poisoned");
             let free_memory = pool.free_blocks.iter().map(|b| b.size).sum();
             Ok((pool.total_allocated, pool.peak_allocated, free_memory))
         } else {

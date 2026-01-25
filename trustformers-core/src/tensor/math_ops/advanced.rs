@@ -201,8 +201,8 @@ impl Tensor {
                 // Calculate statistics along the last axis
                 let mean = a.mean_axis(Axis(axis)).unwrap();
                 let var = a.map_axis(Axis(axis), |lane| {
-                    let lane_mean = lane.mean().unwrap();
-                    lane.mapv(|x| (x - lane_mean).powi(2)).mean().unwrap()
+                    let lane_mean = lane.mean().expect("Mean calculation failed");
+                    lane.mapv(|x| (x - lane_mean).powi(2)).mean().expect("Mean calculation failed")
                 });
 
                 // Normalize
@@ -234,7 +234,7 @@ impl Tensor {
 
                 match reduction {
                     "mean" => {
-                        let mean_loss = losses.mean().unwrap();
+                        let mean_loss = losses.mean().expect("Mean calculation failed");
                         Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), mean_loss)))
                     },
                     "sum" => {

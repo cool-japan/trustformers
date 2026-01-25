@@ -1745,7 +1745,8 @@ mod tests {
     fn test_performance_score_calculation() {
         let device_info = create_test_device_info();
         let config = ProfilerConfig::default();
-        let profiler = MobilePerformanceProfiler::new(config, &device_info).unwrap();
+        let profiler =
+            MobilePerformanceProfiler::new(config, &device_info).expect("Operation failed");
 
         let metrics = MetricsSnapshot {
             timestamp: Instant::now(),
@@ -1801,12 +1802,12 @@ mod tests {
 
     #[test]
     fn test_platform_profiler_capabilities() {
-        let ios_profiler = IOSProfiler::new().unwrap();
+        let ios_profiler = IOSProfiler::new().expect("Operation failed");
         let capabilities = ios_profiler.get_capabilities();
         assert!(capabilities.contains(&ProfilerCapability::CpuProfiling));
         assert!(capabilities.contains(&ProfilerCapability::InstrumentsIntegration));
 
-        let android_profiler = AndroidProfiler::new().unwrap();
+        let android_profiler = AndroidProfiler::new().expect("Operation failed");
         let capabilities = android_profiler.get_capabilities();
         assert!(capabilities.contains(&ProfilerCapability::CpuProfiling));
         assert!(capabilities.contains(&ProfilerCapability::SystraceIntegration));
@@ -1834,8 +1835,9 @@ mod tests {
     #[test]
     fn test_export_format_serialization() {
         let format = ExportFormat::JSON;
-        let serialized = serde_json::to_string(&format).unwrap();
-        let deserialized: ExportFormat = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&format).expect("Operation failed");
+        let deserialized: ExportFormat =
+            serde_json::from_str(&serialized).expect("Operation failed");
         assert_eq!(format, deserialized);
     }
 }

@@ -107,10 +107,9 @@ impl ModelRegistry {
     /// Update model metadata
     pub async fn update_model(&self, model_id: &str, metadata: ModelMetadata) -> ModelResult<()> {
         {
-            let mut models = self
-                .models
-                .write()
-                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+            let mut models = self.models.write().map_err(|e| ModelError::InvalidConfig {
+                error: format!("Lock poisoned: {}", e),
+            })?;
             if !models.contains_key(model_id) {
                 return Err(ModelError::ModelNotFound {
                     id: model_id.to_string(),
@@ -121,10 +120,10 @@ impl ModelRegistry {
 
         // Update version index
         {
-            let mut by_name_version = self
-                .by_name_version
-                .write()
-                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+            let mut by_name_version =
+                self.by_name_version.write().map_err(|e| ModelError::InvalidConfig {
+                    error: format!("Lock poisoned: {}", e),
+                })?;
             by_name_version
                 .entry(metadata.name.clone())
                 .or_default()
@@ -175,7 +174,10 @@ impl ModelRegistry {
 
     /// List models by name
     pub fn list_models_by_name(&self, name: &str) -> Vec<ModelMetadata> {
-        let by_name_version = self.by_name_version.read().ok()?;
+        let by_name_version = match self.by_name_version.read() {
+            Ok(guard) => guard,
+            Err(_) => return Vec::new(),
+        };
         if let Some(versions) = by_name_version.get(name) {
             return versions.values().filter_map(|model_id| self.get_model(model_id)).collect();
         }
@@ -219,10 +221,10 @@ impl ModelRegistry {
             });
         }
 
-        let mut active_models = self
-            .active_models
-            .write()
-            .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+        let mut active_models =
+            self.active_models.write().map_err(|e| ModelError::InvalidConfig {
+                error: format!("Lock poisoned: {}", e),
+            })?;
         active_models.insert(name.to_string(), model_id.to_string());
 
         Ok(())
@@ -240,20 +242,19 @@ impl ModelRegistry {
     /// Remove model from registry
     pub async fn remove_model(&self, model_id: &str) -> ModelResult<()> {
         let metadata = {
-            let mut models = self
-                .models
-                .write()
-                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+            let mut models = self.models.write().map_err(|e| ModelError::InvalidConfig {
+                error: format!("Lock poisoned: {}", e),
+            })?;
             models.remove(model_id)
         };
 
         if let Some(metadata) = metadata {
             // Remove from version index
             {
-                let mut by_name_version = self
-                    .by_name_version
-                    .write()
-                    .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+                let mut by_name_version =
+                    self.by_name_version.write().map_err(|e| ModelError::InvalidConfig {
+                        error: format!("Lock poisoned: {}", e),
+                    })?;
                 if let Some(versions) = by_name_version.get_mut(&metadata.name) {
                     versions.remove(&metadata.version);
                     if versions.is_empty() {
@@ -264,10 +265,10 @@ impl ModelRegistry {
 
             // Remove from active models if it was active
             {
-                let mut active_models = self
-                    .active_models
-                    .write()
-                    .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+                let mut active_models =
+                    self.active_models.write().map_err(|e| ModelError::InvalidConfig {
+                        error: format!("Lock poisoned: {}", e),
+                    })?;
                 active_models.retain(|_, id| id != model_id);
             }
 
@@ -292,7 +293,10 @@ impl ModelRegistry {
     ) -> ModelResult<Vec<String>> {
         let mut removed_models = Vec::new();
         let models_by_name = {
-            let by_name_version = self.by_name_version.read().ok()?;
+            let by_name_version =
+                self.by_name_version.read().map_err(|e| ModelError::InvalidConfig {
+                    error: format!("Lock poisoned: {}", e),
+                })?;
             by_name_version.clone()
         };
 
@@ -343,18 +347,17 @@ impl ModelRegistry {
     /// Add model to internal indexes
     fn add_model_to_indexes(&self, metadata: ModelMetadata) -> ModelResult<()> {
         {
-            let mut models = self
-                .models
-                .write()
-                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+            let mut models = self.models.write().map_err(|e| ModelError::InvalidConfig {
+                error: format!("Lock poisoned: {}", e),
+            })?;
             models.insert(metadata.id.clone(), metadata.clone());
         }
 
         {
-            let mut by_name_version = self
-                .by_name_version
-                .write()
-                .map_err(|e| ModelError::InternalError(format!("Lock poisoned: {}", e)))?;
+            let mut by_name_version =
+                self.by_name_version.write().map_err(|e| ModelError::InvalidConfig {
+                    error: format!("Lock poisoned: {}", e),
+                })?;
             by_name_version
                 .entry(metadata.name.clone())
                 .or_default()

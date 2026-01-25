@@ -696,7 +696,7 @@ void flash_attention_kernel(
 
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> Result<IntelMemoryStats> {
-        let pool = self.memory_pool.lock().unwrap();
+        let pool = self.memory_pool.lock().expect("Lock poisoned");
         Ok(IntelMemoryStats {
             total_allocated: pool.total_allocated,
             peak_allocated: pool.peak_allocated,

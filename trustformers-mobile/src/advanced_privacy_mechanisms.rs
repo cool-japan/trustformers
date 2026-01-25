@@ -1109,9 +1109,9 @@ impl AdvancedPrivacyMechanisms {
 
     /// Get comprehensive privacy report
     pub async fn get_privacy_report(&self) -> Result<PrivacyReport> {
-        let state = self.privacy_state.read().unwrap().clone();
+        let state = self.privacy_state.read().expect("Operation failed").clone();
         let performance_metrics = self.performance_monitor.get_metrics().await?;
-        let audit_entries = self.audit_log.lock().unwrap().clone();
+        let audit_entries = self.audit_log.lock().expect("Operation failed").clone();
 
         Ok(PrivacyReport {
             current_state: state,
@@ -1147,7 +1147,7 @@ impl AdvancedPrivacyMechanisms {
             success: true,
         };
 
-        self.audit_log.lock().unwrap().push(entry);
+        self.audit_log.lock().expect("Operation failed").push(entry);
         Ok(())
     }
 
@@ -1156,7 +1156,7 @@ impl AdvancedPrivacyMechanisms {
         client_id: &str,
         budget_allocation: &BudgetAllocation,
     ) -> Result<()> {
-        let mut state = self.privacy_state.write().unwrap();
+        let mut state = self.privacy_state.write().expect("Operation failed");
         state.update_client_budget(client_id, budget_allocation);
         Ok(())
     }
@@ -1583,16 +1583,16 @@ mod tests {
     #[tokio::test]
     async fn test_advanced_privacy_mechanisms() {
         let config = AdvancedPrivacyConfig::default();
-        let privacy_engine = AdvancedPrivacyMechanisms::new(config).unwrap();
+        let privacy_engine = AdvancedPrivacyMechanisms::new(config).expect("Operation failed");
 
-        let model_update = Tensor::zeros(&[10, 10]).unwrap();
+        let model_update = Tensor::zeros(&[10, 10]).expect("Operation failed");
 
         let result = privacy_engine
             .execute_private_federated_round(&model_update, "client_001")
             .await;
 
         assert!(result.is_ok());
-        let private_result = result.unwrap();
+        let private_result = result.expect("Operation failed");
         assert!(private_result.execution_time < Duration::from_secs(10));
         assert!(private_result.privacy_guarantees.epsilon > 0.0);
     }

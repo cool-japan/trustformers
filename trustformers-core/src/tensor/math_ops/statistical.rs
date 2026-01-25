@@ -27,14 +27,16 @@ impl Tensor {
     pub fn std(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                let mean = a.mean().unwrap();
-                let variance = a.mapv(|x| (x - mean).powi(2)).mean().unwrap();
+                let mean = a.mean().expect("Mean calculation failed");
+                let variance =
+                    a.mapv(|x| (x - mean).powi(2)).mean().expect("Mean calculation failed");
                 let std = variance.sqrt();
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), std)))
             },
             Tensor::F64(a) => {
-                let mean = a.mean().unwrap();
-                let variance = a.mapv(|x| (x - mean).powi(2)).mean().unwrap();
+                let mean = a.mean().expect("Mean calculation failed");
+                let variance =
+                    a.mapv(|x| (x - mean).powi(2)).mean().expect("Mean calculation failed");
                 let std = variance.sqrt();
                 Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), std)))
             },
@@ -196,11 +198,11 @@ impl Tensor {
     pub fn mean(&self) -> Result<Tensor> {
         match self {
             Tensor::F32(a) => {
-                let mean = a.mean().unwrap();
+                let mean = a.mean().expect("Mean calculation failed");
                 Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), mean)))
             },
             Tensor::F64(a) => {
-                let mean = a.mean().unwrap();
+                let mean = a.mean().expect("Mean calculation failed");
                 Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), mean)))
             },
             _ => Err(TrustformersError::tensor_op_error(

@@ -9,13 +9,13 @@ fn test_linear_layer() {
     let linear = Linear::new(10, 5, true);
 
     // Test 2D input
-    let input_2d = Tensor::zeros(&[3, 10]).unwrap();
-    let output_2d = linear.forward(input_2d).unwrap();
+    let input_2d = Tensor::zeros(&[3, 10]).expect("Failed to create tensor");
+    let output_2d = linear.forward(input_2d).expect("Forward pass failed");
     assert_eq!(output_2d.shape(), vec![3, 5]);
 
     // Test 3D input
-    let input_3d = Tensor::zeros(&[2, 3, 10]).unwrap();
-    let output_3d = linear.forward(input_3d).unwrap();
+    let input_3d = Tensor::zeros(&[2, 3, 10]).expect("Failed to create tensor");
+    let output_3d = linear.forward(input_3d).expect("Forward pass failed");
     assert_eq!(output_3d.shape(), vec![2, 3, 5]);
 }
 
@@ -23,17 +23,17 @@ fn test_linear_layer() {
 fn test_linear_layer_without_bias() {
     let linear = Linear::new(10, 5, false);
 
-    let input = Tensor::zeros(&[3, 10]).unwrap();
-    let output = linear.forward(input).unwrap();
+    let input = Tensor::zeros(&[3, 10]).expect("Failed to create tensor");
+    let output = linear.forward(input).expect("Forward pass failed");
     assert_eq!(output.shape(), vec![3, 5]);
 }
 
 #[test]
 fn test_embedding_layer() {
-    let embedding = Embedding::new(100, 64, None).unwrap();
+    let embedding = Embedding::new(100, 64, None).expect("Failed to create embedding");
 
     let input_ids = vec![1u32, 5, 10, 99];
-    let output = embedding.forward(input_ids).unwrap();
+    let output = embedding.forward(input_ids).expect("Forward pass failed");
     assert_eq!(output.shape(), vec![4, 64]);
 }
 
@@ -42,55 +42,57 @@ fn test_embedding_with_padding() {
     let embedding = Embedding::new(100, 64, Some(0)).unwrap();
 
     let input_ids = vec![0u32, 1, 5, 0]; // 0 is padding
-    let output = embedding.forward(input_ids).unwrap();
+    let output = embedding.forward(input_ids).expect("Forward pass failed");
     assert_eq!(output.shape(), vec![4, 64]);
 }
 
 #[test]
 fn test_layer_norm() {
-    let layer_norm = LayerNorm::new(vec![10], 1e-5).unwrap();
+    let layer_norm = LayerNorm::new(vec![10], 1e-5).expect("Failed to create layer norm");
 
     // Test 2D input
-    let input_2d = Tensor::ones(&[3, 10]).unwrap();
-    let output_2d = layer_norm.forward(input_2d).unwrap();
+    let input_2d = Tensor::ones(&[3, 10]).expect("Failed to create tensor");
+    let output_2d = layer_norm.forward(input_2d).expect("Forward pass failed");
     assert_eq!(output_2d.shape(), vec![3, 10]);
 
     // Test 3D input
-    let input_3d = Tensor::ones(&[2, 4, 10]).unwrap();
-    let output_3d = layer_norm.forward(input_3d).unwrap();
+    let input_3d = Tensor::ones(&[2, 4, 10]).expect("Failed to create tensor");
+    let output_3d = layer_norm.forward(input_3d).expect("Forward pass failed");
     assert_eq!(output_3d.shape(), vec![2, 4, 10]);
 }
 
 #[test]
 fn test_feedforward_layer() {
-    let ff = FeedForward::new(10, 20, 0.1).unwrap();
+    let ff = FeedForward::new(10, 20, 0.1).expect("Failed to create feedforward");
 
     // Test 2D input
-    let input_2d = Tensor::zeros(&[3, 10]).unwrap();
-    let output_2d = ff.forward(input_2d).unwrap();
+    let input_2d = Tensor::zeros(&[3, 10]).expect("Failed to create tensor");
+    let output_2d = ff.forward(input_2d).expect("Forward pass failed");
     assert_eq!(output_2d.shape(), vec![3, 10]);
 
     // Test 3D input
-    let input_3d = Tensor::zeros(&[2, 4, 10]).unwrap();
-    let output_3d = ff.forward(input_3d).unwrap();
+    let input_3d = Tensor::zeros(&[2, 4, 10]).expect("Failed to create zero tensor");
+    let output_3d = ff.forward(input_3d).expect("Forward pass failed");
     assert_eq!(output_3d.shape(), vec![2, 4, 10]);
 }
 
 #[test]
 fn test_multihead_attention() {
-    let attention = MultiHeadAttention::new(64, 8, 0.1, false).unwrap();
+    let attention = MultiHeadAttention::new(64, 8, 0.1, false).expect("Failed to create attention");
 
-    let input = Tensor::zeros(&[2, 10, 64]).unwrap(); // batch_size=2, seq_len=10, hidden_size=64
-    let output = attention.forward_self_attention(&input, None, false).unwrap();
+    let input = Tensor::zeros(&[2, 10, 64]).expect("Failed to create tensor"); // batch_size=2, seq_len=10, hidden_size=64
+    let output = attention
+        .forward_self_attention(&input, None, false)
+        .expect("Forward pass failed");
     assert_eq!(output.shape(), vec![2, 10, 64]);
 }
 
 #[test]
 fn test_multihead_attention_with_mask() {
-    let attention = MultiHeadAttention::new(64, 8, 0.1, false).unwrap();
+    let attention = MultiHeadAttention::new(64, 8, 0.1, false).expect("Failed to create attention");
 
-    let input = Tensor::zeros(&[2, 10, 64]).unwrap();
-    let mask = Some(Tensor::ones(&[2, 10, 10]).unwrap()); // Allow all attention
+    let input = Tensor::zeros(&[2, 10, 64]).expect("Failed to create tensor");
+    let mask = Some(Tensor::ones(&[2, 10, 10]).expect("Failed to create tensor")); // Allow all attention
 
     let output = attention.forward_self_attention(&input, mask.as_ref(), false).unwrap();
     assert_eq!(output.shape(), vec![2, 10, 64]);
@@ -100,7 +102,7 @@ fn test_multihead_attention_with_mask() {
 fn test_multihead_attention_causal() {
     let attention = MultiHeadAttention::new(64, 8, 0.1, true).unwrap(); // causal=true
 
-    let input = Tensor::zeros(&[1, 5, 64]).unwrap();
+    let input = Tensor::zeros(&[1, 5, 64]).expect("Failed to create tensor");
     match attention.forward_self_attention(&input, None, true) {
         Ok(output) => {
             assert_eq!(output.shape(), vec![1, 5, 64]); // Preserve batch dimension
@@ -126,14 +128,14 @@ fn test_attention_head_dimension() {
     let attention = MultiHeadAttention::new(64, 8, 0.0, false).unwrap();
     // head_dim should be 64 / 8 = 8
 
-    let input = Tensor::zeros(&[1, 4, 64]).unwrap();
-    let output = attention.forward(input).unwrap();
+    let input = Tensor::zeros(&[1, 4, 64]).expect("Failed to create tensor");
+    let output = attention.forward(input).expect("Forward pass failed");
     assert_eq!(output.shape(), vec![1, 4, 64]); // Preserve batch dimension
 }
 
 #[test]
 fn test_embedding_out_of_bounds() {
-    let embedding = Embedding::new(100, 64, None).unwrap();
+    let embedding = Embedding::new(100, 64, None).expect("Failed to create embedding");
 
     let invalid_ids = vec![100u32, 101]; // Out of bounds
     let result = embedding.forward(invalid_ids);
@@ -143,17 +145,17 @@ fn test_embedding_out_of_bounds() {
 #[test]
 fn test_layer_norm_different_shapes() {
     // Test LayerNorm with different normalized shapes
-    let layer_norm_last = LayerNorm::new(vec![10], 1e-5).unwrap();
-    let layer_norm_2d = LayerNorm::new(vec![5, 10], 1e-5).unwrap();
+    let layer_norm_last = LayerNorm::new(vec![10], 1e-5).expect("Failed to create layer norm");
+    let layer_norm_2d = LayerNorm::new(vec![5, 10], 1e-5).expect("Failed to create layer norm");
 
-    let input_3d = Tensor::ones(&[2, 5, 10]).unwrap();
+    let input_3d = Tensor::ones(&[2, 5, 10]).expect("Failed to create tensor");
 
     // Normalize over last dimension
-    let output_last = layer_norm_last.forward(input_3d.clone()).unwrap();
+    let output_last = layer_norm_last.forward(input_3d.clone()).expect("Forward pass failed");
     assert_eq!(output_last.shape(), vec![2, 5, 10]);
 
     // Normalize over last two dimensions
-    let output_2d = layer_norm_2d.forward(input_3d).unwrap();
+    let output_2d = layer_norm_2d.forward(input_3d).expect("Forward pass failed");
     assert_eq!(output_2d.shape(), vec![2, 5, 10]);
 }
 
@@ -162,8 +164,8 @@ fn test_linear_weight_initialization() {
     let linear = Linear::new(100, 50, true);
 
     // Check that weights are properly initialized (not all zeros)
-    let test_input = Tensor::ones(&[1, 100]).unwrap();
-    let output = linear.forward(test_input).unwrap();
+    let test_input = Tensor::ones(&[1, 100]).expect("Failed to create tensor");
+    let output = linear.forward(test_input).expect("Forward pass failed");
 
     // Output should not be all zeros due to weight initialization
     // We can check shape but not values since weights are random
@@ -172,11 +174,11 @@ fn test_linear_weight_initialization() {
 
 #[test]
 fn test_feedforward_activation() {
-    let ff = FeedForward::new(4, 8, 0.0).unwrap(); // no dropout
+    let ff = FeedForward::new(4, 8, 0.0).expect("Failed to create feedforward"); // no dropout
 
     // Test with small input
-    let input = Tensor::ones(&[1, 4]).unwrap();
-    let output = ff.forward(input).unwrap();
+    let input = Tensor::ones(&[1, 4]).expect("Failed to create tensor");
+    let output = ff.forward(input).expect("Forward pass failed");
 
     assert_eq!(output.shape(), vec![1, 4]);
 }
@@ -187,9 +189,12 @@ fn test_attention_different_head_counts() {
     for num_heads in [1, 2, 4, 8] {
         let hidden_size = 64;
         if hidden_size % num_heads == 0 {
-            let attention = MultiHeadAttention::new(hidden_size, num_heads, 0.0, false).unwrap();
-            let input = Tensor::zeros(&[1, 5, hidden_size]).unwrap();
-            let output = attention.forward_self_attention(&input, None, false).unwrap();
+            let attention = MultiHeadAttention::new(hidden_size, num_heads, 0.0, false)
+                .expect("Failed to create attention");
+            let input = Tensor::zeros(&[1, 5, hidden_size]).expect("Failed to create tensor");
+            let output = attention
+                .forward_self_attention(&input, None, false)
+                .expect("Forward pass failed");
             assert_eq!(output.shape(), vec![1, 5, hidden_size]); // Preserves batch dimension
         }
     }
@@ -208,10 +213,10 @@ fn test_layer_error_conditions() {
 fn test_layer_consistency() {
     // Test that layers produce consistent outputs for same inputs
     let linear = Linear::new(10, 5, true);
-    let input = Tensor::ones(&[3, 10]).unwrap();
+    let input = Tensor::ones(&[3, 10]).expect("Failed to create tensor");
 
-    let output1 = linear.forward(input.clone()).unwrap();
-    let output2 = linear.forward(input).unwrap();
+    let output1 = linear.forward(input.clone()).expect("Forward pass failed");
+    let output2 = linear.forward(input).expect("Forward pass failed");
 
     // Should be exactly the same (no randomness in forward pass)
     assert_eq!(output1.shape(), output2.shape());
@@ -220,13 +225,13 @@ fn test_layer_consistency() {
 #[test]
 fn test_tensor_operations() {
     // Test basic tensor operations work
-    let t1 = Tensor::zeros(&[2, 3]).unwrap();
-    let t2 = Tensor::ones(&[2, 3]).unwrap();
+    let t1 = Tensor::zeros(&[2, 3]).expect("Failed to create tensor");
+    let t2 = Tensor::ones(&[2, 3]).expect("Failed to create tensor");
 
     assert_eq!(t1.shape(), vec![2, 3]);
     assert_eq!(t2.shape(), vec![2, 3]);
 
-    let sum = t1.add(&t2).unwrap();
+    let sum = t1.add(&t2).expect("Failed to add tensors");
     assert_eq!(sum.shape(), vec![2, 3]);
 }
 
@@ -238,11 +243,11 @@ fn test_embedding_basic_functionality() {
 
     // Test single ID
     let single_id = vec![3u32];
-    let output = embedding.forward(single_id).unwrap();
+    let output = embedding.forward(single_id).expect("Forward pass failed");
     assert_eq!(output.shape(), vec![1, embedding_dim]);
 
     // Test multiple IDs
     let multi_ids = vec![0u32, 1, 2, 9];
-    let output = embedding.forward(multi_ids).unwrap();
+    let output = embedding.forward(multi_ids).expect("Forward pass failed");
     assert_eq!(output.shape(), vec![4, embedding_dim]);
 }

@@ -159,9 +159,10 @@ mod tests {
         let mut dropout = Dropout::new(0.5);
         dropout.set_training(false);
 
-        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let input_data = input.data().unwrap();
-        let output = dropout.forward(input).unwrap();
+        let output = dropout.forward(input).expect("Forward pass failed");
         let output_data = output.data().unwrap();
 
         // In inference mode, output should equal input
@@ -172,10 +173,11 @@ mod tests {
     fn test_dropout_zero_rate() {
         let dropout = Dropout::new(0.0);
 
-        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let input_data = input.data().unwrap();
         let input_shape = input.shape().to_vec();
-        let output = dropout.forward(input).unwrap();
+        let output = dropout.forward(input).expect("Forward pass failed");
         let output_data = output.data().unwrap();
         let output_shape = output.shape().to_vec();
 
@@ -188,9 +190,10 @@ mod tests {
     fn test_dropout_full_rate() {
         let dropout = Dropout::new(1.0);
 
-        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let input_shape = input.shape().to_vec();
-        let output = dropout.forward(input).unwrap();
+        let output = dropout.forward(input).expect("Forward pass failed");
         let output_data = output.data().unwrap();
         let output_shape = output.shape().to_vec();
 
@@ -209,8 +212,8 @@ mod tests {
         let mut sums = Vec::new();
 
         for _ in 0..20 {
-            let input = Tensor::from_vec(vec![1.0; size], &[size]).unwrap();
-            let output = dropout.forward(input).unwrap();
+            let input = Tensor::from_vec(vec![1.0; size], &[size]).expect("Tensor from_vec failed");
+            let output = dropout.forward(input).expect("Forward pass failed");
             let output_data = output.data().unwrap();
             let zero_count = output_data.iter().filter(|&&x| x == 0.0).count();
             let sum: f32 = output_data.iter().sum();

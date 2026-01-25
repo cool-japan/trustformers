@@ -1631,7 +1631,7 @@ mod tests {
     #[ignore] // FIXME: This test has implementation issues causing 60+ second delays (likely thread/deadlock issue)
     fn test_collection_lifecycle() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Test start collection
         assert!(collector.start_collection().is_ok());
@@ -1654,7 +1654,7 @@ mod tests {
     #[test]
     fn test_inference_tracking() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Start inference tracking
         assert!(collector.start_inference_tracking("test_session", "test_model").is_ok());
@@ -1667,14 +1667,14 @@ mod tests {
 
         // Collect metrics and check inference data
         assert!(collector.collect_metrics().is_ok());
-        let snapshot = collector.get_current_snapshot().unwrap();
+        let snapshot = collector.get_current_snapshot().expect("Operation failed");
         assert!(snapshot.inference.total_inferences > 0);
     }
 
     #[test]
     fn test_cache_tracking() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Record cache events
         assert!(collector.record_cache_hit(2.5).is_ok());
@@ -1683,28 +1683,28 @@ mod tests {
 
         // Collect metrics and check cache statistics
         assert!(collector.collect_metrics().is_ok());
-        let snapshot = collector.get_current_snapshot().unwrap();
+        let snapshot = collector.get_current_snapshot().expect("Operation failed");
         assert_eq!(snapshot.inference.cache_hit_rate, 2.0 / 3.0);
     }
 
     #[test]
     fn test_model_load_time_tracking() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Record model load time
         assert!(collector.record_model_load_time("test_model", 1500.0).is_ok());
 
         // Collect metrics and check model load time
         assert!(collector.collect_metrics().is_ok());
-        let snapshot = collector.get_current_snapshot().unwrap();
+        let snapshot = collector.get_current_snapshot().expect("Operation failed");
         assert_eq!(snapshot.inference.model_load_time_ms, 1500.0);
     }
 
     #[test]
     fn test_statistics_collection() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Start collection and collect some samples
         assert!(collector.start_collection().is_ok());
@@ -1724,7 +1724,7 @@ mod tests {
     #[test]
     fn test_configuration_update() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Update configuration
         let mut new_config = collector.get_config();
@@ -1742,7 +1742,7 @@ mod tests {
         let mut config = fast_test_config();
         config.sampling.max_samples = 3; // Small limit for testing
 
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Collect more samples than the limit
         for _ in 0..5 {
@@ -1757,7 +1757,7 @@ mod tests {
     #[test]
     fn test_memory_usage_estimation() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Collect some samples
         for _ in 0..10 {
@@ -1772,13 +1772,13 @@ mod tests {
     #[test]
     fn test_error_resilience() {
         let config = fast_test_config();
-        let collector = MobileMetricsCollector::new(config).unwrap();
+        let collector = MobileMetricsCollector::new(config).expect("Operation failed");
 
         // Force collection should succeed even with potential system errors
         assert!(collector.collect_metrics().is_ok());
 
         // Collection should provide default values on error
-        let snapshot = collector.get_current_snapshot().unwrap();
+        let snapshot = collector.get_current_snapshot().expect("Operation failed");
         assert!(snapshot.timestamp > 0);
     }
 }

@@ -504,8 +504,8 @@ impl GradContext {
     /// Create a new context with gradients enabled
     pub fn enable() -> Self {
         let engine = get_engine();
-        let previous_state = engine.lock().unwrap().is_grad_enabled();
-        engine.lock().unwrap().enable_grad();
+        let previous_state = engine.lock().expect("Lock poisoned").is_grad_enabled();
+        engine.lock().expect("Lock poisoned").enable_grad();
 
         Self { previous_state }
     }
@@ -513,8 +513,8 @@ impl GradContext {
     /// Create a new context with gradients disabled
     pub fn disable() -> Self {
         let engine = get_engine();
-        let previous_state = engine.lock().unwrap().is_grad_enabled();
-        engine.lock().unwrap().disable_grad();
+        let previous_state = engine.lock().expect("Lock poisoned").is_grad_enabled();
+        engine.lock().expect("Lock poisoned").disable_grad();
 
         Self { previous_state }
     }
@@ -524,9 +524,9 @@ impl Drop for GradContext {
     fn drop(&mut self) {
         let engine = get_engine();
         if self.previous_state {
-            engine.lock().unwrap().enable_grad();
+            engine.lock().expect("Lock poisoned").enable_grad();
         } else {
-            engine.lock().unwrap().disable_grad();
+            engine.lock().expect("Lock poisoned").disable_grad();
         }
     }
 }
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn test_variable_creation() {
         let engine = AutodiffEngine::default();
-        let tensor = Tensor::ones(&[2, 3]).unwrap();
+        let tensor = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
         let var = engine.variable(tensor, true);
 
         assert!(var.requires_grad());
@@ -582,7 +582,7 @@ mod tests {
 
         let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
         let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
-        let c = a.mul(&b).unwrap();
+        let c = a.mul(&b).expect("Multiplication failed");
 
         engine.backward(&c, None).unwrap();
 
@@ -600,11 +600,11 @@ mod tests {
 
         {
             let _ctx = GradContext::disable();
-            assert!(!get_engine().lock().unwrap().is_grad_enabled());
+            assert!(!get_engine().lock().expect("Lock poisoned").is_grad_enabled());
         }
 
         // Should be restored after context ends
-        assert!(get_engine().lock().unwrap().is_grad_enabled());
+        assert!(get_engine().lock().expect("Lock poisoned").is_grad_enabled());
     }
 
     #[test]
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn test_memory_info() {
         let engine = AutodiffEngine::default();
-        let tensor = Tensor::ones(&[100, 100]).unwrap();
+        let tensor = Tensor::ones(&[100, 100]).expect("Failed to create ones tensor");
         let _var = engine.variable(tensor, true);
 
         let memory_info = engine.memory_info().unwrap();
@@ -647,7 +647,7 @@ mod tests {
         let engine = AutodiffEngine::default();
         let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
         let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
-        let _c = a.mul(&b).unwrap();
+        let _c = a.mul(&b).expect("Multiplication failed");
 
         let dot_graph = engine.export_graph().unwrap();
         assert!(dot_graph.contains("digraph G"));

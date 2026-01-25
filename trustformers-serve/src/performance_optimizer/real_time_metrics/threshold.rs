@@ -760,7 +760,10 @@ impl ThresholdEvaluator for StatisticalThresholdEvaluator {
         };
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.total_evaluations += 1;
         stats.total_evaluation_time += start_time.elapsed();
         if violated {
@@ -1302,7 +1305,10 @@ impl ThresholdEvaluator for AdaptiveThresholdEvaluator {
         let confidence = self.calculate_adaptation_confidence();
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.total_evaluations += 1;
         stats.total_evaluation_time += start_time.elapsed();
         if violated {
@@ -3983,7 +3989,10 @@ impl AlertProcessor for DefaultAlertProcessor {
         );
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.alerts_processed += 1;
         stats.avg_processing_time = (stats.avg_processing_time + start_time.elapsed()) / 2;
         stats.last_processing_time = Instant::now();
@@ -4109,7 +4118,10 @@ impl AlertProcessor for PerformanceAlertProcessor {
         );
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.alerts_processed += 1;
         stats.avg_processing_time = (stats.avg_processing_time + start_time.elapsed()) / 2;
         stats.last_processing_time = Instant::now();
@@ -4221,7 +4233,10 @@ impl AlertProcessor for ResourceAlertProcessor {
         );
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.alerts_processed += 1;
         stats.avg_processing_time = (stats.avg_processing_time + start_time.elapsed()) / 2;
         stats.last_processing_time = Instant::now();
@@ -4335,7 +4350,10 @@ impl AlertProcessor for CriticalAlertProcessor {
         );
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.alerts_processed += 1;
         stats.avg_processing_time = (stats.avg_processing_time + start_time.elapsed()) / 2;
         stats.last_processing_time = Instant::now();
@@ -4451,7 +4469,10 @@ impl NotificationChannel for LogNotificationChannel {
         }
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.notifications_sent += 1;
         stats.avg_send_time = (stats.avg_send_time + start_time.elapsed()) / 2;
         stats.last_send_time = Some(Instant::now());
@@ -4549,7 +4570,10 @@ impl NotificationChannel for EmailNotificationChannel {
         std::thread::sleep(Duration::from_millis(100));
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.notifications_sent += 1;
         stats.avg_send_time = (stats.avg_send_time + start_time.elapsed()) / 2;
         stats.last_send_time = Some(Instant::now());
@@ -4636,7 +4660,10 @@ impl NotificationChannel for WebhookNotificationChannel {
         std::thread::sleep(Duration::from_millis(50));
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.notifications_sent += 1;
         stats.avg_send_time = (stats.avg_send_time + start_time.elapsed()) / 2;
         stats.last_send_time = Some(Instant::now());
@@ -4730,7 +4757,10 @@ impl NotificationChannel for SlackNotificationChannel {
         );
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.notifications_sent += 1;
         stats.avg_send_time = (stats.avg_send_time + start_time.elapsed()) / 2;
         stats.last_send_time = Some(Instant::now());
@@ -5220,7 +5250,9 @@ impl ThresholdMonitor {
         monitoring_state: &Arc<RwLock<ThresholdMonitoringState>>,
         config: &Arc<RwLock<ThresholdMonitorConfig>>,
     ) {
-        let config_read = config.read().unwrap();
+        let config_read = config
+            .read()
+            .map_err(|_| ThresholdError::InternalError("RwLock poisoned".to_string()))?;
         let max_history = config_read.max_alert_history;
         drop(config_read);
 
@@ -5453,7 +5485,10 @@ impl ThresholdMonitor {
     }
 
     async fn update_alert_history(&self, alerts: &[AlertEvent]) {
-        let mut history = self.alert_history.lock().unwrap();
+        let mut history = self
+            .alert_history
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
 
         for alert in alerts {
             history.push_back(alert.clone());
@@ -5607,7 +5642,10 @@ impl ThresholdAdaptationAlgorithm for StatisticalAdaptationAlgorithm {
         let new_threshold = current_threshold + adjustment;
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self
+            .stats
+            .lock()
+            .map_err(|_| ThresholdError::InternalError("Lock poisoned".to_string()))?;
         stats.adaptations_performed += 1;
 
         Ok(new_threshold.max(0.0)) // Ensure non-negative threshold
@@ -6397,7 +6435,9 @@ impl PerformanceAnalyzer {
         config: &Arc<RwLock<PerformanceAnalyzerConfig>>,
     ) {
         let mut metrics_guard = metrics.lock().await;
-        let config_read = config.read().unwrap();
+        let config_read = config
+            .read()
+            .map_err(|_| ThresholdError::InternalError("RwLock poisoned".to_string()))?;
 
         // Clean up old completed evaluations
         let retention = config_read.history_retention;

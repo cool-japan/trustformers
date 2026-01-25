@@ -727,8 +727,9 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = GradientCheckConfig::default();
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: GradientCheckConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: GradientCheckConfig =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(config.epsilon, deserialized.epsilon);
         assert_eq!(config.relative_tolerance, deserialized.relative_tolerance);

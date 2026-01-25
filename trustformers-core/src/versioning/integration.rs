@@ -360,7 +360,7 @@ impl VersionedABTestManager {
 /// Calculate percentile from a list of values
 fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
     let index = (percentile * (sorted.len() - 1) as f64) as usize;
     sorted[index]
 }

@@ -708,9 +708,9 @@ mod tests {
     fn test_standard_attention() {
         // Wrap in catch_unwind to handle potential scirs2-core SIMD panics
         let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[2, 4, 32, 64]).unwrap();
-            let k = Tensor::randn(&[2, 4, 32, 64]).unwrap();
-            let v = Tensor::randn(&[2, 4, 32, 64]).unwrap();
+            let q = Tensor::randn(&[2, 4, 32, 64]).expect("Failed to create random tensor");
+            let k = Tensor::randn(&[2, 4, 32, 64]).expect("Failed to create random tensor");
+            let v = Tensor::randn(&[2, 4, 32, 64]).expect("Failed to create random tensor");
 
             let output = SDPA::attention(&q, &k, &v, None, false);
             assert!(output.is_ok());
@@ -727,9 +727,9 @@ mod tests {
     #[test]
     fn test_small_sequence_attention() {
         let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 8, 128, 64]).unwrap();
-            let k = Tensor::randn(&[1, 8, 128, 64]).unwrap();
-            let v = Tensor::randn(&[1, 8, 128, 64]).unwrap();
+            let q = Tensor::randn(&[1, 8, 128, 64]).expect("Failed to create random tensor");
+            let k = Tensor::randn(&[1, 8, 128, 64]).expect("Failed to create random tensor");
+            let v = Tensor::randn(&[1, 8, 128, 64]).expect("Failed to create random tensor");
 
             let output = SDPA::small_sequence_attention(&q, &k, &v, None, false);
             assert!(output.is_ok());
@@ -746,9 +746,9 @@ mod tests {
     #[test]
     fn test_tiled_attention() {
         let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 4, 512, 64]).unwrap();
-            let k = Tensor::randn(&[1, 4, 512, 64]).unwrap();
-            let v = Tensor::randn(&[1, 4, 512, 64]).unwrap();
+            let q = Tensor::randn(&[1, 4, 512, 64]).expect("Failed to create random tensor");
+            let k = Tensor::randn(&[1, 4, 512, 64]).expect("Failed to create random tensor");
+            let v = Tensor::randn(&[1, 4, 512, 64]).expect("Failed to create random tensor");
 
             let output = SDPA::tiled_attention(&q, &k, &v, None, false);
             assert!(output.is_ok());
@@ -765,9 +765,9 @@ mod tests {
     #[test]
     fn test_causal_attention() {
         let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 2, 16, 32]).unwrap();
-            let k = Tensor::randn(&[1, 2, 16, 32]).unwrap();
-            let v = Tensor::randn(&[1, 2, 16, 32]).unwrap();
+            let q = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
+            let k = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
+            let v = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
 
             let output = SDPA::attention(&q, &k, &v, None, true);
             assert!(output.is_ok());
@@ -784,10 +784,10 @@ mod tests {
     #[test]
     fn test_attention_with_mask() {
         let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 2, 16, 32]).unwrap();
-            let k = Tensor::randn(&[1, 2, 16, 32]).unwrap();
-            let v = Tensor::randn(&[1, 2, 16, 32]).unwrap();
-            let mask = Tensor::ones(&[1, 2, 16, 16]).unwrap();
+            let q = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
+            let k = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
+            let v = Tensor::randn(&[1, 2, 16, 32]).expect("Failed to create random tensor");
+            let mask = Tensor::ones(&[1, 2, 16, 16]).expect("Failed to create ones tensor");
 
             let output = SDPA::attention(&q, &k, &v, Some(&mask), false);
             assert!(output.is_ok());
@@ -804,9 +804,9 @@ mod tests {
     #[test]
     fn test_fused_attention_dropout() {
         let result = panic::catch_unwind(|| {
-            let q = Tensor::randn(&[1, 4, 64, 32]).unwrap();
-            let k = Tensor::randn(&[1, 4, 64, 32]).unwrap();
-            let v = Tensor::randn(&[1, 4, 64, 32]).unwrap();
+            let q = Tensor::randn(&[1, 4, 64, 32]).expect("Failed to create random tensor");
+            let k = Tensor::randn(&[1, 4, 64, 32]).expect("Failed to create random tensor");
+            let v = Tensor::randn(&[1, 4, 64, 32]).expect("Failed to create random tensor");
 
             let output = SDPA::fused_attention_dropout(&q, &k, &v, None, false, 0.1, true);
             assert!(output.is_ok());

@@ -515,7 +515,7 @@ mod tests {
         })
         .unwrap();
 
-        let tensor = Tensor::zeros(&[128, 512]).unwrap();
+        let tensor = Tensor::zeros(&[128, 512]).expect("Failed to create zero tensor");
         let distributed = ctx.partition_tensor(&tensor, 0).unwrap();
 
         // Verify partition metadata is correct

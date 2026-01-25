@@ -225,7 +225,7 @@ impl DefaultScheduler {
         // Find device with highest priority that can handle the operation
         let best_device = priorities
             .iter()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.partial_cmp(b.1).expect("Partial comparison failed"))
             .map(|(device_id, _)| device_id.clone())
             .ok_or_else(|| {
                 TrustformersError::model_error("No suitable device found".to_string())
@@ -297,7 +297,7 @@ impl HardwareScheduler for DefaultScheduler {
     }
 
     fn statistics(&self) -> SchedulerStatistics {
-        self.statistics.lock().unwrap().clone()
+        self.statistics.lock().expect("Lock poisoned").clone()
     }
 
     fn update_priorities(&mut self, priorities: HashMap<String, f64>) {

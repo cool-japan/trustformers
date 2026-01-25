@@ -435,22 +435,28 @@ mod tests {
         let version_id = Uuid::new_v4();
 
         // Initialize version
-        lifecycle.initialize_version(version_id).await.unwrap();
-        let status = lifecycle.get_status(version_id).await.unwrap();
+        lifecycle.initialize_version(version_id).await.expect("Async operation failed");
+        let status = lifecycle.get_status(version_id).await.expect("Async operation failed");
         assert_eq!(status, VersionStatus::Development);
 
         // Transition to staging
-        lifecycle.transition(version_id, VersionTransition::ToStaging).await.unwrap();
-        let status = lifecycle.get_status(version_id).await.unwrap();
+        lifecycle
+            .transition(version_id, VersionTransition::ToStaging)
+            .await
+            .expect("Async operation failed");
+        let status = lifecycle.get_status(version_id).await.expect("Async operation failed");
         assert_eq!(status, VersionStatus::Staging);
 
         // Promote to production
-        lifecycle.transition(version_id, VersionTransition::Promote).await.unwrap();
-        let status = lifecycle.get_status(version_id).await.unwrap();
+        lifecycle
+            .transition(version_id, VersionTransition::Promote)
+            .await
+            .expect("Async operation failed");
+        let status = lifecycle.get_status(version_id).await.expect("Async operation failed");
         assert_eq!(status, VersionStatus::Production);
 
         // Check history
-        let history = lifecycle.get_history(version_id).await.unwrap();
+        let history = lifecycle.get_history(version_id).await.expect("Async operation failed");
         assert_eq!(history.len(), 3); // Initialize + 2 transitions
     }
 
@@ -459,7 +465,7 @@ mod tests {
         let lifecycle = VersionLifecycle::new();
         let version_id = Uuid::new_v4();
 
-        lifecycle.initialize_version(version_id).await.unwrap();
+        lifecycle.initialize_version(version_id).await.expect("Async operation failed");
 
         // Try invalid transition (Development -> Production)
         let result = lifecycle.transition(version_id, VersionTransition::Promote).await;
@@ -473,18 +479,25 @@ mod tests {
         let version1 = Uuid::new_v4();
         let version2 = Uuid::new_v4();
 
-        lifecycle.initialize_version(version1).await.unwrap();
-        lifecycle.initialize_version(version2).await.unwrap();
+        lifecycle.initialize_version(version1).await.expect("Async operation failed");
+        lifecycle.initialize_version(version2).await.expect("Async operation failed");
 
-        lifecycle.transition(version1, VersionTransition::ToStaging).await.unwrap();
+        lifecycle
+            .transition(version1, VersionTransition::ToStaging)
+            .await
+            .expect("Async operation failed");
 
-        let dev_versions =
-            lifecycle.get_versions_by_status(VersionStatus::Development).await.unwrap();
+        let dev_versions = lifecycle
+            .get_versions_by_status(VersionStatus::Development)
+            .await
+            .expect("Async operation failed");
         assert_eq!(dev_versions.len(), 1);
         assert!(dev_versions.contains(&version2));
 
-        let staging_versions =
-            lifecycle.get_versions_by_status(VersionStatus::Staging).await.unwrap();
+        let staging_versions = lifecycle
+            .get_versions_by_status(VersionStatus::Staging)
+            .await
+            .expect("Async operation failed");
         assert_eq!(staging_versions.len(), 1);
         assert!(staging_versions.contains(&version1));
     }
@@ -514,11 +527,14 @@ mod tests {
         let version1 = Uuid::new_v4();
         let version2 = Uuid::new_v4();
 
-        lifecycle.initialize_version(version1).await.unwrap();
-        lifecycle.initialize_version(version2).await.unwrap();
-        lifecycle.transition(version1, VersionTransition::ToStaging).await.unwrap();
+        lifecycle.initialize_version(version1).await.expect("Async operation failed");
+        lifecycle.initialize_version(version2).await.expect("Async operation failed");
+        lifecycle
+            .transition(version1, VersionTransition::ToStaging)
+            .await
+            .expect("Async operation failed");
 
-        let stats = lifecycle.get_statistics().await.unwrap();
+        let stats = lifecycle.get_statistics().await.expect("Async operation failed");
         assert_eq!(stats.development_count, 1);
         assert_eq!(stats.staging_count, 1);
         assert_eq!(stats.total_versions, 2);
@@ -529,15 +545,18 @@ mod tests {
         let lifecycle = VersionLifecycle::new();
         let version_id = Uuid::new_v4();
 
-        lifecycle.initialize_version(version_id).await.unwrap();
+        lifecycle.initialize_version(version_id).await.expect("Async operation failed");
 
         // Cannot promote from development
-        assert!(!lifecycle.can_promote(version_id).await.unwrap());
+        assert!(!lifecycle.can_promote(version_id).await.expect("Async operation failed"));
 
         // Move to staging
-        lifecycle.transition(version_id, VersionTransition::ToStaging).await.unwrap();
+        lifecycle
+            .transition(version_id, VersionTransition::ToStaging)
+            .await
+            .expect("Async operation failed");
 
         // Can promote from staging
-        assert!(lifecycle.can_promote(version_id).await.unwrap());
+        assert!(lifecycle.can_promote(version_id).await.expect("Async operation failed"));
     }
 }

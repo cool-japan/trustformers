@@ -884,8 +884,8 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let a = Tensor::ones(&[2, 3]).unwrap();
-        let b = Tensor::ones(&[3, 4]).unwrap();
+        let a = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[3, 4]).expect("Failed to create ones tensor");
 
         let result = ops.matmul(&a, &b);
         assert!(result.is_ok());
@@ -899,8 +899,8 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let a = Tensor::ones(&[2, 3, 4]).unwrap();
-        let b = Tensor::ones(&[2, 4, 5]).unwrap();
+        let a = Tensor::ones(&[2, 3, 4]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[2, 4, 5]).expect("Failed to create ones tensor");
 
         let result = ops.batch_matmul(&a, &b);
         assert!(result.is_ok());
@@ -918,9 +918,12 @@ mod tests {
         let seq_len = 10;
         let hidden_dim = 64;
 
-        let query = Tensor::ones(&[batch_size, seq_len, hidden_dim]).unwrap();
-        let key = Tensor::ones(&[batch_size, seq_len, hidden_dim]).unwrap();
-        let value = Tensor::ones(&[batch_size, seq_len, hidden_dim]).unwrap();
+        let query =
+            Tensor::ones(&[batch_size, seq_len, hidden_dim]).expect("Failed to create ones tensor");
+        let key =
+            Tensor::ones(&[batch_size, seq_len, hidden_dim]).expect("Failed to create ones tensor");
+        let value =
+            Tensor::ones(&[batch_size, seq_len, hidden_dim]).expect("Failed to create ones tensor");
 
         let result = ops.flash_attention(&query, &key, &value, 0.125, None);
         assert!(result.is_ok());
@@ -934,9 +937,9 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let input = Tensor::ones(&[2, 10, 64]).unwrap();
-        let gamma = Tensor::ones(&[64]).unwrap();
-        let beta = Tensor::zeros(&[64]).unwrap();
+        let input = Tensor::ones(&[2, 10, 64]).expect("Failed to create ones tensor");
+        let gamma = Tensor::ones(&[64]).expect("Failed to create ones tensor");
+        let beta = Tensor::zeros(&[64]).expect("Failed to create zero tensor");
 
         let result = ops.layer_norm(&input, &gamma, &beta, 1e-5);
         assert!(result.is_ok());
@@ -950,7 +953,7 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let input = Tensor::ones(&[2, 10, 64]).unwrap();
+        let input = Tensor::ones(&[2, 10, 64]).expect("Failed to create ones tensor");
 
         let result = ops.gelu(&input);
         assert!(result.is_ok());

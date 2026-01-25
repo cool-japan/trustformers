@@ -130,7 +130,7 @@ impl iOSBackgroundManager {
     /// Handle app entering background
     pub fn app_did_enter_background(&self) -> Result<()> {
         {
-            let mut state = self.background_state.lock().unwrap();
+            let mut state = self.background_state.lock().expect("Operation failed");
             *state = BackgroundState::Background;
         }
 
@@ -151,7 +151,7 @@ impl iOSBackgroundManager {
     /// Handle app entering foreground
     pub fn app_will_enter_foreground(&self) -> Result<()> {
         {
-            let mut state = self.background_state.lock().unwrap();
+            let mut state = self.background_state.lock().expect("Operation failed");
             *state = BackgroundState::Foreground;
         }
 
@@ -184,7 +184,7 @@ impl iOSBackgroundManager {
         };
 
         {
-            let mut queue = self.task_queue.lock().unwrap();
+            let mut queue = self.task_queue.lock().expect("Operation failed");
             queue.push(task);
             // Sort by priority and scheduled time
             queue.sort_by(|a, b| {
@@ -208,7 +208,7 @@ impl iOSBackgroundManager {
 
         // Check if we're in background mode
         let is_background = {
-            let state = self.background_state.lock().unwrap();
+            let state = self.background_state.lock().expect("Operation failed");
             *state == BackgroundState::Background
         };
 
@@ -230,7 +230,7 @@ impl iOSBackgroundManager {
 
         // Register task
         {
-            let mut active_tasks = self.active_tasks.lock().unwrap();
+            let mut active_tasks = self.active_tasks.lock().expect("Operation failed");
             active_tasks.insert(task_id.to_string(), task);
         }
 
@@ -239,7 +239,7 @@ impl iOSBackgroundManager {
 
         // Mark task as completed
         {
-            let mut active_tasks = self.active_tasks.lock().unwrap();
+            let mut active_tasks = self.active_tasks.lock().expect("Operation failed");
             if let Some(task) = active_tasks.get_mut(task_id) {
                 task.state = BackgroundTaskState::Completed;
             }
@@ -247,7 +247,7 @@ impl iOSBackgroundManager {
 
         // Update statistics
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock().expect("Operation failed");
             stats.total_background_inferences += 1;
             stats.total_background_time += start_time.elapsed();
             stats.successful_inferences += 1;
@@ -310,7 +310,7 @@ impl iOSBackgroundManager {
 
         // Update statistics
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock().expect("Operation failed");
             stats.background_app_refresh_count += 1;
             stats.total_background_time += start_time.elapsed();
         }
@@ -337,7 +337,7 @@ impl iOSBackgroundManager {
         };
 
         {
-            let mut active_tasks = self.active_tasks.lock().unwrap();
+            let mut active_tasks = self.active_tasks.lock().expect("Operation failed");
             active_tasks.insert(task_id, task);
         }
 
@@ -350,7 +350,7 @@ impl iOSBackgroundManager {
     /// Process background task queue
     fn process_background_queue(&self) -> Result<()> {
         let tasks_to_process = {
-            let mut queue = self.task_queue.lock().unwrap();
+            let mut queue = self.task_queue.lock().expect("Operation failed");
             let now = Instant::now();
 
             // Get tasks that are ready to run
@@ -368,7 +368,7 @@ impl iOSBackgroundManager {
                 self.execute_pending_task(task)?;
             } else {
                 // Re-queue task for later
-                let mut queue = self.task_queue.lock().unwrap();
+                let mut queue = self.task_queue.lock().expect("Operation failed");
                 queue.push(task);
                 break;
             }
@@ -455,7 +455,7 @@ impl iOSBackgroundManager {
     /// Process high-priority background tasks
     fn process_high_priority_tasks(&self) -> Result<()> {
         let high_priority_tasks = {
-            let queue = self.task_queue.lock().unwrap();
+            let queue = self.task_queue.lock().expect("Operation failed");
             queue
                 .iter()
                 .filter(|task| {
@@ -545,7 +545,7 @@ impl iOSBackgroundManager {
         let mut completed_tasks = Vec::new();
 
         {
-            let mut active_tasks = self.active_tasks.lock().unwrap();
+            let mut active_tasks = self.active_tasks.lock().expect("Operation failed");
             for (task_id, task) in active_tasks.iter_mut() {
                 if task.state == BackgroundTaskState::Running {
                     task.state = BackgroundTaskState::Completed;
@@ -563,7 +563,7 @@ impl iOSBackgroundManager {
 
     /// Check if there's available background execution time
     fn has_available_background_time(&self) -> bool {
-        let active_tasks = self.active_tasks.lock().unwrap();
+        let active_tasks = self.active_tasks.lock().expect("Operation failed");
         let oldest_task = active_tasks
             .values()
             .filter(|task| task.state == BackgroundTaskState::Running)
@@ -596,17 +596,17 @@ impl iOSBackgroundManager {
 
     /// Get background processing statistics
     pub fn get_stats(&self) -> BackgroundStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("Operation failed").clone()
     }
 
     /// Get current background state
     pub fn get_background_state(&self) -> BackgroundState {
-        *self.background_state.lock().unwrap()
+        *self.background_state.lock().expect("Operation failed")
     }
 
     /// Get active background tasks
     pub fn get_active_tasks(&self) -> HashMap<String, BackgroundTask> {
-        self.active_tasks.lock().unwrap().clone()
+        self.active_tasks.lock().expect("Operation failed").clone()
     }
 }
 

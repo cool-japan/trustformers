@@ -4886,7 +4886,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_recommendation_generator() {
-        let generator = RecommendationGenerator::new().await.unwrap();
+        let generator = RecommendationGenerator::new()
+            .await
+            .expect("Failed to create recommendation generator");
 
         let context =
             OptimizationContext::new(SystemState::default(), TestCharacteristics::default());
@@ -4899,7 +4901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_confidence_scorer() {
-        let scorer = ConfidenceScorer::new().await.unwrap();
+        let scorer = ConfidenceScorer::new().await.expect("Failed to create confidence scorer");
 
         let recommendation = OptimizationRecommendation {
             id: "test_rec".to_string(),
@@ -4922,7 +4924,7 @@ mod tests {
 
         let confidence = scorer.score_recommendation(&recommendation).await;
         assert!(confidence.is_ok());
-        let confidence_val = confidence.unwrap();
+        let confidence_val = confidence.expect("Confidence is None");
         assert!(confidence_val >= 0.0 && confidence_val <= 1.0);
     }
 
@@ -4938,7 +4940,7 @@ mod tests {
         let recommendations = algorithm.optimize(&metrics, &[], &context);
         assert!(recommendations.is_ok());
 
-        let recs = recommendations.unwrap();
+        let recs = recommendations.expect("Recommendations is None");
         if !recs.is_empty() {
             // Should recommend increasing parallelism due to low CPU utilization
             assert!(recs.iter().any(|r| r
@@ -4950,7 +4952,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_time_analyzer() {
-        let analyzer = RealTimeAnalyzer::new().await.unwrap();
+        let analyzer = RealTimeAnalyzer::new().await.expect("Failed to create analyzer");
 
         let metrics = RealTimeMetrics::default();
 
@@ -4967,7 +4969,7 @@ mod tests {
         let results = analyzer.analyze(&metrics, &history).await;
         assert!(results.is_ok());
 
-        let analysis_results = results.unwrap();
+        let analysis_results = results.expect("Results is None");
         assert!(!analysis_results.is_empty());
     }
 

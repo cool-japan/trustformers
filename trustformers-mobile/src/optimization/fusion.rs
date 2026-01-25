@@ -589,7 +589,7 @@ mod tests {
         };
 
         let mut fusion_engine = OperatorFusion::new(MobileBackend::CPU);
-        let patterns = fusion_engine.detect_fusion_opportunities(&graph).unwrap();
+        let patterns = fusion_engine.detect_fusion_opportunities(&graph).expect("Operation failed");
 
         assert!(!patterns.is_empty());
         assert!(patterns.contains(&FusionPattern::ConvBatchNorm));
@@ -597,12 +597,12 @@ mod tests {
 
     #[test]
     fn test_conv_bn_weight_fusion() {
-        let conv_weight = Tensor::ones(&[64, 3, 3, 3]).unwrap();
-        let conv_bias = Some(Tensor::zeros(&[64]).unwrap());
-        let bn_scale = Tensor::ones(&[64]).unwrap();
-        let bn_bias = Tensor::zeros(&[64]).unwrap();
-        let bn_mean = Tensor::zeros(&[64]).unwrap();
-        let bn_var = Tensor::ones(&[64]).unwrap();
+        let conv_weight = Tensor::ones(&[64, 3, 3, 3]).expect("Operation failed");
+        let conv_bias = Some(Tensor::zeros(&[64]).expect("Operation failed"));
+        let bn_scale = Tensor::ones(&[64]).expect("Operation failed");
+        let bn_bias = Tensor::zeros(&[64]).expect("Operation failed");
+        let bn_mean = Tensor::zeros(&[64]).expect("Operation failed");
+        let bn_var = Tensor::ones(&[64]).expect("Operation failed");
 
         let (fused_weight, fused_bias) = ConvBatchNormFusion::fuse_weights(
             &conv_weight,
@@ -613,7 +613,7 @@ mod tests {
             &bn_var,
             1e-5,
         )
-        .unwrap();
+        .expect("Operation failed");
 
         assert_eq!(fused_weight.shape(), conv_weight.shape());
         assert_eq!(fused_bias.shape(), &[64]);

@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn test_optical_encoding() {
         let processor = PhotonicProcessor::with_platform(OpticalPlatform::Simulation);
-        let input = Tensor::from_vec(vec![0.5, 1.0, -0.5], &[3]).unwrap();
+        let input = Tensor::from_vec(vec![0.5, 1.0, -0.5], &[3]).expect("Tensor from_vec failed");
 
         let amplitude_encoded = processor.tensor_to_optical(&input, OpticalEncoding::Amplitude);
         assert!(amplitude_encoded.is_ok());

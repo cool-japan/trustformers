@@ -578,7 +578,7 @@ impl OneApiBackend {
 
         // Execute kernel
         {
-            let context = self.context.lock().unwrap();
+            let context = self.context.lock().expect("Lock poisoned");
             let local_ptr = local_size.map(|ls| ls.as_ptr()).unwrap_or(std::ptr::null());
 
             let event = unsafe {
@@ -707,7 +707,7 @@ impl OneApiBackend {
             vec![0.0f32; output_shape.iter().product()]
         };
 
-        let context = self.context.lock().unwrap();
+        let context = self.context.lock().expect("Lock poisoned");
         let result = unsafe {
             onemkl_gemm(
                 context.queue,
@@ -794,7 +794,7 @@ impl OneApiBackend {
 
     /// Get current performance metrics
     pub fn get_metrics(&self) -> HardwareMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock().expect("Lock poisoned").clone()
     }
 
     // Private helper methods
@@ -984,7 +984,7 @@ impl OneApiBackend {
         execution_time: Duration,
         metadata: &OneApiCompilationMetadata,
     ) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock().expect("Lock poisoned");
         let execution_ms = execution_time.as_millis() as f64;
 
         // Simplified metrics update
@@ -1213,8 +1213,9 @@ mod tests {
     #[test]
     fn test_oneapi_device_type_serialization() {
         let device_type = OneApiDeviceType::GPU;
-        let serialized = serde_json::to_string(&device_type).unwrap();
-        let deserialized: OneApiDeviceType = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&device_type).expect("JSON serialization failed");
+        let deserialized: OneApiDeviceType =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(device_type, deserialized);
     }
 

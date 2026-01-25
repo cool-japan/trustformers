@@ -348,8 +348,8 @@ mod tests {
     #[test]
     fn test_privacy_mechanism_serialization() {
         let mechanism = PrivacyMechanism::Gaussian;
-        let serialized = serde_json::to_string(&mechanism).unwrap();
-        let deserialized: PrivacyMechanism = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&mechanism).expect("Operation failed");
+        let deserialized: PrivacyMechanism = serde_json::from_str(&serialized).expect("Operation failed");
         assert_eq!(mechanism, deserialized);
     }
 
@@ -374,8 +374,8 @@ mod tests {
         ];
 
         for method in &methods {
-            let serialized = serde_json::to_string(method).unwrap();
-            let deserialized: CompositionMethod = serde_json::from_str(&serialized).unwrap();
+            let serialized = serde_json::to_string(method).expect("Operation failed");
+            let deserialized: CompositionMethod = serde_json::from_str(&serialized).expect("Operation failed");
             assert_eq!(*method, deserialized);
         }
     }

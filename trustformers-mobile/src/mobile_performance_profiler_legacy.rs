@@ -398,13 +398,13 @@ mod tests {
     #[test]
     fn test_module_integration() {
         // Test that all modules work together seamlessly
-        let profiler = create_default_mobile_profiler().unwrap();
+        let profiler = create_default_mobile_profiler().expect("Operation failed");
 
         let snapshot = profiler.take_snapshot();
         assert!(snapshot.is_ok());
 
         let health = profiler.health_check();
-        let health_unwrapped = health.unwrap();
+        let health_unwrapped = health.expect("Operation failed");
         // Health should be Good or better (Excellent, Good, or Healthy are all acceptable)
         assert!(
             matches!(
@@ -462,12 +462,12 @@ mod tests {
     #[test]
     fn test_validation_report_structure() {
         let config = MobileProfilerConfig::default();
-        let profiler = MobilePerformanceProfiler::new(config).unwrap();
+        let profiler = MobilePerformanceProfiler::new(config).expect("Operation failed");
         let health = profiler.health_check();
         let capabilities = profiler.get_capabilities();
 
-        let health_unwrapped = health.unwrap();
-        let modern_capabilities = capabilities.unwrap();
+        let health_unwrapped = health.expect("Operation failed");
+        let modern_capabilities = capabilities.expect("Operation failed");
 
         // Convert modern capabilities to legacy format
         let legacy_capabilities = ProfilerCapabilities {

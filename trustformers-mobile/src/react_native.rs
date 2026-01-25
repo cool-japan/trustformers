@@ -182,11 +182,11 @@ impl TrustformersReactNative {
         tracing::info!("Initializing TrustformeRS React Native module");
 
         // Initialize inference engine
-        let mut engine = self.inference_engine.lock().unwrap();
+        let mut engine = self.inference_engine.lock().expect("Failed to acquire lock");
         engine.initialize()?;
 
         // Initialize model manager
-        let model_manager = self.model_manager.lock().unwrap();
+        let model_manager = self.model_manager.lock().expect("Failed to acquire lock");
         tracing::info!(
             "Model manager initialized with {} models",
             model_manager.list_models().len()
@@ -207,7 +207,7 @@ impl TrustformersReactNative {
     pub async fn load_model(&self, model_id: &str, model_path: &str) -> Result<String> {
         tracing::info!("Loading model: {} from path: {}", model_id, model_path);
 
-        let mut engine = self.inference_engine.lock().unwrap();
+        let mut engine = self.inference_engine.lock().expect("Failed to acquire lock");
         engine.load_model_from_path(model_id, model_path)?;
 
         let model_info = self.get_model_info(model_id)?;
@@ -281,7 +281,7 @@ impl TrustformersReactNative {
 
     /// Get available models
     pub fn get_available_models(&self) -> Result<String> {
-        let model_manager = self.model_manager.lock().unwrap();
+        let model_manager = self.model_manager.lock().expect("Failed to acquire lock");
         let models = model_manager.list_models();
 
         let model_infos: Vec<ModelInfo> = models
@@ -307,7 +307,7 @@ impl TrustformersReactNative {
     pub async fn download_model(&self, model_id: &str) -> Result<String> {
         tracing::info!("Downloading model: {}", model_id);
 
-        let mut model_manager = self.model_manager.lock().unwrap();
+        let mut model_manager = self.model_manager.lock().expect("Failed to acquire lock");
 
         // Create progress callback for React Native
         let progress_callback =
@@ -336,13 +336,13 @@ impl TrustformersReactNative {
 
         // Unload from inference engine if loaded
         {
-            let mut engine = self.inference_engine.lock().unwrap();
+            let mut engine = self.inference_engine.lock().expect("Failed to acquire lock");
             let _ = engine.unload_model(model_id);
         }
 
         // Remove from model manager
         {
-            let mut model_manager = self.model_manager.lock().unwrap();
+            let mut model_manager = self.model_manager.lock().expect("Failed to acquire lock");
             model_manager.remove_model(model_id)?;
         }
 
@@ -362,7 +362,7 @@ impl TrustformersReactNative {
 
     /// Get performance statistics
     pub fn get_performance_stats(&self) -> Result<String> {
-        let stats = self.performance_stats.lock().unwrap();
+        let stats = self.performance_stats.lock().expect("Failed to acquire lock");
 
         let stats_json = serde_json::json!({
             "total_requests": stats.total_requests,
@@ -382,7 +382,7 @@ impl TrustformersReactNative {
 
     /// Clear cache
     pub fn clear_cache(&self) -> Result<String> {
-        let mut cache = self.request_cache.lock().unwrap();
+        let mut cache = self.request_cache.lock().expect("Failed to acquire lock");
         let cache_size = cache.len();
         cache.clear();
 
@@ -398,7 +398,7 @@ impl TrustformersReactNative {
     pub fn configure_model(&self, model_id: &str, config_json: &str) -> Result<String> {
         let config: MobileConfig = serde_json::from_str(config_json)?;
 
-        let mut engine = self.inference_engine.lock().unwrap();
+        let mut engine = self.inference_engine.lock().expect("Failed to acquire lock");
         engine.configure_model(model_id, config)?;
 
         let result = serde_json::json!({
@@ -467,7 +467,7 @@ impl TrustformersReactNative {
         // Inference
         let inference_start = std::time::Instant::now();
         let result = {
-            let mut engine_lock = engine.lock().unwrap();
+            let mut engine_lock = engine.lock().expect("Failed to acquire lock");
             engine_lock.run_inference(&request.model_id, &input_tensor)
         };
         metrics.inference_time_ms = inference_start.elapsed().as_millis() as f64;
@@ -511,7 +511,7 @@ impl TrustformersReactNative {
     }
 
     fn check_cache(&self, request: &InferenceRequest) -> Option<InferenceResponse> {
-        let cache = self.request_cache.lock().unwrap();
+        let cache = self.request_cache.lock().expect("Failed to acquire lock");
 
         // Simple cache key based on model_id and input hash
         let cache_key = format!(
@@ -529,7 +529,7 @@ impl TrustformersReactNative {
             return;
         }
 
-        let mut cache = self.request_cache.lock().unwrap();
+        let mut cache = self.request_cache.lock().expect("Failed to acquire lock");
 
         // Simple cache eviction if size limit exceeded
         if cache.len() >= self.config.max_cache_size_mb * 100 {
@@ -542,7 +542,7 @@ impl TrustformersReactNative {
     }
 
     fn update_cache_stats(&self, cache_hit: bool) {
-        let mut stats = self.performance_stats.lock().unwrap();
+        let mut stats = self.performance_stats.lock().expect("Failed to acquire lock");
         if cache_hit {
             stats.cache_hits += 1;
         } else {
@@ -551,7 +551,7 @@ impl TrustformersReactNative {
     }
 
     fn update_performance_stats(&self, response: &InferenceResponse) {
-        let mut stats = self.performance_stats.lock().unwrap();
+        let mut stats = self.performance_stats.lock().expect("Failed to acquire lock");
 
         stats.total_requests += 1;
         if response.success {
@@ -571,7 +571,7 @@ impl TrustformersReactNative {
     }
 
     fn get_model_info(&self, model_id: &str) -> Result<ModelInfo> {
-        let model_manager = self.model_manager.lock().unwrap();
+        let model_manager = self.model_manager.lock().expect("Failed to acquire lock");
 
         if let Some(metadata) = model_manager.get_model(model_id) {
             Ok(ModelInfo {
@@ -590,7 +590,7 @@ impl TrustformersReactNative {
     }
 
     fn is_model_loaded(&self, model_id: &str) -> bool {
-        let engine = self.inference_engine.lock().unwrap();
+        let engine = self.inference_engine.lock().expect("Failed to acquire lock");
         engine.is_model_loaded(model_id)
     }
 
@@ -755,11 +755,20 @@ pub mod react_native_exports {
                 Ok(module) => {
                     let init_result = module.initialize().unwrap_or_else(|e| e.to_string());
                     TRUSTFORMERS_RN = Some(module);
-                    CString::new(init_result).unwrap().into_raw()
+                    CString::new(init_result)
+                        .unwrap_or_else(|_| {
+                            CString::new("initialization complete")
+                                .expect("Failed to create CString")
+                        })
+                        .into_raw()
                 },
                 Err(e) => {
                     let error = serde_json::json!({"error": e.to_string()});
-                    CString::new(error.to_string()).unwrap().into_raw()
+                    CString::new(error.to_string())
+                        .unwrap_or_else(|_| {
+                            CString::new("error").expect("Failed to create CString")
+                        })
+                        .into_raw()
                 },
             }
         }
@@ -794,10 +803,14 @@ pub mod react_native_exports {
                     });
 
                 let response_json = serde_json::to_string(&result).unwrap_or_default();
-                CString::new(response_json).unwrap().into_raw()
+                CString::new(response_json)
+                    .unwrap_or_else(|_| CString::new("response").expect("Failed to create CString"))
+                    .into_raw()
             } else {
                 let error = serde_json::json!({"error": "Module not initialized"});
-                CString::new(error.to_string()).unwrap().into_raw()
+                CString::new(error.to_string())
+                    .unwrap_or_else(|_| CString::new("error").expect("Failed to create CString"))
+                    .into_raw()
             }
         }
     }
@@ -810,10 +823,14 @@ pub mod react_native_exports {
                 let result = module
                     .get_available_models()
                     .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}).to_string());
-                CString::new(result).unwrap().into_raw()
+                CString::new(result)
+                    .unwrap_or_else(|_| CString::new("models").expect("Failed to create CString"))
+                    .into_raw()
             } else {
                 let error = serde_json::json!({"error": "Module not initialized"});
-                CString::new(error.to_string()).unwrap().into_raw()
+                CString::new(error.to_string())
+                    .unwrap_or_else(|_| CString::new("error").expect("Failed to create CString"))
+                    .into_raw()
             }
         }
     }
@@ -826,10 +843,16 @@ pub mod react_native_exports {
                 let result = module
                     .get_device_capabilities()
                     .unwrap_or_else(|e| serde_json::json!({"error": e.to_string()}).to_string());
-                CString::new(result).unwrap().into_raw()
+                CString::new(result)
+                    .unwrap_or_else(|_| {
+                        CString::new("capabilities").expect("Failed to create CString")
+                    })
+                    .into_raw()
             } else {
                 let error = serde_json::json!({"error": "Module not initialized"});
-                CString::new(error.to_string()).unwrap().into_raw()
+                CString::new(error.to_string())
+                    .unwrap_or_else(|_| CString::new("error").expect("Failed to create CString"))
+                    .into_raw()
             }
         }
     }

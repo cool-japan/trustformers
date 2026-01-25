@@ -854,9 +854,9 @@ mod tests {
     #[test]
     fn test_add_gradient() {
         let grad_fn = grad_fn::AddGradFn;
-        let grad_output = Tensor::ones(&[2, 2]).unwrap();
-        let input1 = Tensor::ones(&[2, 2]).unwrap();
-        let input2 = Tensor::ones(&[2, 2]).unwrap();
+        let grad_output = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
+        let input1 = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
+        let input2 = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
 
         let gradients = grad_fn.backward(&grad_output, &[&input1, &input2]).unwrap();
 
@@ -868,7 +868,7 @@ mod tests {
     #[test]
     fn test_multiply_gradient() {
         let grad_fn = grad_fn::MultiplyGradFn;
-        let grad_output = Tensor::ones(&[2, 2]).unwrap();
+        let grad_output = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
         let input1 = Tensor::scalar(2.0).unwrap().broadcast_to(&[2, 2]).unwrap();
         let input2 = Tensor::scalar(3.0).unwrap().broadcast_to(&[2, 2]).unwrap();
 
@@ -884,8 +884,8 @@ mod tests {
     #[test]
     fn test_sigmoid_gradient() {
         let grad_fn = grad_fn::SigmoidGradFn;
-        let grad_output = Tensor::ones(&[2, 2]).unwrap();
-        let input = Tensor::zeros(&[2, 2]).unwrap();
+        let grad_output = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
+        let input = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
 
         let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
 
@@ -897,8 +897,8 @@ mod tests {
     #[test]
     fn test_relu_gradient() {
         let grad_fn = grad_fn::ReLUGradFn;
-        let grad_output = Tensor::ones(&[2]).unwrap();
-        let input = Tensor::from_vec(vec![1.0, -1.0], &[2]).unwrap();
+        let grad_output = Tensor::ones(&[2]).expect("Failed to create ones tensor");
+        let input = Tensor::from_vec(vec![1.0, -1.0], &[2]).expect("Tensor from_vec failed");
 
         let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
 
@@ -941,7 +941,7 @@ mod tests {
     fn test_reshape_gradient() {
         let original_shape = vec![2, 3];
         let grad_fn = grad_fn::ReshapeGradFn::new(original_shape.clone());
-        let grad_output = Tensor::ones(&[6]).unwrap();
+        let grad_output = Tensor::ones(&[6]).expect("Failed to create ones tensor");
         let input = Tensor::ones(&original_shape).unwrap();
 
         let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
@@ -954,8 +954,8 @@ mod tests {
     fn test_transpose_gradient() {
         let permutation = vec![1, 0];
         let grad_fn = grad_fn::TransposeGradFn::new(permutation);
-        let grad_output = Tensor::ones(&[3, 2]).unwrap();
-        let input = Tensor::ones(&[2, 3]).unwrap();
+        let grad_output = Tensor::ones(&[3, 2]).expect("Failed to create ones tensor");
+        let input = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
 
         let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
 

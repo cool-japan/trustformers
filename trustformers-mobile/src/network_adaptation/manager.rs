@@ -657,15 +657,17 @@ impl Default for NetworkAdaptationManager {
             // Fallback implementation for default
             Self {
                 config: NetworkAdaptationConfig::default(),
-                network_monitor: NetworkMonitor::new(NetworkAdaptationConfig::default()).unwrap(),
+                network_monitor: NetworkMonitor::new(NetworkAdaptationConfig::default())
+                    .expect("Operation failed"),
                 communication_scheduler:
-                    FederatedScheduler::new(NetworkAdaptationConfig::default()).unwrap(),
+                    FederatedScheduler::new(NetworkAdaptationConfig::default())
+                        .expect("Operation failed"),
                 bandwidth_optimizer: BandwidthOptimizer::new(NetworkAdaptationConfig::default())
-                    .unwrap(),
+                    .expect("Operation failed"),
                 sync_coordinator: ModelSyncCoordinator::new(NetworkAdaptationConfig::default())
-                    .unwrap(),
+                    .expect("Operation failed"),
                 network_predictor: NetworkPredictor::new(NetworkAdaptationConfig::default())
-                    .unwrap(),
+                    .expect("Operation failed"),
                 adaptation_stats: NetworkAdaptationStats::new(),
             }
         })

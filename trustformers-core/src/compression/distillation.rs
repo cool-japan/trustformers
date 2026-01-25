@@ -660,8 +660,10 @@ mod tests {
     fn test_distillation_loss_computation() {
         let distiller = KnowledgeDistiller::new(3.0);
 
-        let student_logits = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
-        let teacher_logits = Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).unwrap();
+        let student_logits =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let teacher_logits =
+            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
 
         let loss = distiller.compute_distillation_loss(&student_logits, &teacher_logits);
         assert!(loss.is_ok(), "Loss computation should succeed");
@@ -675,8 +677,10 @@ mod tests {
         let distiller = KnowledgeDistiller::new(3.0);
         let config = DistillationConfig::default();
 
-        let student_logits = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
-        let teacher_logits = Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).unwrap();
+        let student_logits =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let teacher_logits =
+            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
 
         let grad_norm =
             distiller.simulate_gradient_computation(&student_logits, &teacher_logits, &config);

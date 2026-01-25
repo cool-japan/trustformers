@@ -2095,7 +2095,7 @@ impl UtilizationStats {
         let std_deviation = variance.sqrt();
 
         let mut sorted_samples = samples.to_vec();
-        sorted_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let percentile_95_idx = ((samples.len() as f32 * 0.95) as usize).min(samples.len() - 1);
         let percentile_99_idx = ((samples.len() as f32 * 0.99) as usize).min(samples.len() - 1);

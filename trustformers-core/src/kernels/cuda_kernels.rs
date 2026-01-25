@@ -675,7 +675,7 @@ extern "C" __global__ void reduce_sum_kernel(
             )
         })?;
 
-        let pool_guard = pool.lock().unwrap();
+        let pool_guard = pool.lock().expect("Lock poisoned");
         Ok((pool_guard.total_allocated, pool_guard.peak_allocated, 0))
     }
 

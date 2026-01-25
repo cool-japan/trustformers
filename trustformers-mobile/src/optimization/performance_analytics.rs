@@ -474,7 +474,7 @@ impl PerformanceAnalyticsEngine {
             return Err(TrustformersError::invalid_input("Export is disabled".to_string()).into());
         }
 
-        let metrics_data = self.metrics_data.lock().unwrap();
+        let metrics_data = self.metrics_data.lock().expect("Operation failed");
 
         match format {
             ExportFormat::Json => {
@@ -648,7 +648,7 @@ impl PerformanceAnalyticsEngine {
         }
 
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).expect("Operation failed"));
 
         let index = (percentile * (sorted_values.len() - 1) as f64) as usize;
         sorted_values[index.min(sorted_values.len() - 1)]
@@ -797,8 +797,8 @@ impl ForecastingModel {
         }
 
         // Calculate simple trend
-        let first_point = recent_data.last().unwrap();
-        let last_point = recent_data.first().unwrap();
+        let first_point = recent_data.last().expect("Operation failed");
+        let last_point = recent_data.first().expect("Operation failed");
         let time_diff = (last_point.timestamp - first_point.timestamp) as f64;
         let value_diff = last_point.value - first_point.value;
         let slope = if time_diff > 0.0 { value_diff / time_diff } else { 0.0 };
@@ -902,7 +902,7 @@ mod tests {
 
         let anomaly = detector.detect_anomaly();
         assert!(anomaly.is_some());
-        assert!(anomaly.unwrap().severity > 0.0);
+        assert!(anomaly.expect("Operation failed").severity > 0.0);
     }
 
     #[test]
@@ -921,7 +921,7 @@ mod tests {
         let forecast = forecaster.generate_forecast(5);
         assert!(forecast.is_ok());
 
-        let forecast = forecast.unwrap();
+        let forecast = forecast.expect("Operation failed");
         assert_eq!(forecast.predictions.len(), 5);
         assert_eq!(forecast.confidence_intervals.len(), 5);
     }

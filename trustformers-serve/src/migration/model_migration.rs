@@ -58,7 +58,7 @@ impl ModelMigrator {
             // Create backup directory for models
             let backup_path = models_path
                 .parent()
-                .unwrap()
+                .ok_or_else(|| anyhow::anyhow!("Models path has no parent directory"))?
                 .join(format!("models_backup_{}", Utc::now().timestamp()));
             fs::create_dir_all(&backup_path).await?;
 
@@ -748,13 +748,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_v1_to_v2_model_migration() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let models_path = temp_dir.path().join("models");
-        fs::create_dir_all(&models_path).await.unwrap();
+        fs::create_dir_all(&models_path).await.expect("Failed to create models dir");
 
         // Create a test model directory
         let model_dir = models_path.join("test_model");
-        fs::create_dir_all(&model_dir).await.unwrap();
+        fs::create_dir_all(&model_dir).await.expect("Failed to create model dir");
 
         // Create config.json
         let config = serde_json::json!({
@@ -763,25 +763,32 @@ mod tests {
         });
         fs::write(
             model_dir.join("config.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
+            serde_json::to_string_pretty(&config).expect("Failed to serialize config"),
         )
         .await
-        .unwrap();
+        .expect("Failed to write config");
 
         // Create model file
-        fs::write(model_dir.join("model.onnx"), "dummy model data").await.unwrap();
+        fs::write(model_dir.join("model.onnx"), "dummy model data")
+            .await
+            .expect("Failed to write model file");
 
         let migrator = ModelMigrator::new("1.0.0".to_string(), "2.0.0".to_string());
-        let result = migrator.migrate_models_directory(&models_path).await.unwrap();
+        let result = migrator
+            .migrate_models_directory(&models_path)
+            .await
+            .expect("Failed to migrate models");
 
         assert_eq!(result.source_version, "1.0.0");
         assert_eq!(result.target_version, "2.0.0");
         assert_eq!(result.errors.len(), 0);
 
         // Verify the migrated config
-        let migrated_config_content =
-            fs::read_to_string(model_dir.join("config.json")).await.unwrap();
-        let migrated_config: Value = serde_json::from_str(&migrated_config_content).unwrap();
+        let migrated_config_content = fs::read_to_string(model_dir.join("config.json"))
+            .await
+            .expect("Failed to read migrated config");
+        let migrated_config: Value =
+            serde_json::from_str(&migrated_config_content).expect("Failed to parse config");
 
         assert_eq!(migrated_config["version"], "2.0.0");
         assert!(migrated_config["optimization"].is_object());
@@ -790,24 +797,29 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_registry_update() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let models_path = temp_dir.path().join("models");
-        fs::create_dir_all(&models_path).await.unwrap();
+        fs::create_dir_all(&models_path).await.expect("Failed to create models dir");
 
         // Create a test model file
         fs::write(models_path.join("test_model.onnx"), "dummy model data")
             .await
-            .unwrap();
+            .expect("Failed to write model file");
 
         let migrator = ModelMigrator::new("1.0.0".to_string(), "2.0.0".to_string());
-        migrator.update_model_registry(&models_path).await.unwrap();
+        migrator
+            .update_model_registry(&models_path)
+            .await
+            .expect("Failed to update registry");
 
         // Verify registry was created
         let registry_path = models_path.join("registry.json");
         assert!(registry_path.exists());
 
-        let registry_content = fs::read_to_string(&registry_path).await.unwrap();
-        let registry: ModelRegistry = serde_json::from_str(&registry_content).unwrap();
+        let registry_content =
+            fs::read_to_string(&registry_path).await.expect("Failed to read registry");
+        let registry: ModelRegistry =
+            serde_json::from_str(&registry_content).expect("Failed to parse registry");
 
         assert_eq!(registry.version, "2.0.0");
         assert_eq!(registry.models.len(), 1);
@@ -816,14 +828,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_validation() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let models_path = temp_dir.path().join("models");
-        fs::create_dir_all(&models_path).await.unwrap();
+        fs::create_dir_all(&models_path).await.expect("Failed to create models dir");
 
         // Create test model
         fs::write(models_path.join("test_model.onnx"), "dummy model data")
             .await
-            .unwrap();
+            .expect("Failed to write model file");
 
         // Create registry
         let registry = ModelRegistry {
@@ -833,13 +845,16 @@ mod tests {
         };
         fs::write(
             models_path.join("registry.json"),
-            serde_json::to_string_pretty(&registry).unwrap(),
+            serde_json::to_string_pretty(&registry).expect("Failed to serialize registry"),
         )
         .await
-        .unwrap();
+        .expect("Failed to write registry");
 
         let migrator = ModelMigrator::new("1.0.0".to_string(), "2.0.0".to_string());
-        let results = migrator.validate_migrated_models(&models_path).await.unwrap();
+        let results = migrator
+            .validate_migrated_models(&models_path)
+            .await
+            .expect("Failed to validate models");
 
         // Should have validation results for model and registry
         assert!(!results.is_empty());

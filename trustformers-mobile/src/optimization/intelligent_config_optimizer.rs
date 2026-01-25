@@ -313,7 +313,8 @@ impl IntelligentConfigOptimizer {
             None
         };
 
-        let mut base_config = self.best_config.lock().unwrap().clone().unwrap_or_default();
+        let mut base_config =
+            self.best_config.lock().expect("Operation failed").clone().unwrap_or_default();
 
         // Apply tuning based on insights
         if let Some(insights) = insights {
@@ -803,7 +804,9 @@ impl IntelligentConfigOptimizer {
                 let mut best_configs: Vec<_> =
                     history.iter().filter(|entry| entry.success_score > 0.8).collect();
 
-                best_configs.sort_by(|a, b| b.success_score.partial_cmp(&a.success_score).unwrap());
+                best_configs.sort_by(|a, b| {
+                    b.success_score.partial_cmp(&a.success_score).expect("Operation failed")
+                });
 
                 if !best_configs.is_empty() {
                     let best_config = &best_configs[0].config;
@@ -937,12 +940,12 @@ mod tests {
 
         let optimizer =
             IntelligentConfigOptimizer::new(OptimizationStrategy::Balanced, goals, &device_info)
-                .unwrap();
+                .expect("Operation failed");
 
         let recommendation = optimizer.recommend_configuration();
         assert!(recommendation.is_ok());
 
-        let recommendation = recommendation.unwrap();
+        let recommendation = recommendation.expect("Operation failed");
         assert!(recommendation.confidence > 0.0);
         assert!(recommendation.risk_score >= 0.0);
         assert!(!recommendation.reasoning.is_empty());
@@ -963,7 +966,7 @@ mod tests {
             },
             &device_info,
         )
-        .unwrap();
+        .expect("Operation failed");
 
         let config = MobileConfig::default();
         let metrics = HashMap::from([
@@ -999,7 +1002,7 @@ mod tests {
             },
             &device_info,
         )
-        .unwrap();
+        .expect("Operation failed");
 
         let tuned_config = optimizer.auto_tune();
         assert!(tuned_config.is_ok());

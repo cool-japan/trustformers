@@ -105,11 +105,21 @@ impl ModelManager {
     pub async fn start(&self) -> ModelResult<()> {
         // Start background health check task
         let health_check_task = self.start_health_check_task().await;
-        self.background_tasks.write().unwrap().push(health_check_task);
+        self.background_tasks
+            .write()
+            .map_err(|e| ModelError::InvalidConfig {
+                error: format!("Lock poisoned: {}", e),
+            })?
+            .push(health_check_task);
 
         // Start cleanup task
         let cleanup_task = self.start_cleanup_task().await;
-        self.background_tasks.write().unwrap().push(cleanup_task);
+        self.background_tasks
+            .write()
+            .map_err(|e| ModelError::InvalidConfig {
+                error: format!("Lock poisoned: {}", e),
+            })?
+            .push(cleanup_task);
 
         Ok(())
     }
@@ -118,7 +128,10 @@ impl ModelManager {
     pub async fn stop(&self) -> ModelResult<()> {
         // Cancel background tasks
         let tasks = {
-            let mut tasks = self.background_tasks.write().unwrap();
+            let mut tasks =
+                self.background_tasks.write().map_err(|e| ModelError::InvalidConfig {
+                    error: format!("Lock poisoned: {}", e),
+                })?;
             std::mem::take(&mut *tasks)
         };
 
@@ -127,8 +140,16 @@ impl ModelManager {
         }
 
         // Unload all models
-        let model_ids: Vec<String> =
-            { self.loaded_models.read().unwrap().keys().cloned().collect() };
+        let model_ids: Vec<String> = {
+            self.loaded_models
+                .read()
+                .map_err(|e| ModelError::InvalidConfig {
+                    error: format!("Lock poisoned: {}", e),
+                })?
+                .keys()
+                .cloned()
+                .collect()
+        };
 
         for model_id in model_ids {
             self.unload_model(&model_id, UnloadingStrategy::Immediate).await?;
@@ -151,7 +172,14 @@ impl ModelManager {
             })?;
 
         // Check if already loaded
-        if self.loaded_models.read().unwrap().contains_key(model_id) {
+        if self
+            .loaded_models
+            .read()
+            .map_err(|e| ModelError::InvalidConfig {
+                error: format!("Lock poisoned: {}", e),
+            })?
+            .contains_key(model_id)
+        {
             return Ok(());
         }
 
@@ -159,7 +187,9 @@ impl ModelManager {
         let _permit = match strategy {
             LoadingStrategy::Parallel { .. } => {
                 // For parallel loading, use the global semaphore but don't enforce strict limits
-                self.load_semaphore.acquire().await.unwrap()
+                self.load_semaphore.acquire().await.map_err(|e| ModelError::LoadingFailed {
+                    error: format!("Semaphore acquisition failed: {}", e),
+                })?
             },
             _ => self.load_semaphore.acquire().await.unwrap(),
         };
@@ -199,7 +229,15 @@ impl ModelManager {
         model_id: &str,
         strategy: UnloadingStrategy,
     ) -> ModelResult<()> {
-        let loaded_model = { self.loaded_models.read().unwrap().get(model_id).cloned() };
+        let loaded_model = {
+            self.loaded_models
+                .read()
+                .map_err(|e| ModelError::InvalidConfig {
+                    error: format!("Lock poisoned: {}", e),
+                })?
+                .get(model_id)
+                .cloned()
+        };
 
         if let Some(_loaded_model) = loaded_model {
             match strategy {
@@ -244,11 +282,11 @@ impl ModelManager {
 
     /// Get a loaded model
     pub fn get_loaded_model(&self, model_id: &str) -> Option<Arc<LoadedModel>> {
-        let loaded_model = self.loaded_models.read().unwrap().get(model_id).cloned();
+        let loaded_model = self.loaded_models.read().ok()?.get(model_id).cloned();
 
         if let Some(ref loaded_model) = loaded_model {
             // Update last accessed time
-            *loaded_model.last_accessed.write().unwrap() = Instant::now();
+            *loaded_model.last_accessed.write().ok()? = Instant::now();
         }
 
         loaded_model
@@ -256,12 +294,19 @@ impl ModelManager {
 
     /// List all loaded models
     pub fn list_loaded_models(&self) -> Vec<String> {
-        self.loaded_models.read().unwrap().keys().cloned().collect()
+        self.loaded_models
+            .read()
+            .ok()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Get memory usage statistics
     pub fn get_memory_usage(&self) -> (u64, Option<u64>) {
-        let loaded_models = self.loaded_models.read().unwrap();
+        let loaded_models = match self.loaded_models.read() {
+            Ok(guard) => guard,
+            Err(_) => return (0, None),
+        };
         let total_memory: u64 = loaded_models.values().map(|m| m.memory_usage).sum();
         let total_gpu_memory: Option<u64> = {
             let gpu_usages: Vec<u64> =
@@ -436,8 +481,16 @@ impl ModelManager {
 
     /// Perform health check on loaded models
     async fn perform_health_check(&self) -> ModelResult<()> {
-        let model_ids: Vec<String> =
-            { self.loaded_models.read().unwrap().keys().cloned().collect() };
+        let model_ids: Vec<String> = {
+            self.loaded_models
+                .read()
+                .map_err(|e| ModelError::InvalidConfig {
+                    error: format!("Lock poisoned: {}", e),
+                })?
+                .keys()
+                .cloned()
+                .collect()
+        };
 
         for model_id in model_ids {
             if let Some(loaded_model) = self.get_loaded_model(&model_id) {

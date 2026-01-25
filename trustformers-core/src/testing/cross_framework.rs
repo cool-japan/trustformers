@@ -591,8 +591,8 @@ mod tests {
     fn test_tensor_comparison() {
         let validator = CrossFrameworkValidator::with_defaults();
 
-        let tensor1 = Tensor::zeros(&[2, 2]).unwrap();
-        let tensor2 = Tensor::zeros(&[2, 2]).unwrap();
+        let tensor1 = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
+        let tensor2 = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
 
         let result = validator.compare_tensors(&tensor1, &tensor2).unwrap();
         assert!(result.passed);
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_test_case_builder() {
-        let inputs = vec![Tensor::zeros(&[2, 2]).unwrap()];
+        let inputs = vec![Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor")];
         let test_case = ValidationTestCase::new("test".to_string(), inputs)
             .with_expected_shape(vec![2, 2])
             .with_model_config("layers".to_string(), serde_json::json!(12));

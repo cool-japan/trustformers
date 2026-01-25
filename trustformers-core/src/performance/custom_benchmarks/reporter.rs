@@ -95,7 +95,7 @@ impl BenchmarkReport {
         let std_dev = variance.sqrt();
 
         let mut sorted = durations.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
 
         let percentiles = vec![
             ("p50".to_string(), Self::percentile(&sorted, 0.50)),
@@ -175,7 +175,7 @@ impl BenchmarkReport {
         let std_dev = variance.sqrt();
 
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
 
         MetricStats {
             mean,
@@ -561,7 +561,8 @@ mod tests {
         let report = create_test_report();
         let json = Reporter::generate(&report, ReportFormat::Json).unwrap();
 
-        let parsed: BenchmarkReport = serde_json::from_str(&json).unwrap();
+        let parsed: BenchmarkReport =
+            serde_json::from_str(&json).expect("JSON deserialization failed");
         assert_eq!(parsed.name, "test_benchmark");
     }
 

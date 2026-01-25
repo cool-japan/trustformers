@@ -225,7 +225,7 @@ impl ExporterFactory {
             }
         }
 
-        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
 
         candidates
             .first()

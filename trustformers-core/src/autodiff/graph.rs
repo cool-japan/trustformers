@@ -655,7 +655,7 @@ mod tests {
         let mut graph = ComputationGraph::new();
         assert_eq!(graph.num_nodes(), 0);
 
-        let tensor = Tensor::ones(&[2, 3]).unwrap();
+        let tensor = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
         let node_id = graph.add_node(tensor, true, Some("test".to_string()));
         assert_eq!(graph.num_nodes(), 1);
         assert_eq!(node_id, 0);
@@ -666,9 +666,9 @@ mod tests {
         let mut graph = ComputationGraph::new();
 
         // Create a simple computation: c = a + b
-        let a = Tensor::ones(&[2, 2]).unwrap();
-        let b = Tensor::ones(&[2, 2]).unwrap();
-        let c = a.add(&b).unwrap();
+        let a = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
+        let c = a.add(&b).expect("Addition failed");
 
         let node_a = graph.add_node(a, true, Some("a".to_string()));
         let node_b = graph.add_node(b, true, Some("b".to_string()));
@@ -702,7 +702,7 @@ mod tests {
         // Create computation: c = a * b
         let a = Tensor::scalar(2.0).unwrap();
         let b = Tensor::scalar(3.0).unwrap();
-        let c = a.mul(&b).unwrap();
+        let c = a.mul(&b).expect("Multiplication failed");
 
         let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
         let node_b = graph.add_node(b.clone(), true, Some("b".to_string()));
@@ -735,7 +735,7 @@ mod tests {
 
         // Create computation: d = a + a (gradient should accumulate)
         let a = Tensor::scalar(2.0).unwrap();
-        let d = a.add(&a).unwrap();
+        let d = a.add(&a).expect("Addition failed");
 
         let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
         let node_d = graph

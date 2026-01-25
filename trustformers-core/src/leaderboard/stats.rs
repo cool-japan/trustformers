@@ -115,8 +115,8 @@ impl LeaderboardStats {
         // Date range
         let dates: Vec<_> = entries.iter().map(|e| e.timestamp).collect();
         let date_range = DateRange {
-            start: *dates.iter().min().unwrap(),
-            end: *dates.iter().max().unwrap(),
+            start: *dates.iter().min().expect("Min failed"),
+            end: *dates.iter().max().expect("Max failed"),
         };
 
         // Top submitters

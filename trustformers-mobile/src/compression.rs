@@ -943,7 +943,7 @@ impl DynamicQuantizer {
         for (name, tensor) in weights {
             let data = tensor.data()?;
             let mut sorted_data = data.to_vec();
-            sorted_data.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).unwrap());
+            sorted_data.sort_by(|a, b| a.abs().partial_cmp(&b.abs()).expect("Operation failed"));
 
             // Find outlier threshold
             let outlier_idx = ((1.0 - outlier_threshold) * sorted_data.len() as f32) as usize;
@@ -1203,7 +1203,7 @@ impl MobilePruner {
                 }
 
                 // Sort by norm and keep top rows
-                row_norms.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                row_norms.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("Operation failed"));
                 let kept_rows: Vec<usize> =
                     row_norms.iter().take(target_rows).map(|(_, idx)| *idx).collect();
 
@@ -1433,7 +1433,8 @@ mod tests {
 
     #[test]
     fn test_device_optimized_config() {
-        let device_info = crate::device_info::MobileDeviceDetector::detect().unwrap();
+        let device_info =
+            crate::device_info::MobileDeviceDetector::detect().expect("Operation failed");
         let config = MobileCompressionEngine::create_device_optimized_config(&device_info);
         assert!(config.target_compression_ratio > 0.0);
         assert!(config.target_compression_ratio <= 1.0);
@@ -1442,8 +1443,9 @@ mod tests {
     #[test]
     fn test_compression_benefits_estimation() {
         let config = CompressionConfig::default();
-        let device_info = crate::device_info::MobileDeviceDetector::detect().unwrap();
-        let engine = MobileCompressionEngine::new(config, &device_info).unwrap();
+        let device_info =
+            crate::device_info::MobileDeviceDetector::detect().expect("Operation failed");
+        let engine = MobileCompressionEngine::new(config, &device_info).expect("Operation failed");
 
         let benefits = engine.estimate_compression_benefits(100.0, &device_info);
         assert!(benefits.compression_ratio > 1.0);

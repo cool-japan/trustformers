@@ -171,12 +171,27 @@ impl WasmSimdEngine {
         let start_time = std::time::Instant::now();
 
         let result = match operation {
-            SimdOperationType::MatMul => self.simd_matmul(input, weights.unwrap())?,
-            SimdOperationType::Conv2D => self.simd_conv2d(input, weights.unwrap())?,
-            SimdOperationType::Add => self.simd_elementwise_add(input, weights.unwrap())?,
-            SimdOperationType::Mul => self.simd_elementwise_mul(input, weights.unwrap())?,
+            SimdOperationType::MatMul => {
+                let w = weights.ok_or_else(|| runtime_error("MatMul requires weights"))?;
+                self.simd_matmul(input, w)?
+            },
+            SimdOperationType::Conv2D => {
+                let w = weights.ok_or_else(|| runtime_error("Conv2D requires weights"))?;
+                self.simd_conv2d(input, w)?
+            },
+            SimdOperationType::Add => {
+                let w = weights.ok_or_else(|| runtime_error("Add requires weights"))?;
+                self.simd_elementwise_add(input, w)?
+            },
+            SimdOperationType::Mul => {
+                let w = weights.ok_or_else(|| runtime_error("Mul requires weights"))?;
+                self.simd_elementwise_mul(input, w)?
+            },
             SimdOperationType::Activation => self.simd_activation(input)?,
-            SimdOperationType::BatchNorm => self.simd_batch_norm(input, weights.unwrap())?,
+            SimdOperationType::BatchNorm => {
+                let w = weights.ok_or_else(|| runtime_error("BatchNorm requires weights"))?;
+                self.simd_batch_norm(input, w)?
+            },
             SimdOperationType::Attention => self.simd_attention(input)?,
             SimdOperationType::Pooling => self.simd_pooling(input)?,
         };
@@ -824,9 +839,10 @@ impl WasmSimdEngine {
             SimdOperationType::MatMul => {
                 // Basic scalar matrix multiplication
                 let a_data = input.data()?;
-                let b_data = weights.unwrap().data()?;
+                let w = weights.ok_or_else(|| runtime_error("MatMul requires weights"))?;
+                let b_data = w.data()?;
                 let a_shape = input.shape();
-                let b_shape = weights.unwrap().shape();
+                let b_shape = w.shape();
 
                 let (m, k) = (a_shape[0], a_shape[1]);
                 let (k2, n) = (b_shape[0], b_shape[1]);
@@ -850,7 +866,8 @@ impl WasmSimdEngine {
             },
             SimdOperationType::Add => {
                 let a_data = input.data()?;
-                let b_data = weights.unwrap().data()?;
+                let w = weights.ok_or_else(|| runtime_error("Add requires weights"))?;
+                let b_data = w.data()?;
                 let shape = input.shape();
                 let total_elements = shape.iter().product::<usize>();
                 let mut result = vec![0.0f32; total_elements];
@@ -1037,33 +1054,39 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     fn test_matrix_multiplication() {
         let config = WasmSimdConfig::default();
-        let mut engine = WasmSimdEngine::new(config).unwrap();
+        let mut engine = WasmSimdEngine::new(config).expect("Failed to create SIMD engine");
 
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let a =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Failed to create tensor a");
+        let b =
+            Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Failed to create tensor b");
 
         let result = engine.optimize_tensor_operation(SimdOperationType::MatMul, &a, Some(&b));
 
         assert!(result.is_ok());
-        let result_tensor = result.unwrap();
-        assert_eq!(result_tensor.shape(), &[2, 2]);
+        if let Ok(result_tensor) = result {
+            assert_eq!(result_tensor.shape(), &[2, 2]);
+        }
     }
 
     #[test]
     #[cfg(target_arch = "wasm32")]
     fn test_element_wise_operations() {
         let config = WasmSimdConfig::default();
-        let mut engine = WasmSimdEngine::new(config).unwrap();
+        let mut engine = WasmSimdEngine::new(config).expect("Failed to create SIMD engine");
 
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
-        let b = Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[4]).unwrap();
+        let a =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Failed to create tensor a");
+        let b =
+            Tensor::from_vec(vec![1.0, 1.0, 1.0, 1.0], &[4]).expect("Failed to create tensor b");
 
         // Test addition
-        let result =
-            engine.optimize_tensor_operation(SimdOperationType::Add, &a, Some(&b)).unwrap();
+        let result = engine
+            .optimize_tensor_operation(SimdOperationType::Add, &a, Some(&b))
+            .expect("Addition failed");
 
         assert_eq!(result.shape(), &[4]);
-        let result_data = result.data().unwrap();
+        let result_data = result.data().expect("Failed to get data");
         assert_eq!(result_data, &[2.0, 3.0, 4.0, 5.0]);
     }
 
@@ -1071,15 +1094,16 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     fn test_activation_function() {
         let config = WasmSimdConfig::default();
-        let mut engine = WasmSimdEngine::new(config).unwrap();
+        let mut engine = WasmSimdEngine::new(config).expect("Failed to create SIMD engine");
 
-        let input = Tensor::from_vec(vec![-1.0, 2.0, -3.0, 4.0], &[4]).unwrap();
+        let input =
+            Tensor::from_vec(vec![-1.0, 2.0, -3.0, 4.0], &[4]).expect("Failed to create tensor");
 
         let result = engine
             .optimize_tensor_operation(SimdOperationType::Activation, &input, None)
-            .unwrap();
+            .expect("Activation failed");
 
-        let result_data = result.data().unwrap();
+        let result_data = result.data().expect("Failed to get data");
         assert_eq!(result_data, &[0.0, 2.0, 0.0, 4.0]); // ReLU: max(x, 0)
     }
 
@@ -1087,7 +1111,7 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     fn test_performance_metrics() {
         let config = WasmSimdConfig::default();
-        let engine = WasmSimdEngine::new(config).unwrap();
+        let engine = WasmSimdEngine::new(config).expect("Failed to create SIMD engine");
 
         let metrics = engine.get_performance_metrics();
         assert_eq!(metrics.total_operations, 0);
@@ -1109,21 +1133,22 @@ mod tests {
     #[cfg(target_arch = "wasm32")]
     fn test_benchmarking() {
         let config = WasmSimdConfig::default();
-        let mut engine = WasmSimdEngine::new(config).unwrap();
+        let mut engine = WasmSimdEngine::new(config).expect("Failed to create SIMD engine");
 
         let benchmarks = engine.benchmark_operations();
         assert!(benchmarks.is_ok());
 
-        let results = benchmarks.unwrap();
-        assert!(!results.is_empty());
-        assert!(results.contains_key(&SimdOperationType::MatMul));
+        if let Ok(results) = benchmarks {
+            assert!(!results.is_empty());
+            assert!(results.contains_key(&SimdOperationType::MatMul));
+        }
     }
 
     #[test]
     #[cfg(target_arch = "wasm32")]
     fn test_performance_report() {
         let config = WasmSimdConfig::default();
-        let engine = WasmSimdEngine::new(config).unwrap();
+        let engine = WasmSimdEngine::new(config).expect("Failed to create SIMD engine");
 
         let report = engine.export_performance_report();
         assert!(report.contains("WebAssembly SIMD Performance Report"));

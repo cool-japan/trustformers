@@ -535,7 +535,7 @@ impl CalibrationToolkit {
             .iter()
             .map(|(method, metrics)| (*method, self.calculate_overall_score(metrics)))
             .collect();
-        method_ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        method_ranking.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
 
         let recommended_method = method_ranking[0].0;
 
@@ -938,8 +938,9 @@ mod tests {
         let method = CalibrationMethod::Entropy;
         assert_eq!(method, CalibrationMethod::Entropy);
 
-        let serialized = serde_json::to_string(&method).unwrap();
-        let deserialized: CalibrationMethod = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&method).expect("JSON serialization failed");
+        let deserialized: CalibrationMethod =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(method, deserialized);
     }
 }

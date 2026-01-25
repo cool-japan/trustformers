@@ -497,7 +497,8 @@ mod tests {
 
     #[test]
     fn test_conversion_methods() {
-        let weights = Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).unwrap();
+        let weights =
+            Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[2, 2]).expect("Tensor from_vec failed");
 
         let methods = [
             ConversionMethod::RateCoding,

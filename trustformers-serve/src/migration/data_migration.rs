@@ -58,7 +58,7 @@ impl DataMigrator {
             // Create backup directory
             let backup_path = data_path
                 .parent()
-                .unwrap()
+                .ok_or_else(|| anyhow::anyhow!("Data path has no parent directory"))?
                 .join(format!("data_backup_{}", Utc::now().timestamp()));
             fs::create_dir_all(&backup_path).await?;
 
@@ -337,7 +337,7 @@ impl DataMigrationRule for V1ToV2DataRule {
                                 // Convert from epoch to ISO format
                                 if let Ok(epoch) = ts_str.parse::<i64>() {
                                     let dt = chrono::DateTime::from_timestamp(epoch, 0)
-                                        .unwrap_or_else(Utc::now);
+                                        .unwrap_or_else(|| Utc::now());
                                     *timestamp = Value::String(dt.to_rfc3339());
                                 }
                             }
@@ -605,9 +605,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_v1_to_v2_data_migration() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let data_path = temp_dir.path().join("data");
-        fs::create_dir_all(&data_path).await.unwrap();
+        fs::create_dir_all(&data_path).await.expect("Failed to create data dir");
 
         // Create test data file
         let test_data = serde_json::json!({
@@ -618,13 +618,16 @@ mod tests {
         let test_file = data_path.join("test.json");
         fs::write(
             &test_file,
-            serde_json::to_string_pretty(&test_data).unwrap(),
+            serde_json::to_string_pretty(&test_data).expect("Failed to serialize test data"),
         )
         .await
-        .unwrap();
+        .expect("Failed to write test file");
 
         let migrator = DataMigrator::new("1.0.0".to_string(), "2.0.0".to_string());
-        let result = migrator.migrate_data_directory(&data_path).await.unwrap();
+        let result = migrator
+            .migrate_data_directory(&data_path)
+            .await
+            .expect("Failed to migrate data");
 
         assert_eq!(result.source_version, "1.0.0");
         assert_eq!(result.target_version, "2.0.0");
@@ -632,14 +635,16 @@ mod tests {
         assert_eq!(result.errors.len(), 0);
 
         // Verify the migrated file
-        let migrated_content = fs::read_to_string(&test_file).await.unwrap();
-        let migrated_data: Value = serde_json::from_str(&migrated_content).unwrap();
+        let migrated_content =
+            fs::read_to_string(&test_file).await.expect("Failed to read migrated file");
+        let migrated_data: Value =
+            serde_json::from_str(&migrated_content).expect("Failed to parse migrated data");
 
         assert_eq!(migrated_data["version"], "2.0.0");
         assert!(migrated_data["metadata"].is_object());
 
         // Verify timestamp was converted to ISO format (RFC3339)
-        let timestamp = migrated_data["timestamp"].as_str().unwrap();
+        let timestamp = migrated_data["timestamp"].as_str().expect("Timestamp missing");
         // RFC3339 format can use either "Z" or "+00:00" for UTC
         assert!(
             timestamp.contains("T") && (timestamp.contains("Z") || timestamp.contains("+00:00")),
@@ -650,17 +655,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_data_validation() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let data_path = temp_dir.path().join("data");
-        fs::create_dir_all(&data_path).await.unwrap();
+        fs::create_dir_all(&data_path).await.expect("Failed to create data dir");
 
         // Create required files
-        fs::write(data_path.join("models.json"), "{}").await.unwrap();
-        fs::write(data_path.join("cache.bin"), "").await.unwrap();
-        fs::write(data_path.join("metadata.json"), "{}").await.unwrap();
+        fs::write(data_path.join("models.json"), "{}")
+            .await
+            .expect("Failed to write models.json");
+        fs::write(data_path.join("cache.bin"), "")
+            .await
+            .expect("Failed to write cache.bin");
+        fs::write(data_path.join("metadata.json"), "{}")
+            .await
+            .expect("Failed to write metadata.json");
 
         let migrator = DataMigrator::new("1.0.0".to_string(), "2.0.0".to_string());
-        let results = migrator.validate_migrated_data(&data_path).await.unwrap();
+        let results = migrator
+            .validate_migrated_data(&data_path)
+            .await
+            .expect("Failed to validate data");
 
         // Should pass validation since all critical files exist
         assert!(results.iter().all(|r| r.status != ValidationStatus::Failed));
@@ -668,26 +682,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_backup_and_rollback() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let data_path = temp_dir.path().join("data");
         let backup_path = temp_dir.path().join("backup");
 
-        fs::create_dir_all(&data_path).await.unwrap();
-        fs::write(data_path.join("test.json"), r#"{"test": "data"}"#).await.unwrap();
+        fs::create_dir_all(&data_path).await.expect("Failed to create data dir");
+        fs::write(data_path.join("test.json"), r#"{"test": "data"}"#)
+            .await
+            .expect("Failed to write test file");
 
         let migrator = DataMigrator::new("1.0.0".to_string(), "2.0.0".to_string());
 
         // Create backup
-        migrator.copy_directory_recursive(&data_path, &backup_path).await.unwrap();
+        migrator
+            .copy_directory_recursive(&data_path, &backup_path)
+            .await
+            .expect("Failed to create backup");
 
         // Modify original
-        fs::write(data_path.join("test.json"), r#"{"test": "modified"}"#).await.unwrap();
+        fs::write(data_path.join("test.json"), r#"{"test": "modified"}"#)
+            .await
+            .expect("Failed to modify file");
 
         // Rollback
-        migrator.rollback_data_migration(&backup_path, &data_path).await.unwrap();
+        migrator
+            .rollback_data_migration(&backup_path, &data_path)
+            .await
+            .expect("Failed to rollback");
 
         // Verify rollback worked
-        let content = fs::read_to_string(data_path.join("test.json")).await.unwrap();
+        let content = fs::read_to_string(data_path.join("test.json"))
+            .await
+            .expect("Failed to read file");
         assert_eq!(content, r#"{"test": "data"}"#);
     }
 }
