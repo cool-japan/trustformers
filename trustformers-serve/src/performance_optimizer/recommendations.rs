@@ -892,7 +892,9 @@ impl RecommendationEngine {
                 requirements: vec!["system_access".to_string(), "monitoring_tools".to_string()],
                 success_criteria: vec!["resource_utilization_improved".to_string()],
             });
-            estimated_time += steps.last().unwrap().duration;
+            if let Some(last_step) = steps.last() {
+                estimated_time += last_step.duration;
+            }
         }
 
         Ok(ImplementationGuide {

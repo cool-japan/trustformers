@@ -374,7 +374,7 @@ impl ModelDesigner {
     ) -> String {
         let base_name = requirements.task_type.name();
         let size_suffix = self.get_size_suffix(design);
-        let domain_prefix = requirements.domain.as_deref().unwrap_or("general");
+        let domain_prefix = requirements.domain.as_deref().unwrap_or_else(|| "general");
 
         format!("{}-{}-{}", domain_prefix, base_name, size_suffix)
     }
@@ -902,13 +902,15 @@ impl ArchitectureTemplate {
     }
 
     pub fn estimate_parameters(&self) -> usize {
-        let hidden_size = *self.base_parameters.get("hidden_size").unwrap_or(&768) as f64;
-        let num_layers = *self.base_parameters.get("num_layers").unwrap_or(&12) as f64;
-        let vocab_size = *self.base_parameters.get("vocab_size").unwrap_or(&32000) as f64;
+        // Use sensible defaults for optional parameters to maintain backward compatibility
+        let hidden_size = *self.base_parameters.get("hidden_size").unwrap_or_else(|| &768) as f64;
+        let num_layers = *self.base_parameters.get("num_layers").unwrap_or_else(|| &12) as f64;
+        let vocab_size = *self.base_parameters.get("vocab_size").unwrap_or_else(|| &32000) as f64;
+        let default_intermediate = (hidden_size * 4.0) as i32;
         let intermediate_size = *self
             .base_parameters
             .get("intermediate_size")
-            .unwrap_or(&((hidden_size * 4.0) as i32)) as f64;
+            .unwrap_or_else(|| &default_intermediate) as f64;
 
         // Parameter estimation for transformer architectures
         let embedding_params = vocab_size * hidden_size;
@@ -926,8 +928,9 @@ impl ArchitectureTemplate {
     }
 
     pub fn estimate_flops(&self) -> f64 {
-        let hidden_size = *self.base_parameters.get("hidden_size").unwrap_or(&768) as f64;
-        let num_layers = *self.base_parameters.get("num_layers").unwrap_or(&12) as f64;
+        // Use sensible defaults for missing parameters
+        let hidden_size = *self.base_parameters.get("hidden_size").unwrap_or_else(|| &768) as f64;
+        let num_layers = *self.base_parameters.get("num_layers").unwrap_or_else(|| &12) as f64;
         let seq_length = 512.0; // Assumed sequence length
 
         // Rough FLOP estimation for transformer forward pass

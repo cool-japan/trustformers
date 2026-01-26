@@ -1,7 +1,7 @@
 use crate::command_r::config::CommandRConfig;
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use trustformers_core::{
-    errors::{invalid_config, tensor_op_error, Result},
+    errors::{invalid_config, tensor_op_error, Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     ops::activations::silu,
     tensor::Tensor,
@@ -46,8 +46,16 @@ impl CommandRRoPE {
             self.create_cache(seq_len)?;
         }
 
-        let cos = self.cos_cache.as_ref().expect("operation failed");
-        let sin = self.sin_cache.as_ref().expect("operation failed");
+        let cos = self.cos_cache.as_ref().ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "cos_cache not initialized after create_cache".to_string(),
+            )
+        })?;
+        let sin = self.sin_cache.as_ref().ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "sin_cache not initialized after create_cache".to_string(),
+            )
+        })?;
 
         Ok((cos.clone(), sin.clone()))
     }
@@ -1319,13 +1327,18 @@ impl CommandRForCausalLM {
 
             println!("Attempting to download {}", file_url);
 
+            // Convert path to string once for both commands
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!("Invalid UTF-8 in path: {:?}", file_path))
+            })?;
+
             // Try using curl first
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -1348,13 +1361,7 @@ impl CommandRForCausalLM {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {

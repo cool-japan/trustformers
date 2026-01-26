@@ -999,22 +999,14 @@ mod tests {
 
         // Check that gradient is set
         assert_eq!(
-            optimizer
-                .gradients
-                .lock()
-                .expect("Mutex lock poisoned")
-                .len(),
+            optimizer.gradients.lock().expect("Mutex lock poisoned").len(),
             1
         );
 
         // Zero gradients
         optimizer.zero_grad(false).unwrap();
         assert_eq!(
-            optimizer
-                .gradients
-                .lock()
-                .expect("Mutex lock poisoned")
-                .len(),
+            optimizer.gradients.lock().expect("Mutex lock poisoned").len(),
             0
         );
     }

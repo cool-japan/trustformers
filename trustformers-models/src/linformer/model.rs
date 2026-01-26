@@ -3,7 +3,7 @@ use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -796,13 +796,21 @@ impl LinformerModel {
             );
             let output_path = model_path.join(file);
 
+            // Convert path to string once for both commands
+            let output_path_str = output_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!(
+                    "Invalid UTF-8 in path: {:?}",
+                    output_path
+                ))
+            })?;
+
             // Try curl first
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail silently on HTTP errors
                     "-o",
-                    output_path.to_str().expect("operation failed"),
+                    output_path_str,
                     &url,
                 ])
                 .output();
@@ -815,7 +823,7 @@ impl LinformerModel {
                         .args([
                             "-q", // Quiet mode
                             "-O",
-                            output_path.to_str().expect("operation failed"),
+                            output_path_str,
                             &url,
                         ])
                         .output();
@@ -907,12 +915,19 @@ impl Model for LinformerForSequenceClassification {
                     let batch_size = shape[0];
                     let hidden_size = shape[2];
 
+                    let arr_slice = arr.as_slice().ok_or_else(|| {
+                        TrustformersError::tensor_op_error(
+                            "extract_cls_embeddings",
+                            "Tensor is not contiguous in memory",
+                        )
+                    })?;
+
                     let mut cls_data = Vec::with_capacity(batch_size * hidden_size);
                     for b in 0..batch_size {
                         for h in 0..hidden_size {
                             // Take first token (index 0) for each batch
                             let idx = (b * shape[1]) * hidden_size + h;
-                            cls_data.push(arr.as_slice().expect("operation failed")[idx]);
+                            cls_data.push(arr_slice[idx]);
                         }
                     }
 

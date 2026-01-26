@@ -245,7 +245,7 @@ impl MemoryBuffer {
                         .priorities
                         .iter()
                         .enumerate()
-                        .min_by(|a, b| a.1.partial_cmp(b.1).expect("operation failed"))
+                        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                         .map(|(idx, _)| idx)
                         .unwrap_or(0);
 

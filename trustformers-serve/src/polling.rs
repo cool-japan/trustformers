@@ -268,7 +268,8 @@ impl LongPollingService {
         }
 
         // Close all active connections
-        let mut connections_lock = self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
+        let mut connections_lock =
+            self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
         for (_, conn) in connections_lock.drain() {
             let _ = conn.response_sender.send(LongPollResponse {
                 events: vec![],
@@ -285,7 +286,8 @@ impl LongPollingService {
     pub async fn poll(&self, request: LongPollRequest) -> Result<LongPollResponse> {
         // Check connection limits
         {
-            let connections_lock = self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
+            let connections_lock =
+                self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             if connections_lock.len() >= self.config.max_concurrent_connections {
                 return Ok(LongPollResponse {
                     events: vec![],
@@ -328,7 +330,8 @@ impl LongPollingService {
 
         // Store connection
         {
-            let mut connections_lock = self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
+            let mut connections_lock =
+                self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             connections_lock.insert(connection_id.clone(), connection);
         }
 
@@ -336,7 +339,8 @@ impl LongPollingService {
         {
             let mut stats = self.stats.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             stats.total_connections_served += 1;
-            stats.active_connections = self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?.len();
+            stats.active_connections =
+                self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?.len();
         }
 
         // Subscribe to events
@@ -394,14 +398,16 @@ impl LongPollingService {
 
         // Clean up connection
         {
-            let mut connections_lock = self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
+            let mut connections_lock =
+                self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             connections_lock.remove(&connection_id);
         }
 
         // Update stats
         {
             let mut stats = self.stats.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
-            stats.active_connections = self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?.len();
+            stats.active_connections =
+                self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?.len();
         }
 
         Ok(response)

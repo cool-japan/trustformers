@@ -1,5 +1,5 @@
 use trustformers_core::{
-    errors::Result,
+    errors::{Result, TrustformersError},
     layers::{LayerNorm, Linear},
     tensor::{DType, Tensor},
     traits::Layer,
@@ -158,7 +158,11 @@ impl SpikingLayer {
 
         // Recurrent current
         let recurrent_current = {
-            let neuron_states = self.neuron_states.as_ref().expect("operation failed");
+            let neuron_states = self.neuron_states.as_ref().ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "Neuron states not initialized in forward_timestep".to_string(),
+                )
+            })?;
             self.recurrent_projection.forward(neuron_states.spikes.clone())?
         };
 
@@ -167,7 +171,11 @@ impl SpikingLayer {
 
         // Update neuron dynamics based on model type (simplified for compilation)
         {
-            let neuron_states = self.neuron_states.as_mut().expect("operation failed");
+            let neuron_states = self.neuron_states.as_mut().ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "Neuron states not initialized in forward_timestep".to_string(),
+                )
+            })?;
             // Simple leaky integrate and fire dynamics for all models for now
             let dt = 0.001; // timestep
             let tau = 0.02; // membrane time constant
@@ -189,8 +197,16 @@ impl SpikingLayer {
 
         // Update synaptic plasticity (simplified)
         {
-            let neuron_states = self.neuron_states.as_mut().expect("operation failed");
-            let synaptic_states = self.synaptic_states.as_mut().expect("operation failed");
+            let neuron_states = self.neuron_states.as_mut().ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "Neuron states not initialized in forward_timestep".to_string(),
+                )
+            })?;
+            let synaptic_states = self.synaptic_states.as_mut().ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "Synaptic states not initialized in forward_timestep".to_string(),
+                )
+            })?;
 
             // Simple STDP-like plasticity update
             let learning_rate = 0.001;
@@ -210,7 +226,11 @@ impl SpikingLayer {
 
         // Apply layer normalization to spikes
         let output = {
-            let neuron_states = self.neuron_states.as_ref().expect("operation failed");
+            let neuron_states = self.neuron_states.as_ref().ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "Neuron states not initialized in forward_timestep".to_string(),
+                )
+            })?;
             self.layer_norm.forward(neuron_states.spikes.clone())?
         };
 
@@ -270,7 +290,11 @@ impl SpikingLayer {
         let c = -65.0; // reset value
         let d = 2.0; // after-spike reset of u
 
-        let u_recovery = states.u_recovery.as_mut().expect("operation failed");
+        let u_recovery = states.u_recovery.as_mut().ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "Recovery variable not initialized for Izhikevich model".to_string(),
+            )
+        })?;
 
         // Membrane potential dynamics
         let v_squared = states.v_mem.pow_scalar(2.0)?;
@@ -327,7 +351,11 @@ impl SpikingLayer {
         let a = 2.0; // adaptation coupling
         let b = 0.0; // adaptation increment
 
-        let adaptation = states.adaptation.as_mut().expect("operation failed");
+        let adaptation = states.adaptation.as_mut().ok_or_else(|| {
+            TrustformersError::runtime_error(
+                "Adaptation current not initialized for AdExp model".to_string(),
+            )
+        })?;
 
         // Exponential term
         let exp_term = states.v_mem.sub_scalar(v_t)?.div_scalar(delta_t)?.exp()?;

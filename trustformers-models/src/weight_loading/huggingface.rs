@@ -243,7 +243,12 @@ impl HuggingFaceLoader {
             self.file_handles.insert(filename.to_string(), reader);
         }
 
-        Ok(self.file_handles.get_mut(filename).expect("operation failed"))
+        self.file_handles.get_mut(filename).ok_or_else(|| {
+            TrustformersError::runtime_error(format!(
+                "File handle for {} not found after insertion",
+                filename
+            ))
+        })
     }
 
     /// Load tensor from PyTorch .bin file

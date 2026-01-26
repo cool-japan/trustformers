@@ -624,9 +624,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert(
             "lr".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(0.001).expect("Invalid constant"),
-            ),
+            Value::Number(serde_json::Number::from_f64(0.001).expect("Invalid constant")),
         );
 
         let mapped = converter
@@ -664,9 +662,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert(
             "lr".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(0.001).expect("Invalid constant"),
-            ),
+            Value::Number(serde_json::Number::from_f64(0.001).expect("Invalid constant")),
         );
 
         utils::validate_parameters("Adam", &params).unwrap();
@@ -674,9 +670,7 @@ mod tests {
         // Test invalid learning rate
         params.insert(
             "lr".to_string(),
-            Value::Number(
-                serde_json::Number::from_f64(-0.001).expect("Invalid constant"),
-            ),
+            Value::Number(serde_json::Number::from_f64(-0.001).expect("Invalid constant")),
         );
         assert!(utils::validate_parameters("Adam", &params).is_err());
     }

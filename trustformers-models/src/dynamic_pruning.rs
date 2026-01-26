@@ -395,23 +395,43 @@ impl DynamicPruner {
     ) -> Result<PruningResult> {
         match &self.strategy {
             PruningStrategy::AttentionBased => {
-                let config = self.attention_config.as_ref().expect("operation failed");
+                let config = self.attention_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "AttentionBased strategy requires attention_config".to_string(),
+                    )
+                })?;
                 self.attention_based_pruning(hidden_states, attention_scores, config)
             },
             PruningStrategy::ConfidenceBased => {
-                let config = self.confidence_config.as_ref().expect("operation failed");
+                let config = self.confidence_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "ConfidenceBased strategy requires confidence_config".to_string(),
+                    )
+                })?;
                 self.confidence_based_pruning(hidden_states, config)
             },
             PruningStrategy::LearnedGates => {
-                let config = self.learned_gate_config.as_ref().expect("operation failed");
+                let config = self.learned_gate_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "LearnedGates strategy requires learned_gate_config".to_string(),
+                    )
+                })?;
                 self.learned_gate_pruning(hidden_states, config)
             },
             PruningStrategy::LayerAdaptive => {
-                let config = self.layer_adaptive_config.as_ref().expect("operation failed");
+                let config = self.layer_adaptive_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "LayerAdaptive strategy requires layer_adaptive_config".to_string(),
+                    )
+                })?;
                 self.layer_adaptive_pruning(hidden_states, layer_index.unwrap_or(0), config)
             },
             PruningStrategy::Progressive => {
-                let config = self.progressive_config.as_ref().expect("operation failed");
+                let config = self.progressive_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "Progressive strategy requires progressive_config".to_string(),
+                    )
+                })?;
                 self.progressive_pruning(
                     hidden_states,
                     layer_index.unwrap_or(0),
@@ -549,7 +569,11 @@ impl DynamicPruner {
         hidden_states: &Tensor,
         _config: &LearnedGatePruningConfig,
     ) -> Result<PruningResult> {
-        let gate_network = self.gate_network.as_ref().expect("operation failed");
+        let gate_network = self.gate_network.as_ref().ok_or_else(|| {
+            TrustformersError::invalid_config(
+                "LearnedGates strategy requires gate_network to be initialized".to_string(),
+            )
+        })?;
 
         // Compute gate probabilities
         let gate_probs = gate_network.forward(hidden_states)?;
@@ -1006,7 +1030,7 @@ impl DynamicPruner {
             importance_scores.iter().enumerate().map(|(i, &score)| (i, score)).collect();
 
         // Sort by importance (descending)
-        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
+        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut keep_mask = vec![false; seq_len];
         let mut pruning_reasons = vec![PruningReason::LowAttention; seq_len];

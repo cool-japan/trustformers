@@ -658,12 +658,15 @@ impl GptJLMHeadModel {
             println!("Attempting to download {}", file_url);
 
             // Try using curl first
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::io_error("Invalid file path encoding".to_string())
+            })?;
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -686,13 +689,7 @@ impl GptJLMHeadModel {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {
@@ -906,7 +903,7 @@ fn apply_top_k_filtering_gpt_j(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f
         logits.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
 
     // Sort by value in descending order
-    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
+    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Set all values outside top-k to -inf
     for (idx, _) in indices_and_values.iter().skip(k) {
@@ -923,7 +920,7 @@ fn apply_top_p_filtering_gpt_j(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32
         probs.iter().enumerate().map(|(idx, &prob)| (idx, prob)).collect();
 
     // Sort by probability in descending order
-    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
+    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Find the smallest set of tokens with cumulative probability > p
     let mut cumsum = 0.0;

@@ -198,7 +198,12 @@ impl DistributedWeightLoader {
             self.local_loaders.insert(loader_key.clone(), loader);
         }
 
-        let loader = self.local_loaders.get_mut(&loader_key).expect("operation failed");
+        let loader = self.local_loaders.get_mut(&loader_key).ok_or_else(|| {
+            TrustformersError::runtime_error(format!(
+                "Loader for {} not found after insertion",
+                loader_key
+            ))
+        })?;
         loader.load_tensor(name)
     }
 

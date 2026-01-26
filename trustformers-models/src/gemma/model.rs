@@ -2,7 +2,7 @@ use crate::gemma::config::GemmaConfig;
 use std::io::Read;
 use trustformers_core::{
     device::Device,
-    errors::{tensor_op_error, Result},
+    errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, Linear},
     ops::activations::gelu,
     tensor::Tensor,
@@ -628,13 +628,18 @@ impl GemmaForCausalLM {
 
             println!("Attempting to download {}", file_url);
 
+            // Convert path to string once for both commands
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!("Invalid UTF-8 in path: {:?}", file_path))
+            })?;
+
             // Try using curl first
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -657,13 +662,7 @@ impl GemmaForCausalLM {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {

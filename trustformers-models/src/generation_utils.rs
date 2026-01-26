@@ -486,7 +486,7 @@ impl GenerationUtils {
 
         // Get top-k indices
         let mut indexed_logits: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
+        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         indexed_logits.truncate(k);
 
         // Compute probabilities for top-k
@@ -509,7 +509,7 @@ impl GenerationUtils {
 
         // Sort by probability (descending)
         let mut indexed_logits: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
-        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
+        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Compute probabilities
         let sorted_logits: Vec<f32> = indexed_logits.iter().map(|(_, logit)| *logit).collect();
@@ -558,9 +558,11 @@ impl GenerationUtils {
             let max_idx = logits
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("operation failed"))
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, _)| idx)
-                .expect("operation failed");
+                .ok_or_else(|| {
+                    TrustformersError::tensor_op_error("sample_top_p", "Empty logits vector")
+                })?;
             return Ok(max_idx as u32);
         }
 
@@ -595,7 +597,7 @@ impl GenerationUtils {
         logits
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("operation failed"))
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx as u32)
             .unwrap_or(0)
     }

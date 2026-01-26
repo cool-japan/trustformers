@@ -195,38 +195,41 @@ fn test_config_with_methods() {
 }
 
 #[test]
-fn test_memory_state_creation() {
-    let memory = MemoryState::new(2, 1024, 768);
+fn test_memory_state_creation() -> Result<()> {
+    let memory = MemoryState::new(2, 1024, 768)?;
     // MemoryState created successfully - implementation details are private
 
-    let content = memory.get_content().expect("operation failed");
+    let content = memory.get_content()?;
     assert_eq!(content.shape(), &[2, 1024, 768]);
+    Ok(())
 }
 
 #[test]
-fn test_memory_state_update() {
-    let mut memory = MemoryState::new(1, 1024, 768);
-    let new_content = Tensor::ones(&[1, 256, 768]).expect("operation failed");
+fn test_memory_state_update() -> Result<()> {
+    let mut memory = MemoryState::new(1, 1024, 768)?;
+    let new_content = Tensor::ones(&[1, 256, 768])?;
 
     assert!(memory.update(new_content).is_ok());
     // Memory update successful - write head position is internal
 
     // Test circular buffer behavior
-    let large_content = Tensor::ones(&[1, 1000, 768]).expect("operation failed");
+    let large_content = Tensor::ones(&[1, 1000, 768])?;
     assert!(memory.update(large_content).is_ok());
     // Large content update successful - circular buffer behavior handled internally
+    Ok(())
 }
 
 #[test]
-fn test_memory_state_read() {
-    let mut memory = MemoryState::new(1, 1024, 768);
-    let content = memory.read(256).expect("operation failed");
+fn test_memory_state_read() -> Result<()> {
+    let mut memory = MemoryState::new(1, 1024, 768)?;
+    let content = memory.read(256)?;
     assert_eq!(content.shape(), &[1, 256, 768]);
     // Read head position updated successfully - position is internal
 
     // Test circular read
-    let _ = memory.read(1000);
+    let _ = memory.read(1000)?;
     // Circular read successful - read head position handled internally
+    Ok(())
 }
 
 #[test]
@@ -360,12 +363,12 @@ fn test_recursive_transformer_long_sequence() {
 }
 
 #[test]
-fn test_recursive_transformer_with_memory() {
+fn test_recursive_transformer_with_memory() -> Result<()> {
     let config = RecursiveConfig::default();
-    let model = RecursiveTransformer::new(config.clone()).expect("operation failed");
+    let model = RecursiveTransformer::new(config.clone())?;
 
-    let input_ids = Tensor::zeros(&[1, 100]).expect("operation failed");
-    let memory_state = MemoryState::new(1, config.memory_size, config.hidden_size);
+    let input_ids = Tensor::zeros(&[1, 100])?;
+    let memory_state = MemoryState::new(1, config.memory_size, config.hidden_size)?;
 
     let input = RecursiveInput {
         input_ids,
@@ -381,8 +384,9 @@ fn test_recursive_transformer_with_memory() {
         result.err()
     );
 
-    let _output = result.expect("operation failed");
+    let _output = result?;
     // Memory state initialized with correct capacity - capacity is internal
+    Ok(())
 }
 
 #[test]
@@ -441,20 +445,21 @@ fn test_sequence_classification_forward() {
 }
 
 #[test]
-fn test_depth_predictor_predict() {
+fn test_depth_predictor_predict() -> Result<()> {
     let config = RecursiveConfig::default();
-    let predictor = DepthPredictor::new(config).expect("operation failed");
-    let memory = MemoryState::new(1, 1024, 768);
+    let predictor = DepthPredictor::new(config)?;
+    let memory = MemoryState::new(1, 1024, 768)?;
 
     // Test short sequence
-    let short_seq = Tensor::zeros(&[1, 100]).expect("operation failed");
-    let depth = predictor.predict_depth(&short_seq, &memory).expect("operation failed");
+    let short_seq = Tensor::zeros(&[1, 100])?;
+    let depth = predictor.predict_depth(&short_seq, &memory)?;
     assert!((1..=5).contains(&depth));
 
     // Test long sequence
-    let long_seq = Tensor::zeros(&[1, 5000]).expect("operation failed");
-    let depth = predictor.predict_depth(&long_seq, &memory).expect("operation failed");
+    let long_seq = Tensor::zeros(&[1, 5000])?;
+    let depth = predictor.predict_depth(&long_seq, &memory)?;
     assert!(depth >= 3); // Should predict higher depth for longer sequences
+    Ok(())
 }
 
 #[test]
@@ -501,11 +506,11 @@ fn test_convenience_functions() {
 }
 
 #[test]
-fn test_utility_functions() {
+fn test_utility_functions() -> Result<()> {
     let config = RecursiveConfig::default();
 
     // Test memory state creation
-    let _memory = create_memory_state(2, &config);
+    let _memory = create_memory_state(2, &config)?;
     // Memory state created with correct capacity - capacity is internal
 
     // Test optimal chunk size calculation
@@ -515,6 +520,8 @@ fn test_utility_functions() {
     // Test memory usage estimation
     let memory_usage = estimate_memory_usage(&config, 1000);
     assert!(memory_usage > 0); // Should return positive MB estimate
+
+    Ok(())
 }
 
 #[test]

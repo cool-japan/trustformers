@@ -1147,20 +1147,14 @@ impl AnalysisOrchestrator {
     /// Update phase statistics
     async fn update_phase_statistics(&self, phase: &AnalysisPhase, duration: Duration) {
         {
-            let mut counts = self
-                .orchestration_stats
-                .phase_execution_counts
-                .lock()
-                .expect("Lock poisoned");
+            let mut counts =
+                self.orchestration_stats.phase_execution_counts.lock().expect("Lock poisoned");
             *counts.entry(phase.clone()).or_insert(0) += 1;
         }
 
         {
-            let mut durations = self
-                .orchestration_stats
-                .phase_average_durations
-                .lock()
-                .expect("Lock poisoned");
+            let mut durations =
+                self.orchestration_stats.phase_average_durations.lock().expect("Lock poisoned");
             let current_avg = durations.get(phase).cloned().unwrap_or(0);
             let new_avg = if current_avg == 0 {
                 duration.as_millis() as u64

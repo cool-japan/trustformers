@@ -38,7 +38,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use trustformers_core::{errors::invalid_input, tensor::Tensor, Result};
+use trustformers_core::{
+    errors::{invalid_input, TrustformersError},
+    tensor::Tensor,
+    Result,
+};
 
 /// Hybrid architecture configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1529,7 +1533,11 @@ impl HybridArchitecture {
 
     /// Create cross-modal processor
     fn create_cross_modal_processor(config: &HybridConfig) -> Result<CrossModalProcessor> {
-        let cross_modal_config = config.cross_modal_config.as_ref().expect("operation failed");
+        let cross_modal_config = config.cross_modal_config.as_ref().ok_or_else(|| {
+            TrustformersError::invalid_config(
+                "cross_modal_config required for cross-modal processing".to_string(),
+            )
+        })?;
 
         let mut modality_encoders = HashMap::new();
         for modality in &cross_modal_config.modalities {

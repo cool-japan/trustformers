@@ -300,7 +300,9 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
             DifficultyMeasure::LossBasedDifficulty => {
                 let outputs = self.model.forward(input.clone())?;
                 let loss = self.compute_loss(&outputs, target)?;
-                Ok(loss.to_scalar().unwrap_or(0.0))
+                loss.to_scalar().map_err(|e| {
+                    invalid_input(format!("Failed to convert loss tensor to scalar: {}", e))
+                })
             },
             DifficultyMeasure::GradientNormDifficulty => {
                 // Compute gradient norm as difficulty measure
@@ -361,7 +363,9 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
             DifficultyMeasure::LossBasedDifficulty => {
                 let outputs = self.model.forward(input.clone())?;
                 let loss = self.compute_loss(&outputs, target)?;
-                Ok(loss.to_scalar().unwrap_or(0.0))
+                loss.to_scalar().map_err(|e| {
+                    invalid_input(format!("Failed to convert loss tensor to scalar: {}", e))
+                })
             },
             DifficultyMeasure::LengthDifficulty => {
                 let seq_len = input.shape()[1] as f32; // Assuming [batch, seq_len, ...]
@@ -402,8 +406,9 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
 
     /// Sort examples by difficulty
     fn sort_examples_by_difficulty(&mut self) {
-        self.examples
-            .sort_by(|a, b| a.difficulty.partial_cmp(&b.difficulty).expect("operation failed"));
+        self.examples.sort_by(|a, b| {
+            a.difficulty.partial_cmp(&b.difficulty).unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 
     /// Get current curriculum subset
@@ -633,7 +638,10 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
             let loss = self.compute_loss(&outputs, &example.target)?;
             let accuracy = self.compute_accuracy(&outputs, &example.target)?;
 
-            total_loss += loss.to_scalar().unwrap_or(0.0) * example.weight;
+            let loss_scalar = loss.to_scalar().map_err(|e| {
+                invalid_input(format!("Failed to convert loss tensor to scalar: {}", e))
+            })?;
+            total_loss += loss_scalar * example.weight;
             total_accuracy += accuracy;
             num_steps += 1;
         }
@@ -728,7 +736,12 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
             (Tensor::F32(log_prob_arr), Tensor::F32(target_arr)) => {
                 // Assuming targets are one-hot encoded or class indices
                 let batch_size = log_prob_arr.shape()[0];
-                let num_classes = log_prob_arr.shape().get(1).copied().unwrap_or(1);
+                let num_classes = log_prob_arr.shape().get(1).copied().ok_or_else(|| {
+                    invalid_input(format!(
+                        "Invalid tensor shape: expected at least 2 dimensions, got {}",
+                        log_prob_arr.shape().len()
+                    ))
+                })?;
 
                 let mut total_loss = 0.0f32;
 
@@ -801,7 +814,9 @@ impl<M: Model<Input = Tensor, Output = Tensor>> CurriculumLearningTrainer<M> {
                 } else {
                     // Multi-dimensional tensor - flatten and find global argmax
                     let mut max_idx = 0;
-                    let mut max_val = arr.iter().next().copied().unwrap_or(0.0);
+                    let mut max_val = arr.iter().next().copied().ok_or_else(|| {
+                        invalid_input("Cannot compute argmax on empty tensor".to_string())
+                    })?;
 
                     for (idx, &val) in arr.iter().enumerate() {
                         if val > max_val {
@@ -975,7 +990,12 @@ pub mod utils {
             let outputs = model.forward(input.clone())?;
             // Use a simple cross-entropy loss calculation without trainer for difficulty estimation
             let loss = simple_cross_entropy_loss(&outputs, &target)?;
-            let difficulty = loss.to_scalar().unwrap_or(0.0);
+            let difficulty = loss.to_scalar().map_err(|e| {
+                invalid_input(format!(
+                    "Failed to convert loss tensor to scalar for difficulty estimation: {}",
+                    e
+                ))
+            })?;
 
             examples.push(CurriculumExample::new(input, target, difficulty));
         }
@@ -1037,8 +1057,15 @@ pub mod utils {
         baseline_accuracies: &[f32],
         curriculum_accuracies: &[f32],
     ) -> CurriculumAnalysis {
-        let baseline_final = baseline_accuracies.last().copied().unwrap_or(0.0);
-        let curriculum_final = curriculum_accuracies.last().copied().unwrap_or(0.0);
+        // Use 0.0 as default for empty accuracy arrays (no training = no accuracy)
+        let baseline_final = baseline_accuracies.last().copied().unwrap_or_else(|| {
+            eprintln!("Warning: Empty baseline accuracies array, using 0.0");
+            0.0
+        });
+        let curriculum_final = curriculum_accuracies.last().copied().unwrap_or_else(|| {
+            eprintln!("Warning: Empty curriculum accuracies array, using 0.0");
+            0.0
+        });
 
         let improvement = curriculum_final - baseline_final;
 

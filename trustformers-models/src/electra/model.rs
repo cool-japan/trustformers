@@ -67,9 +67,10 @@ impl ElectraEmbeddings {
         let seq_len = input_ids.len();
 
         // Word embeddings
-        let word_emb = self
-            .word_embeddings
-            .forward_ids(input_ids.as_slice().expect("operation failed"))?;
+        let input_ids_slice = input_ids.as_slice().ok_or_else(|| {
+            TrustformersError::tensor_op_error("forward", "input_ids is not contiguous in memory")
+        })?;
+        let word_emb = self.word_embeddings.forward_ids(input_ids_slice)?;
         let word_emb_2d = match word_emb {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()
@@ -88,9 +89,10 @@ impl ElectraEmbeddings {
         } else {
             (0..seq_len as u32).collect()
         };
-        let pos_emb = self
-            .position_embeddings
-            .forward_ids(pos_ids.as_slice().expect("operation failed"))?;
+        let pos_ids_slice = pos_ids.as_slice().ok_or_else(|| {
+            TrustformersError::tensor_op_error("forward", "pos_ids is not contiguous in memory")
+        })?;
+        let pos_emb = self.position_embeddings.forward_ids(pos_ids_slice)?;
         let pos_emb_2d = match pos_emb {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()
@@ -109,9 +111,10 @@ impl ElectraEmbeddings {
         } else {
             Array1::zeros(seq_len)
         };
-        let tt_emb = self
-            .token_type_embeddings
-            .forward_ids(tt_ids.as_slice().expect("operation failed"))?;
+        let tt_ids_slice = tt_ids.as_slice().ok_or_else(|| {
+            TrustformersError::tensor_op_error("forward", "tt_ids is not contiguous in memory")
+        })?;
+        let tt_emb = self.token_type_embeddings.forward_ids(tt_ids_slice)?;
         let tt_emb_2d = match tt_emb {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()

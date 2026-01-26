@@ -1116,7 +1116,8 @@ impl AggregationWindow {
         // Remove data points older than window duration
         while let Some(front) = data_points.front() {
             if now.signed_duration_since(front.timestamp)
-                > chrono::Duration::from_std(self.duration).unwrap_or_else(|_| chrono::Duration::zero())
+                > chrono::Duration::from_std(self.duration)
+                    .unwrap_or_else(|_| chrono::Duration::zero())
             {
                 data_points.pop_front();
             } else {

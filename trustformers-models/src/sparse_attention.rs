@@ -737,18 +737,18 @@ pub mod utils {
     pub fn analyze_pattern_efficiency(
         pattern: &SparsePattern,
         sequence_length: usize,
-    ) -> PatternAnalysis {
+    ) -> Result<PatternAnalysis> {
         let config = SparseAttentionConfig::new().with_pattern(pattern.clone());
-        let attention = SparseAttention::new(config).expect("Failed to create attention");
-        let mask = attention.generate_mask(sequence_length).expect("Failed to generate mask");
+        let attention = SparseAttention::new(config)?;
+        let mask = attention.generate_mask(sequence_length)?;
 
-        PatternAnalysis {
+        Ok(PatternAnalysis {
             sparsity: mask.sparsity(),
             memory_reduction: mask.sparsity(),
             compute_reduction: mask.sparsity(),
             effective_receptive_field: calculate_receptive_field(&mask),
             pattern_regularity: calculate_pattern_regularity(&mask),
-        }
+        })
     }
 
     fn calculate_receptive_field(mask: &SparseAttentionMask) -> f32 {
@@ -866,7 +866,7 @@ mod tests {
     #[test]
     fn test_pattern_analysis() {
         let pattern = SparsePattern::Local { window_size: 4 };
-        let analysis = utils::analyze_pattern_efficiency(&pattern, 16);
+        let analysis = utils::analyze_pattern_efficiency(&pattern, 16).unwrap();
 
         assert!(analysis.sparsity > 0.0);
         assert!(analysis.sparsity < 1.0);

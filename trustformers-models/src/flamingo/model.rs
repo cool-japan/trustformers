@@ -4,6 +4,7 @@ use crate::flamingo::config::{
 };
 use trustformers_core::{
     device::Device,
+    errors::TrustformersError,
     kernels::fused_ops::ActivationType,
     layers::{
         attention::{AttentionConfig, MultiHeadAttention},
@@ -647,11 +648,12 @@ impl FlamingoLanguageLayer {
         let hidden_states = if let (Some(cross_attention), Some(vision_features)) =
             (&self.cross_attention, &vision_features)
         {
-            let normed_states = self
-                .layer_norm3
-                .as_ref()
-                .expect("operation failed")
-                .forward(hidden_states.clone())?;
+            let layer_norm3 = self.layer_norm3.as_ref().ok_or_else(|| {
+                TrustformersError::invalid_config(
+                    "layer_norm3 must be present when cross_attention is used".to_string(),
+                )
+            })?;
+            let normed_states = layer_norm3.forward(hidden_states.clone())?;
             let cross_output =
                 cross_attention.forward(&normed_states, vision_features, media_locations)?;
             cross_attention_weights = cross_output.attention_weights;

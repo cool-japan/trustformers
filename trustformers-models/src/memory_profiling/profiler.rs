@@ -128,7 +128,10 @@ impl MemoryProfiler {
 
                 // Store metrics
                 {
-                    let mut history = metrics_history.lock().expect("operation failed");
+                    let mut history = match metrics_history.lock() {
+                        Ok(guard) => guard,
+                        Err(_) => continue, // Skip this iteration on lock failure
+                    };
                     history.push_back(final_metrics.clone());
 
                     // Keep only max_data_points
@@ -192,25 +195,37 @@ impl MemoryProfiler {
 
     /// Get current metrics snapshot
     pub async fn get_current_metrics(&self) -> Result<Option<MemoryMetrics>> {
-        let history = self.metrics_history.lock().expect("operation failed");
+        let history = self
+            .metrics_history
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock metrics history: {}", e))?;
         Ok(history.back().cloned())
     }
 
     /// Get all alerts
     pub async fn get_alerts(&self) -> Result<Vec<MemoryAlert>> {
-        let alerts = self.alerts.lock().expect("operation failed");
+        let alerts = self
+            .alerts
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock alerts: {}", e))?;
         Ok(alerts.clone())
     }
 
     /// Get memory patterns
     pub async fn get_patterns(&self) -> Result<Vec<MemoryPattern>> {
-        let patterns = self.patterns.lock().expect("operation failed");
+        let patterns = self
+            .patterns
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock patterns: {}", e))?;
         Ok(patterns.clone())
     }
 
     /// Get adaptive thresholds
     pub async fn get_adaptive_thresholds(&self) -> Result<AdaptiveThresholds> {
-        let thresholds = self.adaptive_thresholds.lock().expect("operation failed");
+        let thresholds = self
+            .adaptive_thresholds
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock adaptive thresholds: {}", e))?;
         Ok(thresholds.clone())
     }
 
@@ -233,7 +248,10 @@ impl MemoryProfiler {
 
     /// Configure leak detection parameters
     pub async fn configure_leak_detection(&self, config: LeakDetectionConfig) -> Result<()> {
-        let mut detection = self.leak_detection.lock().expect("operation failed");
+        let mut detection = self
+            .leak_detection
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock leak detection: {}", e))?;
         *detection = LeakDetectionHeuristics {
             sustained_growth_threshold: config.growth_threshold,
             growth_duration_threshold: Duration::from_secs(config.duration_secs),
@@ -245,7 +263,10 @@ impl MemoryProfiler {
 
     /// Get current leak detection configuration
     pub async fn get_leak_detection_config(&self) -> Result<LeakDetectionConfig> {
-        let detection = self.leak_detection.lock().expect("operation failed");
+        let detection = self
+            .leak_detection
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock leak detection: {}", e))?;
         Ok(LeakDetectionConfig {
             growth_threshold: detection.sustained_growth_threshold,
             duration_secs: detection.growth_duration_threshold.as_secs(),
@@ -259,11 +280,17 @@ impl MemoryProfiler {
         &self,
         horizon_secs: u64,
     ) -> Result<Option<MemoryPrediction>> {
-        let metrics_history = self.metrics_history.lock().expect("operation failed");
+        let metrics_history = self
+            .metrics_history
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock metrics history: {}", e))?;
         let metrics: Vec<MemoryMetrics> = metrics_history.iter().cloned().collect();
         drop(metrics_history);
 
-        let mut predictor = self.memory_predictor.lock().expect("operation failed");
+        let mut predictor = self
+            .memory_predictor
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock memory predictor: {}", e))?;
         Ok(predictor.predict_memory_usage(&metrics, Some(horizon_secs)))
     }
 

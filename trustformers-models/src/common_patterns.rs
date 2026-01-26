@@ -328,7 +328,8 @@ impl ModelUtils {
             InitializationStrategy::Normal { std } => {
                 // Initialize with normal distribution
                 let mut rng = thread_rng();
-                let normal = Normal::new(0.0, *std).expect("operation failed");
+                let normal = Normal::new(0.0, *std)
+                    .map_err(|e| anyhow::anyhow!("Failed to create normal distribution: {}", e))?;
 
                 match tensor {
                     Tensor::F32(data) => {
@@ -384,7 +385,9 @@ impl ModelUtils {
                         };
 
                         let std = (2.0 / (fan_in + fan_out) as f32).sqrt();
-                        let normal = Normal::new(0.0, std).expect("operation failed");
+                        let normal = Normal::new(0.0, std).map_err(|e| {
+                            anyhow::anyhow!("Failed to create normal distribution: {}", e)
+                        })?;
 
                         for value in data.iter_mut() {
                             *value = normal.sample(&mut rng);
@@ -430,7 +433,9 @@ impl ModelUtils {
                         let fan_in = if shape.len() >= 2 { shape[shape.len() - 1] } else { 1 };
 
                         let std = (2.0 / fan_in as f32).sqrt();
-                        let normal = Normal::new(0.0, std).expect("operation failed");
+                        let normal = Normal::new(0.0, std).map_err(|e| {
+                            anyhow::anyhow!("Failed to create normal distribution: {}", e)
+                        })?;
 
                         for value in data.iter_mut() {
                             *value = normal.sample(&mut rng);
@@ -448,7 +453,9 @@ impl ModelUtils {
 
                 match tensor {
                     Tensor::F32(data) => {
-                        let normal = Normal::new(0.0, *std).expect("operation failed");
+                        let normal = Normal::new(0.0, *std).map_err(|e| {
+                            anyhow::anyhow!("Failed to create normal distribution: {}", e)
+                        })?;
 
                         for value in data.iter_mut() {
                             loop {

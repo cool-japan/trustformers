@@ -368,51 +368,50 @@ mod tests {
     use crate::xlstm::config::XLSTMBlockType;
 
     #[test]
-    fn test_xlstm_model_device_support() {
+    fn test_xlstm_model_device_support() -> Result<()> {
         let config = XLSTMConfig::default();
 
         // Test CPU creation (default)
-        let model_cpu = XLSTMModel::new(config.clone()).expect("operation failed");
+        let model_cpu = XLSTMModel::new(config.clone())?;
         assert_eq!(model_cpu.device(), Device::CPU);
 
         // Test explicit CPU creation
-        let model_cpu_explicit =
-            XLSTMModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
+        let model_cpu_explicit = XLSTMModel::new_with_device(config.clone(), Device::CPU)?;
         assert_eq!(model_cpu_explicit.device(), Device::CPU);
 
         // Test Metal device creation
-        let model_metal = XLSTMModel::new_with_device(config.clone(), Device::Metal(0))
-            .expect("operation failed");
+        let model_metal = XLSTMModel::new_with_device(config.clone(), Device::Metal(0))?;
         assert_eq!(model_metal.device(), Device::Metal(0));
 
         // Test CUDA device creation
-        let model_cuda =
-            XLSTMModel::new_with_device(config.clone(), Device::CUDA(0)).expect("operation failed");
+        let model_cuda = XLSTMModel::new_with_device(config.clone(), Device::CUDA(0))?;
         assert_eq!(model_cuda.device(), Device::CUDA(0));
+
+        Ok(())
     }
 
     #[test]
-    fn test_xlstm_for_causal_lm_device_support() {
+    fn test_xlstm_for_causal_lm_device_support() -> Result<()> {
         let config = XLSTMConfig::default();
 
         // Test CPU creation (default)
-        let model_cpu = XLSTMForCausalLM::new(config.clone()).expect("operation failed");
+        let model_cpu = XLSTMForCausalLM::new(config.clone())?;
         assert_eq!(model_cpu.device(), Device::CPU);
 
         // Test explicit device creation
-        let model_metal = XLSTMForCausalLM::new_with_device(config.clone(), Device::Metal(0))
-            .expect("operation failed");
+        let model_metal = XLSTMForCausalLM::new_with_device(config.clone(), Device::Metal(0))?;
         assert_eq!(model_metal.device(), Device::Metal(0));
+
+        Ok(())
     }
 
     #[test]
-    fn test_xlstm_for_sequence_classification_device_support() {
+    fn test_xlstm_for_sequence_classification_device_support() -> Result<()> {
         let config = XLSTMConfig::default();
         let num_labels = 2;
 
         // Test CPU creation (default)
-        let model_cpu = XLSTMForSequenceClassification::new(config.clone(), num_labels)
-            .expect("operation failed");
+        let model_cpu = XLSTMForSequenceClassification::new(config.clone(), num_labels)?;
         assert_eq!(model_cpu.device(), Device::CPU);
 
         // Test explicit device creation
@@ -420,9 +419,10 @@ mod tests {
             config.clone(),
             num_labels,
             Device::CUDA(0),
-        )
-        .expect("operation failed");
+        )?;
         assert_eq!(model_cuda.device(), Device::CUDA(0));
+
+        Ok(())
     }
 
     #[test]
@@ -482,36 +482,37 @@ mod tests {
     }
 
     #[test]
-    fn test_device_propagation() {
+    fn test_device_propagation() -> Result<()> {
         let config = XLSTMConfig::default();
 
         // Create model on Metal
-        let model = XLSTMModel::new_with_device(config.clone(), Device::Metal(0))
-            .expect("operation failed");
+        let model = XLSTMModel::new_with_device(config.clone(), Device::Metal(0))?;
 
         // Verify device is Metal
         assert_eq!(model.device(), Device::Metal(0));
 
         // Create causal LM model on CUDA
-        let causal_lm = XLSTMForCausalLM::new_with_device(config.clone(), Device::CUDA(1))
-            .expect("operation failed");
+        let causal_lm = XLSTMForCausalLM::new_with_device(config.clone(), Device::CUDA(1))?;
         assert_eq!(causal_lm.device(), Device::CUDA(1));
         assert_eq!(causal_lm.xlstm.device(), Device::CUDA(1));
+
+        Ok(())
     }
 
     #[test]
-    fn test_backward_compatibility() {
+    fn test_backward_compatibility() -> Result<()> {
         let config = XLSTMConfig::default();
 
         // Old API should still work and default to CPU
-        let model = XLSTMModel::new(config.clone()).expect("operation failed");
+        let model = XLSTMModel::new(config.clone())?;
         assert_eq!(model.device(), Device::CPU);
 
-        let causal_lm = XLSTMForCausalLM::new(config.clone()).expect("operation failed");
+        let causal_lm = XLSTMForCausalLM::new(config.clone())?;
         assert_eq!(causal_lm.device(), Device::CPU);
 
-        let seq_class =
-            XLSTMForSequenceClassification::new(config.clone(), 2).expect("operation failed");
+        let seq_class = XLSTMForSequenceClassification::new(config.clone(), 2)?;
         assert_eq!(seq_class.device(), Device::CPU);
+
+        Ok(())
     }
 }

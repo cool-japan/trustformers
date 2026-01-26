@@ -635,7 +635,7 @@ impl MetaLearner {
             let predicted_class = distances
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| a.partial_cmp(b).expect("operation failed"))
+                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i)
                 .unwrap_or(0);
 

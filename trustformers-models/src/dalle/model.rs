@@ -124,29 +124,26 @@ impl DalleModel {
         let latents = self.vae.encode(pixel_values)?;
 
         // Add noise for diffusion training
-        let (noisy_latents, noise_pred_target) =
+        let generated_timesteps;
+        let (noisy_latents, noise_pred_target, actual_timesteps) =
             if let (Some(noise), Some(timesteps)) = (noise, timesteps) {
                 let noisy_latents = self.add_noise(&latents, noise, timesteps)?;
-                (noisy_latents, noise.clone())
+                (noisy_latents, noise.clone(), timesteps)
             } else {
                 // Generate random noise and timesteps for training
                 let noise = Tensor::randn_like(&latents)?;
-                let timesteps = Tensor::randint(
+                generated_timesteps = Tensor::randint(
                     0,
                     self.config.num_diffusion_steps as i64,
                     &[latents.shape()[0]],
                     TensorType::I64,
                 )?;
-                let noisy_latents = self.add_noise(&latents, &noise, &timesteps)?;
-                (noisy_latents, noise)
+                let noisy_latents = self.add_noise(&latents, &noise, &generated_timesteps)?;
+                (noisy_latents, noise, &generated_timesteps)
             };
 
         // U-Net noise prediction
-        let noise_pred = self.unet.forward(
-            &noisy_latents,
-            timesteps.as_ref().expect("operation failed"),
-            &text_embeds,
-        )?;
+        let noise_pred = self.unet.forward(&noisy_latents, actual_timesteps, &text_embeds)?;
 
         Ok(DalleModelOutput {
             text_embeds: Some(text_embeds),

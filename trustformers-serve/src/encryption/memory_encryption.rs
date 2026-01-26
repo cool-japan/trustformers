@@ -712,9 +712,12 @@ impl SecureMemoryManager {
                     // Update statistics
                     self.stats.pool_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+                    let buffer_ptr = NonNull::new(block.ptr)
+                        .ok_or_else(|| anyhow::anyhow!("Allocated block has null pointer"))?;
+
                     return Ok(SecureBuffer {
                         id: Uuid::new_v4().to_string(),
-                        buffer: NonNull::new(block.ptr).unwrap(),
+                        buffer: buffer_ptr,
                         size,
                         layout: block.layout,
                         key_id: String::new(),
@@ -748,9 +751,12 @@ impl SecureMemoryManager {
             ptr::write_bytes(ptr, 0, size);
         }
 
+        let buffer_ptr = NonNull::new(ptr)
+            .ok_or_else(|| anyhow::anyhow!("Allocated pointer is null"))?;
+
         let buffer = SecureBuffer {
             id: Uuid::new_v4().to_string(),
-            buffer: NonNull::new(ptr).unwrap(),
+            buffer: buffer_ptr,
             size,
             layout,
             key_id: String::new(),

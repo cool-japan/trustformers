@@ -46,9 +46,10 @@ impl DebertaEmbeddings {
 
     pub fn forward(&self, input_ids: &Array1<u32>) -> Result<Array2<f32>> {
         // Word embeddings
-        let embeddings = self
-            .word_embeddings
-            .forward_ids(input_ids.as_slice().expect("operation failed"))?;
+        let input_ids_slice = input_ids.as_slice().ok_or_else(|| {
+            TrustformersError::tensor_op_error("forward", "input_ids is not contiguous in memory")
+        })?;
+        let embeddings = self.word_embeddings.forward_ids(input_ids_slice)?;
         let embeddings_2d = match embeddings {
             Tensor::F32(arr) => arr
                 .into_dimensionality::<Ix2>()
@@ -164,7 +165,7 @@ impl DebertaDisentangledSelfAttention {
         self.device
     }
 
-    fn transpose_for_scores(&self, x: &Array3<f32>) -> Array4<f32> {
+    fn transpose_for_scores(&self, x: &Array3<f32>) -> Result<Array4<f32>> {
         let (batch_size, seq_len, _) = x.dim();
 
         // Reshape to (batch_size, seq_len, num_heads, head_size)
@@ -175,11 +176,13 @@ impl DebertaDisentangledSelfAttention {
                 self.num_attention_heads,
                 self.attention_head_size,
             ))
-            .expect("operation failed")
+            .map_err(|e| {
+                TrustformersError::shape_error(format!("Failed to reshape tensor: {}", e))
+            })?
             .to_owned();
 
         // Transpose to (batch_size, num_heads, seq_len, head_size)
-        reshaped.permuted_axes([0, 2, 1, 3])
+        Ok(reshaped.permuted_axes([0, 2, 1, 3]))
     }
 
     fn build_relative_position(&self, query_size: usize, key_size: usize) -> Array2<i32> {
@@ -253,9 +256,9 @@ impl DebertaDisentangledSelfAttention {
             },
         };
 
-        let query_layer = self.transpose_for_scores(&query_layer);
-        let key_layer = self.transpose_for_scores(&key_layer);
-        let value_layer = self.transpose_for_scores(&value_layer);
+        let query_layer = self.transpose_for_scores(&query_layer)?;
+        let key_layer = self.transpose_for_scores(&key_layer)?;
+        let value_layer = self.transpose_for_scores(&value_layer)?;
 
         // Compute attention scores
         let mut attention_scores =
@@ -301,7 +304,7 @@ impl DebertaDisentangledSelfAttention {
                         ))
                     },
                 };
-                let _pos_query_layer = self.transpose_for_scores(&pos_query_layer);
+                let _pos_query_layer = self.transpose_for_scores(&pos_query_layer)?;
 
                 // Build relative position embeddings
                 let relative_pos = self.build_relative_position(seq_len, seq_len);

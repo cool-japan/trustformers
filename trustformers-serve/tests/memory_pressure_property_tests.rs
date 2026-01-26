@@ -602,8 +602,11 @@ mod stress_tests {
             // low: 0.6, medium: 0.75, high: 0.85, critical: 0.95, emergency: 0.95
             match utilization {
                 u if u >= 0.95 => assert!(
-                    level == MemoryPressureLevel::Emergency || level == MemoryPressureLevel::Critical,
-                    "Expected Emergency or Critical for {}, got {:?}", u, level
+                    level == MemoryPressureLevel::Emergency
+                        || level == MemoryPressureLevel::Critical,
+                    "Expected Emergency or Critical for {}, got {:?}",
+                    u,
+                    level
                 ),
                 u if u >= 0.85 => assert_eq!(level, MemoryPressureLevel::High),
                 u if u >= 0.75 => assert_eq!(level, MemoryPressureLevel::Medium),

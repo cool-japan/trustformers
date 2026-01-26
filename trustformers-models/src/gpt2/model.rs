@@ -607,7 +607,12 @@ impl Gpt2LMHeadModel {
                             IxDyn(&[vocab_size]),
                             slice.iter().cloned().collect(),
                         )
-                        .expect("operation failed")
+                        .map_err(|e| {
+                            tensor_op_error(
+                                "from_shape_vec",
+                                format!("Failed to create array from shape: {}", e),
+                            )
+                        })?
                     }
                 },
                 _ => {
@@ -704,7 +709,9 @@ impl Gpt2LMHeadModel {
                         // Find top 5 predictions
                         let mut top_indices: Vec<usize> = (0..vocab_size).collect();
                         top_indices.sort_by(|&a, &b| {
-                            logits_vec[b].partial_cmp(&logits_vec[a]).expect("operation failed")
+                            logits_vec[b]
+                                .partial_cmp(&logits_vec[a])
+                                .unwrap_or(std::cmp::Ordering::Equal)
                         });
                         eprintln!("   Top 5 predictions:");
                         for &idx in &top_indices[..5.min(vocab_size)] {
@@ -768,7 +775,9 @@ impl Gpt2LMHeadModel {
                         // Find top 5 predictions
                         let mut top_indices: Vec<usize> = (0..vocab_size).collect();
                         top_indices.sort_by(|&a, &b| {
-                            last_logits[b].partial_cmp(&last_logits[a]).expect("operation failed")
+                            last_logits[b]
+                                .partial_cmp(&last_logits[a])
+                                .unwrap_or(std::cmp::Ordering::Equal)
                         });
                         eprintln!("   Top 5 predictions:");
                         for &idx in &top_indices[..5.min(vocab_size)] {
@@ -851,7 +860,9 @@ impl Gpt2LMHeadModel {
                 // First iteration: process full prompt
                 vec![generated.clone()]
             } else {
-                let last_token = *generated.last().expect("operation failed");
+                let last_token = *generated.last().ok_or_else(|| {
+                    tensor_op_error("generation", "Generated sequence is empty".to_string())
+                })?;
                 eprintln!(
                     "📤 Subsequent iteration: processing last token [{}]",
                     last_token
@@ -1067,7 +1078,12 @@ impl Gpt2LMHeadModel {
                                 IxDyn(&[vocab_size]),
                                 slice.iter().cloned().collect(),
                             )
-                            .expect("operation failed")
+                            .map_err(|e| {
+                                tensor_op_error(
+                                    "from_shape_vec",
+                                    format!("Failed to create array from shape: {}", e),
+                                )
+                            })?
                         }
                     },
                     _ => {
@@ -1084,7 +1100,8 @@ impl Gpt2LMHeadModel {
                 // Get top k tokens for this beam
                 let mut token_scores: Vec<(f32, usize)> =
                     log_probs.iter().enumerate().map(|(idx, &log_prob)| (log_prob, idx)).collect();
-                token_scores.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("operation failed"));
+                token_scores
+                    .sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
                 // Add top candidates
                 for (log_prob, token_idx) in token_scores.iter().take(num_beams) {
@@ -1096,7 +1113,7 @@ impl Gpt2LMHeadModel {
             }
 
             // Select top beams for next iteration
-            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).expect("operation failed"));
+            candidates.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             beams = candidates.into_iter().take(num_beams).collect();
 
             // Check if all beams ended with EOS
@@ -2176,7 +2193,7 @@ fn apply_top_k_filtering(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f32>> {
         logits.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
 
     // Sort by value in descending order
-    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
+    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Set all values outside top-k to -inf
     for (idx, _) in indices_and_values.iter().skip(k) {
@@ -2195,7 +2212,7 @@ fn apply_top_p_filtering(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32>> {
         probs.iter().enumerate().map(|(idx, &prob)| (idx, prob)).collect();
 
     // Sort by probability in descending order
-    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("operation failed"));
+    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Find the smallest set of tokens with cumulative probability > p
     let mut cumsum = 0.0;

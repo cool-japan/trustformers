@@ -935,7 +935,13 @@ impl ErrorTrackingSystem {
             std::sync::Arc<std::sync::Mutex<HashMap<String, (u64, u64)>>>,
         > = std::sync::LazyLock::new(|| std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())));
 
-        let mut counts = ERROR_TYPE_COUNTS.lock().unwrap();
+        let mut counts = match ERROR_TYPE_COUNTS.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("Mutex poisoned in error spike threshold check, recovering");
+                poisoned.into_inner()
+            },
+        };
         let now = chrono::Utc::now().timestamp() as u64;
         let entry = counts.entry(error.error_type.clone()).or_insert((0, now));
 
@@ -996,7 +1002,13 @@ impl ErrorTrackingSystem {
             std::sync::Arc<std::sync::Mutex<HashMap<String, u64>>>,
         > = std::sync::LazyLock::new(|| std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())));
 
-        let mut patterns = CONSECUTIVE_PATTERNS.lock().unwrap();
+        let mut patterns = match CONSECUTIVE_PATTERNS.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("Mutex poisoned in consecutive error pattern check, recovering");
+                poisoned.into_inner()
+            },
+        };
         let source = error.context.service_name.as_deref().unwrap_or("unknown");
         let pattern_key = format!("{}:{}", error.error_type, source);
 

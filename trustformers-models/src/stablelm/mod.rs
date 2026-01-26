@@ -144,12 +144,10 @@ mod tests {
 
     #[test]
     #[ignore] // Heavy test - creates StableLM 3B model, run with --ignored
-    fn test_create_model() {
-        let model = create_model(StableLMVariant::Base3B);
-        assert_eq!(
-            model.expect("operation failed").model.config.hidden_size,
-            2560
-        );
+    fn test_create_model() -> Result<(), TrustformersError> {
+        let model = create_model(StableLMVariant::Base3B)?;
+        assert_eq!(model.model.config.hidden_size, 2560);
+        Ok(())
     }
 
     #[test]

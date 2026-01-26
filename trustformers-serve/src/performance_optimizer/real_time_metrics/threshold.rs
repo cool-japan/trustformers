@@ -5250,9 +5250,7 @@ impl ThresholdMonitor {
         monitoring_state: &Arc<RwLock<ThresholdMonitoringState>>,
         config: &Arc<RwLock<ThresholdMonitorConfig>>,
     ) {
-        let config_read = config
-            .read()
-            .expect("RwLock poisoned");
+        let config_read = config.read().expect("RwLock poisoned");
         let max_history = config_read.max_alert_history;
         drop(config_read);
 
@@ -5485,10 +5483,7 @@ impl ThresholdMonitor {
     }
 
     async fn update_alert_history(&self, alerts: &[AlertEvent]) {
-        let mut history = self
-            .alert_history
-            .lock()
-            .expect("Lock poisoned");
+        let mut history = self.alert_history.lock().expect("Lock poisoned");
 
         for alert in alerts {
             history.push_back(alert.clone());
@@ -6435,9 +6430,7 @@ impl PerformanceAnalyzer {
         config: &Arc<RwLock<PerformanceAnalyzerConfig>>,
     ) {
         let mut metrics_guard = metrics.lock().await;
-        let config_read = config
-            .read()
-            .expect("RwLock poisoned");
+        let config_read = config.read().expect("RwLock poisoned");
 
         // Clean up old completed evaluations
         let retention = config_read.history_retention;

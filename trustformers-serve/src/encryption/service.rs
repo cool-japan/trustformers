@@ -250,7 +250,7 @@ impl EncryptionService {
         let mut hasher = DefaultHasher::new();
         SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_nanos()
             .hash(&mut hasher);
 
@@ -273,7 +273,11 @@ impl EncryptionService {
         use std::hash::{Hash, Hasher};
 
         let mut hasher = DefaultHasher::new();
-        (SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() + 12345)
+        (SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            + 12345)
             .hash(&mut hasher);
 
         let hash = hasher.finish();

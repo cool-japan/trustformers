@@ -127,7 +127,12 @@ impl RecursiveTransformer {
 
         // Combine processed chunks
         if processed_chunks.len() == 1 {
-            Ok(processed_chunks.into_iter().next().expect("operation failed"))
+            processed_chunks.into_iter().next().ok_or_else(|| {
+                TrustformersError::tensor_op_error(
+                    "forward_with_memory",
+                    "Unexpected empty processed_chunks",
+                )
+            })
         } else {
             self.combine_chunks(processed_chunks, memory)
         }
@@ -283,9 +288,10 @@ impl Model for RecursiveTransformer {
         let seq_len = input_ids.shape()[1];
 
         // Initialize memory state
-        let mut memory = initial_memory.unwrap_or_else(|| {
-            MemoryState::new(batch_size, self.config.memory_size, self.config.hidden_size)
-        });
+        let mut memory = match initial_memory {
+            Some(m) => m,
+            None => MemoryState::new(batch_size, self.config.memory_size, self.config.hidden_size)?,
+        };
 
         // Determine recursion depth
         let depth = if let Some(ref predictor) = self.depth_predictor {
@@ -488,12 +494,15 @@ impl RecursiveTransformer {
             println!("Attempting to download {}", file_url);
 
             // Try using curl first
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!("Invalid UTF-8 in path: {:?}", file_path))
+            })?;
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -516,13 +525,7 @@ impl RecursiveTransformer {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {
@@ -732,15 +735,14 @@ pub struct MemoryState {
 }
 
 impl MemoryState {
-    pub fn new(batch_size: usize, memory_size: usize, hidden_size: usize) -> Self {
-        let content =
-            Tensor::zeros(&[batch_size, memory_size, hidden_size]).expect("operation failed");
-        Self {
+    pub fn new(batch_size: usize, memory_size: usize, hidden_size: usize) -> Result<Self> {
+        let content = Tensor::zeros(&[batch_size, memory_size, hidden_size])?;
+        Ok(Self {
             content,
             write_head: 0,
             read_head: 0,
             capacity: memory_size,
-        }
+        })
     }
 
     pub fn update(&mut self, new_content: Tensor) -> Result<()> {
@@ -1274,12 +1276,15 @@ impl RecursiveForSequenceClassification {
             println!("Attempting to download {}", file_url);
 
             // Try using curl first
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!("Invalid UTF-8 in path: {:?}", file_path))
+            })?;
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -1302,13 +1307,7 @@ impl RecursiveForSequenceClassification {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {

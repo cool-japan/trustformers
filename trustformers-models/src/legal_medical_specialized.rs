@@ -1261,7 +1261,8 @@ impl LegalMedicalForCausalLM {
         let mut result = text.to_string();
 
         // Pattern for XXX-XX-XXXX, XXX XX XXXX, and XXXXXXXXX formats
-        let ssn_regex = Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b").expect("operation failed");
+        let ssn_regex = Regex::new(r"\b\d{3}[-\s]?\d{2}[-\s]?\d{4}\b")
+            .map_err(|e| anyhow::anyhow!("Failed to compile SSN regex: {}", e))?;
         result = ssn_regex.replace_all(&result, "[REDACTED_SSN]").to_string();
 
         // Also redact explicit SSN references
@@ -1285,7 +1286,8 @@ impl LegalMedicalForCausalLM {
         ];
 
         for pattern in &phone_patterns {
-            let regex = Regex::new(pattern).expect("operation failed");
+            let regex = Regex::new(pattern)
+                .map_err(|e| anyhow::anyhow!("Failed to compile phone regex: {}", e))?;
             result = regex.replace_all(&result, "[REDACTED_PHONE]").to_string();
         }
 
@@ -1305,7 +1307,7 @@ impl LegalMedicalForCausalLM {
 
         // Comprehensive email regex pattern
         let email_regex = Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-            .expect("operation failed");
+            .map_err(|e| anyhow::anyhow!("Failed to compile email regex: {}", e))?;
         result = email_regex.replace_all(&result, "[REDACTED_EMAIL]").to_string();
 
         Ok(result)
@@ -1325,7 +1327,8 @@ impl LegalMedicalForCausalLM {
         ];
 
         for pattern in &date_patterns {
-            let regex = Regex::new(pattern).expect("operation failed");
+            let regex = Regex::new(pattern)
+                .map_err(|e| anyhow::anyhow!("Failed to compile date regex: {}", e))?;
             result = regex.replace_all(&result, "[REDACTED_DATE]").to_string();
         }
 
@@ -1365,7 +1368,8 @@ impl LegalMedicalForCausalLM {
         ];
 
         for pattern in &medical_id_patterns {
-            let regex = Regex::new(pattern).expect("operation failed");
+            let regex = Regex::new(pattern)
+                .map_err(|e| anyhow::anyhow!("Failed to compile medical ID regex: {}", e))?;
             result = regex.replace_all(&result, "[REDACTED_MEDICAL_ID]").to_string();
         }
 

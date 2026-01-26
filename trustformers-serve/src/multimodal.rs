@@ -1119,12 +1119,31 @@ impl MultiModalService {
         // Handle file upload
         let mut files = Vec::new();
 
-        while let Some(field) = multipart.next_field().await.unwrap() {
+        loop {
+            let field = match multipart.next_field().await {
+                Ok(Some(field)) => field,
+                Ok(None) => break,
+                Err(e) => {
+                    return Json(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Failed to read multipart field: {}", e)
+                    }));
+                },
+            };
+
             let name = field.name().unwrap_or("unknown").to_string();
             let filename = field.file_name().unwrap_or("unknown").to_string();
             let content_type =
                 field.content_type().unwrap_or("application/octet-stream").to_string();
-            let data = field.bytes().await.unwrap();
+            let data = match field.bytes().await {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    return Json(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Failed to read file bytes: {}", e)
+                    }));
+                },
+            };
 
             files.push(serde_json::json!({
                 "name": name,

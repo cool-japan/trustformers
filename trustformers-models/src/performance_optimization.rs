@@ -59,10 +59,8 @@ impl LruCache {
     }
 
     pub fn get(&mut self, key: &str) -> Option<&Tensor> {
-        if self.cache.contains_key(key) {
+        if let Some((tensor, _)) = self.cache.get(key).cloned() {
             self.access_order += 1;
-            // Get a clone to avoid borrow checker issues
-            let (tensor, _) = self.cache.get(key).expect("operation failed").clone();
             self.cache.insert(key.to_string(), (tensor, self.access_order));
             self.hits += 1;
             self.cache.get(key).map(|(tensor, _)| tensor)

@@ -940,7 +940,15 @@ impl NotificationManager {
             let handle = tokio::spawn(async move {
                 loop {
                     // Acquire processing permit
-                    let _permit = semaphore.acquire().await.expect("Semaphore closed");
+                    let _permit = match semaphore.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::warn!(
+                                "Notification processing semaphore closed, shutting down worker"
+                            );
+                            break;
+                        },
+                    };
 
                     // Get next notification from queue
                     let notification = {
@@ -4311,7 +4319,10 @@ mod tests {
             correlation_id: None,
         };
 
-        let result = channel.send_notification(&notification).await.expect("Failed to send notification");
+        let result = channel
+            .send_notification(&notification)
+            .await
+            .expect("Failed to send notification");
         assert!(result.success);
         assert!(result.delivered_at.is_some());
     }

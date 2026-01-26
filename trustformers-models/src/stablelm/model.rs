@@ -2,7 +2,7 @@ use crate::stablelm::config::StableLMConfig;
 use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy (Array2 in tests)
 use trustformers_core::{
     device::Device,
-    errors::{tensor_op_error, Result},
+    errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, Linear},
     ops::activations::{silu, swiglu},
     tensor::Tensor,
@@ -17,20 +17,17 @@ pub struct RMSNorm {
 }
 
 impl RMSNorm {
-    pub fn new(hidden_size: usize, eps: f32) -> Self {
+    pub fn new(hidden_size: usize, eps: f32) -> Result<Self> {
         Self::new_with_device(hidden_size, eps, Device::CPU)
     }
 
-    pub fn new_with_device(hidden_size: usize, eps: f32, device: Device) -> Self {
-        let weight = Tensor::ones(&[hidden_size])
-            .expect("operation failed")
-            .to_device_enum(&device)
-            .expect("operation failed");
-        Self {
+    pub fn new_with_device(hidden_size: usize, eps: f32, device: Device) -> Result<Self> {
+        let weight = Tensor::ones(&[hidden_size])?.to_device_enum(&device)?;
+        Ok(Self {
             weight,
             eps,
             device,
-        }
+        })
     }
 
     pub fn device(&self) -> &Device {
@@ -85,7 +82,12 @@ pub struct RotaryEmbedding {
 }
 
 impl RotaryEmbedding {
-    pub fn new(head_dim: usize, max_seq_len: usize, base: f32, partial_rotary_factor: f32) -> Self {
+    pub fn new(
+        head_dim: usize,
+        max_seq_len: usize,
+        base: f32,
+        partial_rotary_factor: f32,
+    ) -> Result<Self> {
         Self::new_with_device(
             head_dim,
             max_seq_len,
@@ -101,7 +103,7 @@ impl RotaryEmbedding {
         base: f32,
         partial_rotary_factor: f32,
         device: Device,
-    ) -> Self {
+    ) -> Result<Self> {
         let rotary_dim = ((head_dim as f32) * partial_rotary_factor) as usize;
 
         // Pre-compute sin and cos values
@@ -116,14 +118,10 @@ impl RotaryEmbedding {
         let cos_arr =
             Array2::from_shape_fn((max_seq_len, rotary_dim / 2), |(i, j)| freqs[[i, j]].cos());
 
-        let sin_cached = Tensor::F32(sin_arr.into_dyn())
-            .to_device_enum(&device)
-            .expect("operation failed");
-        let cos_cached = Tensor::F32(cos_arr.into_dyn())
-            .to_device_enum(&device)
-            .expect("operation failed");
+        let sin_cached = Tensor::F32(sin_arr.into_dyn()).to_device_enum(&device)?;
+        let cos_cached = Tensor::F32(cos_arr.into_dyn()).to_device_enum(&device)?;
 
-        Self {
+        Ok(Self {
             sin_cached,
             cos_cached,
             max_seq_len,
@@ -131,7 +129,7 @@ impl RotaryEmbedding {
             base,
             partial_rotary_factor,
             device,
-        }
+        })
     }
 
     pub fn device(&self) -> &Device {
@@ -220,11 +218,11 @@ pub struct StableLMAttention {
 }
 
 impl StableLMAttention {
-    pub fn new(config: &StableLMConfig) -> Self {
+    pub fn new(config: &StableLMConfig) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }
 
-    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Self {
+    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Result<Self> {
         let hidden_size = config.hidden_size;
         let num_heads = config.num_attention_heads;
         let num_kv_heads = config.num_key_value_heads.unwrap_or(num_heads);
@@ -253,9 +251,9 @@ impl StableLMAttention {
             config.rope_theta,
             config.partial_rotary_factor,
             device,
-        );
+        )?;
 
-        Self {
+        Ok(Self {
             config: config.clone(),
             q_proj,
             k_proj,
@@ -266,7 +264,7 @@ impl StableLMAttention {
             num_heads,
             num_kv_heads,
             device,
-        }
+        })
     }
 
     pub fn device(&self) -> &Device {
@@ -443,27 +441,27 @@ pub struct StableLMDecoderLayer {
 }
 
 impl StableLMDecoderLayer {
-    pub fn new(config: &StableLMConfig) -> Self {
+    pub fn new(config: &StableLMConfig) -> Result<Self> {
         Self::new_with_device(config, Device::CPU)
     }
 
-    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Self {
-        Self {
+    pub fn new_with_device(config: &StableLMConfig, device: Device) -> Result<Self> {
+        Ok(Self {
             config: config.clone(),
-            self_attn: StableLMAttention::new_with_device(config, device),
+            self_attn: StableLMAttention::new_with_device(config, device)?,
             mlp: StableLMMLP::new_with_device(config, device),
             input_layernorm: RMSNorm::new_with_device(
                 config.hidden_size,
                 config.rms_norm_eps,
                 device,
-            ),
+            )?,
             post_attention_layernorm: RMSNorm::new_with_device(
                 config.hidden_size,
                 config.rms_norm_eps,
                 device,
-            ),
+            )?,
             device,
-        }
+        })
     }
 
     pub fn device(&self) -> &Device {
@@ -581,10 +579,10 @@ impl StableLMModel {
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(StableLMDecoderLayer::new_with_device(&config, device));
+            layers.push(StableLMDecoderLayer::new_with_device(&config, device)?);
         }
 
-        let norm = RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device);
+        let norm = RMSNorm::new_with_device(config.hidden_size, config.rms_norm_eps, device)?;
 
         Ok(Self {
             config,
@@ -853,13 +851,18 @@ impl StableLMForCausalLM {
 
             println!("Attempting to download {}", file_url);
 
+            // Convert path to string once for both commands
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!("Invalid UTF-8 in path: {:?}", file_path))
+            })?;
+
             // Try using curl first
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().expect("operation failed"),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -882,13 +885,7 @@ impl StableLMForCausalLM {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args([
-                    "-O",
-                    file_path.to_str().expect("operation failed"),
-                    &file_url,
-                ])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {
@@ -930,64 +927,68 @@ mod tests {
     // Array2 already imported via scirs2_core at top
 
     #[test]
-    fn test_rms_norm() {
-        let norm = RMSNorm::new(768, 1e-5);
+    fn test_rms_norm() -> Result<()> {
+        let norm = RMSNorm::new(768, 1e-5)?;
         let input = Tensor::F32(Array2::ones((2, 768)).into_dyn());
         let output = norm.forward(input);
         assert!(output.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_rotary_embedding() {
-        let rope = RotaryEmbedding::new(64, 512, 10000.0, 0.25);
+    fn test_rotary_embedding() -> Result<()> {
+        let rope = RotaryEmbedding::new(64, 512, 10000.0, 0.25)?;
         assert_eq!(rope.head_dim, 64);
         assert_eq!(rope.max_seq_len, 512);
         assert_eq!(rope.partial_rotary_factor, 0.25);
+        Ok(())
     }
 
     #[test]
     #[ignore] // Heavy test - StableLM 3B model creation, run with --ignored
-    fn test_stablelm_model_creation() {
+    fn test_stablelm_model_creation() -> Result<()> {
         let config = StableLMConfig::stablelm_3b();
-        let model = StableLMModel::new(config.clone()).expect("operation failed");
+        let model = StableLMModel::new(config.clone())?;
 
         assert_eq!(model.layers.len(), config.num_hidden_layers);
         assert_eq!(model.config.hidden_size, 2560);
+        Ok(())
     }
 
     #[test]
     #[ignore] // Heavy test - StableLM 3B CausalLM, run with --ignored
-    fn test_stablelm_causal_lm() {
+    fn test_stablelm_causal_lm() -> Result<()> {
         let config = StableLMConfig::stablelm_3b();
-        let _model = StableLMForCausalLM::new(config.clone()).expect("operation failed");
+        let _model = StableLMForCausalLM::new(config.clone())?;
 
         // StableLM for CausalLM created successfully - LM head dimensions are internal
+        Ok(())
     }
 
     #[test]
-    fn test_grouped_query_attention() {
+    fn test_grouped_query_attention() -> Result<()> {
         let mut config = StableLMConfig::stablelm_2_1_6b();
         config.num_key_value_heads = Some(4);
 
-        let attn = StableLMAttention::new(&config);
+        let attn = StableLMAttention::new(&config)?;
         assert_eq!(attn.num_heads, 32);
         assert_eq!(attn.num_kv_heads, 4);
 
         // Grouped query attention created successfully - projection dimensions are internal
+        Ok(())
     }
 
     #[test]
     #[ignore] // Heavy test - StableLM 3B device support, run with --ignored
-    fn test_device_support() {
+    fn test_device_support() -> Result<()> {
         let config = StableLMConfig::stablelm_3b();
 
         // Test CPU device (default)
-        let model_cpu = StableLMModel::new(config.clone()).expect("operation failed");
+        let model_cpu = StableLMModel::new(config.clone())?;
         assert_eq!(*model_cpu.device(), Device::CPU);
 
         // Test explicit CPU device
-        let model_cpu_explicit =
-            StableLMModel::new_with_device(config.clone(), Device::CPU).expect("operation failed");
+        let model_cpu_explicit = StableLMModel::new_with_device(config.clone(), Device::CPU)?;
         assert_eq!(*model_cpu_explicit.device(), Device::CPU);
 
         // Test that all components have the correct device
@@ -998,21 +999,22 @@ mod tests {
             assert_eq!(*layer.self_attn.device(), Device::CPU);
             assert_eq!(*layer.mlp.device(), Device::CPU);
         }
+        Ok(())
     }
 
     #[test]
     #[ignore] // Heavy test - StableLM 3B CausalLM device support (SIGKILL risk), run with --ignored
-    fn test_causal_lm_device_support() {
+    fn test_causal_lm_device_support() -> Result<()> {
         let config = StableLMConfig::stablelm_3b();
 
         // Test CPU device
-        let model = StableLMForCausalLM::new(config.clone()).expect("operation failed");
+        let model = StableLMForCausalLM::new(config.clone())?;
         assert_eq!(*model.device(), Device::CPU);
         assert_eq!(*model.model.device(), Device::CPU);
 
         // Test explicit device
-        let model_explicit =
-            StableLMForCausalLM::new_with_device(config, Device::CPU).expect("operation failed");
+        let model_explicit = StableLMForCausalLM::new_with_device(config, Device::CPU)?;
         assert_eq!(*model_explicit.device(), Device::CPU);
+        Ok(())
     }
 }
