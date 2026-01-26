@@ -625,7 +625,7 @@ mod tests {
         params.insert(
             "lr".to_string(),
             Value::Number(
-                serde_json::Number::from_f64(0.001).ok_or_else(|| anyhow!("Invalid constant"))?,
+                serde_json::Number::from_f64(0.001).expect("Invalid constant"),
             ),
         );
 
@@ -665,7 +665,7 @@ mod tests {
         params.insert(
             "lr".to_string(),
             Value::Number(
-                serde_json::Number::from_f64(0.001).ok_or_else(|| anyhow!("Invalid constant"))?,
+                serde_json::Number::from_f64(0.001).expect("Invalid constant"),
             ),
         );
 
@@ -675,7 +675,7 @@ mod tests {
         params.insert(
             "lr".to_string(),
             Value::Number(
-                serde_json::Number::from_f64(-0.001).ok_or_else(|| anyhow!("Invalid constant"))?,
+                serde_json::Number::from_f64(-0.001).expect("Invalid constant"),
             ),
         );
         assert!(utils::validate_parameters("Adam", &params).is_err());

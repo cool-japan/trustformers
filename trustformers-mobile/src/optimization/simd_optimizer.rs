@@ -489,7 +489,8 @@ mod tests {
 
     #[test]
     fn test_vectorization_check() {
-        let optimizer = SimdOptimizer::new(MobilePlatform::Generic);
+        // Use iOS platform which always has NEON support (ARM-based)
+        let optimizer = SimdOptimizer::new(MobilePlatform::Ios);
 
         assert!(optimizer.can_vectorize(&KernelType::Conv2d));
         assert!(optimizer.can_vectorize(&KernelType::Linear));

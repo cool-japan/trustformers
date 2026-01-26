@@ -457,6 +457,7 @@ impl MathSpecializedConfig {
                 ReasoningStrategy::BackwardReasoning,
                 ReasoningStrategy::CaseAnalysis,
                 ReasoningStrategy::Induction,
+                ReasoningStrategy::ProofByContradiction,
                 ReasoningStrategy::Constructive,
                 ReasoningStrategy::Analogical,
                 ReasoningStrategy::Symbolic,
@@ -913,7 +914,7 @@ mod tests {
         let config = MathSpecializedConfig::mammoth_7b();
         assert_eq!(config.model_variant, MathModelVariant::Mammoth);
         assert_eq!(config.supported_domains.len(), 12); // All domains
-        assert_eq!(config.reasoning_strategies.len(), 8); // All strategies
+        assert_eq!(config.reasoning_strategies.len(), 9); // All strategies including ProofByContradiction
     }
 
     #[test]

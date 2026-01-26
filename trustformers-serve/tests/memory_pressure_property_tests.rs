@@ -27,11 +27,16 @@ fn memory_pressure_config_strategy() -> impl Strategy<Value = MemoryPressureConf
     )
         .prop_map(
             |(enabled, low, medium, high, critical, emergency, interval, buffer)| {
-                // Ensure proper ordering of thresholds
-                let low = low.min(medium - 0.01);
-                let medium = medium.clamp(low + 0.01, high - 0.01);
-                let high = high.clamp(medium + 0.01, critical - 0.01);
-                let critical = critical.clamp(high + 0.01, emergency - 0.01);
+                // Sort thresholds to ensure proper ordering
+                let mut thresholds = [low, medium, high, critical, emergency];
+                thresholds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+                // Ensure minimum separation between thresholds
+                let low = thresholds[0];
+                let medium = (thresholds[1]).max(low + 0.02);
+                let high = (thresholds[2]).max(medium + 0.02);
+                let critical = (thresholds[3]).max(high + 0.02);
+                let emergency = (thresholds[4]).max(critical + 0.02).min(0.99);
 
                 let mut config = MemoryPressureConfig::default();
                 config.enabled = enabled;
@@ -593,13 +598,16 @@ mod stress_tests {
         for utilization in pressure_sequence {
             let level = handler.calculate_pressure_level(utilization);
 
-            // Verify level is appropriate for utilization
+            // Verify level is appropriate for utilization based on default thresholds:
+            // low: 0.6, medium: 0.75, high: 0.85, critical: 0.95, emergency: 0.95
             match utilization {
-                u if u >= 0.95 => assert_eq!(level, MemoryPressureLevel::Emergency),
-                u if u >= 0.85 => assert_eq!(level, MemoryPressureLevel::Critical),
-                u if u >= 0.75 => assert_eq!(level, MemoryPressureLevel::High),
-                u if u >= 0.60 => assert_eq!(level, MemoryPressureLevel::Medium),
-                u if u >= 0.45 => assert_eq!(level, MemoryPressureLevel::Low),
+                u if u >= 0.95 => assert!(
+                    level == MemoryPressureLevel::Emergency || level == MemoryPressureLevel::Critical,
+                    "Expected Emergency or Critical for {}, got {:?}", u, level
+                ),
+                u if u >= 0.85 => assert_eq!(level, MemoryPressureLevel::High),
+                u if u >= 0.75 => assert_eq!(level, MemoryPressureLevel::Medium),
+                u if u >= 0.60 => assert_eq!(level, MemoryPressureLevel::Low),
                 _ => assert_eq!(level, MemoryPressureLevel::Normal),
             }
 

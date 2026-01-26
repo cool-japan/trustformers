@@ -1348,6 +1348,7 @@ mod tests {
 
         let dequantized = quantized.dequantize()?;
         assert_eq!(dequantized.shape(), tensor.shape());
+        Ok(())
     }
 
     #[test]
@@ -1568,9 +1569,9 @@ mod tests {
         };
 
         let serialized = serde_json::to_string(&config)
-            .map_err(|e| TrustformersError::serialization_error(&e.to_string()))?;
+            .map_err(|e| TrustformersError::serialization_error(e.to_string()))?;
         let deserialized: BnBConfig = serde_json::from_str(&serialized)
-            .map_err(|e| TrustformersError::serialization_error(&e.to_string()))?;
+            .map_err(|e| TrustformersError::serialization_error(e.to_string()))?;
 
         assert_eq!(config.quant_type, deserialized.quant_type);
         assert_eq!(config.compute_dtype, deserialized.compute_dtype);

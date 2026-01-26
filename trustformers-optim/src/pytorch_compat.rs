@@ -1002,7 +1002,7 @@ mod tests {
             optimizer
                 .gradients
                 .lock()
-                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?
+                .expect("Mutex lock poisoned")
                 .len(),
             1
         );
@@ -1013,7 +1013,7 @@ mod tests {
             optimizer
                 .gradients
                 .lock()
-                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?
+                .expect("Mutex lock poisoned")
                 .len(),
             0
         );
