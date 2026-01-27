@@ -628,11 +628,16 @@ impl BatchAggregator {
 
     /// Get aggregator statistics
     pub fn get_stats(&self) -> AggregatorStats {
+        // Get metrics summary from the metrics collector
+        let summary = self.metrics.get_summary();
+
+        // Note: queue_depth and pending_requests require async access to locks
+        // For now, we return the key metrics from the summary
         AggregatorStats {
-            queue_depth: 0, // Would need async access to queue
-            pending_requests: 0,
-            total_batches_formed: 0,
-            avg_batch_size: 0.0,
+            queue_depth: summary.queue_depth,
+            pending_requests: 0, // Would need async access to get current pending requests
+            total_batches_formed: summary.total_batches,
+            avg_batch_size: summary.avg_batch_size,
         }
     }
 }

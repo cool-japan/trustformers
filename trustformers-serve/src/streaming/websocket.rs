@@ -135,10 +135,18 @@ impl WebSocketHandler {
             }
         });
 
-        // Wait for either task to complete
+        // Wait for either task to complete or timeout
+        let timeout = self.config.connection_timeout;
         tokio::select! {
-            _ = recv_task => {},
-            _ = send_task => {},
+            _ = recv_task => {
+                tracing::debug!("WebSocket receive task completed for connection {}", connection_id);
+            },
+            _ = send_task => {
+                tracing::debug!("WebSocket send task completed for connection {}", connection_id);
+            },
+            _ = tokio::time::sleep(timeout) => {
+                tracing::debug!("WebSocket connection {} timed out after {:?}", connection_id, timeout);
+            },
         }
 
         // Clean up connection

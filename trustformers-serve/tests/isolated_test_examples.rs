@@ -127,14 +127,15 @@ async fn run_isolated_inference_test(
         let response = test_server
             .post("/inference")
             .json(&json!({
-                "input": format!("Test input for {}", model_name),
-                "model": model_name
+                "text": format!("Test input for {}", model_name),
+                "model": model_name,
+                "max_length": 50
             }))
             .await;
 
         assert_eq!(response.status_code(), StatusCode::OK);
         let result: Value = response.json();
-        assert!(result["result"].is_string());
+        assert!(result["text"].is_string());
 
         Ok(())
     })

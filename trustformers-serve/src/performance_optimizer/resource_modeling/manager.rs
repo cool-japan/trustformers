@@ -2289,6 +2289,8 @@ mod tests {
                 .await
                 .expect("Failed to create component coordinator");
 
+        coordinator.start().await.expect("Failed to start component coordinator");
+
         let health = coordinator.get_all_component_health().await;
         assert!(!health.is_empty());
     }

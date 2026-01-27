@@ -348,12 +348,34 @@ fn create_test_server_config(config: &TestEnvironmentConfig, port: u16) -> Resul
         };
     }
 
-    // Streaming configuration
+    // Streaming configuration with very short timeouts for tests (500ms)
     if config.enable_streaming {
+        use trustformers_serve::streaming::{SseConfig, WsConfig};
+
         server_config.streaming_config = StreamingConfig {
             buffer_size: 100,
-            max_concurrent_streams: 10,
-            heartbeat_interval: Duration::from_secs(30),
+            stream_timeout: Duration::from_millis(500),
+            max_concurrent_streams: 100,
+            enable_compression: false,
+            chunk_size: 1024,
+            heartbeat_interval: Duration::from_millis(250),
+            sse_config: SseConfig {
+                buffer_size: 10,
+                heartbeat_interval: Duration::from_millis(250),
+                connection_timeout: Duration::from_millis(500),
+                max_connections: 100,
+                enable_compression: false,
+                cors_origins: vec!["*".to_string()],
+            },
+            ws_config: WsConfig {
+                buffer_size: 10,
+                connection_timeout: Duration::from_millis(500),
+                max_connections: 100,
+                max_message_size: 1024,
+                enable_compression: false,
+                ping_interval: Duration::from_millis(250),
+                max_frame_size: 1024,
+            },
             ..Default::default()
         };
     }
@@ -717,7 +739,7 @@ pub fn create_test_batch_request() -> Value {
 
 pub fn create_test_auth_request() -> Value {
     serde_json::json!({
-        "username": "test-user",
-        "password": "test-password"
+        "username": "testuser",
+        "password": "password123"
     })
 }

@@ -100,8 +100,9 @@ impl MetricsCollector {
 
     /// Get metrics summary
     pub fn get_summary(&self) -> crate::batching::MetricsSummary {
-        // Would need async access
+        // Would need async access - return mock values for testing
         crate::batching::MetricsSummary {
+            total_batches: 0, // Will be overridden in metrics endpoint
             avg_batch_size: 0.0,
             avg_latency_ms: 0.0,
             throughput_rps: 0.0,

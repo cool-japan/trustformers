@@ -328,7 +328,7 @@ impl GpuMonitoringSystem {
     /// Returns ConfigurationError if any validation checks fail
     fn validate_config(config: &GpuMonitoringConfig) -> GpuMonitoringResult<()> {
         // Validate monitoring interval
-        if config.monitoring_interval.as_secs() == 0 {
+        if config.monitoring_interval.as_millis() == 0 {
             return Err(GpuMonitoringError::ConfigurationError {
                 field: "monitoring_interval".to_string(),
                 message: "Monitoring interval must be greater than 0 seconds".to_string(),

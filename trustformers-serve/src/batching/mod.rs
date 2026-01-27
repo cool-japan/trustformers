@@ -233,6 +233,7 @@ pub struct BatchingStats {
 /// Metrics summary
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct MetricsSummary {
+    pub total_batches: usize,
     pub avg_batch_size: f32,
     pub avg_latency_ms: f32,
     pub throughput_rps: f32,

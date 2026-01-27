@@ -726,11 +726,12 @@ impl GpuLoadBalancer {
         devices: &HashMap<usize, GpuDeviceInfo>,
         requirements: &GpuPerformanceRequirements,
     ) -> Result<Option<usize>> {
-        // Select device with minimum memory that still meets requirements
+        // Select device with minimum available memory that still meets requirements
+        // Use total_memory as tiebreaker when available_memory is the same
         let selected = devices
             .values()
             .filter(|device| device.available_memory_mb >= requirements.min_memory_mb)
-            .min_by_key(|device| device.total_memory_mb)
+            .min_by_key(|device| (device.available_memory_mb, device.total_memory_mb))
             .map(|device| device.device_id);
 
         Ok(selected)
@@ -1678,7 +1679,7 @@ mod tests {
         let mut devices = HashMap::new();
         devices.insert(0, create_test_device(0, 0.5, 16384)); // More memory than needed
         devices.insert(1, create_test_device(1, 0.5, 8192)); // Less memory than device 0
-        devices.insert(2, create_test_device(2, 0.5, 4096)); // Exact fit
+        devices.insert(2, create_test_device(2, 0.0, 4096)); // Exact fit (no utilization)
 
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, None)
