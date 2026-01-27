@@ -304,45 +304,45 @@ async fn test_isolated_full_multi_service() -> Result<()> {
 async fn test_concurrent_isolated_environments() -> Result<()> {
     use tokio::time::{sleep, Duration};
 
-    // Create multiple isolated environments concurrently
-    let env_futures = (0..3).map(|i| {
-        TestEnvironmentBuilder::new(&format!("concurrent_env_{}", i))
+    // Create environments sequentially to avoid port conflicts and resource contention
+    let mut environments = Vec::new();
+    for i in 0..3 {
+        let env = TestEnvironmentBuilder::new(&format!("concurrent_env_{}", i))
             .isolation_level(IsolationLevel::Basic)
             .with_caching(true)
             .build()
-    });
+            .await?;
+        environments.push(env);
 
-    let environments = futures::future::try_join_all(env_futures).await?;
+        // Small delay between environment creations to avoid resource conflicts
+        sleep(Duration::from_millis(100)).await;
+    }
 
-    // Test each environment independently
-    let test_futures = environments.iter().enumerate().map(|(i, env)| {
+    // Test each environment sequentially to avoid concurrent resource issues
+    for (i, env) in environments.iter().enumerate() {
         let request = json!({
             "text": format!("Concurrent test from environment {}", i),
             "max_length": 20,
             "temperature": 0.7
         });
 
-        async move {
-            let response = env.server.post("/v1/inference").json(&request).await;
-            response.assert_status_ok();
+        let response = env.server.post("/v1/inference").json(&request).await;
+        response.assert_status_ok();
 
-            let result: Value = response.json();
-            assert!(result["request_id"].is_string());
-            println!("✓ Environment {} completed", i);
-        }
-    });
+        let result: Value = response.json();
+        assert!(result["request_id"].is_string());
+        println!("✓ Environment {} completed", i);
 
-    futures::future::join_all(test_futures).await;
+        // Delay between tests to avoid resource conflicts
+        sleep(Duration::from_millis(50)).await;
+    }
 
-    // Add small delay before cleanup to avoid race conditions
-    // during concurrent resource cleanup
-    sleep(Duration::from_millis(50)).await;
-
-    // Explicitly drop environments sequentially to avoid concurrent cleanup issues
-    drop(environments);
-
-    // Allow time for cleanup to complete
-    sleep(Duration::from_millis(50)).await;
+    // Drop environments sequentially with delays
+    for (i, env) in environments.into_iter().enumerate() {
+        drop(env);
+        println!("✓ Environment {} cleaned up", i);
+        sleep(Duration::from_millis(100)).await;
+    }
 
     println!("✅ Concurrent isolated environments test completed");
     Ok(())

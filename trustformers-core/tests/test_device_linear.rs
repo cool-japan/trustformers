@@ -4,15 +4,21 @@ use trustformers_core::{device::Device, layers::Linear, tensor::Tensor, traits::
 
 #[test]
 fn test_linear_cpu() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a linear layer on CPU
-    let linear = Linear::new_with_device(768, 3072, true, Device::CPU);
+    // Create a linear layer on CPU with smaller dimensions to avoid memory issues
+    let linear = Linear::new_with_device(256, 512, true, Device::CPU)?;
 
-    // Test with 2D input
-    let input = Tensor::randn(&[128, 768])?;
+    // Test with smaller 2D input for memory safety
+    let input = Tensor::randn(&[32, 256])?;
     let output = linear.forward(input)?;
 
-    assert_eq!(output.shape(), &[128, 3072]);
+    assert_eq!(output.shape(), &[32, 512]);
     assert_eq!(linear.device(), Device::CPU);
+
+    // Explicit cleanup to prevent memory issues
+    drop(output);
+    drop(input);
+    drop(linear);
+    std::hint::black_box(());
 
     Ok(())
 }

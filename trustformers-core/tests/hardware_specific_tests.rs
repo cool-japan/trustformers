@@ -565,6 +565,7 @@ mod cross_platform_tests {
 
         #[allow(unused_mut)]
         let mut results: Vec<(&str, Tensor)> = Vec::new();
+        let mut had_any_gpu = false;
 
         // Test CUDA if available
         #[cfg(feature = "cuda")]
@@ -591,6 +592,7 @@ mod cross_platform_tests {
                     };
                     if has_nonzero {
                         results.push(("ROCm", c_rocm));
+                        had_any_gpu = true;
                     } else {
                         println!("ROCm returned zeros (stub implementation), skipping ROCm test");
                     }
@@ -616,6 +618,7 @@ mod cross_platform_tests {
                     };
                     if has_nonzero {
                         results.push(("Intel", c_intel));
+                        had_any_gpu = true;
                     } else {
                         println!("Intel returned zeros (no hardware or stub), skipping Intel test");
                     }
@@ -642,6 +645,7 @@ mod cross_platform_tests {
                         };
                         if has_nonzero {
                             results.push(("Vulkan", c_vulkan));
+                            had_any_gpu = true;
                         } else {
                             println!(
                                 "Vulkan returned zeros (no hardware or stub), skipping Vulkan test"
@@ -666,6 +670,14 @@ mod cross_platform_tests {
                 config.numerical_tolerance,
             )?;
             println!("Cross-platform consistency {}: PASSED", backend_name);
+        }
+
+        // If no GPU backends produced valid results, just pass the test
+        // (CPU-only systems shouldn't fail cross-platform tests)
+        if !had_any_gpu {
+            println!(
+                "No GPU backends available with real implementations - test passed (CPU only)"
+            );
         }
 
         Ok(())
