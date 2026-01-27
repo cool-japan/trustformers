@@ -277,12 +277,12 @@ async fn test_auth_and_batching_integration() {
             "requests": [
                 {
                     "id": "req1",
-                    "input": "Hello world",
+                    "text": "Hello world",
                     "model": "multi-test-model"
                 },
                 {
                     "id": "req2",
-                    "input": "How are you?",
+                    "text": "How are you?",
                     "model": "multi-test-model"
                 }
             ]
@@ -309,7 +309,7 @@ async fn test_auth_failure_blocks_batching() {
             "requests": [
                 {
                     "id": "req1",
-                    "input": "Hello world",
+                    "text": "Hello world",
                     "model": "multi-test-model"
                 }
             ]
@@ -330,7 +330,7 @@ async fn test_caching_and_model_management_integration() {
         .post("/inference")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "Test input for caching",
+            "text": "Test input for caching",
             "model": "multi-test-model",
             "enable_cache": true
         }))
@@ -347,7 +347,7 @@ async fn test_caching_and_model_management_integration() {
         .post("/inference")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "Test input for caching",
+            "text": "Test input for caching",
             "model": "multi-test-model",
             "enable_cache": true
         }))
@@ -380,7 +380,7 @@ async fn test_gpu_scheduler_and_load_balancer_integration() {
                 .post("/inference")
                 .add_header("Authorization", &format!("Bearer {}", token_clone))
                 .json(&json!({
-                    "input": format!("Concurrent request {}", i),
+                    "text": format!("Concurrent request {}", i),
                     "model": "multi-test-model",
                     "priority": i % 3 // Test priority scheduling
                 }))
@@ -424,7 +424,7 @@ async fn test_message_queue_and_metrics_integration() {
         .post("/inference/async")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "Async inference test",
+            "text": "Async inference test",
             "model": "multi-test-model",
             "callback_url": "http://localhost:8080/callback"
         }))
@@ -477,7 +477,7 @@ async fn test_streaming_and_health_integration() {
         .post("/inference/stream")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "Stream this response",
+            "text": "Stream this response",
             "model": "multi-test-model",
             "stream": true
         }))
@@ -506,7 +506,7 @@ async fn test_circuit_breaker_and_failover_integration() {
             .post("/inference")
             .add_header("Authorization", &format!("Bearer {}", token))
             .json(&json!({
-                "input": "Stress test input",
+                "text": "Stress test input",
                 "model": "multi-test-model",
                 "timeout_ms": 1 // Very short timeout to trigger failures
             }))
@@ -554,13 +554,13 @@ async fn test_end_to_end_multi_service_workflow() {
             "requests": [
                 {
                     "id": "workflow1",
-                    "input": "End-to-end test 1",
+                    "text": "End-to-end test 1",
                     "model": "workflow-test-model",
                     "enable_cache": true
                 },
                 {
                     "id": "workflow2",
-                    "input": "End-to-end test 2",
+                    "text": "End-to-end test 2",
                     "model": "workflow-test-model",
                     "enable_cache": true
                 }
@@ -575,7 +575,7 @@ async fn test_end_to_end_multi_service_workflow() {
         .post("/inference/async")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "End-to-end async test",
+            "text": "End-to-end async test",
             "model": "workflow-test-model"
         }))
         .await;
@@ -587,7 +587,7 @@ async fn test_end_to_end_multi_service_workflow() {
         .post("/inference/stream")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "End-to-end streaming test",
+            "text": "End-to-end streaming test",
             "model": "workflow-test-model",
             "stream": true
         }))
@@ -644,7 +644,7 @@ async fn test_service_dependency_chain() {
         .post("/inference")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "Test dependency chain",
+            "text": "Test dependency chain",
             "model": "nonexistent-model"
         }))
         .await;
@@ -676,7 +676,7 @@ async fn test_service_dependency_chain() {
         .post("/inference")
         .add_header("Authorization", &format!("Bearer {}", token))
         .json(&json!({
-            "input": "Test successful dependency chain",
+            "text": "Test successful dependency chain",
             "model": "dependency-test",
             "enable_cache": true
         }))

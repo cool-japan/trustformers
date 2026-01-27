@@ -50,8 +50,16 @@ async fn create_test_server() -> TestServer {
 
 /// Create test server with authentication enabled
 async fn create_test_server_with_auth() -> TestServer {
+    use trustformers_serve::auth::{AuthConfig, AuthService};
+
     let config = create_test_config();
-    let server = TrustformerServer::new(config);
+
+    // Create auth service with default config
+    let auth_config = AuthConfig::default();
+    let auth_service = AuthService::new(auth_config);
+
+    // Create server and add auth service
+    let server = TrustformerServer::new(config).with_auth(auth_service);
 
     let router = server.create_test_router().await;
     TestServer::new(router).unwrap()
@@ -354,9 +362,9 @@ async fn test_concurrent_requests() {
     // Test concurrent inference requests
     let request_body = json!({
         "model": "test-model",
-        "input": "Test concurrent request",
+        "text": "Test concurrent request",
         "parameters": {
-            "max_tokens": 50
+            "max_length": 50
         }
     });
 
@@ -383,9 +391,9 @@ async fn test_rate_limiting() {
     // Note: This assumes rate limiting is configured
     let request_body = json!({
         "model": "test-model",
-        "input": "Rate limit test",
+        "text": "Rate limit test",
         "parameters": {
-            "max_tokens": 10
+            "max_length": 10
         }
     });
 
@@ -434,9 +442,9 @@ async fn test_end_to_end_workflow() {
     // 2. Make inference request
     let request_body = json!({
         "model": "test-model",
-        "input": "End-to-end test",
+        "text": "End-to-end test",
         "parameters": {
-            "max_tokens": 100,
+            "max_length": 100,
             "temperature": 0.8
         }
     });
@@ -464,7 +472,7 @@ async fn test_end_to_end_workflow() {
         "model": "test-model",
         "inputs": ["Batch test 1", "Batch test 2"],
         "parameters": {
-            "max_tokens": 50
+            "max_length": 50
         }
     });
 
@@ -539,8 +547,8 @@ async fn test_auth_metrics_interaction() {
     // Test unauthenticated request
     let request_body = json!({
         "model": "test-model",
-        "input": "Auth test",
-        "parameters": {"max_tokens": 50}
+        "text": "Auth test",
+        "parameters": {"max_length": 50}
     });
 
     let response = server.post("/v1/inference").json(&request_body).await;
@@ -585,9 +593,9 @@ async fn test_streaming_monitoring_interaction() {
     // Start a streaming request
     let request_body = json!({
         "model": "test-model",
-        "input": "Stream test input",
+        "text": "Stream test input",
         "parameters": {
-            "max_tokens": 100,
+            "max_length": 100,
             "stream": true
         }
     });
@@ -623,9 +631,9 @@ async fn test_shadow_validation_interaction() {
     // Test shadow mode request with validation
     let request_body = json!({
         "model": "test-model",
-        "input": "Shadow test with very long input that should be validated by the validation service to ensure it meets requirements",
+        "text": "Shadow test with very long input that should be validated by the validation service to ensure it meets requirements",
         "parameters": {
-            "max_tokens": 50,
+            "max_length": 50,
             "temperature": 0.7
         },
         "shadow_mode": true
@@ -641,8 +649,8 @@ async fn test_shadow_validation_interaction() {
     // Test with invalid input to trigger validation
     let invalid_request = json!({
         "model": "test-model",
-        "input": "a".repeat(10000), // Very long input to trigger validation
-        "parameters": {"max_tokens": 50},
+        "text": "a".repeat(10000), // Very long input to trigger validation
+        "parameters": {"max_length": 50},
         "shadow_mode": true
     });
 
@@ -673,8 +681,8 @@ async fn test_load_balancing_health_interaction() {
             async move {
                 let request_body = json!({
                     "model": "test-model",
-                    "input": format!("Load test request {}", i),
-                    "parameters": {"max_tokens": 20}
+                    "text": format!("Load test request {}", i),
+                    "parameters": {"max_length": 20}
                 });
 
                 server.post("/v1/inference").json(&request_body).await.assert_status_ok()
@@ -725,9 +733,9 @@ async fn test_gpu_memory_interaction() {
     // Make requests that could trigger memory pressure
     let large_request = json!({
         "model": "test-model",
-        "input": "Large memory test ".repeat(100),
+        "text": "Large memory test ".repeat(100),
         "parameters": {
-            "max_tokens": 200,
+            "max_length": 200,
             "batch_size": 5
         }
     });
@@ -765,7 +773,7 @@ async fn test_comprehensive_multi_service_workflow() {
             "Multi-service test 1" // Duplicate for cache testing
         ],
         "parameters": {
-            "max_tokens": 50,
+            "max_length": 50,
             "temperature": 0.7
         }
     });
@@ -779,9 +787,9 @@ async fn test_comprehensive_multi_service_workflow() {
     // 3. Test streaming with monitoring
     let stream_request = json!({
         "model": "test-model",
-        "input": "Streaming test for multi-service",
+        "text": "Streaming test for multi-service",
         "parameters": {
-            "max_tokens": 30,
+            "max_length": 30,
             "stream": true
         }
     });

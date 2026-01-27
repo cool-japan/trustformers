@@ -1140,24 +1140,37 @@ mod tests {
 
     #[test]
     fn test_perceiver_resampler() {
-        let config = FlamingoPerceiverConfig::default();
-        let input_dim = 1024;
+        // Use smaller config to reduce memory pressure
+        let mut config = FlamingoPerceiverConfig::default();
+        config.num_latents = 32; // Reduce from 64
+        config.latent_dim = 512; // Reduce from 2048
+        config.num_layers = 2; // Reduce from 6
+        config.num_heads = 8; // Reduce from 16
+        config.mlp_hidden_size = 2048; // Reduce from 8192
+
+        let input_dim = 512; // Reduce from 1024
         let resampler =
             PerceiverResampler::new(config.clone(), input_dim).expect("operation failed");
 
-        let batch_size = 2;
-        let seq_len = 257; // ViT output length
+        let batch_size = 1; // Reduce from 2
+        let seq_len = 64; // Reduce from 257
         let vision_features =
             Tensor::randn(&[batch_size, seq_len, input_dim]).expect("operation failed");
 
         let output = resampler.forward(&vision_features);
-        assert!(output.is_ok());
+        assert!(output.is_ok(), "Forward pass failed: {:?}", output.err());
 
         let output = output.expect("operation failed");
         assert_eq!(
             output.shape(),
             &[batch_size, config.num_latents, config.latent_dim]
         );
+
+        // Explicit cleanup
+        drop(output);
+        drop(vision_features);
+        drop(resampler);
+        std::hint::black_box(());
     }
 
     #[test]

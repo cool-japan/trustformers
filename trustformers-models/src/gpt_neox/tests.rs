@@ -234,23 +234,25 @@ mod tests {
         use trustformers_core::tensor::Tensor;
         use trustformers_core::traits::Model;
 
-        // Minimal config for fast test
+        // Minimal config for fast test with reduced dimensions
         let config = GPTNeoXConfig {
             vocab_size: 100,
             hidden_size: 32,
-            num_hidden_layers: 2,
+            num_hidden_layers: 1, // Reduce from 2
             num_attention_heads: 4,
-            intermediate_size: 128,
-            max_position_embeddings: 64,
+            intermediate_size: 64,       // Reduce from 128
+            max_position_embeddings: 32, // Reduce from 64
             ..GPTNeoXConfig::default()
         };
 
         let model = GPTNeoXModel::new(config).expect("operation failed");
 
-        // Test with different sequence lengths
-        for seq_len in [1, 5, 10, 20] {
+        // Test with different sequence lengths (reduced range)
+        for seq_len in [1, 3, 5] {
             let input_ids: Vec<u32> = (0..seq_len).map(|i| (i % 100) as u32).collect();
-            let output = model.forward(input_ids.clone()).expect("operation failed");
+            let output = model
+                .forward(input_ids.clone())
+                .expect(&format!("Forward pass failed for seq_len={}", seq_len));
 
             match &output {
                 Tensor::F32(arr) => {
@@ -259,6 +261,10 @@ mod tests {
                 },
                 _ => panic!("Expected F32 tensor"),
             }
+
+            // Explicit cleanup after each iteration
+            drop(output);
+            std::hint::black_box(());
         }
 
         // Explicit cleanup

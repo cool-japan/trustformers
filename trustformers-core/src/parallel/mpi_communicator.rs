@@ -394,9 +394,10 @@ mod tests {
 
     #[test]
     #[cfg(feature = "mpi")]
+    #[ignore] // Only run with: cargo test -- --ignored --test-threads=1 under mpirun
     fn test_mpi_basic_operations() {
         // This test would only run in an MPI environment
-        // Typically run with: mpirun -np 2 cargo test --features mpi
+        // Typically run with: mpirun -np 2 cargo test --features mpi -- --ignored --test-threads=1
         if let Ok(comm) = MpiCommunicatorImpl::new() {
             assert!(comm.rank() < comm.world_size());
             assert!(comm.world_size() > 0);

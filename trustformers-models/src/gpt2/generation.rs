@@ -502,15 +502,34 @@ mod tests {
 
     #[test]
     fn test_greedy_generation_interface() -> Result<()> {
-        let gpt2_config = Gpt2Config::small();
+        // Use very small config to reduce memory pressure
+        let mut gpt2_config = Gpt2Config::small();
+        gpt2_config.vocab_size = 50; // Reduce from default
+        gpt2_config.n_positions = 32; // Reduce from default
+        gpt2_config.n_embd = 32; // Reduce from default
+        gpt2_config.n_layer = 1; // Reduce from default
+        gpt2_config.n_head = 2; // Reduce from default
+
         let model = Gpt2LMHeadModel::new(gpt2_config)?;
 
-        let input_ids = vec![1, 2, 3];
-        let max_length = 10;
+        let input_ids = vec![1, 2];
+        let max_length = 5; // Reduce from 10
 
-        // This will fail without weights, but tests the interface
+        // Test the interface
         let result = model.generate_greedy(input_ids, max_length);
-        assert!(result.is_ok() || result.is_err()); // Interface test only
+        assert!(
+            result.is_ok(),
+            "Greedy generation failed: {:?}",
+            result.err()
+        );
+
+        let generated = result?;
+        assert!(generated.len() <= max_length);
+
+        // Explicit cleanup
+        drop(generated);
+        drop(model);
+        std::hint::black_box(());
 
         Ok(())
     }

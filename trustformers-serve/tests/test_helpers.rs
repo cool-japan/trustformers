@@ -277,8 +277,12 @@ pub async fn create_isolated_test_environment(
     // Apply isolation settings
     apply_isolation_settings(&mut server_config, &config)?;
 
-    // Create server instance
-    let server = create_test_server_instance(server_config.clone()).await?;
+    // Create server instance with or without auth
+    let server = if config.enable_auth {
+        create_test_server_instance_with_auth(server_config.clone(), true).await?
+    } else {
+        create_test_server_instance(server_config.clone()).await?
+    };
 
     // Initialize environment state
     let state = Arc::new(RwLock::new(TestEnvironmentState {
@@ -683,27 +687,31 @@ impl Default for TestFixtures {
 // Helper functions for common test scenarios
 pub fn create_test_inference_request() -> Value {
     serde_json::json!({
-        "model": "test-model",
-        "input": "Test inference request",
-        "parameters": {
-            "max_tokens": 100,
-            "temperature": 0.7
-        }
+        "text": "Test inference request",
+        "max_length": 100,
+        "temperature": 0.7
     })
 }
 
 pub fn create_test_batch_request() -> Value {
     serde_json::json!({
-        "model": "test-model",
-        "inputs": [
-            "Batch test 1",
-            "Batch test 2",
-            "Batch test 3"
-        ],
-        "parameters": {
-            "max_tokens": 50,
-            "temperature": 0.5
-        }
+        "requests": [
+            {
+                "text": "Batch test 1",
+                "max_length": 50,
+                "temperature": 0.5
+            },
+            {
+                "text": "Batch test 2",
+                "max_length": 50,
+                "temperature": 0.5
+            },
+            {
+                "text": "Batch test 3",
+                "max_length": 50,
+                "temperature": 0.5
+            }
+        ]
     })
 }
 

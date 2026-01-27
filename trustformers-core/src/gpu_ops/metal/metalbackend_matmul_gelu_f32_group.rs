@@ -106,8 +106,17 @@ impl MetalBackend {
         command_buffer.commit();
         command_buffer.wait_until_completed(); // Wait for GPU to complete
 
+        // Safety check: verify buffer pointer is not null
+        let result_ptr = c_buffer.contents();
+        if result_ptr.is_null() {
+            return Err(TrustformersError::hardware_error(
+                "GPU buffer contents pointer is null",
+                "MetalBackend::matmul_gelu_f32/matmul_bias_gelu_f32",
+            ));
+        }
+
         // Read result
-        let result_ptr = c_buffer.contents() as *const f32;
+        let result_ptr = result_ptr as *const f32;
         let result = unsafe { std::slice::from_raw_parts(result_ptr, result_size) }.to_vec();
 
         Ok(result)
@@ -211,8 +220,17 @@ impl MetalBackend {
         command_buffer.commit();
         command_buffer.wait_until_completed(); // Wait for GPU to complete
 
+        // Safety check: verify buffer pointer is not null
+        let result_ptr = c_buffer.contents();
+        if result_ptr.is_null() {
+            return Err(TrustformersError::hardware_error(
+                "GPU buffer contents pointer is null",
+                "MetalBackend::matmul_gelu_f32/matmul_bias_gelu_f32",
+            ));
+        }
+
         // Read result
-        let result_ptr = c_buffer.contents() as *const f32;
+        let result_ptr = result_ptr as *const f32;
         let result = unsafe { std::slice::from_raw_parts(result_ptr, result_size) }.to_vec();
 
         Ok(result)

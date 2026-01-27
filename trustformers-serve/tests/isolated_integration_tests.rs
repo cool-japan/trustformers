@@ -34,7 +34,7 @@ async fn test_isolated_basic_inference() -> Result<()> {
     response.assert_status_ok();
     let result: Value = response.json();
     assert!(result["request_id"].is_string());
-    assert!(result["output"].is_string());
+    assert!(result["text"].is_string());
 
     println!("✅ Isolated basic inference test completed");
     Ok(())
@@ -126,12 +126,9 @@ async fn test_isolated_streaming_monitoring() -> Result<()> {
 
     // Test streaming endpoint
     let stream_request = json!({
-        "model": "test-model",
-        "input": "Streaming test in isolated environment",
-        "parameters": {
-            "max_tokens": 50,
-            "stream": true
-        }
+        "text": "Streaming test in isolated environment",
+        "max_length": 50,
+        "temperature": 0.7
     });
 
     let response = env.server.post("/v1/inference/stream").json(&stream_request).await;
@@ -164,9 +161,9 @@ async fn test_isolated_shadow_testing() -> Result<()> {
     // Test shadow mode request
     let shadow_request = json!({
         "model": "test-model",
-        "input": "Shadow testing in isolated environment",
+        "text": "Shadow testing in isolated environment",
         "parameters": {
-            "max_tokens": 75,
+            "max_length": 75,
             "temperature": 0.8
         },
         "shadow_mode": true
@@ -208,26 +205,26 @@ async fn test_isolated_full_multi_service() -> Result<()> {
         // Single inference with caching
         json!({
             "model": "test-model",
-            "input": "Multi-service test 1",
-            "parameters": {"max_tokens": 50}
+            "text": "Multi-service test 1",
+            "parameters": {"max_length": 50}
         }),
         // Batch inference
         json!({
             "model": "test-model",
             "inputs": ["Multi test 2a", "Multi test 2b"],
-            "parameters": {"max_tokens": 30}
+            "parameters": {"max_length": 30}
         }),
         // Streaming inference
         json!({
             "model": "test-model",
-            "input": "Multi-service streaming test",
-            "parameters": {"max_tokens": 40, "stream": true}
+            "text": "Multi-service streaming test",
+            "parameters": {"max_length": 40, "stream": true}
         }),
         // Shadow mode inference
         json!({
             "model": "test-model",
-            "input": "Multi-service shadow test",
-            "parameters": {"max_tokens": 35},
+            "text": "Multi-service shadow test",
+            "parameters": {"max_length": 35},
             "shadow_mode": true
         }),
     ];
@@ -289,9 +286,9 @@ async fn test_concurrent_isolated_environments() -> Result<()> {
     // Test each environment independently
     let test_futures = environments.iter().enumerate().map(|(i, env)| {
         let request = json!({
-            "model": "test-model",
-            "input": format!("Concurrent test from environment {}", i),
-            "parameters": {"max_tokens": 20}
+            "text": format!("Concurrent test from environment {}", i),
+            "max_length": 20,
+            "temperature": 0.7
         });
 
         async move {
@@ -327,8 +324,8 @@ async fn test_isolated_with_fixtures() -> Result<()> {
     fixtures.load_dataset(
         "custom_inputs",
         vec![
-            json!({"text": "Custom test input 1", "max_tokens": 25}),
-            json!({"text": "Custom test input 2", "max_tokens": 35}),
+            json!({"text": "Custom test input 1", "max_length": 25}),
+            json!({"text": "Custom test input 2", "max_length": 35}),
         ],
     );
 
@@ -337,9 +334,9 @@ async fn test_isolated_with_fixtures() -> Result<()> {
         for (i, test_input) in dataset.iter().enumerate() {
             let request = json!({
                 "model": "test-model",
-                "input": test_input["text"],
+                "text": test_input["text"],
                 "parameters": {
-                    "max_tokens": test_input["max_tokens"]
+                    "max_length": test_input["max_tokens"]
                 }
             });
 
@@ -377,11 +374,11 @@ async fn test_isolated_error_handling() -> Result<()> {
         // Invalid JSON
         ("invalid_json", r#"{"invalid": json}"#),
         // Missing required fields
-        ("missing_model", r#"{"input": "test"}"#),
+        ("missing_model", r#"{"text": "test"}"#),
         // Invalid parameters
         (
             "invalid_params",
-            r#"{"model": "test", "input": "test", "parameters": {"max_tokens": -1}}"#,
+            r#"{"model": "test", "text": "test", "parameters": {"max_length": -1}}"#,
         ),
     ];
 
@@ -401,8 +398,8 @@ async fn test_isolated_error_handling() -> Result<()> {
     // Test request timeout
     let timeout_request = json!({
         "model": "test-model",
-        "input": "Very long input that might timeout ".repeat(1000),
-        "parameters": {"max_tokens": 1000}
+        "text": "Very long input that might timeout ".repeat(1000),
+        "parameters": {"max_length": 1000}
     });
 
     let response = env.server.post("/v1/inference").json(&timeout_request).await;

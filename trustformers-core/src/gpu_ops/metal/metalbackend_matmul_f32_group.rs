@@ -28,13 +28,17 @@ impl MetalBackend {
 
             let mut result = vec![0.0f32; m * n];
 
-            // Create matrix views from slices (row-major layout)
-            let a_mat = MatRef::new(a.as_ptr(), m, k, k);
-            let b_mat = MatRef::new(b.as_ptr(), k, n, n);
-            let c_mat = MatMut::new(result.as_mut_ptr(), m, n, n);
+            // OxiBLAS uses column-major layout (Fortran convention), but we have row-major data
+            // To compute C = A * B in row-major, we compute C^T = B^T * A^T in column-major
+            // Row-major A (m×k) becomes column-major A^T (k×m) with leading dim k
+            // Row-major B (k×n) becomes column-major B^T (n×k) with leading dim n
+            // Result C^T is n×m in column-major = C in row-major with leading dim n
+            let b_mat = MatRef::new(b.as_ptr(), n, k, n); // B^T: n×k with ld=n
+            let a_mat = MatRef::new(a.as_ptr(), k, m, k); // A^T: k×m with ld=k
+            let c_mat = MatMut::new(result.as_mut_ptr(), n, m, n); // C^T: n×m with ld=n
 
-            // GEMM: C = 1.0 * A * B + 0.0 * C
-            gemm(1.0, a_mat, b_mat, 0.0, c_mat);
+            // GEMM: C^T = 1.0 * B^T * A^T + 0.0 * C^T  (which gives us C = A * B)
+            gemm(1.0, b_mat, a_mat, 0.0, c_mat);
 
             Ok(result)
         }
@@ -85,7 +89,17 @@ impl MetalBackend {
             encoder.end_encoding();
             command_buffer.commit();
             command_buffer.wait_until_completed();
-            let result_ptr = c_buffer.contents() as *const f32;
+
+            // Safety check: verify buffer pointer is not null
+            let result_ptr = c_buffer.contents();
+            if result_ptr.is_null() {
+                return Err(TrustformersError::hardware_error(
+                    "GPU buffer contents pointer is null",
+                    "MetalBackend::matmul_f32",
+                ));
+            }
+
+            let result_ptr = result_ptr as *const f32;
             let result = unsafe { std::slice::from_raw_parts(result_ptr, result_size) }.to_vec();
             Ok(result)
         }
@@ -108,15 +122,31 @@ impl MetalBackend {
             }
         }
 
+        // Validate input
+        if data.is_empty() {
+            return Err(TrustformersError::shape_error(
+                "Cannot create buffer from empty data".to_string(),
+            ));
+        }
+
         let buffer = self.device.new_buffer_with_data(
             data.as_ptr() as *const _,
             byte_size,
             MTLResourceOptions::StorageModeShared,
         );
 
+        // Verify buffer was created successfully
+        let ptr = buffer.contents();
+        if ptr.is_null() {
+            return Err(TrustformersError::hardware_error(
+                "Failed to create Metal buffer: contents pointer is null",
+                "MetalBackend::create_buffer",
+            ));
+        }
+
         #[cfg(debug_assertions)]
         {
-            let ptr = buffer.contents() as *const f32;
+            let ptr = ptr as *const f32;
             let verify_data = unsafe { std::slice::from_raw_parts(ptr, data.len().min(5)) };
             eprintln!(
                 "🔍 create_buffer: After creation, first 5 in buffer: {:?}",

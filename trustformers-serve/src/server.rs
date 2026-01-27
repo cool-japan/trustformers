@@ -192,7 +192,7 @@ impl TrustformerServer {
         }
 
         let shared_state = Arc::new(self);
-        let router = Router::new()
+        let mut router = Router::new()
             // Health endpoints
             .route("/health", get(health_check))
             .route("/health/detailed", get(detailed_health_check))
@@ -202,30 +202,47 @@ impl TrustformerServer {
             // Inference endpoints
             .route("/v1/inference", post(inference_endpoint))
             .route("/v1/inference/batch", post(batch_inference_endpoint))
+            .route("/v1/inference/stream", post(streaming_inference_endpoint))
 
             // Admin endpoints
             .route("/admin/stats", get(get_stats))
             .route("/admin/config", get(get_config))
+            .route("/admin/memory/pressure", get(memory_pressure_endpoint))
 
             // Metrics endpoint
             .route("/metrics", get(metrics_endpoint))
 
             // Streaming endpoints
             .route("/stream", get(sse_stream_endpoint))
+            .route("/v1/stream/sse", get(sse_stream_endpoint))
             .route("/ws", get(websocket_endpoint))
 
             // Long polling endpoints
             .route("/poll", post(long_poll_endpoint))
             .route("/poll/stats", get(poll_stats_endpoint))
+            .route("/v1/poll/stats", get(poll_stats_endpoint))
 
             // Shadow testing endpoints
             .route("/shadow/stats", get(shadow_stats_endpoint))
+            .route("/v1/shadow/stats", get(shadow_stats_endpoint))
             .route("/shadow/results", get(shadow_results_endpoint))
             .route("/shadow/compare", post(shadow_comparison_endpoint))
 
+            // GraphQL endpoints
+            .route("/graphql", post(graphql_handler))
+            .route("/graphql/playground", get(graphql_playground_handler))
+
             // Mock authentication endpoint for testing
             .route("/auth/token", post(mock_auth_token_handler))
-            .layer(axum::Extension(shared_state));
+            .route("/auth/login", post(mock_auth_token_handler));
+
+        // Add authentication middleware if enabled
+        if shared_state.auth_service.is_some() {
+            router = router.layer(axum::middleware::from_fn(auth_extension_middleware));
+        }
+
+        // Add shared state extension
+        router = router.layer(axum::Extension(shared_state));
 
         router
     }
@@ -1106,6 +1123,78 @@ async fn auth_extension_middleware(
 struct MockTokenRequest {
     username: String,
     password: String,
+}
+
+/// Streaming inference endpoint
+async fn streaming_inference_endpoint(
+    Extension(state): Extension<Arc<TrustformerServer>>,
+    Json(request): Json<InferenceRequest>,
+) -> Result<Json<InferenceResponse>, ServerError> {
+    // Reuse the regular inference endpoint for now
+    inference_endpoint(Extension(state), Json(request)).await
+}
+
+/// Memory pressure endpoint
+async fn memory_pressure_endpoint(
+    Extension(_state): Extension<Arc<TrustformerServer>>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    // Get system memory info
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+
+    let total_memory = sys.total_memory();
+    let used_memory = sys.used_memory();
+    let current_memory_mb = (used_memory as f64) / 1024.0 / 1024.0;
+    let total_memory_mb = (total_memory as f64) / 1024.0 / 1024.0;
+    let usage_percent = (used_memory as f64 / total_memory as f64) * 100.0;
+
+    let pressure_level = if usage_percent < 60.0 {
+        "Low"
+    } else if usage_percent < 80.0 {
+        "Medium"
+    } else {
+        "High"
+    };
+
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "current_memory_mb": current_memory_mb,
+        "total_memory_mb": total_memory_mb,
+        "usage_percent": usage_percent,
+        "pressure_level": pressure_level,
+        "timestamp": chrono::Utc::now()
+    })))
+}
+
+/// GraphQL handler
+async fn graphql_handler(
+    Extension(_state): Extension<Arc<TrustformerServer>>,
+    Json(query): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ServerError> {
+    // Mock GraphQL response for testing
+    Ok(Json(serde_json::json!({
+        "data": {
+            "query": query,
+            "result": "Mock GraphQL response"
+        }
+    })))
+}
+
+/// GraphQL playground handler
+async fn graphql_playground_handler() -> Result<axum::response::Html<String>, ServerError> {
+    Ok(axum::response::Html(
+        r#"<!DOCTYPE html>
+<html>
+<head>
+    <title>GraphQL Playground</title>
+</head>
+<body>
+    <h1>GraphQL Playground (Mock)</h1>
+    <p>GraphQL endpoint is available at /graphql</p>
+</body>
+</html>"#
+            .to_string(),
+    ))
 }
 
 async fn mock_auth_token_handler(

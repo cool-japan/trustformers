@@ -147,8 +147,18 @@ mod tests {
         let backend = MetalBackend::new()?;
         let a = vec![1.0, 2.0, 3.0, 4.0];
         let b = vec![5.0, 6.0, 7.0, 8.0];
+
+        // A = [[1, 2], [3, 4]], B = [[5, 6], [7, 8]]
+        // Expected: C = A * B = [[19, 22], [43, 50]]
+        println!("Input A (2x2): {:?}", a);
+        println!("Input B (2x2): {:?}", b);
+
         let result = backend.matmul_f32(&a, &b, 2, 2, 2)?;
+        println!("Result (2x2): {:?}", result);
+
         let expected = [19.0, 22.0, 43.0, 50.0];
+        println!("Expected (2x2): {:?}", expected);
+
         for (i, (&res, &exp)) in result.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (res - exp).abs() < 1e-5,
