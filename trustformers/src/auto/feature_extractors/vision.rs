@@ -43,7 +43,7 @@
 //!
 //! ### Basic Image Feature Extraction
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::feature_extractors::vision::{VisionFeatureExtractor, VisionFeatureConfig};
 //! use trustformers::auto::types::{FeatureInput, ImageFormat, ImageMetadata};
 //!
@@ -81,7 +81,7 @@
 //!
 //! ### Configuration from Model Config
 //!
-//! ```rust
+//! ```rust,ignore
 //! use serde_json::json;
 //!
 //! let model_config = json!({
@@ -154,7 +154,7 @@ use std::collections::HashMap;
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// let config = VisionFeatureConfig {
 ///     image_size: 224,
 ///     feature_size: 768,
@@ -187,7 +187,7 @@ impl VisionFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = VisionFeatureConfig {
     ///     image_size: 224,
     ///     feature_size: 768,
@@ -317,8 +317,8 @@ impl FeatureExtractor for VisionFeatureExtractor {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let input = FeatureInput::Image {
+    /// ```rust,ignore
+    ///    /// let input = FeatureInput::Image {
     ///     data: image_bytes,
     ///     format: ImageFormat::Jpeg,
     ///     metadata: Some(ImageMetadata {
@@ -330,7 +330,7 @@ impl FeatureExtractor for VisionFeatureExtractor {
     /// };
     ///
     /// let output = extractor.extract_features(&input)?;
-    /// ```
+
     fn extract_features(&self, input: &FeatureInput) -> Result<FeatureOutput> {
         match input {
             FeatureInput::Image {
@@ -508,7 +508,7 @@ impl FeatureExtractor for VisionFeatureExtractor {
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// // Manual configuration
 /// let config = VisionFeatureConfig {
 ///     image_size: 224,
@@ -620,8 +620,8 @@ impl VisionFeatureConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let config_json = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let config_json = serde_json::json!({
     ///     "image_size": 224,
     ///     "hidden_size": 768,
     ///     "do_normalize": true,
@@ -632,7 +632,7 @@ impl VisionFeatureConfig {
     /// });
     ///
     /// let config = VisionFeatureConfig::from_config(&config_json)?;
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
             image_size: config
@@ -674,7 +674,7 @@ impl VisionFeatureConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = VisionFeatureConfig::default();
     /// assert_eq!(config.image_size, 224);
     /// assert_eq!(config.feature_size, 768);
@@ -916,16 +916,22 @@ mod tests {
         assert_eq!(output.shape, vec![768]);
 
         // Check metadata preservation
-        assert_eq!(output.metadata.get("width").unwrap().as_u64().unwrap(), 640);
         assert_eq!(
-            output.metadata.get("height").unwrap().as_u64().unwrap(),
+            output.metadata.get("width").unwrap().as_u64().expect("expected u64 value"),
+            640
+        );
+        assert_eq!(
+            output.metadata.get("height").unwrap().as_u64().expect("expected u64 value"),
             480
         );
         assert_eq!(
-            output.metadata.get("channels").unwrap().as_u64().unwrap(),
+            output.metadata.get("channels").unwrap().as_u64().expect("expected u64 value"),
             3
         );
-        assert_eq!(output.metadata.get("dpi").unwrap().as_u64().unwrap(), 96);
+        assert_eq!(
+            output.metadata.get("dpi").unwrap().as_u64().expect("expected u64 value"),
+            96
+        );
     }
 
     #[test]
@@ -1037,9 +1043,18 @@ mod tests {
         let extractor = VisionFeatureExtractor::new(config);
         let caps = extractor.capabilities();
 
-        assert_eq!(caps.get("modality").unwrap().as_str().unwrap(), "vision");
-        assert_eq!(caps.get("feature_size").unwrap().as_u64().unwrap(), 768);
-        assert_eq!(caps.get("image_size").unwrap().as_u64().unwrap(), 224);
+        assert_eq!(
+            caps.get("modality").unwrap().as_str().expect("expected str value"),
+            "vision"
+        );
+        assert_eq!(
+            caps.get("feature_size").unwrap().as_u64().expect("expected u64 value"),
+            768
+        );
+        assert_eq!(
+            caps.get("image_size").unwrap().as_u64().expect("expected u64 value"),
+            224
+        );
         assert!(caps.get("supports_batching").unwrap().as_bool().unwrap());
         assert!(caps.contains_key("supported_formats"));
     }

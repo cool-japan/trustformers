@@ -211,7 +211,7 @@ impl AdaptiveLearningModel {
 
         for feedback in &recent_feedback {
             // Convert feedback to training example
-            let training_example = self.convert_feedback_to_training_example(&feedback)?;
+            let training_example = self.convert_feedback_to_training_example(feedback)?;
 
             // Update learning algorithm
             {
@@ -277,12 +277,12 @@ impl AdaptiveLearningModel {
     ) -> Result<TrainingExample> {
         // Simplified feature extraction for example
         let features = vec![
-            feedback.aggregated_value as f64,
+            feedback.aggregated_value,
             feedback.confidence as f64,
             feedback.contributing_feedback_count as f64,
         ];
 
-        let target = feedback.aggregated_value as f64; // Simplified target
+        let target = feedback.aggregated_value; // Simplified target
 
         Ok(TrainingExample {
             features,
@@ -324,6 +324,12 @@ pub struct AdaptiveLinearRegression {
     learning_rate: f64,
     momentum: Vec<f64>,
     momentum_factor: f64,
+}
+
+impl Default for AdaptiveLinearRegression {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AdaptiveLinearRegression {

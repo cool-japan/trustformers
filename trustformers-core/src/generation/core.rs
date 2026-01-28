@@ -1,8 +1,6 @@
-#![allow(deprecated)] // Using rand legacy API, will migrate to scirs2_core
-
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
-use rand::{thread_rng, Rng};
+use scirs2_core::random::Rng; // SciRS2 Policy compliant
 
 use super::cache::KVCache;
 use super::config::{GenerationConfig, GenerationStrategy};
@@ -89,6 +87,15 @@ impl TextGenerator {
         match logits {
             Tensor::F32(arr) => {
                 let data: Vec<f32> = arr.iter().cloned().collect();
+                self.greedy_select_from_data(&data)
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(metal_data) => {
+                use crate::gpu_ops::metal::get_metal_backend;
+
+                // Download logits from GPU to CPU for sampling
+                let backend = get_metal_backend()?;
+                let data = backend.download_buffer_to_vec(&metal_data.buffer_id)?;
                 self.greedy_select_from_data(&data)
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -182,7 +189,7 @@ impl TextGenerator {
     fn greedy_select_from_data(&self, data: &[f32]) -> Result<usize> {
         data.iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("Partial comparison failed"))
             .map(|(idx, _)| idx)
             .ok_or_else(|| TrustformersError::invalid_input("Empty logits".to_string()))
     }
@@ -205,8 +212,10 @@ impl TextGenerator {
 
     /// Sample from probability distribution
     pub fn sample_from_probs(&self, probs: &[f32]) -> Result<usize> {
-        let mut rng = thread_rng();
-        let sample: f32 = rng.gen();
+        use scirs2_core::random::rng; // Use updated API
+
+        let mut rng = rng();
+        let sample: f32 = rng.random(); // Updated API (gen → random)
         let mut cumsum = 0.0;
 
         for (i, &prob) in probs.iter().enumerate() {

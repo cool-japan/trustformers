@@ -6,10 +6,11 @@ pub trait Normalizer {
     fn normalize(&self, text: &str) -> String;
 }
 
-static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").unwrap());
-static PUNCTUATION_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\w\s]").unwrap());
+static WHITESPACE_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("valid regex"));
+static PUNCTUATION_REGEX: Lazy<Regex> = Lazy::new(|| Regex::new(r"[^\w\s]").expect("valid regex"));
 static ACCENT_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]").unwrap()
+    Regex::new(r"[\u0300-\u036f\u1ab0-\u1aff\u1dc0-\u1dff\u20d0-\u20ff\ufe20-\ufe2f]")
+        .expect("valid regex")
 });
 
 pub struct NFCNormalizer;

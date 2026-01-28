@@ -22,6 +22,12 @@ pub struct ThroughputFeedbackProcessor {
     name: String,
 }
 
+impl Default for ThroughputFeedbackProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThroughputFeedbackProcessor {
     pub fn new() -> Self {
         Self {
@@ -84,6 +90,12 @@ pub struct LatencyFeedbackProcessor {
     name: String,
 }
 
+impl Default for LatencyFeedbackProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LatencyFeedbackProcessor {
     pub fn new() -> Self {
         Self {
@@ -136,6 +148,12 @@ impl FeedbackProcessor for LatencyFeedbackProcessor {
 /// Resource utilization feedback processor
 pub struct ResourceUtilizationFeedbackProcessor {
     name: String,
+}
+
+impl Default for ResourceUtilizationFeedbackProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourceUtilizationFeedbackProcessor {

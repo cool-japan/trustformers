@@ -876,7 +876,7 @@ impl RecommendationEngine {
         }
 
         // Add resource optimization steps
-        for (_i, resource_rec) in recommendations.resource_optimization.iter().enumerate() {
+        for resource_rec in recommendations.resource_optimization.iter() {
             steps.push(ImplementationStep {
                 step_number: steps.len() + 1,
                 description: format!(
@@ -892,7 +892,9 @@ impl RecommendationEngine {
                 requirements: vec!["system_access".to_string(), "monitoring_tools".to_string()],
                 success_criteria: vec!["resource_utilization_improved".to_string()],
             });
-            estimated_time += steps.last().unwrap().duration;
+            if let Some(last_step) = steps.last() {
+                estimated_time += last_step.duration;
+            }
         }
 
         Ok(ImplementationGuide {

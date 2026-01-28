@@ -71,14 +71,24 @@ pub trait Checkpoint: Send + Sync {
 }
 
 /// Unified weight tensor representation
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, oxicode::Encode, oxicode::Decode)]
 pub struct WeightTensor {
     pub data: Vec<f32>,
     pub shape: Vec<usize>,
     pub dtype: DataType,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    serde::Serialize,
+    serde::Deserialize,
+    oxicode::Encode,
+    oxicode::Decode,
+)]
 pub enum DataType {
     Float32,
     Float16,
@@ -530,19 +540,24 @@ impl Checkpoint for TrustformersCheckpoint {
     }
 
     fn save(&self, path: &Path) -> Result<()> {
-        // Use bincode for efficient serialization
-        let data = bincode::serialize(&(&self.weights, &self.metadata, &self.version))?;
+        // Use oxicode for efficient serialization
+        let data = oxicode::serde::encode_to_vec(
+            &(&self.weights, &self.metadata, &self.version),
+            oxicode::config::standard(),
+        )?;
         std::fs::write(path, data)?;
         Ok(())
     }
 
     fn load(path: &Path) -> Result<Self> {
         let data = std::fs::read(path)?;
-        let (weights, metadata, version): (
+        type CheckpointData = (
             HashMap<String, WeightTensor>,
             HashMap<String, String>,
             String,
-        ) = bincode::deserialize(&data)?;
+        );
+        let ((weights, metadata, version), _): (CheckpointData, usize) =
+            oxicode::serde::decode_from_slice(&data, oxicode::config::standard())?;
         Ok(Self {
             weights,
             metadata,

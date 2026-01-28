@@ -17,6 +17,29 @@
 #![allow(unused_assignments)]
 #![allow(private_interfaces)]
 #![allow(unused_must_use)]
+// Allow FFI patterns - raw pointer handling in Unity interop is intentional
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+#![allow(clippy::manual_memcpy)]
+#![allow(clippy::useless_vec)]
+// Allow mobile-specific patterns
+#![allow(clippy::await_holding_lock)]
+#![allow(clippy::arc_with_non_send_sync)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::manual_clamp)]
+#![allow(clippy::borrowed_box)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::redundant_pattern_matching)]
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::explicit_counter_loop)]
+#![allow(clippy::missing_safety_doc)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::to_string_trait_impl)]
+#![allow(clippy::match_like_matches_macro)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::empty_line_after_doc_comments)]
 
 pub mod abi_checker;
 pub mod benchmarks;
@@ -154,6 +177,12 @@ pub mod expo_plugin;
 #[cfg(feature = "unity")]
 pub mod unity_interop;
 
+// WebNN integration for web/hybrid platforms
+pub mod webnn_integration;
+
+// Advanced thermal management with predictive algorithms
+pub mod advanced_thermal;
+
 use serde::{Deserialize, Serialize};
 use trustformers_core::errors::{Result, TrustformersError};
 
@@ -165,6 +194,25 @@ pub use optimization::{
     QuantizationConfig as NASQuantizationConfig, QuantizationScheme as NASQuantizationScheme,
     ReinforcementLearningAgent, SearchStrategy, SkipConnection, UsagePattern, UserContext,
     UserPreferences,
+};
+
+// Re-export GGUF mobile optimization types
+pub use optimization::{
+    MobileGGUFConfig, MobileGGUFQuantizer, MobileGGUFStats, MobileGGUFType, MobileGGUFUtils,
+};
+
+// Re-export WebNN integration types
+pub use webnn_integration::{
+    BrowserInfo, WebNNBackend, WebNNCapabilities, WebNNCompiledGraph, WebNNDataType, WebNNDevice,
+    WebNNExecutionContext, WebNNGraphConfig, WebNNOperation, WebNNPowerPreference,
+    WebNNSupportLevel, WebNNTensorDescriptor, WebNNUtils,
+};
+
+// Re-export advanced thermal management types
+pub use advanced_thermal::{
+    AdaptiveCoolingStrategy, AdvancedThermalManager, CoolingMode, MultiSensorThermalFusion,
+    PlannedWorkload, SensorWeights, ThermalCoefficients, ThermalHotspot, ThermalPredictionModel,
+    WorkloadExecutionPlan, WorkloadPriority, WorkloadThermalPlanner,
 };
 
 // Re-export key device info types

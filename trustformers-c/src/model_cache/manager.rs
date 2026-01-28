@@ -211,7 +211,7 @@ impl ModelCacheManager {
 
             Ok(())
         } else {
-            Err(anyhow!("Model {} not found in cache", model_id))
+            Err(anyhow!("Model {} not found in cache", model_id).into())
         }
     }
 
@@ -298,15 +298,19 @@ impl ModelCacheManager {
     }
 
     fn evict_lru_model(&mut self) -> TrustformersResult<()> {
-        if let Ok(mut access_order) = self.access_order.lock() {
-            if let Some(model_id) = access_order.first().cloned() {
-                drop(access_order); // Release lock before calling remove_model
-                self.remove_model(&model_id)?;
-                self.evictions.fetch_add(1, Ordering::Relaxed);
-                return Ok(());
-            }
+        let model_id = {
+            let access_order =
+                self.access_order.lock().map_err(|_| anyhow!("Failed to lock access order"))?;
+            access_order.first().cloned()
+        }; // Lock is released here
+
+        if let Some(model_id) = model_id {
+            self.remove_model(&model_id)?;
+            self.evictions.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        } else {
+            Err(anyhow!("No models available for eviction").into())
         }
-        Err(anyhow!("No models available for eviction"))
     }
 
     fn evict_lfu_model(&mut self) -> TrustformersResult<()> {
@@ -325,7 +329,7 @@ impl ModelCacheManager {
             self.evictions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
-            Err(anyhow!("No models available for eviction"))
+            Err(anyhow!("No models available for eviction").into())
         }
     }
 
@@ -345,7 +349,7 @@ impl ModelCacheManager {
             self.evictions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         } else {
-            Err(anyhow!("No models available for eviction"))
+            Err(anyhow!("No models available for eviction").into())
         }
     }
 

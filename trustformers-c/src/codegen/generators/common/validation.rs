@@ -1,6 +1,6 @@
 //! Validation utilities for code generators
 
-use crate::codegen::ast::{FfiFunction, FfiParameter, FfiStruct, FfiType};
+use crate::codegen::ast::{FfiField, FfiFunction, FfiParameter, FfiStruct, FfiType};
 use crate::error::{TrustformersError, TrustformersResult};
 
 /// Validate that a function definition is complete and consistent
@@ -71,7 +71,7 @@ pub fn validate_parameter(param: &FfiParameter) -> TrustformersResult<()> {
 }
 
 /// Validate that a field definition is complete and consistent
-pub fn validate_field(field: &super::super::ast::FfiField) -> TrustformersResult<()> {
+pub fn validate_field(field: &FfiField) -> TrustformersResult<()> {
     if field.name.is_empty() {
         return Err(TrustformersError::InvalidParameter);
     }
@@ -169,7 +169,7 @@ pub fn is_reserved_keyword(name: &str, languages: &[crate::codegen::TargetLangua
 pub fn is_reserved_in_language(name: &str, language: crate::codegen::TargetLanguage) -> bool {
     use crate::codegen::TargetLanguage;
 
-    let reserved_words = match language {
+    let reserved_words: &[&str] = match language {
         TargetLanguage::Python => &[
             "False", "None", "True", "and", "as", "assert", "async", "await", "break", "class",
             "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global",

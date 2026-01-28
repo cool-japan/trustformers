@@ -103,7 +103,7 @@ impl KernelFusionConfig {
 
     /// Gets optimal block size for given parameter count.
     pub fn optimal_block_size(&self, param_count: usize) -> usize {
-        let warp_aligned = ((param_count + self.warp_size - 1) / self.warp_size) * self.warp_size;
+        let warp_aligned = param_count.div_ceil(self.warp_size) * self.warp_size;
         warp_aligned.min(self.max_threads_per_block)
     }
 
@@ -153,7 +153,7 @@ impl FusedParameterBuffer {
     /// Creates a new fused parameter buffer.
     fn new(id: String, size: usize, config: &KernelFusionConfig) -> Self {
         let alignment = config.memory_alignment();
-        let stride = ((size * std::mem::size_of::<f32>() + alignment - 1) / alignment) * alignment;
+        let stride = (size * std::mem::size_of::<f32>()).div_ceil(alignment) * alignment;
 
         Self {
             id,
@@ -242,7 +242,7 @@ impl FusedGPUState {
 
         // Calculate kernel launch parameters
         let block_size = self.config.optimal_block_size(buffer.size);
-        let grid_size = (buffer.size + block_size - 1) / block_size;
+        let grid_size = buffer.size.div_ceil(block_size);
 
         // In real implementation, this would launch a CUDA kernel:
         // fused_adam_kernel<<<grid_size, block_size>>>(...)
@@ -314,7 +314,7 @@ impl FusedGPUState {
     ) {
         // Simulate warp-level operations
         let warp_size = self.config.warp_size;
-        let num_warps = (param_block.len() + warp_size - 1) / warp_size;
+        let num_warps = param_block.len().div_ceil(warp_size);
 
         for warp_idx in 0..num_warps {
             let warp_start = warp_idx * warp_size;
@@ -386,7 +386,7 @@ impl FusedGPUState {
         // Calculate total workload
         let total_elements: usize = params.iter().map(|(_, p, _)| p.len()).sum();
         let block_size = self.config.optimal_block_size(total_elements);
-        let _grid_size = (total_elements + block_size - 1) / block_size;
+        let _grid_size = total_elements.div_ceil(block_size);
 
         // In real implementation, this would launch a multi-parameter kernel
         for (param_id, param, grad) in params {

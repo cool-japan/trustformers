@@ -131,8 +131,32 @@ building blocks required by model implementations in trustformers-models and oth
 - ✅ **Sparse Tensor Support**
   - COO (Coordinate) format
   - CSR (Compressed Sparse Row) format
+  - CSC (Compressed Sparse Column) format
+  - BSR (Block Sparse Row) format
+  - DOK (Dictionary of Keys) format
   - Sparse-dense operations
   - Efficient storage for sparse weights
+
+- ✅ **Advanced Sparse Operations** (NEW - 2025-11-10)
+  - **Structured Sparsity Patterns**
+    - N:M sparsity (2:4, 1:4, etc.) for hardware acceleration
+    - Block sparsity with configurable block sizes
+    - Channel pruning for model compression
+    - Magnitude-based and gradient-based pruning
+  - **Sparse Matrix Multiplication**
+    - SpMM (Sparse-Dense matmul) optimized for CSR format
+    - Efficient batch operations
+  - **Sparse Attention Utilities**
+    - Block-sparse attention patterns
+    - Sliding window attention masks
+    - Dilated window attention for long-range dependencies
+  - **Format Conversion**
+    - COO ↔ CSR ↔ CSC conversions
+    - Efficient sorting and reorganization
+  - **Pruning Algorithms**
+    - Magnitude pruning with configurable keep ratios
+    - Gradient-based importance scoring
+    - Automatic sparsity pattern selection
 
 ---
 
@@ -344,11 +368,79 @@ building blocks required by model implementations in trustformers-models and oth
 
 ### Memory Management
 
-- ✅ **Advanced Memory Pool**
-  - LRU (Least Recently Used) eviction policy
-  - Configurable size limits per device
-  - Thread-safe allocation
-  - Fragmentation reduction
+- ✅ **Advanced Memory Pool with Adaptive Strategies** (Enhanced 2025-11-10)
+  - **Multiple Eviction Policies:**
+    - LRU (Least Recently Used) - time-based eviction
+    - LFU (Least Frequently Used) - frequency-based eviction
+    - Size-Based - evict largest tensors first
+    - ARC (Adaptive Replacement Cache) - balanced recency/frequency
+    - Hybrid - combined LRU, frequency, and size factors
+  - **Adaptive Pool Sizing:**
+    - Fixed - static pool size
+    - HitRate - adjust based on cache hit/miss rates
+    - MemoryPressure - adapt to system memory availability
+    - Predictive - forecast needs based on access patterns
+  - **Access Pattern Learning:**
+    - Track access frequency and recency per tensor shape
+    - Predict frequently accessed shapes
+    - Historical pattern analysis
+  - **Performance Optimization:**
+    - Automatic defragmentation
+    - Entry sorting by access count
+    - Thread-safe allocation
+    - Fragmentation reduction
+  - **Enhanced Statistics:**
+    - Hit rate and miss rate tracking
+    - Peak memory usage monitoring
+    - Per-policy eviction counters
+    - Request/hit/miss counters
+    - Dynamic pool size reporting
+  - **Dynamic Features:**
+    - Automatic pool growth/shrinkage (configurable min/max)
+    - Target hit rate optimization (default 85%)
+    - Prefetching support (pattern-based)
+    - Configurable size limits per device
+
+**Key Files:**
+- `src/memory.rs` (Enhanced to 900+ lines)
+- Exports: `MemoryEvictionPolicy`, `AdaptiveStrategy`, `MemoryConfig`, `TensorMemoryPool`, `MemoryPoolStats`
+
+**Usage Example:**
+```rust
+use trustformers_core::memory::*;
+
+// Configure enhanced memory pool
+let config = MemoryConfig {
+    enable_memory_pool: true,
+    max_pool_size: 2 * 1024 * 1024 * 1024, // 2GB max
+    min_pool_size: 128 * 1024 * 1024,       // 128MB min
+    eviction_policy: MemoryEvictionPolicy::Hybrid,
+    adaptive_strategy: AdaptiveStrategy::HitRate,
+    target_hit_rate: 0.90, // Target 90% hit rate
+    enable_prefetching: true,
+    enable_defragmentation: true,
+    ..Default::default()
+};
+
+let pool = TensorMemoryPool::new(config);
+
+// Get tensor from pool (or create if not available)
+let tensor = pool.get_tensor(&[1024, 768], DType::F32)?;
+
+// Use tensor...
+
+// Return to pool for reuse
+pool.return_tensor(tensor)?;
+
+// Check performance statistics
+let stats = pool.get_stats();
+println!("Hit rate: {:.2}%", stats.hit_rate * 100.0);
+println!("Pool utilization: {:.2}%", stats.utilization * 100.0);
+println!("Dynamic max size: {} MB", stats.dynamic_max_size_bytes / 1024 / 1024);
+
+// Get predicted shapes for prefetching
+let predicted = pool.get_predicted_shapes(Duration::from_secs(60));
+```
 
 - ✅ **Zero-Copy Operations**
   - Tensor views without data duplication
@@ -440,6 +532,81 @@ building blocks required by model implementations in trustformers-models and oth
 
 ---
 
+### Quantization
+
+- ✅ **Standard Quantization Methods**
+  - INT8 and INT4 symmetric/asymmetric quantization
+  - Per-tensor and per-channel quantization
+  - Dynamic and static quantization
+  - Quantization-aware training (QAT)
+
+- ✅ **Advanced Quantization Formats**
+  - **BitsAndBytes:** 4-bit and 8-bit quantization with compatibility
+  - **GPTQ:** Weight quantization for large language models
+  - **AWQ:** Activation-aware weight quantization
+  - **SmoothQuant:** W8A8 quantization with migration analysis
+
+- ✅ **GGML/GGUF Quantization** (Production-Ready)
+  - Q5_0, Q5_1: 5-bit quantization formats
+  - Q5K, Q6K: Advanced 5/6-bit super-block formats
+
+- ✅ **GGUF K-Quant Formats** (NEW - 2025-11-10)
+  - **Q2_K:** 2.5625 bits/weight, ~10GB for 7B models
+    - 16 sub-blocks with 4-bit quantized scales
+    - Best for maximum compression with acceptable quality
+  - **Q3_K:** 3.4375 bits/weight, ~13GB for 7B models
+    - 16 sub-blocks with 6-bit quantized scales
+    - Balanced compression and quality
+  - **Q4_K:** 4.5 bits/weight, ~15GB for 7B models
+    - 8 sub-blocks with 6-bit quantized scales
+    - High quality with good compression
+  - Super-block architecture (256 weights per block)
+  - Importance-based quantization support
+  - Outlier-aware scale optimization
+
+- ✅ **FP8 Quantization** (NEW - 2025-11-10)
+  - **E4M3 Format:** 4-bit exponent, 3-bit mantissa
+    - Range: ±448, optimized for forward pass
+    - Best for: Weights, activations
+  - **E5M2 Format:** 5-bit exponent, 2-bit mantissa
+    - Range: ±57344, wider dynamic range
+    - Best for: Gradients, loss scaling
+  - **Scaling Strategies:**
+    - Per-tensor scaling with single scale factor
+    - Per-channel scaling for better accuracy
+    - Per-token scaling for sequence models
+    - Block-wise scaling with configurable block sizes
+  - **Delayed Scaling:** Training-optimized scale updates
+    - Configurable update intervals
+    - Historical statistics tracking
+    - Overflow/underflow monitoring
+  - **Hardware Support:** Optimized for H100, MI300, future accelerators
+  - Native FP8 operations when hardware available
+  - Automatic format selection based on tensor characteristics
+
+- ✅ **Activation Quantization**
+  - Runtime inference optimization
+  - Calibration-based quantization
+  - Per-layer quality metrics
+
+- ✅ **Mixed-Bit Quantization**
+  - Automatic bit allocation strategies
+  - Sensitivity-based bit assignment
+  - Layer-specific quantization configurations
+
+- ✅ **Learned Quantization**
+  - Trainable quantization parameters
+  - Gradient-based optimization
+  - Fake quantization for training
+
+- ✅ **Calibration Toolkit**
+  - Multiple calibration methods (MinMax, Entropy, Percentile)
+  - Cross-validation support
+  - Quality thresholds and recommendations
+  - Trade-off analysis tools
+
+---
+
 ### AutoDiff & Backpropagation
 
 - ✅ **Computational Graph**
@@ -474,6 +641,193 @@ building blocks required by model implementations in trustformers-models and oth
 
 ---
 
+### Kernel Optimization & Performance Tuning
+
+#### Automatic Kernel Tuning (NEW - 2025-11-10)
+- ✅ **Platform Detection**
+  - Automatic hardware capability detection
+  - Multi-backend support (CUDA, ROCm, Metal, CPU, Vulkan, OneAPI, TPU)
+  - GPU memory and compute capability detection
+  - CPU feature detection (AVX, AVX2, AVX-512, NEON, etc.)
+
+- ✅ **Auto-Tuning Infrastructure**
+  - **Benchmarking Engine:** Automatic kernel parameter optimization
+  - **Caching System:** Persistent tuning results with JSON storage
+  - **Platform-Specific Tuning:** Separate configurations per hardware
+  - **Operation Coverage:**
+    - Matrix multiplication (GEMM) with shape-specific tuning
+    - Convolution operations
+    - Batch normalization
+    - Activation functions (ReLU, GELU, etc.)
+    - Pooling operations
+    - Custom operations
+
+- ✅ **Kernel Parameters**
+  - **Block Size:** Optimal CUDA/HIP thread block dimensions
+  - **Tile Size:** Memory hierarchy optimization
+  - **Unroll Factor:** Loop unrolling for performance
+  - **Vector Width:** SIMD vectorization width
+  - **Shared Memory:** Per-block shared memory allocation
+  - **Registers:** Register usage hints
+  - **Occupancy:** Target GPU occupancy percentage
+
+- ✅ **Tuning Strategies**
+  - Grid search over parameter spaces
+  - Configurable iteration counts for stable measurements
+  - Statistical filtering of benchmark results
+  - Automatic fallback to safe defaults
+  - Platform-aware parameter constraints
+
+- ✅ **Global Kernel Tuner**
+  - Thread-safe singleton access via `get_kernel_tuner()`
+  - Automatic cache loading/saving
+  - Configurable cache directory
+  - Zero-overhead when tuning disabled
+
+- ✅ **Configuration Options**
+  - Enable/disable auto-tuning per operation
+  - Custom cache directory paths
+  - Benchmark iteration control
+  - Platform preference specification
+
+**Key Files:**
+- `src/kernel_tuning.rs` (680+ lines)
+- Exports: `KernelTuner`, `KernelParams`, `TuningConfig`, `PlatformInfo`, `Operation`, `Backend`
+
+**Usage Example:**
+```rust
+use trustformers_core::kernel_tuning::*;
+
+// Get global tuner (thread-safe)
+let mut tuner = get_kernel_tuner();
+
+// Tune for specific operation
+let params = tuner.tune_matmul(1024, 1024, 1024)?;
+
+// Or tune generic operation
+let params = tuner.tune_operation(
+    Operation::Convolution,
+    &[batch, channels, height, width]
+)?;
+```
+
+---
+
+### Interactive Tensor Debugger (NEW - 2025-11-10)
+
+- ✅ **Tensor Inspection**
+  - Comprehensive statistics (min, max, mean, std dev)
+  - Shape and dtype tracking
+  - Memory usage reporting
+  - Element count and distribution analysis
+
+- ✅ **Automatic Issue Detection**
+  - **NaN Detection:** Identifies and counts Not-a-Number values
+  - **Infinity Detection:** Tracks infinite values
+  - **Vanishing Values:** Detects very small values (< 1e-7)
+  - **Exploding Values:** Detects very large values (> 1e6)
+  - **All Zeros:** Identifies tensors filled with zeros
+  - **Unusual Distributions:** Statistical anomaly detection
+
+- ✅ **Watchpoints System**
+  - Conditional breakpoints on tensor operations
+  - Multiple watch conditions:
+    - `HasNaN` - Break on NaN values
+    - `HasInf` - Break on infinite values
+    - `ValueExceeds(threshold)` - Break on large values
+    - `ValueBelow(threshold)` - Break on small values
+    - `ShapeEquals(shape)` - Break on specific shapes
+    - `Custom(condition)` - User-defined conditions
+  - Pattern-based tensor matching (wildcards supported)
+  - Trigger count tracking
+  - Configurable break-on-trigger behavior
+
+- ✅ **Operation Tracing**
+  - Track tensor operations and transformations
+  - Record input/output shapes
+  - Measure operation duration
+  - Build operation history
+  - Maximum trace entry limits (configurable)
+
+- ✅ **Severity Levels**
+  - Info: Informational messages
+  - Warning: Potential issues
+  - Error: Issues requiring attention
+  - Critical: Critical issues requiring immediate action
+
+- ✅ **Configuration Options**
+  - Enable/disable automatic issue detection
+  - Enable/disable operation tracing
+  - Maximum trace entries (default: 1000)
+  - Enable/disable watchpoints
+  - Break on errors/warnings
+  - Maximum issues to track (default: 100)
+
+- ✅ **Interactive Features**
+  - Register tensors for debugging
+  - Get tensor by name
+  - Query statistics
+  - List all issues
+  - Clear issues and traces
+  - Check breakpoint status
+  - Print comprehensive summary
+
+**Key Files:**
+- `src/tensor_debugger.rs` (760+ lines)
+- Exports: `TensorDebugger`, `TensorDebuggerConfig`, `DebugTensorStats`, `TensorDebugIssue`, `TensorIssueType`, `Severity`, `Watchpoint`, `WatchCondition`, `OperationTrace`
+
+**Usage Example:**
+```rust
+use trustformers_core::tensor_debugger::*;
+
+// Create debugger with custom configuration
+let config = TensorDebuggerConfig {
+    auto_detect_issues: true,
+    enable_tracing: true,
+    break_on_error: true,
+    ..Default::default()
+};
+let debugger = TensorDebugger::with_config(config);
+
+// Register tensors for debugging
+let tensor = Tensor::randn(&[100, 768])?;
+debugger.register_tensor("hidden_states".to_string(), tensor)?;
+
+// Add watchpoint for NaN values
+let watchpoint = Watchpoint {
+    tensor_pattern: "hidden_states".to_string(),
+    condition: WatchCondition::HasNaN,
+    break_on_trigger: true,
+    trigger_count: 0,
+};
+debugger.add_watchpoint(watchpoint);
+
+// Check for issues
+let issues = debugger.get_issues();
+for issue in issues {
+    println!("[{:?}] {}: {}", issue.severity, issue.issue_type, issue.message);
+}
+
+// Get statistics
+if let Some(stats) = debugger.get_stats("hidden_states") {
+    println!("Shape: {:?}", stats.shape);
+    println!("Mean: {:.6}", stats.mean.unwrap_or(0.0));
+    println!("Std Dev: {:.6}", stats.std_dev.unwrap_or(0.0));
+    println!("NaN count: {}", stats.nan_count);
+}
+
+// Print full summary
+debugger.print_summary();
+
+// Check if breakpoint was hit
+if debugger.is_breakpoint_hit() {
+    println!("Breakpoint hit! Inspect tensors.");
+    debugger.clear_breakpoint();
+}
+```
+
+---
+
 ## Known Limitations
 
 ### Hardware Backend Limitations
@@ -494,16 +848,18 @@ building blocks required by model implementations in trustformers-models and oth
 
 ## Future Enhancements
 
-### High Priority
+### High Priority (Updated 2025-11-10)
 - Additional fused kernel patterns
-- Enhanced sparse tensor operations
-- More quantization methods
+- ~~Enhanced sparse tensor operations~~ ✅ COMPLETED (2025-11-10)
+- ~~More quantization methods~~ ✅ COMPLETED (FP8, GGUF K-quants - 2025-11-10)
+- INT2 and sub-byte quantization for extreme compression
+- MX (Microscaling) formats for future hardware
 
 ### Performance
 - Further SIMD optimizations via SciRS2
 - Advanced kernel fusion strategies
-- Enhanced memory pooling
-- Automatic kernel tuning for new hardware
+- ~~Enhanced memory pooling with adaptive strategies~~ ✅ COMPLETED (2025-11-10)
+- ~~Automatic kernel tuning for new hardware~~ ✅ COMPLETED (2025-11-10)
 
 ### Hardware Support
 - WebGPU backend for browser deployment
@@ -511,7 +867,7 @@ building blocks required by model implementations in trustformers-models and oth
 - Enhanced FPGA support
 
 ### Developer Tools
-- Interactive tensor debugger
+- ~~Interactive tensor debugger~~ ✅ COMPLETED (2025-11-10)
 - Enhanced profiling visualizations
 - Performance regression dashboard
 

@@ -346,6 +346,12 @@ pub struct CyclicalPatternDetector {
     min_cycle_length: usize,
 }
 
+impl Default for CyclicalPatternDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CyclicalPatternDetector {
     pub fn new() -> Self {
         Self {
@@ -443,7 +449,7 @@ impl CyclicalPatternDetector {
                 ),
                 frequency: cycles.len() as f32 / 100.0, // Normalized frequency
                 confidence: average_similarity,
-                events: cycles.into_iter().flatten().cloned().cloned().collect(),
+                events: cycles.iter().flatten().cloned().cloned().collect(),
                 effectiveness: average_similarity * 0.8, // Effectiveness based on consistency
                 first_observed: cycles
                     .first()
@@ -482,6 +488,12 @@ impl CyclicalPatternDetector {
 pub struct DegradationPatternDetector {
     min_degradation_events: usize,
     degradation_threshold: f64,
+}
+
+impl Default for DegradationPatternDetector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DegradationPatternDetector {
@@ -608,6 +620,12 @@ pub struct ImprovementPatternDetector {
     improvement_threshold: f64,
 }
 
+impl Default for ImprovementPatternDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImprovementPatternDetector {
     pub fn new() -> Self {
         Self {
@@ -730,6 +748,12 @@ pub struct OscillationPatternDetector {
     oscillation_threshold: f64,
 }
 
+impl Default for OscillationPatternDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OscillationPatternDetector {
     pub fn new() -> Self {
         Self {
@@ -833,6 +857,12 @@ pub struct ThresholdPatternDetector {
     threshold_values: Vec<f64>,
 }
 
+impl Default for ThresholdPatternDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThresholdPatternDetector {
     pub fn new() -> Self {
         Self {
@@ -916,6 +946,12 @@ impl ThresholdPatternDetector {
 pub struct SimplePatternLearner {
     pattern_frequencies: HashMap<String, f32>,
     learning_rate: f32,
+}
+
+impl Default for SimplePatternLearner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SimplePatternLearner {
@@ -1002,6 +1038,12 @@ pub struct FrequencyBasedPredictor {
     pattern_intervals: HashMap<String, Vec<Duration>>,
 }
 
+impl Default for FrequencyBasedPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrequencyBasedPredictor {
     pub fn new() -> Self {
         Self {
@@ -1072,6 +1114,12 @@ impl PatternLearningModel for FrequencyBasedPredictor {
 /// Contextual pattern predictor that considers system state
 pub struct ContextualPatternPredictor {
     context_patterns: HashMap<String, Vec<RecognizedPattern>>,
+}
+
+impl Default for ContextualPatternPredictor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ContextualPatternPredictor {

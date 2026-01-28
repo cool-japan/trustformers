@@ -1,5 +1,6 @@
 use crate::vit::config::ViTConfig;
-use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{concatenate, s, Array1, Array2, Array3, Array4, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
+use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{
     attention::MultiHeadAttention, embedding::Embedding, feedforward::FeedForward,
@@ -15,18 +16,33 @@ pub struct PatchEmbedding {
     pub patch_size: usize,
     pub num_channels: usize,
     pub hidden_size: usize,
+    device: Device,
 }
 
 impl PatchEmbedding {
     pub fn new(config: &ViTConfig) -> Self {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ViTConfig, device: Device) -> Self {
         let input_size = config.patch_size * config.patch_size * config.num_channels;
 
         Self {
-            projection: Linear::new(input_size, config.hidden_size, config.use_patch_bias),
+            projection: Linear::new_with_device(
+                input_size,
+                config.hidden_size,
+                config.use_patch_bias,
+                device,
+            ),
             patch_size: config.patch_size,
             num_channels: config.num_channels,
             hidden_size: config.hidden_size,
+            device,
         }
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Convert image to patches and embed them
@@ -87,7 +103,7 @@ impl PatchEmbedding {
         let patches_tensor = Tensor::F32(patches.into_dyn());
         match self.projection.forward(patches_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),
@@ -104,12 +120,18 @@ pub struct ViTEmbeddings {
     pub class_token: Option<Array1<f32>>,
     pub dropout: f32,
     pub config: ViTConfig,
+    device: Device,
 }
 
 impl ViTEmbeddings {
     pub fn new(config: &ViTConfig) -> Result<Self> {
-        let patch_embeddings = PatchEmbedding::new(config);
-        let position_embeddings = Embedding::new(config.seq_length(), config.hidden_size, None)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ViTConfig, device: Device) -> Result<Self> {
+        let patch_embeddings = PatchEmbedding::new_with_device(config, device);
+        let position_embeddings =
+            Embedding::new_with_device(config.seq_length(), config.hidden_size, None, device)?;
 
         let class_token = if config.use_class_token {
             Some(Array1::zeros(config.hidden_size))
@@ -123,7 +145,12 @@ impl ViTEmbeddings {
             class_token,
             dropout: config.hidden_dropout_prob,
             config: config.clone(),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, images: &Array4<f32>) -> Result<Array3<f32>> {
@@ -140,7 +167,7 @@ impl ViTEmbeddings {
                 });
 
             // Concatenate class token with patch embeddings
-            embeddings = ndarray::concatenate![Axis(1), class_tokens, embeddings];
+            embeddings = concatenate![Axis(1), class_tokens, embeddings];
         }
 
         // Add position embeddings
@@ -180,20 +207,35 @@ pub struct ViTAttention {
     pub attention: MultiHeadAttention,
     pub layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl ViTAttention {
     pub fn new(config: &ViTConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ViTConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            attention: MultiHeadAttention::new(
+            attention: MultiHeadAttention::new_with_device(
                 config.hidden_size,
                 config.num_attention_heads,
                 config.attention_probs_dropout_prob,
                 true,
+                device,
             )?,
-            layer_norm: LayerNorm::new_simple(config.hidden_size, config.layer_norm_eps),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, hidden_states: &Array3<f32>) -> Result<Array3<f32>> {
@@ -204,7 +246,7 @@ impl ViTAttention {
         // Extract array and apply dropout
         let attention_output = match attention_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::invalid_input_simple(
@@ -224,7 +266,7 @@ impl ViTAttention {
         let output_tensor = Tensor::F32(output.into_dyn());
         match self.layer_norm.forward(output_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),
@@ -239,19 +281,34 @@ pub struct ViTMLP {
     pub feed_forward: FeedForward,
     pub layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl ViTMLP {
     pub fn new(config: &ViTConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ViTConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            feed_forward: FeedForward::new(
+            feed_forward: FeedForward::new_with_device(
                 config.hidden_size,
                 config.intermediate_size,
                 0.0, // dropout is handled separately
+                device,
+            ),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
             )?,
-            layer_norm: LayerNorm::new_simple(config.hidden_size, config.layer_norm_eps),
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, hidden_states: &Array3<f32>) -> Result<Array3<f32>> {
@@ -262,7 +319,7 @@ impl ViTMLP {
         // Extract array and apply dropout
         let ff_output = match ff_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::invalid_input_simple(
@@ -279,7 +336,7 @@ impl ViTMLP {
         let output_tensor = Tensor::F32(output.into_dyn());
         match self.layer_norm.forward(output_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),
@@ -293,14 +350,24 @@ impl ViTMLP {
 pub struct ViTLayer {
     pub attention: ViTAttention,
     pub mlp: ViTMLP,
+    device: Device,
 }
 
 impl ViTLayer {
     pub fn new(config: &ViTConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ViTConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            attention: ViTAttention::new(config)?,
-            mlp: ViTMLP::new(config)?,
+            attention: ViTAttention::new_with_device(config, device)?,
+            mlp: ViTMLP::new_with_device(config, device)?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, hidden_states: &Array3<f32>) -> Result<Array3<f32>> {
@@ -318,15 +385,24 @@ impl ViTLayer {
 #[derive(Debug, Clone)]
 pub struct ViTEncoder {
     pub layers: Vec<ViTLayer>,
+    device: Device,
 }
 
 impl ViTEncoder {
     pub fn new(config: &ViTConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &ViTConfig, device: Device) -> Result<Self> {
         let layers = (0..config.num_hidden_layers)
-            .map(|_| ViTLayer::new(config))
+            .map(|_| ViTLayer::new_with_device(config, device))
             .collect::<Result<Vec<_>>>()?;
 
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, hidden_states: &Array3<f32>) -> Result<Array3<f32>> {
@@ -347,18 +423,32 @@ pub struct ViTModel {
     pub encoder: ViTEncoder,
     pub layer_norm: LayerNorm,
     pub config: ViTConfig,
+    device: Device,
 }
 
 impl ViTModel {
     pub fn new(config: ViTConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: ViTConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
         Ok(Self {
-            embeddings: ViTEmbeddings::new(&config)?,
-            encoder: ViTEncoder::new(&config)?,
-            layer_norm: LayerNorm::new_simple(config.hidden_size, config.layer_norm_eps),
+            embeddings: ViTEmbeddings::new_with_device(&config, device)?,
+            encoder: ViTEncoder::new_with_device(&config, device)?,
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             config,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
@@ -377,7 +467,7 @@ impl ViTModel {
         let output_tensor = Tensor::F32(encoder_output.into_dyn());
         let output = match self.layer_norm.forward(output_tensor)? {
             Tensor::F32(result) => result
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::invalid_input_simple(
@@ -398,7 +488,7 @@ impl ViTModel {
             Ok(output.slice(s![.., 0, ..]).to_owned())
         } else {
             // Use mean of all patch tokens
-            Ok(output.mean_axis(Axis(1)).unwrap())
+            Ok(output.mean_axis(Axis(1)).expect("operation failed"))
         }
     }
 }
@@ -409,17 +499,32 @@ pub struct ViTForImageClassification {
     pub vit: ViTModel,
     pub classifier: Linear,
     pub dropout: f32,
+    device: Device,
 }
 
 impl ViTForImageClassification {
     pub fn new(config: ViTConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: ViTConfig, device: Device) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(0.0);
 
         Ok(Self {
-            vit: ViTModel::new(config.clone())?,
-            classifier: Linear::new(config.hidden_size, config.num_labels, true),
+            vit: ViTModel::new_with_device(config.clone(), device)?,
+            classifier: Linear::new_with_device(
+                config.hidden_size,
+                config.num_labels,
+                true,
+                device,
+            ),
             dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
@@ -442,7 +547,7 @@ impl ViTForImageClassification {
         let class_tensor = Tensor::F32(class_output.into_dyn());
         match self.classifier.forward(class_tensor)? {
             Tensor::F32(result) => Ok(result
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?),
             _ => Err(TrustformersError::invalid_input_simple(
                 "Expected F32 tensor".to_string(),

@@ -939,7 +939,7 @@ impl ProfilingSessionManager {
             }
         });
 
-        *self.cleanup_handle.lock().unwrap() = Some(handle);
+        *self.cleanup_handle.lock().expect("Lock poisoned") = Some(handle);
     }
 
     /// Update completion metrics
@@ -973,7 +973,9 @@ impl ProfilingSessionManager {
         }
 
         // Wait for cleanup task to finish
-        if let Some(handle) = self.cleanup_handle.lock().unwrap().take() {
+        if let Some(handle) =
+            self.cleanup_handle.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))?.take()
+        {
             let _ = handle.await;
         }
 

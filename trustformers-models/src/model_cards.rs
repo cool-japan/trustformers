@@ -778,8 +778,8 @@ mod tests {
         )
         .build();
 
-        let json = card.to_json().unwrap();
-        let deserialized_card = ModelCard::from_json(&json).unwrap();
+        let json = card.to_json().expect("operation failed");
+        let deserialized_card = ModelCard::from_json(&json).expect("operation failed");
 
         assert_eq!(
             card.model_details.name,

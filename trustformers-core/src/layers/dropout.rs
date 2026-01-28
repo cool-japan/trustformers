@@ -3,10 +3,11 @@
 //! Dropout randomly sets a fraction of the input elements to zero during training,
 //! which helps prevent overfitting.
 
+use crate::device::Device;
 use crate::errors::Result;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use rand::Rng;
+use scirs2_core::random::*;
 
 /// Dropout layer for regularization during training
 ///
@@ -19,11 +20,12 @@ use rand::Rng;
 /// ```no_run
 /// use trustformers_core::layers::Dropout;
 /// use trustformers_core::tensor::Tensor;
+/// use trustformers_core::device::Device;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let dropout = Dropout::new(0.1); // 10% dropout rate
+/// let dropout = Dropout::new_with_device(0.1, Device::CPU); // 10% dropout rate
 /// let input = Tensor::randn(&[32, 768])?;
-/// let output = dropout.forward(&input)?;
+/// let output = dropout.forward(input)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -33,10 +35,12 @@ pub struct Dropout {
     p: f32,
     /// Whether layer is in training mode
     training: bool,
+    /// Device for computations
+    device: Device,
 }
 
 impl Dropout {
-    /// Create a new dropout layer
+    /// Create a new dropout layer on CPU
     ///
     /// # Arguments
     ///
@@ -46,13 +50,31 @@ impl Dropout {
     ///
     /// Panics if `p` is not between 0.0 and 1.0
     pub fn new(p: f32) -> Self {
+        Self::new_with_device(p, Device::CPU)
+    }
+
+    /// Create a new dropout layer on specified device
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - Dropout probability, should be between 0.0 and 1.0
+    /// * `device` - Device to use for computations
+    ///
+    /// # Panics
+    ///
+    /// Panics if `p` is not between 0.0 and 1.0
+    pub fn new_with_device(p: f32, device: Device) -> Self {
         assert!(
             (0.0..=1.0).contains(&p),
             "Dropout probability must be between 0.0 and 1.0, got {}",
             p
         );
 
-        Self { p, training: true }
+        Self {
+            p,
+            training: true,
+            device,
+        }
     }
 
     /// Set training mode
@@ -69,6 +91,17 @@ impl Dropout {
     pub fn is_training(&self) -> bool {
         self.training
     }
+
+    /// Returns the device this layer uses for computations
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Moves this layer to a different device
+    pub fn to_device(mut self, device: Device) -> Self {
+        self.device = device;
+        self
+    }
 }
 
 impl Layer for Dropout {
@@ -82,7 +115,7 @@ impl Layer for Dropout {
         }
 
         // During training, apply dropout
-        let mut rng = rand::rng();
+        let mut rng = thread_rng(); // ✅ From scirs2_core::random
         let data = input.data()?;
         let mut output_data = Vec::with_capacity(data.len());
 
@@ -115,13 +148,21 @@ mod tests {
     }
 
     #[test]
+    fn test_dropout_with_device() {
+        let dropout = Dropout::new_with_device(0.3, Device::CPU);
+        assert_eq!(dropout.dropout_rate(), 0.3);
+        assert_eq!(dropout.device(), Device::CPU);
+    }
+
+    #[test]
     fn test_dropout_inference_mode() {
         let mut dropout = Dropout::new(0.5);
         dropout.set_training(false);
 
-        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let input_data = input.data().unwrap();
-        let output = dropout.forward(input).unwrap();
+        let output = dropout.forward(input).expect("Forward pass failed");
         let output_data = output.data().unwrap();
 
         // In inference mode, output should equal input
@@ -132,10 +173,11 @@ mod tests {
     fn test_dropout_zero_rate() {
         let dropout = Dropout::new(0.0);
 
-        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let input_data = input.data().unwrap();
         let input_shape = input.shape().to_vec();
-        let output = dropout.forward(input).unwrap();
+        let output = dropout.forward(input).expect("Forward pass failed");
         let output_data = output.data().unwrap();
         let output_shape = output.shape().to_vec();
 
@@ -148,9 +190,10 @@ mod tests {
     fn test_dropout_full_rate() {
         let dropout = Dropout::new(1.0);
 
-        let input = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let input =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let input_shape = input.shape().to_vec();
-        let output = dropout.forward(input).unwrap();
+        let output = dropout.forward(input).expect("Forward pass failed");
         let output_data = output.data().unwrap();
         let output_shape = output.shape().to_vec();
 
@@ -169,8 +212,8 @@ mod tests {
         let mut sums = Vec::new();
 
         for _ in 0..20 {
-            let input = Tensor::from_vec(vec![1.0; size], &[size]).unwrap();
-            let output = dropout.forward(input).unwrap();
+            let input = Tensor::from_vec(vec![1.0; size], &[size]).expect("Tensor from_vec failed");
+            let output = dropout.forward(input).expect("Forward pass failed");
             let output_data = output.data().unwrap();
             let zero_count = output_data.iter().filter(|&&x| x == 0.0).count();
             let sum: f32 = output_data.iter().sum();

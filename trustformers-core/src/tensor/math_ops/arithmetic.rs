@@ -6,7 +6,7 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::ArrayD;
+use scirs2_core::ndarray::ArrayD;
 
 // Import stability functions from the stability module
 use super::stability::{is_stable_f32, is_stable_f64, stabilize_f32, stabilize_f64};
@@ -30,28 +30,21 @@ impl Tensor {
                     )));
                 }
 
-                // Check for numerical stability issues
-                let has_unstable_a = a.iter().any(|&x| !is_stable_f32(x));
-                let has_unstable_b = b.iter().any(|&x| !is_stable_f32(x));
+                // Always use ndarray's broadcasting addition (handles all shapes correctly)
+                // Then stabilize the result if needed
+                let result = a + b;
 
-                if has_unstable_a || has_unstable_b {
-                    // Use stabilized element-wise addition
-                    let result = a
-                        .iter()
-                        .zip(b.iter())
-                        .map(|(&x, &y)| {
-                            let stabilized_x = stabilize_f32(x);
-                            let stabilized_y = stabilize_f32(y);
-                            stabilize_f32(stabilized_x + stabilized_y)
-                        })
-                        .collect::<Vec<_>>();
+                // Check if stabilization is needed
+                let has_unstable = result.iter().any(|&x| !is_stable_f32(x));
 
-                    let result_array = ArrayD::from_shape_vec(a.raw_dim(), result)
+                if has_unstable {
+                    // Stabilize the result
+                    let stabilized: Vec<f32> = result.iter().map(|&x| stabilize_f32(x)).collect();
+
+                    let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                     Ok(Tensor::F32(result_array))
                 } else {
-                    // Use optimized broadcasting addition if inputs are stable
-                    let result = a + b;
                     Ok(Tensor::F32(result))
                 }
             },
@@ -64,28 +57,21 @@ impl Tensor {
                     )));
                 }
 
-                // Check for numerical stability issues
-                let has_unstable_a = a.iter().any(|&x| !is_stable_f64(x));
-                let has_unstable_b = b.iter().any(|&x| !is_stable_f64(x));
+                // Always use ndarray's broadcasting addition (handles all shapes correctly)
+                // Then stabilize the result if needed
+                let result = a + b;
 
-                if has_unstable_a || has_unstable_b {
-                    // Use stabilized element-wise addition
-                    let result = a
-                        .iter()
-                        .zip(b.iter())
-                        .map(|(&x, &y)| {
-                            let stabilized_x = stabilize_f64(x);
-                            let stabilized_y = stabilize_f64(y);
-                            stabilize_f64(stabilized_x + stabilized_y)
-                        })
-                        .collect::<Vec<_>>();
+                // Check if stabilization is needed
+                let has_unstable = result.iter().any(|&x| !is_stable_f64(x));
 
-                    let result_array = ArrayD::from_shape_vec(a.raw_dim(), result)
+                if has_unstable {
+                    // Stabilize the result
+                    let stabilized: Vec<f64> = result.iter().map(|&x| stabilize_f64(x)).collect();
+
+                    let result_array = ArrayD::from_shape_vec(result.raw_dim(), stabilized)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                     Ok(Tensor::F64(result_array))
                 } else {
-                    // Use optimized broadcasting addition if inputs are stable
-                    let result = a + b;
                     Ok(Tensor::F64(result))
                 }
             },
@@ -121,6 +107,53 @@ impl Tensor {
                 }
                 let result = a + b;
                 Ok(Tensor::C64(result))
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (Tensor::Metal(a_data), Tensor::Metal(b_data)) => {
+                use crate::gpu_ops::metal::get_metal_backend;
+                use crate::tensor::MetalTensorData;
+
+                // GPU-to-GPU addition - stays on Metal!
+                // eprintln!("✅ Tensor::add - GPU-to-GPU path (Metal + Metal → Metal)");
+
+                if a_data.shape != b_data.shape {
+                    return Err(TrustformersError::shape_error(format!(
+                        "Cannot add Metal tensors with different shapes: {:?} and {:?}",
+                        a_data.shape, b_data.shape
+                    )));
+                }
+
+                let backend = get_metal_backend()?;
+                let size = a_data.shape.iter().product();
+
+                let output_buffer_id =
+                    backend.add_gpu_to_gpu(&a_data.buffer_id, &b_data.buffer_id, size)?;
+
+                Ok(Tensor::Metal(MetalTensorData {
+                    buffer_id: output_buffer_id,
+                    shape: a_data.shape.clone(),
+                    dtype: a_data.dtype,
+                }))
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (Tensor::Metal(_), _) | (_, Tensor::Metal(_)) => {
+                // Mixed Metal/CPU - convert to CPU for now
+                // TODO: Could upload CPU tensor to GPU instead
+                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
+                let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_self.add(&cpu_other)
+            },
+            #[cfg(feature = "cuda")]
+            (Tensor::CUDA(_), _) => {
+                // Convert CUDA tensor to CPU, then perform operation
+                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_self.add(other)
+            },
+            #[cfg(feature = "cuda")]
+            (_, Tensor::CUDA(_)) => {
+                // Convert CUDA tensor to CPU, then perform operation
+                let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
+                self.add(&cpu_other)
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Addition not supported for these tensor types",
@@ -186,6 +219,16 @@ impl Tensor {
                 }
                 let result = a - b;
                 Ok(Tensor::C64(result))
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (Tensor::Metal(_), _) => {
+                let cpu_self = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_self.sub(other)
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (_, Tensor::Metal(_)) => {
+                let cpu_other = other.to_device_enum(&crate::device::Device::CPU)?;
+                self.sub(&cpu_other)
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Subtraction not supported for these tensor types",

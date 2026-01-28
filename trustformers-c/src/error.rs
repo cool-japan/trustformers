@@ -66,6 +66,12 @@ pub enum TrustformersError {
     InitializationError = -26,
     /// Optimization error
     OptimizationError = -27,
+    /// Plugin initialization error
+    PluginInitError = -28,
+    /// Plugin not found
+    PluginNotFound = -29,
+    /// Operation not found
+    OperationNotFound = -30,
     /// Unknown error
     Unknown = -100,
 }
@@ -104,6 +110,9 @@ impl fmt::Display for TrustformersError {
             TrustformersError::InitializationError => "Initialization error",
             TrustformersError::OptimizationError => "Optimization error",
             TrustformersError::InvalidPath => "Invalid file path",
+            TrustformersError::PluginInitError => "Plugin initialization failed",
+            TrustformersError::PluginNotFound => "Plugin not found",
+            TrustformersError::OperationNotFound => "Operation not found",
             TrustformersError::Unknown => "Unknown error",
         };
         write!(f, "{}", message)
@@ -115,6 +124,8 @@ impl Default for TrustformersError {
         Self::Success
     }
 }
+
+impl std::error::Error for TrustformersError {}
 
 impl From<anyhow::Error> for TrustformersError {
     fn from(error: anyhow::Error) -> Self {
@@ -166,6 +177,42 @@ impl From<anyhow::Error> for TrustformersError {
 impl From<serde_json::Error> for TrustformersError {
     fn from(_: serde_json::Error) -> Self {
         TrustformersError::SerializationError
+    }
+}
+
+impl From<std::io::Error> for TrustformersError {
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            std::io::ErrorKind::NotFound => TrustformersError::FileNotFound,
+            std::io::ErrorKind::PermissionDenied => TrustformersError::InvalidPath,
+            std::io::ErrorKind::OutOfMemory => TrustformersError::OutOfMemory,
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput => {
+                TrustformersError::InvalidFormat
+            },
+            std::io::ErrorKind::TimedOut => TrustformersError::Timeout,
+            _ => TrustformersError::RuntimeError,
+        }
+    }
+}
+
+#[cfg(feature = "codegen")]
+impl From<syn::Error> for TrustformersError {
+    fn from(_: syn::Error) -> Self {
+        TrustformersError::CompilationError
+    }
+}
+
+#[cfg(feature = "codegen")]
+impl From<regex::Error> for TrustformersError {
+    fn from(_: regex::Error) -> Self {
+        TrustformersError::ValidationError
+    }
+}
+
+#[cfg(feature = "codegen")]
+impl From<toml::de::Error> for TrustformersError {
+    fn from(_: toml::de::Error) -> Self {
+        TrustformersError::ConfigError
     }
 }
 
@@ -342,6 +389,9 @@ pub extern "C" fn trustformers_error_message(error: TrustformersError) -> *const
         TrustformersError::InitializationError => "Initialization error",
         TrustformersError::OptimizationError => "Optimization error",
         TrustformersError::InvalidPath => "Invalid path provided",
+        TrustformersError::PluginInitError => "Plugin initialization failed",
+        TrustformersError::PluginNotFound => "Plugin not found",
+        TrustformersError::OperationNotFound => "Operation not found",
         TrustformersError::Unknown => "Unknown error",
     };
 

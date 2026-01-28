@@ -1324,7 +1324,7 @@ mod tests {
         analyzer.update_config(config.clone());
 
         let retrieved_config = analyzer.get_config();
-        assert_eq!(retrieved_config.enable_ml_conflict_prediction, true);
+        assert!(retrieved_config.enable_ml_conflict_prediction);
     }
 
     #[tokio::test]

@@ -39,7 +39,7 @@ impl ColumnParallelLinear {
         let rank = mp_context.rank();
 
         // Calculate local output features
-        let out_features_per_device = (out_features + world_size - 1) / world_size;
+        let out_features_per_device = out_features.div_ceil(world_size);
         let local_out_start = rank * out_features_per_device;
         let local_out_end = ((rank + 1) * out_features_per_device).min(out_features);
         let local_out_features = local_out_end - local_out_start;
@@ -71,7 +71,7 @@ impl ColumnParallelLinear {
             // Slice bias to match local output features
             let rank = self.mp_context.rank();
             let world_size = self.mp_context.world_size();
-            let out_features_per_device = (self.out_features + world_size - 1) / world_size;
+            let out_features_per_device = self.out_features.div_ceil(world_size);
             let local_out_start = rank * out_features_per_device;
             let local_out_end = ((rank + 1) * out_features_per_device).min(self.out_features);
 
@@ -160,7 +160,7 @@ impl RowParallelLinear {
         let rank = mp_context.rank();
 
         // Calculate local input features
-        let in_features_per_device = (in_features + world_size - 1) / world_size;
+        let in_features_per_device = in_features.div_ceil(world_size);
         let local_in_start = rank * in_features_per_device;
         let local_in_end = ((rank + 1) * in_features_per_device).min(in_features);
         let local_in_features = local_in_end - local_in_start;

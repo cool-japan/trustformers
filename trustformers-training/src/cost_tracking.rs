@@ -709,6 +709,20 @@ impl CostTracker {
             });
         }
 
+        // Always provide a general cost optimization recommendation
+        if recommendations.is_empty() {
+            recommendations.push(CostRecommendation {
+                recommendation_id: uuid::Uuid::new_v4().to_string(),
+                title: "Regular Cost Review".to_string(),
+                description: "Current cost metrics look healthy. Continue regular cost reviews and consider implementing cost allocation tags for better tracking.".to_string(),
+                potential_savings: 0.0,
+                confidence: 0.5,
+                implementation_effort: ImplementationEffort::Low,
+                category: RecommendationCategory::SchedulingOptimization,
+                priority: RecommendationPriority::Low,
+            });
+        }
+
         recommendations
     }
 

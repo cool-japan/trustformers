@@ -1,11 +1,15 @@
+#![allow(dead_code)]
+
 use crate::albert::config::AlbertConfig;
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::{Embedding, LayerNorm, Linear};
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Config, Layer, Model, TokenizedInput};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertEmbeddings {
     word_embeddings: Embedding,
     position_embeddings: Embedding,
@@ -14,19 +18,23 @@ pub struct AlbertEmbeddings {
     #[allow(dead_code)]
     dropout: f32,
     embedding_hidden_mapping_in: Linear,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertTransformerGroup {
     albert_layers: Vec<AlbertLayer>,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertLayer {
     attention: AlbertAttention,
     ffn: AlbertFeedForward,
     attention_output: AlbertAttentionOutput,
     ffn_output: AlbertFFNOutput,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +49,7 @@ pub struct AlbertAttention {
     dropout: f32,
     num_attention_heads: usize,
     attention_head_size: usize,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -49,12 +58,14 @@ pub struct AlbertAttentionOutput {
     layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertFeedForward {
     dense: Linear,
     intermediate_act_fn: String,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
@@ -63,27 +74,33 @@ pub struct AlbertFFNOutput {
     layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertModel {
     config: AlbertConfig,
     embeddings: AlbertEmbeddings,
     encoder: AlbertTransformer,
     pooler: Option<AlbertPooler>,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AlbertTransformer {
     #[allow(dead_code)]
     embedding_hidden_mapping_in: Linear,
     albert_layer_groups: Vec<AlbertTransformerGroup>,
+    device: Device,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlbertPooler {
     dense: Linear,
     activation: String,
+    device: Device,
 }
 
 #[derive(Debug)]
@@ -96,18 +113,32 @@ pub struct AlbertModelOutput {
 
 impl AlbertEmbeddings {
     fn new(config: &AlbertConfig) -> Result<Self> {
-        let word_embeddings = Embedding::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
+        let word_embeddings = Embedding::new_with_device(
             config.vocab_size,
             config.embedding_size,
             Some(config.pad_token_id as usize),
+            device,
         )?;
-        let position_embeddings =
-            Embedding::new(config.max_position_embeddings, config.embedding_size, None)?;
-        let token_type_embeddings =
-            Embedding::new(config.type_vocab_size, config.embedding_size, None)?;
-        let layer_norm = LayerNorm::new(vec![config.embedding_size], config.layer_norm_eps)?;
+        let position_embeddings = Embedding::new_with_device(
+            config.max_position_embeddings,
+            config.embedding_size,
+            None,
+            device,
+        )?;
+        let token_type_embeddings = Embedding::new_with_device(
+            config.type_vocab_size,
+            config.embedding_size,
+            None,
+            device,
+        )?;
+        let layer_norm =
+            LayerNorm::new_with_device(vec![config.embedding_size], config.layer_norm_eps, device)?;
         let embedding_hidden_mapping_in =
-            Linear::new(config.embedding_size, config.hidden_size, true);
+            Linear::new_with_device(config.embedding_size, config.hidden_size, true, device);
 
         Ok(Self {
             word_embeddings,
@@ -116,7 +147,12 @@ impl AlbertEmbeddings {
             layer_norm,
             dropout: config.hidden_dropout_prob,
             embedding_hidden_mapping_in,
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, input_ids: Vec<u32>, token_type_ids: Option<Vec<u32>>) -> Result<Tensor> {
@@ -140,19 +176,32 @@ impl AlbertEmbeddings {
 
 impl AlbertAttention {
     fn new(config: &AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         let attention_head_size = config.hidden_size / config.num_attention_heads;
         let all_head_size = config.num_attention_heads * attention_head_size;
 
         Ok(Self {
-            query: Linear::new(config.hidden_size, all_head_size, true),
-            key: Linear::new(config.hidden_size, all_head_size, true),
-            value: Linear::new(config.hidden_size, all_head_size, true),
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            query: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
+            key: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
+            value: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.attention_probs_dropout_prob,
             num_attention_heads: config.num_attention_heads,
             attention_head_size,
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -180,11 +229,24 @@ impl AlbertAttention {
 
 impl AlbertAttentionOutput {
     fn new(config: &AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, input_tensor: Tensor) -> Result<Tensor> {
@@ -197,10 +259,24 @@ impl AlbertAttentionOutput {
 
 impl AlbertFeedForward {
     fn new(config: &AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.hidden_size, config.intermediate_size, true),
+            dense: Linear::new_with_device(
+                config.hidden_size,
+                config.intermediate_size,
+                true,
+                device,
+            ),
             intermediate_act_fn: config.hidden_act.clone(),
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -226,11 +302,29 @@ impl AlbertFeedForward {
 
 impl AlbertFFNOutput {
     fn new(config: &AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.intermediate_size, config.hidden_size, true),
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            dense: Linear::new_with_device(
+                config.intermediate_size,
+                config.hidden_size,
+                true,
+                device,
+            ),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, input_tensor: Tensor) -> Result<Tensor> {
@@ -243,12 +337,21 @@ impl AlbertFFNOutput {
 
 impl AlbertLayer {
     fn new(config: &AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            attention: AlbertAttention::new(config)?,
-            ffn: AlbertFeedForward::new(config)?,
-            attention_output: AlbertAttentionOutput::new(config)?,
-            ffn_output: AlbertFFNOutput::new(config)?,
+            attention: AlbertAttention::new_with_device(config, device)?,
+            ffn: AlbertFeedForward::new_with_device(config, device)?,
+            attention_output: AlbertAttentionOutput::new_with_device(config, device)?,
+            ffn_output: AlbertFFNOutput::new_with_device(config, device)?,
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -264,12 +367,23 @@ impl AlbertLayer {
 
 impl AlbertTransformerGroup {
     fn new(config: &AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         let mut albert_layers = Vec::new();
         for _ in 0..config.inner_group_num {
-            albert_layers.push(AlbertLayer::new(config)?);
+            albert_layers.push(AlbertLayer::new_with_device(config, device)?);
         }
 
-        Ok(Self { albert_layers })
+        Ok(Self {
+            albert_layers,
+            device,
+        })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -285,18 +399,27 @@ impl AlbertTransformerGroup {
 
 impl AlbertTransformer {
     fn new(config: &AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Result<Self> {
         let embedding_hidden_mapping_in =
-            Linear::new(config.embedding_size, config.hidden_size, true);
+            Linear::new_with_device(config.embedding_size, config.hidden_size, true, device);
 
         let mut albert_layer_groups = Vec::new();
         for _ in 0..config.num_hidden_groups {
-            albert_layer_groups.push(AlbertTransformerGroup::new(config)?);
+            albert_layer_groups.push(AlbertTransformerGroup::new_with_device(config, device)?);
         }
 
         Ok(Self {
             embedding_hidden_mapping_in,
             albert_layer_groups,
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor, attention_mask: Option<&Tensor>) -> Result<Tensor> {
@@ -319,10 +442,19 @@ impl AlbertTransformer {
 
 impl AlbertPooler {
     fn new(config: &AlbertConfig) -> Self {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &AlbertConfig, device: Device) -> Self {
         Self {
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
             activation: "tanh".to_string(),
+            device,
         }
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -346,18 +478,27 @@ impl AlbertPooler {
 
 impl AlbertModel {
     pub fn new(config: AlbertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: AlbertConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let embeddings = AlbertEmbeddings::new(&config)?;
-        let encoder = AlbertTransformer::new(&config)?;
-        let pooler = Some(AlbertPooler::new(&config));
+        let embeddings = AlbertEmbeddings::new_with_device(&config, device)?;
+        let encoder = AlbertTransformer::new_with_device(&config, device)?;
+        let pooler = Some(AlbertPooler::new_with_device(&config, device));
 
         Ok(Self {
             config,
             embeddings,
             encoder,
             pooler,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

@@ -5,9 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers"
 description = "TrustformeRS - Rust port of Hugging Face Transformers"
 keywords = ["transformers", "machine-learning", "nlp", "ai", "bert"]
 categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -58,7 +61,6 @@ rstest.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile.workspace = true
 proptest.workspace = true
-rand.workspace = true
 
 [features]
 default = ["bert", "async"]
@@ -70,8 +72,11 @@ gpt_neo = ["trustformers-models/gpt_neo"]
 gpt_j = ["trustformers-models/gpt_j"]
 t5 = ["trustformers-models/t5"]
 all-models = ["bert", "roberta", "albert", "gpt2", "gpt_neo", "gpt_j", "t5"]
+# torch feature disabled by default - requires matching libtorch version at runtime
 torch = ["trustformers-core/torch", "trustformers-training/torch"]
 candle = ["trustformers-core/candle", "trustformers-training/candle"]
 async = ["axum", "tower", "tower-http", "async-stream"]
 vision = ["image"]
 audio = []
+# Full feature set for testing (excludes torch due to libtorch version requirements)
+full = ["all-models", "candle", "async", "vision", "trustformers-core/full"]

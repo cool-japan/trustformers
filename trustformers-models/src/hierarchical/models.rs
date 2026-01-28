@@ -278,7 +278,7 @@ impl HierarchicalTransformer {
                     "-L", // Follow redirects
                     "-f", // Fail silently on HTTP errors
                     "-o",
-                    output_path.to_str().unwrap(),
+                    output_path.to_str().expect("operation failed"),
                     &url,
                 ])
                 .output();
@@ -291,7 +291,7 @@ impl HierarchicalTransformer {
                         .args([
                             "-q", // Quiet mode
                             "-O",
-                            output_path.to_str().unwrap(),
+                            output_path.to_str().expect("operation failed"),
                             &url,
                         ])
                         .output();
@@ -375,7 +375,7 @@ impl Model for HierarchicalTransformer {
         })?;
 
         // Use the enhanced loading system
-        let result = self.load_from_path(temp_file.to_str().unwrap());
+        let result = self.load_from_path(temp_file.to_str().expect("operation failed"));
 
         // Clean up temporary file
         let _ = std::fs::remove_file(&temp_file);

@@ -1,6 +1,7 @@
 use crate::qwen::config::QwenConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, Linear},
     ops::activations::silu,
@@ -48,6 +49,12 @@ impl Layer for QwenRMSNorm {
                 "Unsupported input tensor type for QwenRMSNorm",
             )),
         }
+    }
+}
+
+impl QwenRMSNorm {
+    pub fn parameter_count(&self) -> usize {
+        self.weight.len()
     }
 }
 
@@ -123,15 +130,28 @@ pub struct QwenMLP {
 
 impl QwenMLP {
     pub fn new(config: &QwenConfig) -> Result<Self> {
-        let gate_proj = Linear::new(config.hidden_size, config.intermediate_size, false);
-        let up_proj = Linear::new(config.hidden_size, config.intermediate_size, false);
-        let down_proj = Linear::new(config.intermediate_size, config.hidden_size, false);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &QwenConfig, device: Device) -> Result<Self> {
+        let gate_proj =
+            Linear::new_with_device(config.hidden_size, config.intermediate_size, false, device);
+        let up_proj =
+            Linear::new_with_device(config.hidden_size, config.intermediate_size, false, device);
+        let down_proj =
+            Linear::new_with_device(config.intermediate_size, config.hidden_size, false, device);
 
         Ok(Self {
             gate_proj,
             up_proj,
             down_proj,
         })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.gate_proj.parameter_count()
+            + self.up_proj.parameter_count()
+            + self.down_proj.parameter_count()
     }
 }
 
@@ -180,21 +200,29 @@ pub struct QwenAttention {
 
 impl QwenAttention {
     pub fn new(config: &QwenConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &QwenConfig, device: Device) -> Result<Self> {
         let head_dim = config.head_dim();
         let num_kv_heads = config.num_kv_heads();
         let scaling = 1.0 / (head_dim as f32).sqrt();
 
-        let q_proj = Linear::new(
+        let q_proj = Linear::new_with_device(
             config.hidden_size,
             config.num_attention_heads * head_dim,
             false,
+            device,
         );
-        let k_proj = Linear::new(config.hidden_size, num_kv_heads * head_dim, false);
-        let v_proj = Linear::new(config.hidden_size, num_kv_heads * head_dim, false);
-        let o_proj = Linear::new(
+        let k_proj =
+            Linear::new_with_device(config.hidden_size, num_kv_heads * head_dim, false, device);
+        let v_proj =
+            Linear::new_with_device(config.hidden_size, num_kv_heads * head_dim, false, device);
+        let o_proj = Linear::new_with_device(
             config.num_attention_heads * head_dim,
             config.hidden_size,
             false,
+            device,
         );
 
         let scaling_factor = config.rope_scaling.as_ref().map(|s| s.scaling_factor);
@@ -218,6 +246,14 @@ impl QwenAttention {
             use_sliding_window: config.use_sliding_window,
             sliding_window: config.sliding_window,
         })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.q_proj.parameter_count()
+            + self.k_proj.parameter_count()
+            + self.v_proj.parameter_count()
+            + self.o_proj.parameter_count()
+        // Note: RotaryEmbedding doesn't have learnable parameters
     }
 }
 
@@ -288,8 +324,12 @@ pub struct QwenDecoderLayer {
 
 impl QwenDecoderLayer {
     pub fn new(config: &QwenConfig) -> Result<Self> {
-        let self_attn = QwenAttention::new(config)?;
-        let mlp = QwenMLP::new(config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &QwenConfig, device: Device) -> Result<Self> {
+        let self_attn = QwenAttention::new_with_device(config, device)?;
+        let mlp = QwenMLP::new_with_device(config, device)?;
         let input_layernorm = QwenRMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
         let post_attention_layernorm = QwenRMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
 
@@ -299,6 +339,13 @@ impl QwenDecoderLayer {
             input_layernorm,
             post_attention_layernorm,
         })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.self_attn.parameter_count()
+            + self.mlp.parameter_count()
+            + self.input_layernorm.parameter_count()
+            + self.post_attention_layernorm.parameter_count()
     }
 }
 
@@ -331,13 +378,17 @@ pub struct QwenModel {
 
 impl QwenModel {
     pub fn new(config: QwenConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: QwenConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
         let embed_tokens = Embedding::new(config.vocab_size, config.hidden_size, None)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(QwenDecoderLayer::new(&config)?);
+            layers.push(QwenDecoderLayer::new_with_device(&config, device)?);
         }
 
         let norm = QwenRMSNorm::new(config.hidden_size, config.rms_norm_eps)?;
@@ -348,6 +399,30 @@ impl QwenModel {
             layers,
             norm,
         })
+    }
+
+    /// Create a Qwen model from a pretrained model name
+    pub fn from_pretrained_name(name: &str) -> Result<Self> {
+        use trustformers_core::errors::invalid_config;
+
+        let config = match name {
+            "qwen2-0.5b" => QwenConfig::qwen2_0_5b(),
+            "qwen2-1.5b" => QwenConfig::qwen2_1_5b(),
+            "qwen2-7b" => QwenConfig::qwen2_7b(),
+            "qwen2-72b" => QwenConfig::qwen2_72b(),
+            "qwen2.5-7b" => QwenConfig::qwen2_5_7b(),
+            "qwen2.5-14b" => QwenConfig::qwen2_5_14b(),
+            "qwen2.5-32b" => QwenConfig::qwen2_5_32b(),
+            "qwen2.5-72b" => QwenConfig::qwen2_5_72b(),
+            "qwen2.5-coder-7b" => QwenConfig::qwen2_5_coder_7b(),
+            _ => {
+                return Err(invalid_config(
+                    "pretrained_model",
+                    format!("Unknown pretrained model: {}", name),
+                ))
+            },
+        };
+        Self::new(config)
     }
 }
 
@@ -393,24 +468,11 @@ impl Model for QwenModel {
 
         // Count parameters in each decoder layer
         for layer in &self.layers {
-            // Attention layer parameters
-            total += layer.self_attn.q_proj.parameter_count();
-            total += layer.self_attn.k_proj.parameter_count();
-            total += layer.self_attn.v_proj.parameter_count();
-            total += layer.self_attn.o_proj.parameter_count();
-
-            // MLP parameters
-            total += layer.mlp.gate_proj.parameter_count();
-            total += layer.mlp.up_proj.parameter_count();
-            total += layer.mlp.down_proj.parameter_count();
-
-            // LayerNorm parameters (weight only, no bias)
-            total += self.config.hidden_size; // input_layernorm
-            total += self.config.hidden_size; // post_attention_layernorm
+            total += layer.parameter_count();
         }
 
         // Final norm parameters
-        total += self.config.hidden_size;
+        total += self.norm.parameter_count();
 
         total
     }
@@ -424,7 +486,20 @@ pub struct QwenForCausalLM {
 
 impl QwenForCausalLM {
     pub fn new(config: QwenConfig) -> Result<Self> {
-        let model = QwenModel::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: QwenConfig, device: Device) -> Result<Self> {
+        let model = QwenModel::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
+
+        Ok(Self { model, lm_head })
+    }
+
+    /// Create a Qwen for causal LM model from a pretrained model name
+    pub fn from_pretrained_name(name: &str) -> Result<Self> {
+        let model = QwenModel::from_pretrained_name(name)?;
+        let config = model.get_config().clone();
         let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
 
         Ok(Self { model, lm_head })
@@ -587,7 +662,7 @@ impl QwenForCausalLM {
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path.to_str().expect("operation failed"),
                     &file_url,
                 ])
                 .output();
@@ -611,7 +686,11 @@ impl QwenForCausalLM {
 
             // Try using wget as fallback
             let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
+                .args([
+                    "-O",
+                    file_path.to_str().expect("operation failed"),
+                    &file_url,
+                ])
                 .output();
 
             match wget_result {

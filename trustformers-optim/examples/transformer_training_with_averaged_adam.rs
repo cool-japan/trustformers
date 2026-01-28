@@ -6,7 +6,7 @@
 
 #![allow(unused_imports, unused_variables, dead_code)]
 
-use rand::Rng;
+use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::time::Instant;
 use trustformers_core::TrustformersError;

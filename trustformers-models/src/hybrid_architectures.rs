@@ -38,7 +38,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
-use trustformers_core::{errors::invalid_input, tensor::Tensor, Result};
+use trustformers_core::{
+    errors::{invalid_input, TrustformersError},
+    tensor::Tensor,
+    Result,
+};
 
 /// Hybrid architecture configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1529,7 +1533,11 @@ impl HybridArchitecture {
 
     /// Create cross-modal processor
     fn create_cross_modal_processor(config: &HybridConfig) -> Result<CrossModalProcessor> {
-        let cross_modal_config = config.cross_modal_config.as_ref().unwrap();
+        let cross_modal_config = config.cross_modal_config.as_ref().ok_or_else(|| {
+            TrustformersError::invalid_config(
+                "cross_modal_config required for cross-modal processing".to_string(),
+            )
+        })?;
 
         let mut modality_encoders = HashMap::new();
         for modality in &cross_modal_config.modalities {
@@ -1768,7 +1776,7 @@ mod tests {
                 fusion_method: ParallelFusionMethod::Concatenation,
             })
             .build()
-            .unwrap();
+            .expect("operation failed");
 
         assert_eq!(config.components.len(), 2);
         assert!(matches!(
@@ -1787,9 +1795,9 @@ mod tests {
                 variant: TransformerVariant::Standard,
             })
             .build()
-            .unwrap();
+            .expect("operation failed");
 
-        let hybrid_arch = HybridArchitecture::new(config).unwrap();
+        let hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
         assert_eq!(hybrid_arch.num_components(), 1);
     }
 
@@ -1803,9 +1811,9 @@ mod tests {
                 architecture: CNNArchitecture::ResNet,
             })
             .build()
-            .unwrap();
+            .expect("operation failed");
 
-        let mut hybrid_arch = HybridArchitecture::new(config).unwrap();
+        let mut hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
 
         // Test component activation/deactivation
         assert!(hybrid_arch.set_component_active(0, false).is_ok());
@@ -1863,9 +1871,9 @@ mod tests {
                 architecture: CNNArchitecture::EfficientNet,
             })
             .build()
-            .unwrap();
+            .expect("operation failed");
 
-        let hybrid_arch = HybridArchitecture::new(config).unwrap();
+        let hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
         let summary = hybrid_arch.get_architecture_summary();
 
         assert_eq!(summary.num_components, 2);
@@ -1938,9 +1946,12 @@ mod tests {
         ];
 
         for component in components {
-            let config = HybridConfig::builder().add_component(component).build().unwrap();
+            let config = HybridConfig::builder()
+                .add_component(component)
+                .build()
+                .expect("operation failed");
 
-            let hybrid_arch = HybridArchitecture::new(config).unwrap();
+            let hybrid_arch = HybridArchitecture::new(config).expect("operation failed");
             assert_eq!(hybrid_arch.num_components(), 1);
         }
     }

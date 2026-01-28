@@ -181,7 +181,8 @@ fn test_vision_transformer_creation() {
 
 #[test]
 fn test_visual_expert_creation() {
-    let config = CogVlmConfig::default();
+    // Use small_test_config for fast testing
+    let config = CogVlmConfig::small_test_config();
     let result = VisualExpert::new(config);
     assert!(
         result.is_ok(),
@@ -210,10 +211,10 @@ fn test_cogvlm_forward_text_only() {
     let mut config = CogVlmConfig::small_test_config();
     config.hidden_size = 128;
     config.num_attention_heads = 8;
-    let model = CogVlmModel::new(config).unwrap();
+    let model = CogVlmModel::new(config).expect("operation failed");
 
     // Test with text input only (no vision)
-    let input_ids = Tensor::zeros(&[1, 10]).unwrap(); // batch=1, seq_len=10
+    let input_ids = Tensor::zeros(&[1, 10]).expect("operation failed"); // batch=1, seq_len=10
     let input = CogVlmInput {
         pixel_values: None,
         input_ids,
@@ -227,7 +228,7 @@ fn test_cogvlm_forward_text_only() {
     let result = model.forward(input);
     assert!(result.is_ok(), "Forward pass failed: {:?}", result.err());
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], 1); // batch size
     assert_eq!(output.last_hidden_state.shape()[1], 10); // sequence length
     assert_eq!(
@@ -246,7 +247,7 @@ fn test_cogvlm_forward_with_vision() {
     config.vision_config.hidden_size = 128;
     config.vision_config.num_attention_heads = 8;
     config.vision_config.image_size = 56; // Much smaller image
-    let model = CogVlmModel::new(config.clone()).unwrap();
+    let model = CogVlmModel::new(config.clone()).expect("operation failed");
 
     // Calculate expected number of vision tokens: (56/14)^2 + 1 = 16 + 1 = 17
     config.vision_config.patch_size = 14; // Ensure proper patch calculation
@@ -255,9 +256,9 @@ fn test_cogvlm_forward_with_vision() {
 
     // Test with both text and vision input - match sequence length to vision tokens
     let seq_len = vision_tokens; // Use vision token count as sequence length
-    let input_ids = Tensor::zeros(&[1, seq_len]).unwrap();
-    let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).unwrap(); // Much smaller image
-    let images_emb_mask = Tensor::zeros(&[1, seq_len]).unwrap(); // Mask for vision token positions
+    let input_ids = Tensor::zeros(&[1, seq_len]).expect("operation failed");
+    let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).expect("operation failed"); // Much smaller image
+    let images_emb_mask = Tensor::zeros(&[1, seq_len]).expect("operation failed"); // Mask for vision token positions
 
     let input = CogVlmInput {
         pixel_values: Some(pixel_values),
@@ -276,7 +277,7 @@ fn test_cogvlm_forward_with_vision() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], 1); // batch size
     assert_eq!(output.last_hidden_state.shape()[1], seq_len); // sequence length
     assert_eq!(output.last_hidden_state.shape()[2], config.hidden_size); // hidden size
@@ -289,11 +290,11 @@ fn test_cogvideo_forward() {
     config.base_config = CogVlmConfig::small_test_config();
     config.temporal_hidden_size = 64;
     config.temporal_num_layers = 1;
-    let model = CogVideoModel::new(config.clone()).unwrap();
+    let model = CogVideoModel::new(config.clone()).expect("operation failed");
 
     // Use much smaller inputs for fast testing
-    let input_ids = Tensor::zeros(&[1, 4]).unwrap(); // Smaller sequence
-    let video_frames = Tensor::zeros(&[1, 2, 3, 56, 56]).unwrap(); // Only 2 frames, smaller size
+    let input_ids = Tensor::zeros(&[1, 4]).expect("operation failed"); // Smaller sequence
+    let video_frames = Tensor::zeros(&[1, 2, 3, 56, 56]).expect("operation failed"); // Only 2 frames, smaller size
 
     let input = CogVideoInput {
         video_frames,
@@ -310,7 +311,7 @@ fn test_cogvideo_forward() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], 1);
     assert_eq!(output.logits.shape()[2], config.base_config.vocab_size);
 }
@@ -323,9 +324,9 @@ fn test_vision_transformer_forward() {
     config.num_attention_heads = 8;
     config.image_size = 56; // Much smaller than default 490
     config.patch_size = 14; // Ensure proper patch calculation
-    let vision_model = CogVlmVisionTransformer::new(config.clone()).unwrap();
+    let vision_model = CogVlmVisionTransformer::new(config.clone()).expect("operation failed");
 
-    let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).unwrap(); // batch=1, smaller image
+    let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).expect("operation failed"); // batch=1, smaller image
     let result = vision_model.forward(pixel_values);
 
     assert!(
@@ -334,7 +335,7 @@ fn test_vision_transformer_forward() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.shape()[0], 1); // batch size - fix: should be 1, not 2
     let expected_seq_len = (config.image_size / config.patch_size).pow(2) + 1; // patches + CLS token
     assert_eq!(output.shape()[1], expected_seq_len); // sequence length
@@ -343,11 +344,13 @@ fn test_vision_transformer_forward() {
 
 #[test]
 fn test_visual_expert_forward() {
-    let config = CogVlmConfig::default();
-    let visual_expert = VisualExpert::new(config.clone()).unwrap();
+    // Use small_test_config for fast testing
+    let config = CogVlmConfig::small_test_config();
+    let visual_expert = VisualExpert::new(config.clone()).expect("operation failed");
 
-    let lang_hidden = Tensor::zeros(&[1, 10, config.hidden_size]).unwrap();
-    let vision_hidden = Tensor::zeros(&[1, 256, config.vision_config.hidden_size]).unwrap();
+    let lang_hidden = Tensor::zeros(&[1, 10, config.hidden_size]).expect("operation failed");
+    let vision_hidden =
+        Tensor::zeros(&[1, 256, config.vision_config.hidden_size]).expect("operation failed");
 
     let result = visual_expert.forward((lang_hidden, vision_hidden));
     assert!(
@@ -356,7 +359,7 @@ fn test_visual_expert_forward() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.shape()[0], 1);
     assert_eq!(output.shape()[1], 10);
     assert_eq!(output.shape()[2], config.hidden_size);
@@ -368,10 +371,10 @@ fn test_temporal_encoder_forward() {
     let mut config = CogVideoConfig::default();
     config.temporal_hidden_size = 64;
     config.temporal_num_layers = 1;
-    let temporal_encoder = TemporalEncoder::new(config.clone()).unwrap();
+    let temporal_encoder = TemporalEncoder::new(config.clone()).expect("operation failed");
 
     // Use much smaller video input for fast testing
-    let video_frames = Tensor::zeros(&[1, 2, 3, 56, 56]).unwrap(); // Only 2 frames, smaller size
+    let video_frames = Tensor::zeros(&[1, 2, 3, 56, 56]).expect("operation failed"); // Only 2 frames, smaller size
     let result = temporal_encoder.forward(video_frames);
 
     assert!(
@@ -380,7 +383,7 @@ fn test_temporal_encoder_forward() {
         result.err()
     );
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.shape()[0], 1); // batch size
     assert_eq!(output.shape()[1], 2); // num frames (updated to match input)
     assert_eq!(output.shape()[2], config.temporal_hidden_size);
@@ -388,12 +391,12 @@ fn test_temporal_encoder_forward() {
 
 #[test]
 fn test_model_info() {
-    let info = model_info("cogvlm-chat-17b").unwrap();
+    let info = model_info("cogvlm-chat-17b").expect("operation failed");
     assert_eq!(info.name, "CogVLM-Chat-17B");
     assert!(!info.supports_video);
     assert_eq!(info.parameters, "17B");
 
-    let video_info = model_info("cogvideo").unwrap();
+    let video_info = model_info("cogvideo").expect("operation failed");
     assert!(video_info.supports_video);
     assert_eq!(video_info.context_length, 4096);
 }
@@ -431,20 +434,22 @@ fn test_vision_encoder_standalone() {
     config.num_hidden_layers = 1;
     config.num_attention_heads = 4;
     config.image_size = 56; // Much smaller image
-    let vision_encoder = vision_encoder(config).unwrap();
+    let vision_encoder = vision_encoder(config).expect("operation failed");
 
-    let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).unwrap(); // Smaller image
+    let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).expect("operation failed"); // Smaller image
     let result = vision_encoder.forward(pixel_values);
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_visual_expert_standalone() {
-    let config = CogVlmConfig::default();
-    let expert = visual_expert(config).unwrap();
+    // Use small_test_config for fast testing
+    let config = CogVlmConfig::small_test_config();
+    let expert = visual_expert(config.clone()).expect("operation failed");
 
-    let lang_hidden = Tensor::zeros(&[1, 10, 4096]).unwrap();
-    let vision_hidden = Tensor::zeros(&[1, 256, 1792]).unwrap();
+    let lang_hidden = Tensor::zeros(&[1, 10, config.hidden_size]).expect("operation failed");
+    let vision_hidden =
+        Tensor::zeros(&[1, 256, config.vision_config.hidden_size]).expect("operation failed");
 
     let result = expert.forward((lang_hidden, vision_hidden));
     assert!(result.is_ok());
@@ -462,7 +467,8 @@ fn test_empty_vision_input() {
     config.vision_config.num_attention_heads = 8;
 
     // Test basic tensor operations work correctly
-    let embeddings = Embedding::new(config.vocab_size, config.hidden_size, None).unwrap();
+    let embeddings =
+        Embedding::new(config.vocab_size, config.hidden_size, None).expect("operation failed");
     let test_tokens = vec![1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32, 8u32]; // 8 tokens
     let embedding_result = embeddings.forward(test_tokens);
     assert!(
@@ -471,10 +477,10 @@ fn test_empty_vision_input() {
         embedding_result.err()
     );
 
-    let model = CogVlmModel::new(config.clone()).unwrap();
+    let model = CogVlmModel::new(config.clone()).expect("operation failed");
 
     // Create proper input_ids tensor with minimal sequence length
-    let input_ids = Tensor::zeros(&[1, 8]).unwrap(); // batch=1, seq_len=8
+    let input_ids = Tensor::zeros(&[1, 8]).expect("operation failed"); // batch=1, seq_len=8
     let input = CogVlmInput {
         pixel_values: None,
         input_ids,
@@ -504,12 +510,12 @@ fn test_batch_processing() {
     config.vision_config.num_attention_heads = 8;
     config.vision_config.image_size = 56; // Much smaller than default 490
 
-    let model = CogVlmModel::new(config).unwrap();
+    let model = CogVlmModel::new(config).expect("operation failed");
 
     let batch_size = 1; // Use single batch for now
     let seq_len = 4; // Reduced from 8 to 4
 
-    let input_ids = Tensor::zeros(&[batch_size, seq_len]).unwrap();
+    let input_ids = Tensor::zeros(&[batch_size, seq_len]).expect("operation failed");
     // Test without vision input for now (faster and more reliable)
 
     let input = CogVlmInput {
@@ -525,7 +531,7 @@ fn test_batch_processing() {
     let result = model.forward(input);
     assert!(result.is_ok());
 
-    let output = result.unwrap();
+    let output = result.expect("operation failed");
     assert_eq!(output.last_hidden_state.shape()[0], batch_size);
     assert_eq!(output.last_hidden_state.shape()[1], seq_len);
 }

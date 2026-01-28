@@ -688,8 +688,10 @@ mod tests {
 
     #[test]
     fn test_vanishing_gradient_detection() -> Result<()> {
-        let mut config = GradientFlowConfig::default();
-        config.vanishing_threshold = 0.1;
+        let config = GradientFlowConfig {
+            vanishing_threshold: 0.1,
+            ..Default::default()
+        };
 
         let mut analyzer = GradientFlowAnalyzer::new(config);
 
@@ -708,8 +710,10 @@ mod tests {
 
     #[test]
     fn test_exploding_gradient_detection() -> Result<()> {
-        let mut config = GradientFlowConfig::default();
-        config.exploding_threshold = 10.0;
+        let config = GradientFlowConfig {
+            exploding_threshold: 10.0,
+            ..Default::default()
+        };
 
         let mut analyzer = GradientFlowAnalyzer::new(config);
 

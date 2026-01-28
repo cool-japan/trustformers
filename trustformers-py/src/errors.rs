@@ -1,4 +1,4 @@
-use pyo3::{exceptions::PyException, prelude::*, types::PyType};
+use pyo3::{exceptions::PyException, prelude::*};
 use thiserror::Error;
 
 /// Custom error types for TrustformeRS Python bindings

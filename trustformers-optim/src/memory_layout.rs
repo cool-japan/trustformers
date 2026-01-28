@@ -280,7 +280,7 @@ impl SoAOptimizerState {
 
         // Process in cache-friendly chunks
         let chunk_size = param_info.chunk_size;
-        let num_chunks = (param_info.size + chunk_size - 1) / chunk_size;
+        let num_chunks = param_info.size.div_ceil(chunk_size);
 
         for chunk_idx in 0..num_chunks {
             let start = chunk_idx * chunk_size;
@@ -389,7 +389,7 @@ impl SoAOptimizerState {
         let mut total_utilization = 0.0;
 
         for param in &self.parameters {
-            let lines_used = (param.size + cache_line_elements - 1) / cache_line_elements;
+            let lines_used = param.size.div_ceil(cache_line_elements);
             let elements_in_lines = lines_used * cache_line_elements;
             let utilization = param.size as f32 / elements_in_lines as f32;
             total_utilization += utilization;

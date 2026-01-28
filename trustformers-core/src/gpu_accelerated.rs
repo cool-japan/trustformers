@@ -11,6 +11,12 @@ use crate::kernels::rocm_kernels::RocmKernel;
 #[cfg(feature = "vulkan")]
 use crate::kernels::vulkan_kernels::VulkanKernel;
 use crate::tensor::Tensor;
+#[cfg(any(
+    feature = "cuda",
+    feature = "rocm",
+    feature = "intel",
+    feature = "vulkan"
+))]
 use std::sync::{Arc, Mutex};
 
 /// GPU-accelerated operations manager
@@ -27,6 +33,7 @@ pub struct GpuAcceleratedOps {
     intel_kernel: Option<Arc<Mutex<IntelKernel>>>,
     #[cfg(feature = "vulkan")]
     vulkan_kernel: Option<Arc<Mutex<VulkanKernel>>>,
+    #[allow(dead_code)]
     device_id: usize,
     #[allow(dead_code)]
     enable_async: bool,
@@ -144,7 +151,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 if let Some(ref cuda_kernel) = self.cuda_kernel {
-                    let mut kernel = cuda_kernel.lock().unwrap();
+                    let mut kernel = cuda_kernel.lock().expect("lock should not be poisoned");
                     kernel.matmul(a, b, &mut result, None)?;
                 } else {
                     return Err(TrustformersError::tensor_op_error(
@@ -161,7 +168,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Rocm => {
                 #[cfg(feature = "rocm")]
                 if let Some(ref rocm_kernel) = self.rocm_kernel {
-                    let mut kernel = rocm_kernel.lock().unwrap();
+                    let mut kernel = rocm_kernel.lock().expect("lock should not be poisoned");
                     kernel.matmul(a, b, &mut result, None)?;
                 } else {
                     return Err(TrustformersError::tensor_op_error(
@@ -178,7 +185,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Intel => {
                 #[cfg(feature = "intel")]
                 if let Some(ref intel_kernel) = self.intel_kernel {
-                    let mut kernel = intel_kernel.lock().unwrap();
+                    let mut kernel = intel_kernel.lock().expect("lock should not be poisoned");
                     kernel.gemm(
                         a,
                         b,
@@ -202,7 +209,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Vulkan => {
                 #[cfg(feature = "vulkan")]
                 if let Some(ref vulkan_kernel) = self.vulkan_kernel {
-                    let mut kernel = vulkan_kernel.lock().unwrap();
+                    let mut kernel = vulkan_kernel.lock().expect("lock should not be poisoned");
                     kernel.matmul(a, b, &mut result, None)?;
                 } else {
                     return Err(TrustformersError::tensor_op_error(
@@ -256,7 +263,7 @@ impl GpuAcceleratedOps {
                 GpuBackend::Cuda => {
                     #[cfg(feature = "cuda")]
                     if let Some(ref cuda_kernel) = self.cuda_kernel {
-                        let mut kernel = cuda_kernel.lock().unwrap();
+                        let mut kernel = cuda_kernel.lock().expect("lock should not be poisoned");
                         kernel.matmul(&a_slice, &b_slice, &mut result_slice, None)?;
                     } else {
                         self.cpu_matmul(&a_slice, &b_slice, &mut result_slice)?;
@@ -267,7 +274,7 @@ impl GpuAcceleratedOps {
                 GpuBackend::Rocm => {
                     #[cfg(feature = "rocm")]
                     if let Some(ref rocm_kernel) = self.rocm_kernel {
-                        let mut kernel = rocm_kernel.lock().unwrap();
+                        let mut kernel = rocm_kernel.lock().expect("lock should not be poisoned");
                         kernel.matmul(&a_slice, &b_slice, &mut result_slice, None)?;
                     } else {
                         self.cpu_matmul(&a_slice, &b_slice, &mut result_slice)?;
@@ -317,7 +324,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 if let Some(ref cuda_kernel) = self.cuda_kernel {
-                    let mut kernel = cuda_kernel.lock().unwrap();
+                    let mut kernel = cuda_kernel.lock().expect("lock should not be poisoned");
                     kernel.flash_attention(query, key, value, &mut output, None)?;
                 } else {
                     self.cpu_attention(query, key, value, &mut output, scale, mask)?;
@@ -328,7 +335,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Rocm => {
                 #[cfg(feature = "rocm")]
                 if let Some(ref rocm_kernel) = self.rocm_kernel {
-                    let mut kernel = rocm_kernel.lock().unwrap();
+                    let mut kernel = rocm_kernel.lock().expect("lock should not be poisoned");
                     kernel.flash_attention(query, key, value, &mut output, None)?;
                 } else {
                     self.cpu_attention(query, key, value, &mut output, scale, mask)?;
@@ -339,7 +346,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Intel => {
                 #[cfg(feature = "intel")]
                 if let Some(ref intel_kernel) = self.intel_kernel {
-                    let mut kernel = intel_kernel.lock().unwrap();
+                    let mut kernel = intel_kernel.lock().expect("lock should not be poisoned");
                     kernel.attention(
                         query,
                         key,
@@ -357,7 +364,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Vulkan => {
                 #[cfg(feature = "vulkan")]
                 if let Some(ref vulkan_kernel) = self.vulkan_kernel {
-                    let mut kernel = vulkan_kernel.lock().unwrap();
+                    let mut kernel = vulkan_kernel.lock().expect("lock should not be poisoned");
                     kernel.flash_attention(query, key, value, &mut output, None)?;
                 } else {
                     self.cpu_attention(query, key, value, &mut output, scale, mask)?;
@@ -388,7 +395,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 if let Some(ref cuda_kernel) = self.cuda_kernel {
-                    let mut kernel = cuda_kernel.lock().unwrap();
+                    let mut kernel = cuda_kernel.lock().expect("lock should not be poisoned");
                     kernel.layer_norm(input, gamma, beta, &mut output, epsilon, None)?;
                 } else {
                     self.cpu_layer_norm(input, gamma, beta, &mut output, epsilon)?;
@@ -399,7 +406,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Rocm => {
                 #[cfg(feature = "rocm")]
                 if let Some(ref rocm_kernel) = self.rocm_kernel {
-                    let mut kernel = rocm_kernel.lock().unwrap();
+                    let mut kernel = rocm_kernel.lock().expect("lock should not be poisoned");
                     kernel.layer_norm(input, gamma, beta, &mut output, epsilon, None)?;
                 } else {
                     self.cpu_layer_norm(input, gamma, beta, &mut output, epsilon)?;
@@ -410,7 +417,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Intel => {
                 #[cfg(feature = "intel")]
                 if let Some(ref intel_kernel) = self.intel_kernel {
-                    let mut kernel = intel_kernel.lock().unwrap();
+                    let mut kernel = intel_kernel.lock().expect("lock should not be poisoned");
                     kernel.layer_norm(
                         input,
                         gamma,
@@ -428,7 +435,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Vulkan => {
                 #[cfg(feature = "vulkan")]
                 if let Some(ref vulkan_kernel) = self.vulkan_kernel {
-                    let mut kernel = vulkan_kernel.lock().unwrap();
+                    let mut kernel = vulkan_kernel.lock().expect("lock should not be poisoned");
                     kernel.layer_norm(
                         input,
                         gamma,
@@ -460,7 +467,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 if let Some(ref cuda_kernel) = self.cuda_kernel {
-                    let mut kernel = cuda_kernel.lock().unwrap();
+                    let mut kernel = cuda_kernel.lock().expect("lock should not be poisoned");
                     kernel.fused_gelu(input, &mut output, None)?;
                 } else {
                     self.cpu_gelu(input, &mut output)?;
@@ -471,7 +478,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Rocm => {
                 #[cfg(feature = "rocm")]
                 if let Some(ref rocm_kernel) = self.rocm_kernel {
-                    let mut kernel = rocm_kernel.lock().unwrap();
+                    let mut kernel = rocm_kernel.lock().expect("lock should not be poisoned");
                     kernel.fused_gelu(input, &mut output, None)?;
                 } else {
                     self.cpu_gelu(input, &mut output)?;
@@ -482,7 +489,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Vulkan => {
                 #[cfg(feature = "vulkan")]
                 if let Some(ref vulkan_kernel) = self.vulkan_kernel {
-                    let mut kernel = vulkan_kernel.lock().unwrap();
+                    let mut kernel = vulkan_kernel.lock().expect("lock should not be poisoned");
                     kernel.gelu(input, &mut output, None)?;
                 } else {
                     self.cpu_gelu(input, &mut output)?;
@@ -517,7 +524,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 if let Some(ref cuda_kernel) = self.cuda_kernel {
-                    let mut kernel = cuda_kernel.lock().unwrap();
+                    let mut kernel = cuda_kernel.lock().expect("lock should not be poisoned");
                     kernel.reduce_sum(input, &mut output, dim, None)?;
                 } else {
                     self.cpu_reduce_sum(input, &mut output, dim)?;
@@ -528,7 +535,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Rocm => {
                 #[cfg(feature = "rocm")]
                 if let Some(ref rocm_kernel) = self.rocm_kernel {
-                    let mut kernel = rocm_kernel.lock().unwrap();
+                    let mut kernel = rocm_kernel.lock().expect("lock should not be poisoned");
                     kernel.reduce_sum(input, &mut output, dim, None)?;
                 } else {
                     self.cpu_reduce_sum(input, &mut output, dim)?;
@@ -539,7 +546,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Vulkan => {
                 #[cfg(feature = "vulkan")]
                 if let Some(ref vulkan_kernel) = self.vulkan_kernel {
-                    let mut kernel = vulkan_kernel.lock().unwrap();
+                    let mut kernel = vulkan_kernel.lock().expect("lock should not be poisoned");
                     kernel.reduce_sum(input, &mut output, dim, None)?;
                 } else {
                     self.cpu_reduce_sum(input, &mut output, dim)?;
@@ -607,7 +614,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Cuda => {
                 #[cfg(feature = "cuda")]
                 if let Some(ref cuda_kernel) = self.cuda_kernel {
-                    let kernel = cuda_kernel.lock().unwrap();
+                    let kernel = cuda_kernel.lock().expect("lock should not be poisoned");
                     kernel.get_memory_stats(self.device_id)
                 } else {
                     Ok((0, 0, 0))
@@ -618,7 +625,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Rocm => {
                 #[cfg(feature = "rocm")]
                 if let Some(ref rocm_kernel) = self.rocm_kernel {
-                    let kernel = rocm_kernel.lock().unwrap();
+                    let kernel = rocm_kernel.lock().expect("lock should not be poisoned");
                     kernel.get_memory_stats(self.device_id)
                 } else {
                     Ok((0, 0, 0))
@@ -629,7 +636,7 @@ impl GpuAcceleratedOps {
             GpuBackend::Vulkan => {
                 #[cfg(feature = "vulkan")]
                 if let Some(ref vulkan_kernel) = self.vulkan_kernel {
-                    let kernel = vulkan_kernel.lock().unwrap();
+                    let kernel = vulkan_kernel.lock().expect("lock should not be poisoned");
                     kernel.get_memory_stats(self.device_id)
                 } else {
                     Ok((0, 0, 0))
@@ -877,8 +884,8 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let a = Tensor::ones(&[2, 3]).unwrap();
-        let b = Tensor::ones(&[3, 4]).unwrap();
+        let a = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[3, 4]).expect("Failed to create ones tensor");
 
         let result = ops.matmul(&a, &b);
         assert!(result.is_ok());
@@ -892,8 +899,8 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let a = Tensor::ones(&[2, 3, 4]).unwrap();
-        let b = Tensor::ones(&[2, 4, 5]).unwrap();
+        let a = Tensor::ones(&[2, 3, 4]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[2, 4, 5]).expect("Failed to create ones tensor");
 
         let result = ops.batch_matmul(&a, &b);
         assert!(result.is_ok());
@@ -911,9 +918,12 @@ mod tests {
         let seq_len = 10;
         let hidden_dim = 64;
 
-        let query = Tensor::ones(&[batch_size, seq_len, hidden_dim]).unwrap();
-        let key = Tensor::ones(&[batch_size, seq_len, hidden_dim]).unwrap();
-        let value = Tensor::ones(&[batch_size, seq_len, hidden_dim]).unwrap();
+        let query =
+            Tensor::ones(&[batch_size, seq_len, hidden_dim]).expect("Failed to create ones tensor");
+        let key =
+            Tensor::ones(&[batch_size, seq_len, hidden_dim]).expect("Failed to create ones tensor");
+        let value =
+            Tensor::ones(&[batch_size, seq_len, hidden_dim]).expect("Failed to create ones tensor");
 
         let result = ops.flash_attention(&query, &key, &value, 0.125, None);
         assert!(result.is_ok());
@@ -927,9 +937,9 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let input = Tensor::ones(&[2, 10, 64]).unwrap();
-        let gamma = Tensor::ones(&[64]).unwrap();
-        let beta = Tensor::zeros(&[64]).unwrap();
+        let input = Tensor::ones(&[2, 10, 64]).expect("Failed to create ones tensor");
+        let gamma = Tensor::ones(&[64]).expect("Failed to create ones tensor");
+        let beta = Tensor::zeros(&[64]).expect("Failed to create zero tensor");
 
         let result = ops.layer_norm(&input, &gamma, &beta, 1e-5);
         assert!(result.is_ok());
@@ -943,7 +953,7 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let input = Tensor::ones(&[2, 10, 64]).unwrap();
+        let input = Tensor::ones(&[2, 10, 64]).expect("Failed to create ones tensor");
 
         let result = ops.gelu(&input);
         assert!(result.is_ok());
@@ -957,11 +967,9 @@ mod tests {
         let config = GpuOpsConfig::default();
         let ops = GpuAcceleratedOps::new(config).unwrap();
 
-        let (total, peak, free) = ops.get_memory_usage().unwrap();
+        let (_total, _peak, _free) = ops.get_memory_usage().unwrap();
         // Should return some values (may be 0 if no GPU available)
-        assert!(total >= 0);
-        assert!(peak >= 0);
-        assert!(free >= 0);
+        // Note: No need to assert >= 0 for u64 values, they're always non-negative
     }
 
     #[test]

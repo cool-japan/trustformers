@@ -72,7 +72,7 @@ impl MobileTestingFramework {
         let test_start = Instant::now();
 
         {
-            let mut state = self.test_state.lock().unwrap();
+            let mut state = self.test_state.lock().expect("Operation failed");
             state.is_running = true;
             state.start_time = Some(test_start);
         }
@@ -124,7 +124,7 @@ impl MobileTestingFramework {
             if total_tests > 0 { successful_tests as f32 / total_tests as f32 } else { 0.0 };
 
         {
-            let mut state = self.test_state.lock().unwrap();
+            let mut state = self.test_state.lock().expect("Operation failed");
             state.is_running = false;
             state.current_test = None;
             state.results.push(results.clone());
@@ -172,7 +172,7 @@ impl MobileTestingFramework {
         let config = &self.config.benchmark_config;
 
         {
-            let mut state = self.test_state.lock().unwrap();
+            let mut state = self.test_state.lock().expect("Operation failed");
             state.current_test = Some(format!("Benchmark {:?} {:?}", input_shape, precision_mode));
         }
 
@@ -213,7 +213,7 @@ impl MobileTestingFramework {
         let throughput = config.benchmark_iterations as f32 / total_duration.as_secs_f32();
 
         // Calculate percentiles
-        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        latencies.sort_by(|a, b| a.partial_cmp(b).expect("Operation failed"));
         let avg_latency = latencies.iter().sum::<f32>() / latencies.len() as f32;
         let p95_latency = latencies[(latencies.len() * 95 / 100).min(latencies.len() - 1)];
         let p99_latency = latencies[(latencies.len() * 99 / 100).min(latencies.len() - 1)];
@@ -243,7 +243,7 @@ impl MobileTestingFramework {
         let mut results = Vec::new();
 
         {
-            let mut state = self.test_state.lock().unwrap();
+            let mut state = self.test_state.lock().expect("Operation failed");
             state.current_test = Some("Battery Test".to_string());
         }
 
@@ -351,7 +351,7 @@ impl MobileTestingFramework {
         config: &StressTestConfig,
     ) -> Result<StressTestResult> {
         {
-            let mut state = self.test_state.lock().unwrap();
+            let mut state = self.test_state.lock().expect("Operation failed");
             state.current_test = Some(format!("Stress Test {:?}", stress_type));
         }
 
@@ -480,7 +480,7 @@ impl MobileTestingFramework {
         config: &MemoryTestConfig,
     ) -> Result<MemoryTestResult> {
         {
-            let mut state = self.test_state.lock().unwrap();
+            let mut state = self.test_state.lock().expect("Operation failed");
             state.current_test = Some(format!("Memory Test {:?}", test_type));
         }
 
@@ -547,7 +547,7 @@ impl MobileTestingFramework {
     // Helper methods
     fn create_test_input(&self) -> Tensor {
         let test_data = vec![0.5f32; 224 * 224 * 3];
-        Tensor::from_vec(test_data, &[1, 224, 224, 3]).unwrap()
+        Tensor::from_vec(test_data, &[1, 224, 224, 3]).expect("Operation failed")
     }
 
     fn create_mock_accuracy_metrics(&self) -> AccuracyMetrics {

@@ -1,4 +1,4 @@
-use ndarray::{Array1, Array2, Array3, Array4};
+use scirs2_core::ndarray::{Array1, Array2, Array3, Array4}; // SciRS2 Integration Policy
 
 #[test]
 fn test_bert_base_functionality() {

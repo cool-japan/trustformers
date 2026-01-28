@@ -355,7 +355,7 @@ mod tests {
         let encoding = QuantumEncoding::Angle;
         let layer = QuantumEmbeddingLayer::new(2, 4, encoding).unwrap();
 
-        let input = Tensor::from_vec(vec![0.5, 1.0], &[2]).unwrap();
+        let input = Tensor::from_vec(vec![0.5, 1.0], &[2]).expect("Tensor from_vec failed");
         let output = layer.forward(&input);
         assert!(output.is_ok());
 
@@ -378,7 +378,7 @@ mod tests {
         let parameters = vec![0.1, 0.2];
         let layer = QuantumNeuralLayer::new(2, ansatz, &parameters).unwrap();
 
-        let input = Tensor::from_vec(vec![0.5, 1.0], &[2]).unwrap();
+        let input = Tensor::from_vec(vec![0.5, 1.0], &[2]).expect("Tensor from_vec failed");
         let output = layer.forward(&input);
         assert!(output.is_ok());
     }

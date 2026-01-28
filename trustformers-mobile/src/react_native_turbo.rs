@@ -222,7 +222,7 @@ impl TrustformersTurboModule {
         let start_time = std::time::Instant::now();
 
         let init_result = {
-            let base = self.base_module.lock().unwrap();
+            let base = self.base_module.lock().expect("Failed to acquire lock");
             base.initialize()
         };
 
@@ -286,7 +286,7 @@ impl TrustformersTurboModule {
 
         // Perform inference
         let inference_result = {
-            let base = self.base_module.lock().unwrap();
+            let base = self.base_module.lock().expect("Failed to acquire lock");
             let request_json = serde_json::to_string(request)?;
             base.inference(&request_json).await
         };
@@ -309,7 +309,8 @@ impl TrustformersTurboModule {
                 metadata.insert(
                     "inference_engine_time_ms".to_string(),
                     serde_json::Value::Number(
-                        serde_json::Number::from_f64(response.inference_time_ms).unwrap(),
+                        serde_json::Number::from_f64(response.inference_time_ms)
+                            .expect("Failed to get value"),
                     ),
                 );
 
@@ -358,7 +359,7 @@ impl TrustformersTurboModule {
         let start_time = std::time::Instant::now();
 
         let capabilities_result = {
-            let base = self.base_module.lock().unwrap();
+            let base = self.base_module.lock().expect("Failed to acquire lock");
             base.get_device_capabilities()
         };
 
@@ -368,7 +369,8 @@ impl TrustformersTurboModule {
             Ok(capabilities_json) => {
                 let capabilities: serde_json::Value = serde_json::from_str(&capabilities_json)?;
 
-                let mut enhanced_capabilities = capabilities.as_object().unwrap().clone();
+                let mut enhanced_capabilities =
+                    capabilities.as_object().expect("Failed to get value").clone();
                 enhanced_capabilities.insert(
                     "turbo_module_support".to_string(),
                     serde_json::Value::Bool(true),
@@ -426,7 +428,7 @@ impl TrustformersTurboModule {
     pub fn get_performance_stats(&self) -> Result<TurboMethodResult> {
         let start_time = std::time::Instant::now();
 
-        let monitor = self.performance_monitor.lock().unwrap();
+        let monitor = self.performance_monitor.lock().expect("Failed to acquire lock");
         let stats = serde_json::json!({
             "method_call_counts": monitor.method_call_counts,
             "average_execution_times": monitor.get_average_execution_times(),
@@ -601,7 +603,7 @@ impl TrustformersTurboModule {
         method_name: &str,
         request: &InferenceRequest,
     ) -> Option<TurboMethodResult> {
-        let cache = self.method_cache.lock().unwrap();
+        let cache = self.method_cache.lock().expect("Failed to acquire lock");
         let cache_key = format!("{}_{}", method_name, self.generate_cache_key(request));
         cache.get(&cache_key).cloned()
     }
@@ -612,7 +614,7 @@ impl TrustformersTurboModule {
         request: &InferenceRequest,
         result: &TurboMethodResult,
     ) {
-        let mut cache = self.method_cache.lock().unwrap();
+        let mut cache = self.method_cache.lock().expect("Failed to acquire lock");
 
         // Simple cache eviction if size limit exceeded
         if cache.len() >= self.config.performance.cache_size_limit {
@@ -635,7 +637,7 @@ impl TrustformersTurboModule {
     }
 
     fn update_cache_stats(&self, cache_hit: bool) {
-        let mut monitor = self.performance_monitor.lock().unwrap();
+        let mut monitor = self.performance_monitor.lock().expect("Failed to acquire lock");
         let total_cache_ops = monitor.method_call_counts.values().sum::<usize>() as f64;
 
         if total_cache_ops > 0.0 {
@@ -646,7 +648,7 @@ impl TrustformersTurboModule {
     }
 
     fn update_performance_stats(&self, method_name: &str, execution_time: f64, success: bool) {
-        let mut monitor = self.performance_monitor.lock().unwrap();
+        let mut monitor = self.performance_monitor.lock().expect("Failed to acquire lock");
 
         *monitor.method_call_counts.entry(method_name.to_string()).or_insert(0) += 1;
         monitor
@@ -768,9 +770,9 @@ pub mod turbo_module_exports {
                         let _ = TURBO_MODULE.set(module_arc.clone());
 
                         // Initialize the module
-                        let runtime = tokio::runtime::Runtime::new().unwrap();
+                        let runtime = tokio::runtime::Runtime::new().expect("Failed to get value");
                         let init_result = runtime.block_on(async {
-                            let module_lock = module_arc.lock().unwrap();
+                            let module_lock = module_arc.lock().expect("Failed to acquire lock");
                             module_lock.initialize().await
                         });
 
@@ -813,7 +815,7 @@ pub mod turbo_module_exports {
         });
 
         match result {
-            Ok(json_str) => CString::new(json_str).unwrap().into_raw(),
+            Ok(json_str) => CString::new(json_str).expect("Failed to get value").into_raw(),
             Err(_) => {
                 let error = TurboMethodResult {
                     success: false,
@@ -828,7 +830,7 @@ pub mod turbo_module_exports {
                     metadata: HashMap::new(),
                 };
                 let error_json = serde_json::to_string(&error).unwrap_or_default();
-                CString::new(error_json).unwrap().into_raw()
+                CString::new(error_json).expect("Failed to get value").into_raw()
             },
         }
     }
@@ -842,9 +844,9 @@ pub mod turbo_module_exports {
 
                 match serde_json::from_str::<InferenceRequest>(request_str) {
                     Ok(request) => {
-                        let runtime = tokio::runtime::Runtime::new().unwrap();
+                        let runtime = tokio::runtime::Runtime::new().expect("Failed to get value");
                         let inference_result = runtime.block_on(async {
-                            let module = module_arc.lock().unwrap();
+                            let module = module_arc.lock().expect("Failed to acquire lock");
                             module.inference(&request).await
                         });
 
@@ -901,7 +903,7 @@ pub mod turbo_module_exports {
         });
 
         match result {
-            Ok(json_str) => CString::new(json_str).unwrap().into_raw(),
+            Ok(json_str) => CString::new(json_str).expect("Failed to get value").into_raw(),
             Err(_) => {
                 let error_result = TurboMethodResult {
                     success: false,
@@ -916,7 +918,7 @@ pub mod turbo_module_exports {
                     metadata: HashMap::new(),
                 };
                 let error_json = serde_json::to_string(&error_result).unwrap_or_default();
-                CString::new(error_json).unwrap().into_raw()
+                CString::new(error_json).expect("Failed to get value").into_raw()
             },
         }
     }
@@ -925,11 +927,13 @@ pub mod turbo_module_exports {
     #[no_mangle]
     pub extern "C" fn trustformers_turbo_get_typescript_definitions() -> *mut c_char {
         if let Some(module_arc) = TURBO_MODULE.get() {
-            let module = module_arc.lock().unwrap();
+            let module = module_arc.lock().expect("Failed to acquire lock");
             let ts_definitions = module.generate_typescript_definitions().unwrap_or_default();
-            CString::new(ts_definitions).unwrap().into_raw()
+            CString::new(ts_definitions).expect("Failed to get value").into_raw()
         } else {
-            CString::new("// Module not initialized").unwrap().into_raw()
+            CString::new("// Module not initialized")
+                .expect("Failed to get value")
+                .into_raw()
         }
     }
 
@@ -964,7 +968,8 @@ mod tests {
         let rn_config = ReactNativeConfig::default();
         let mobile_config = MobileConfig::default();
 
-        let module = TrustformersTurboModule::new(turbo_config, rn_config, mobile_config).unwrap();
+        let module = TrustformersTurboModule::new(turbo_config, rn_config, mobile_config)
+            .expect("Failed to get value");
         let result = module.initialize().await;
         assert!(result.is_ok());
     }
@@ -975,11 +980,12 @@ mod tests {
         let rn_config = ReactNativeConfig::default();
         let mobile_config = MobileConfig::default();
 
-        let module = TrustformersTurboModule::new(turbo_config, rn_config, mobile_config).unwrap();
+        let module = TrustformersTurboModule::new(turbo_config, rn_config, mobile_config)
+            .expect("Failed to get value");
         let ts_definitions = module.generate_typescript_definitions();
         assert!(ts_definitions.is_ok());
 
-        let definitions = ts_definitions.unwrap();
+        let definitions = ts_definitions.expect("Failed to get value");
         assert!(definitions.contains("TrustformersTurboModule"));
         assert!(definitions.contains("initialize"));
         assert!(definitions.contains("inference"));

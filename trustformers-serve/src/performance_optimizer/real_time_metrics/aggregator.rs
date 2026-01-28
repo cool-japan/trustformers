@@ -645,7 +645,7 @@ impl RealTimeDataAggregator {
                     confidence: 0.7,
                     supporting_data: {
                         let mut data = HashMap::new();
-                        data.insert("slope".to_string(), slope as f64);
+                        data.insert("slope".to_string(), slope);
                         data
                     },
                     actions: Vec::new(),
@@ -1116,7 +1116,8 @@ impl AggregationWindow {
         // Remove data points older than window duration
         while let Some(front) = data_points.front() {
             if now.signed_duration_since(front.timestamp)
-                > chrono::Duration::from_std(self.duration).unwrap()
+                > chrono::Duration::from_std(self.duration)
+                    .unwrap_or_else(|_| chrono::Duration::zero())
             {
                 data_points.pop_front();
             } else {
@@ -1225,7 +1226,7 @@ impl AggregationWindow {
 
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median = if sorted_values.len() % 2 == 0 {
             (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
@@ -1311,7 +1312,7 @@ impl AggregationWindow {
 
         let mean = values.iter().sum::<f32>() / values.len() as f32;
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median = if sorted_values.len() % 2 == 0 {
             (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
@@ -1453,7 +1454,7 @@ impl AggregationWindow {
         let std_dev = variance.sqrt();
 
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let q1_idx = sorted.len() / 4;
         let q3_idx = 3 * sorted.len() / 4;
@@ -1822,6 +1823,12 @@ impl AggregatorMetrics {
 // Basic Statistical Processor Implementation
 pub struct BasicStatisticalProcessor;
 
+impl Default for BasicStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BasicStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1854,6 +1861,12 @@ impl std::fmt::Debug for BasicStatisticalProcessor {
 
 // Additional placeholder processor implementations
 pub struct AdvancedStatisticalProcessor;
+impl Default for AdvancedStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AdvancedStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1880,6 +1893,12 @@ impl std::fmt::Debug for AdvancedStatisticalProcessor {
 }
 
 pub struct TrendStatisticalProcessor;
+impl Default for TrendStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrendStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1906,6 +1925,12 @@ impl std::fmt::Debug for TrendStatisticalProcessor {
 }
 
 pub struct DistributionStatisticalProcessor;
+impl Default for DistributionStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DistributionStatisticalProcessor {
     pub fn new() -> Self {
         Self
@@ -1932,6 +1957,12 @@ impl std::fmt::Debug for DistributionStatisticalProcessor {
 }
 
 pub struct EfficiencyStatisticalProcessor;
+impl Default for EfficiencyStatisticalProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EfficiencyStatisticalProcessor {
     pub fn new() -> Self {
         Self

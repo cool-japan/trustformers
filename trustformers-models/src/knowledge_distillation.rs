@@ -30,6 +30,7 @@
 //! trainer.train(dataloader)?;
 //! ```
 
+use scirs2_core::ndarray::{ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::{
@@ -529,15 +530,13 @@ where
                                     truncated_data
                                 };
 
-                                let projected_array = ndarray::ArrayD::from_shape_vec(
-                                    ndarray::IxDyn(&new_shape),
-                                    projected_data,
-                                )
-                                .map_err(|_| {
-                                    TrustformersError::shape_error(
-                                        "Failed to project student features".to_string(),
-                                    )
-                                })?;
+                                let projected_array =
+                                    ArrayD::from_shape_vec(IxDyn(&new_shape), projected_data)
+                                        .map_err(|_| {
+                                            TrustformersError::shape_error(
+                                                "Failed to project student features".to_string(),
+                                            )
+                                        })?;
 
                                 Tensor::F32(projected_array)
                             } else {
@@ -647,8 +646,8 @@ where
                                 }
                             }
 
-                            let aligned_array = ndarray::ArrayD::from_shape_vec(
-                                ndarray::IxDyn(&[batch_size, teacher_heads, seq_len, seq_len_2]),
+                            let aligned_array = ArrayD::from_shape_vec(
+                                IxDyn(&[batch_size, teacher_heads, seq_len, seq_len_2]),
                                 aligned_data,
                             )
                             .map_err(|_| {
@@ -684,8 +683,8 @@ where
                                 }
                             }
 
-                            let aligned_array = ndarray::ArrayD::from_shape_vec(
-                                ndarray::IxDyn(&[batch_size, teacher_heads, seq_len, seq_len_2]),
+                            let aligned_array = ArrayD::from_shape_vec(
+                                IxDyn(&[batch_size, teacher_heads, seq_len, seq_len_2]),
                                 aligned_data,
                             )
                             .map_err(|_| {
@@ -715,13 +714,10 @@ where
                 let epsilon = 1e-8_f32; // Small constant to avoid log(0)
                 let log_probs = arr.mapv(|x| (x + epsilon).ln());
                 let entropy_contributions = arr * &log_probs;
-                let entropy = entropy_contributions.sum_axis(ndarray::Axis(3)); // Sum over last dimension
-                let mean_entropy = entropy.mean().unwrap();
+                let entropy = entropy_contributions.sum_axis(Axis(3)); // Sum over last dimension
+                let mean_entropy = entropy.mean().expect("operation failed");
 
-                Ok(Tensor::F32(ndarray::ArrayD::from_elem(
-                    ndarray::IxDyn(&[1]),
-                    -mean_entropy,
-                )))
+                Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[1]), -mean_entropy)))
             },
             _ => Err(tensor_op_error(
                 "tensor_operation",
@@ -739,10 +735,7 @@ where
                 let student_flat: Vec<f32> = s_arr.iter().cloned().collect();
 
                 if teacher_flat.len() != student_flat.len() {
-                    return Ok(Tensor::F32(ndarray::ArrayD::from_elem(
-                        ndarray::IxDyn(&[1]),
-                        0.0,
-                    )));
+                    return Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[1]), 0.0)));
                 }
 
                 let n = teacher_flat.len() as f32;
@@ -768,10 +761,7 @@ where
                     0.0
                 };
 
-                Ok(Tensor::F32(ndarray::ArrayD::from_elem(
-                    ndarray::IxDyn(&[1]),
-                    correlation,
-                )))
+                Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[1]), correlation)))
             },
             _ => Err(tensor_op_error(
                 "tensor_operation",

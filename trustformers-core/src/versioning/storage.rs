@@ -465,7 +465,7 @@ mod tests {
         );
 
         // Store artifact
-        let ids = storage.store_artifacts(&[artifact.clone()]).await.unwrap();
+        let ids = storage.store_artifacts(std::slice::from_ref(&artifact)).await.unwrap();
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], artifact.id);
 
@@ -493,7 +493,7 @@ mod tests {
         );
 
         // Store and retrieve
-        let ids = storage.store_artifacts(&[artifact.clone()]).await.unwrap();
+        let ids = storage.store_artifacts(std::slice::from_ref(&artifact)).await.unwrap();
         assert_eq!(ids[0], artifact.id);
 
         let retrieved = storage.get_artifact(artifact.id).await.unwrap();

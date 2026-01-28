@@ -649,7 +649,7 @@ impl CpuDetector {
     async fn detect_macos_cpu_frequencies(&self) -> Result<(u32, u32)> {
         // Try using sysctl
         if let Ok(output) =
-            Command::new("sysctl").args(&["-n", "hw.cpufrequency_max"]).output().await
+            Command::new("sysctl").args(["-n", "hw.cpufrequency_max"]).output().await
         {
             if let Ok(freq_str) = String::from_utf8(output.stdout) {
                 if let Ok(freq_hz) = freq_str.trim().parse::<u64>() {
@@ -723,7 +723,7 @@ impl CpuDetector {
         let mut l3_cache_kb = Some(8192);
 
         // Try to get cache sizes from sysctl
-        if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.l1dcachesize"]).output().await {
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.l1dcachesize"]).output().await {
             if let Ok(size_str) = String::from_utf8(output.stdout) {
                 if let Ok(size_bytes) = size_str.trim().parse::<u32>() {
                     l1_cache_kb = size_bytes / 1024;
@@ -731,7 +731,7 @@ impl CpuDetector {
             }
         }
 
-        if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.l2cachesize"]).output().await {
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.l2cachesize"]).output().await {
             if let Ok(size_str) = String::from_utf8(output.stdout) {
                 if let Ok(size_bytes) = size_str.trim().parse::<u32>() {
                     l2_cache_kb = size_bytes / 1024;
@@ -739,7 +739,7 @@ impl CpuDetector {
             }
         }
 
-        if let Ok(output) = Command::new("sysctl").args(&["-n", "hw.l3cachesize"]).output().await {
+        if let Ok(output) = Command::new("sysctl").args(["-n", "hw.l3cachesize"]).output().await {
             if let Ok(size_str) = String::from_utf8(output.stdout) {
                 if let Ok(size_bytes) = size_str.trim().parse::<u32>() {
                     l3_cache_kb = Some(size_bytes / 1024);
@@ -814,7 +814,7 @@ impl CpuDetector {
                 // Minimal work
                 42
             });
-            handle.await.unwrap();
+            handle.await.map_err(|e| anyhow::anyhow!("Task join failed: {}", e))?;
         }
 
         Ok(start.elapsed() / iterations)
@@ -1247,6 +1247,12 @@ impl HardwareValidator {
 
 // Vendor detector implementations
 pub struct IntelCpuDetector;
+impl Default for IntelCpuDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IntelCpuDetector {
     pub fn new() -> Self {
         Self
@@ -1264,6 +1270,12 @@ impl CpuVendorDetector for IntelCpuDetector {
 }
 
 pub struct AmdCpuDetector;
+impl Default for AmdCpuDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AmdCpuDetector {
     pub fn new() -> Self {
         Self
@@ -1281,6 +1293,12 @@ impl CpuVendorDetector for AmdCpuDetector {
 }
 
 pub struct ArmCpuDetector;
+impl Default for ArmCpuDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ArmCpuDetector {
     pub fn new() -> Self {
         Self
@@ -1455,10 +1473,13 @@ mod tests {
     #[tokio::test]
     async fn test_hardware_detector_creation() {
         let config = HardwareDetectionConfig::default();
-        let detector = HardwareDetector::new(config).await.unwrap();
+        let detector = HardwareDetector::new(config).await.expect("Failed to create detector");
 
         // Test basic functionality
-        let cpu_frequencies = detector.detect_cpu_frequencies().await.unwrap();
+        let cpu_frequencies = detector
+            .detect_cpu_frequencies()
+            .await
+            .expect("Failed to detect CPU frequencies");
         assert!(cpu_frequencies.0 > 0);
         assert!(cpu_frequencies.1 >= cpu_frequencies.0);
     }
@@ -1466,9 +1487,10 @@ mod tests {
     #[tokio::test]
     async fn test_cpu_detector() {
         let config = CpuDetectionConfig::default();
-        let cpu_detector = CpuDetector::new(config).await.unwrap();
+        let cpu_detector = CpuDetector::new(config).await.expect("Failed to create CPU detector");
 
-        let cpu_profile = cpu_detector.detect_cpu_hardware().await.unwrap();
+        let cpu_profile =
+            cpu_detector.detect_cpu_hardware().await.expect("Failed to detect CPU hardware");
         assert!(cpu_profile.core_count > 0);
         assert!(cpu_profile.thread_count >= cpu_profile.core_count);
     }
@@ -1476,16 +1498,20 @@ mod tests {
     #[tokio::test]
     async fn test_memory_detector() {
         let config = MemoryDetectionConfig::default();
-        let memory_detector = MemoryDetector::new(config).await.unwrap();
+        let memory_detector =
+            MemoryDetector::new(config).await.expect("Failed to create memory detector");
 
-        let memory_profile = memory_detector.detect_memory_hardware().await.unwrap();
+        let memory_profile = memory_detector
+            .detect_memory_hardware()
+            .await
+            .expect("Failed to detect memory hardware");
         assert!(memory_profile.total_memory_mb > 0);
     }
 
     #[tokio::test]
     async fn test_cache_size_parsing() {
         let config = CpuDetectionConfig::default();
-        let cpu_detector = CpuDetector::new(config).await.unwrap();
+        let cpu_detector = CpuDetector::new(config).await.expect("Failed to create CPU detector");
 
         assert_eq!(cpu_detector.parse_cache_size("32K"), 32);
         assert_eq!(cpu_detector.parse_cache_size("256KB"), 256);
@@ -1496,9 +1522,12 @@ mod tests {
     #[tokio::test]
     async fn test_complete_hardware_detection() {
         let config = HardwareDetectionConfig::default();
-        let detector = HardwareDetector::new(config).await.unwrap();
+        let detector = HardwareDetector::new(config).await.expect("Failed to create detector");
 
-        let profile = detector.detect_complete_hardware().await.unwrap();
+        let profile = detector
+            .detect_complete_hardware()
+            .await
+            .expect("Failed to detect complete hardware");
         assert!(profile.detection_duration > Duration::from_nanos(0));
         assert!(profile.cpu_profile.core_count > 0);
     }

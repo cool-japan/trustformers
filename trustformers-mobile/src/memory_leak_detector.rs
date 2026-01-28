@@ -593,7 +593,10 @@ impl MobileMemoryLeakDetector {
         } else if max_size > avg_size * 10 {
             // Large size variations
             LeakPatternType::BurstLeak
-        } else if timestamps.last().unwrap() - timestamps.first().unwrap() > 3600 {
+        } else if timestamps.last().expect("Operation failed")
+            - timestamps.first().expect("Operation failed")
+            > 3600
+        {
             // Long time span
             LeakPatternType::GradualLeak
         } else {
@@ -765,7 +768,9 @@ mod tests {
         let detector = MobileMemoryLeakDetector::new(config);
 
         // Track some allocations
-        detector.track_allocation(0x1000, 1024, AllocationType::Tensor, None).unwrap();
+        detector
+            .track_allocation(0x1000, 1024, AllocationType::Tensor, None)
+            .expect("Operation failed");
         detector
             .track_allocation(
                 0x2000,
@@ -773,17 +778,17 @@ mod tests {
                 AllocationType::Model,
                 Some("test".to_string()),
             )
-            .unwrap();
+            .expect("Operation failed");
 
         // Get current usage
-        let usage = detector.get_memory_usage().unwrap();
+        let usage = detector.get_memory_usage().expect("Operation failed");
         assert_eq!(usage.allocation_count, 2);
         assert_eq!(usage.allocated_memory, 3072);
 
         // Track deallocation
-        detector.track_deallocation(0x1000).unwrap();
+        detector.track_deallocation(0x1000).expect("Operation failed");
 
-        let usage_after = detector.get_memory_usage().unwrap();
+        let usage_after = detector.get_memory_usage().expect("Operation failed");
         assert_eq!(usage_after.allocation_count, 1);
         assert_eq!(usage_after.allocated_memory, 2048);
     }
@@ -801,13 +806,15 @@ mod tests {
         let detector = MobileMemoryLeakDetector::new(config);
 
         // Track allocation but don't deallocate
-        detector.track_allocation(0x1000, 1024, AllocationType::Tensor, None).unwrap();
+        detector
+            .track_allocation(0x1000, 1024, AllocationType::Tensor, None)
+            .expect("Operation failed");
 
         // Wait a moment to ensure timestamp difference
         thread::sleep(Duration::from_millis(10));
 
         // Detect leaks
-        let analysis = detector.detect_leaks().unwrap();
+        let analysis = detector.detect_leaks().expect("Operation failed");
         assert_eq!(analysis.potential_leaks.len(), 1);
         assert_eq!(analysis.potential_leaks[0].size, 1024);
     }
@@ -819,7 +826,10 @@ mod tests {
 
         // Create test leak data
         let mut leaks = Vec::new();
-        let base_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let base_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("Operation failed")
+            .as_secs();
 
         for i in 0..5 {
             leaks.push(AllocationInfo {

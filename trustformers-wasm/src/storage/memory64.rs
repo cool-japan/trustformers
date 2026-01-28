@@ -475,9 +475,11 @@ pub fn can_load_model_size(model_size_gb: f64) -> Result<bool, JsValue> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_memory64_manager_creation() {
         // This test would only pass in environments that support Memory64
         // In most current browsers, this will fail
@@ -489,6 +491,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_allocation_strategy() {
         if let Ok(manager) = Memory64Manager::new(16) {
             assert_eq!(

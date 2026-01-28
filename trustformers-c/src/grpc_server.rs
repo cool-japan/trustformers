@@ -3,10 +3,9 @@
 //! This module provides a high-performance gRPC server for serving TrustformeRS models
 //! with load balancing and advanced serving capabilities.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -333,7 +332,7 @@ impl GrpcServer {
             .map_err(|_| anyhow!("Failed to acquire lock on running state"))?;
 
         if *is_running {
-            return Err(anyhow!("Server is already running"));
+            return Err(anyhow!("Server is already running").into());
         }
 
         let shutdown_signal = Arc::new(Mutex::new(false));
@@ -488,7 +487,7 @@ impl LoadBalancer {
         }
     }
 
-    fn select_instance(&self, instances: &[ModelInstance]) -> Option<&ModelInstance> {
+    fn select_instance<'a>(&self, instances: &'a [ModelInstance]) -> Option<&'a ModelInstance> {
         if instances.is_empty() {
             return None;
         }
@@ -516,7 +515,7 @@ impl LoadBalancer {
             },
             LoadBalancingStrategy::LeastConnections => healthy_instances
                 .iter()
-                .min_by_key(|instance| instance.current_requests.lock().unwrap_or_default())
+                .min_by_key(|instance| *instance.current_requests.lock().unwrap())
                 .copied(),
             LoadBalancingStrategy::WeightedRoundRobin => {
                 // Weighted selection (simplified)
@@ -530,10 +529,10 @@ impl LoadBalancer {
             LoadBalancingStrategy::LeastResponseTime => healthy_instances
                 .iter()
                 .min_by_key(|instance| {
-                    let total_requests = instance.total_requests.lock().unwrap_or_default();
-                    let total_time = instance.total_response_time_ms.lock().unwrap_or_default();
-                    if *total_requests > 0 {
-                        *total_time / *total_requests
+                    let total_requests = *instance.total_requests.lock().unwrap();
+                    let total_time = *instance.total_response_time_ms.lock().unwrap();
+                    if total_requests > 0 {
+                        total_time / total_requests
                     } else {
                         0
                     }

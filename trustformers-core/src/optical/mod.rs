@@ -14,6 +14,7 @@ pub use photonic_networks::*;
 
 use crate::tensor::Tensor;
 use anyhow::Result;
+use scirs2_core::random::*;
 use std::collections::HashMap;
 
 /// Optical computing platforms
@@ -217,8 +218,9 @@ impl OpticalSignal {
 
     /// Add noise to the signal
     pub fn add_noise(&mut self, noise_power: f64) {
+        let mut rng = thread_rng();
         for amp in &mut self.amplitude {
-            let noise = noise_power.sqrt() * (rand::random::<f64>() - 0.5);
+            let noise = noise_power.sqrt() * (rng.random::<f64>() - 0.5);
             *amp += noise;
         }
     }
@@ -679,7 +681,7 @@ mod tests {
     #[test]
     fn test_optical_encoding() {
         let processor = PhotonicProcessor::with_platform(OpticalPlatform::Simulation);
-        let input = Tensor::from_vec(vec![0.5, 1.0, -0.5], &[3]).unwrap();
+        let input = Tensor::from_vec(vec![0.5, 1.0, -0.5], &[3]).expect("Tensor from_vec failed");
 
         let amplitude_encoded = processor.tensor_to_optical(&input, OpticalEncoding::Amplitude);
         assert!(amplitude_encoded.is_ok());

@@ -218,9 +218,9 @@ impl ProtobufSerializer {
 
     /// Serialize to protobuf binary format
     pub fn to_protobuf_bytes(model: &ProtobufTokenizerModel) -> Result<Vec<u8>> {
-        // Using serde with bincode as a simplified protobuf-like format
+        // Using serde with oxicode as a simplified protobuf-like format
         // In a real implementation, you'd use actual protobuf libraries like prost
-        bincode::serialize(model).map_err(|e| {
+        oxicode::serde::encode_to_vec(model, oxicode::config::standard()).map_err(|e| {
             TrustformersError::other(
                 anyhow::anyhow!("Failed to serialize protobuf: {}", e).to_string(),
             )
@@ -229,11 +229,13 @@ impl ProtobufSerializer {
 
     /// Deserialize from protobuf binary format
     pub fn from_protobuf_bytes(bytes: &[u8]) -> Result<ProtobufTokenizerModel> {
-        bincode::deserialize(bytes).map_err(|e| {
-            TrustformersError::other(
-                anyhow::anyhow!("Failed to deserialize protobuf: {}", e).to_string(),
-            )
-        })
+        let (result, _): (ProtobufTokenizerModel, usize) =
+            oxicode::serde::decode_from_slice(bytes, oxicode::config::standard()).map_err(|e| {
+                TrustformersError::other(
+                    anyhow::anyhow!("Failed to deserialize protobuf: {}", e).to_string(),
+                )
+            })?;
+        Ok(result)
     }
 
     /// Save tokenizer model to protobuf file

@@ -1,6 +1,8 @@
 use crate::bert::layers::{BertEncoder, BertPooler};
 use crate::roberta::config::RobertaConfig;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
@@ -11,11 +13,16 @@ pub struct RobertaModel {
     embeddings: RobertaEmbeddings,
     encoder: BertEncoder,
     pooler: Option<BertPooler>,
+    device: Device,
 }
 
 impl RobertaModel {
     pub fn new(config: RobertaConfig) -> Result<Self> {
-        let embeddings = RobertaEmbeddings::new(&config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: RobertaConfig, device: Device) -> Result<Self> {
+        let embeddings = RobertaEmbeddings::new_with_device(&config, device)?;
 
         let bert_config = crate::bert::config::BertConfig {
             vocab_size: config.vocab_size,
@@ -36,15 +43,20 @@ impl RobertaModel {
             classifier_dropout: config.classifier_dropout,
         };
 
-        let encoder = BertEncoder::new(&bert_config)?;
-        let pooler = Some(BertPooler::new(&bert_config)?);
+        let encoder = BertEncoder::new_with_device(&bert_config, device)?;
+        let pooler = Some(BertPooler::new_with_device(&bert_config, device)?);
 
         Ok(Self {
             config,
             embeddings,
             encoder,
             pooler,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward_with_embeddings(
@@ -59,7 +71,7 @@ impl RobertaModel {
             let mask_f32: Vec<f32> = mask.iter().map(|&m| m as f32).collect();
             let shape = vec![1, 1, 1, mask_f32.len()];
             Some(Tensor::F32(
-                ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape), mask_f32).map_err(|e| {
+                ArrayD::from_shape_vec(IxDyn(&shape), mask_f32).map_err(|e| {
                     trustformers_core::errors::TrustformersError::shape_error(e.to_string())
                 })?,
             ))
@@ -90,33 +102,47 @@ pub struct RobertaEmbeddings {
     layer_norm: trustformers_core::layers::LayerNorm,
     dropout: f32,
     padding_idx: usize,
+    device: Device,
 }
 
 impl RobertaEmbeddings {
     pub fn new(config: &RobertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RobertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            word_embeddings: trustformers_core::layers::Embedding::new(
+            word_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.vocab_size,
                 config.hidden_size,
                 Some(config.pad_token_id as usize),
+                device,
             )?,
-            position_embeddings: trustformers_core::layers::Embedding::new(
+            position_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.max_position_embeddings,
                 config.hidden_size,
                 None,
+                device,
             )?,
-            token_type_embeddings: trustformers_core::layers::Embedding::new(
+            token_type_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.type_vocab_size,
                 config.hidden_size,
                 None,
+                device,
             )?,
-            layer_norm: trustformers_core::layers::LayerNorm::new(
+            layer_norm: trustformers_core::layers::LayerNorm::new_with_device(
                 vec![config.hidden_size],
                 config.layer_norm_eps,
+                device,
             )?,
             dropout: config.hidden_dropout_prob,
             padding_idx: config.pad_token_id as usize,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn create_position_ids_from_input_ids(&self, input_ids: &[u32]) -> Vec<u32> {

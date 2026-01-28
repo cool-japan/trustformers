@@ -153,9 +153,10 @@ impl Default for BenchmarkConfig {
 }
 
 /// Device configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum DeviceConfig {
     /// Run on CPU
+    #[default]
     Cpu,
     /// Run on specific GPU
     Gpu(usize),
@@ -163,12 +164,6 @@ pub enum DeviceConfig {
     AllGpus,
     /// Custom device string
     Custom(String),
-}
-
-impl Default for DeviceConfig {
-    fn default() -> Self {
-        Self::Cpu
-    }
 }
 
 /// Macro for easily creating custom benchmarks

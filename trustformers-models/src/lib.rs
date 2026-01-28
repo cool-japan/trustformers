@@ -2,6 +2,19 @@
 //!
 //! This crate provides pre-trained transformer model implementations optimized for Rust,
 //! offering high-performance alternatives to Python-based implementations.
+
+// Temporary clippy allows for alpha release - to be addressed in 0.1.0
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::useless_vec)]
+#![allow(clippy::redundant_locals)]
+#![allow(clippy::len_without_is_empty)]
+#![allow(clippy::await_holding_lock)]
+#![allow(clippy::if_same_then_else)]
+#![allow(clippy::derivable_impls)]
+#![allow(clippy::wrong_self_convention)]
+#![allow(clippy::same_item_push)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::ptr_arg)]
 //!
 //! ## Overview
 //!
@@ -157,6 +170,9 @@ pub mod vit;
 #[cfg(feature = "llama")]
 pub mod llama;
 
+#[cfg(feature = "gpt_neox")]
+pub mod gpt_neox;
+
 #[cfg(feature = "mistral")]
 pub mod mistral;
 
@@ -225,6 +241,13 @@ pub mod hierarchical;
 pub mod advanced_quantization;
 pub mod ring_attention;
 pub mod weight_loading;
+
+// Generation utilities for text generation
+pub mod generation_utils;
+
+// Batch inference optimization utilities
+pub mod batch_inference;
+
 // Dynamic token pruning for efficiency
 pub mod dynamic_pruning;
 
@@ -367,6 +390,9 @@ pub use vit::{ViTConfig, ViTForImageClassification, ViTModel};
 
 #[cfg(feature = "llama")]
 pub use llama::{LlamaConfig, LlamaForCausalLM, LlamaModel};
+
+#[cfg(feature = "gpt_neox")]
+pub use gpt_neox::{GPTNeoXConfig, GPTNeoXForCausalLM, GPTNeoXModel};
 
 #[cfg(feature = "mistral")]
 pub use mistral::{MistralConfig, MistralForCausalLM, MistralModel};

@@ -186,6 +186,7 @@ pub struct UtilsStatistics {
 /*
 mod tests {
     use super::*;
+use crate::error::TrustformersResult;
 
     #[test]
     fn test_utils_initialization() {

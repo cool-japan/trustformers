@@ -3,16 +3,19 @@
 // This is intentional as each backend provides its own implementation of common types.
 #![allow(ambiguous_glob_reexports)]
 
+pub mod advanced_simd;
 pub mod fused_ops;
 pub mod rope;
 pub mod simd;
 pub mod simd_ops;
 
-#[cfg(feature = "cuda")]
-pub mod cuda_kernels;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub mod cuda_kernels;
 
-#[cfg(feature = "cuda")]
-pub mod cuda_impl;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub mod cuda_impl;
 
 #[cfg(feature = "rocm")]
 pub mod rocm_kernels;
@@ -44,7 +47,7 @@ pub mod oneapi_impl;
 #[cfg(feature = "riscv")]
 pub mod riscv_impl;
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal_impl;
 
 pub use fused_ops::*;
@@ -53,11 +56,13 @@ pub use simd::CpuFeatures as SIMDCpuFeatures;
 pub use simd::{SIMDLayerNorm, SIMDMatrixOps, SIMDSoftmax};
 pub use simd_ops::CpuFeatures;
 
-#[cfg(feature = "cuda")]
-pub use cuda_kernels::*;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub use cuda_kernels::*;
 
-#[cfg(feature = "cuda")]
-pub use cuda_impl::*;
+// Temporarily disabled - needs cudarc 0.17.7 API migration
+// #[cfg(feature = "cuda")]
+// pub use cuda_impl::*;
 
 #[cfg(feature = "rocm")]
 pub use rocm_kernels::*;
@@ -89,5 +94,5 @@ pub use oneapi_impl::*;
 #[cfg(feature = "riscv")]
 pub use riscv_impl::*;
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub use metal_impl::*;

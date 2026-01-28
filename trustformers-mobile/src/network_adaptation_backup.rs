@@ -354,7 +354,7 @@ mod tests {
     #[tokio::test]
     async fn test_module_integration() {
         // Test that all modules work together seamlessly
-        let manager = create_default_network_manager().await.unwrap();
+        let manager = create_default_network_manager().await.expect("Operation failed");
 
         let status = manager.get_status().await;
         assert!(matches!(status.state, AdaptationState::Idle));
@@ -375,21 +375,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_smart_monitoring_start() {
-        let mut manager = create_default_network_manager().await.unwrap();
+        let mut manager = create_default_network_manager().await.expect("Operation failed");
         let result = start_smart_monitoring(&mut manager).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_performance_optimization() {
-        let manager = create_default_network_manager().await.unwrap();
+        let manager = create_default_network_manager().await.expect("Operation failed");
         let result = optimize_for_current_network(&manager).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_performance_recommendations() {
-        let manager = create_default_network_manager().await.unwrap();
+        let manager = create_default_network_manager().await.expect("Operation failed");
         let recommendations = get_performance_recommendations(&manager).await;
         assert!(recommendations.is_ok());
     }

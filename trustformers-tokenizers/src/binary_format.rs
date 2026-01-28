@@ -137,9 +137,13 @@ impl BinarySerializer {
         let mut writer = BufWriter::with_capacity(self.config.buffer_size, file);
 
         // Serialize the tokenizer data
-        let data = bincode::serialize(tokenizer).map_err(|e| {
-            TrustformersError::serialization_error(format!("Failed to serialize tokenizer: {}", e))
-        })?;
+        let data =
+            oxicode::serde::encode_to_vec(tokenizer, oxicode::config::standard()).map_err(|e| {
+                TrustformersError::serialization_error(format!(
+                    "Failed to serialize tokenizer: {}",
+                    e
+                ))
+            })?;
 
         // Calculate checksum
         let checksum = crc32fast::hash(&data);
@@ -188,9 +192,10 @@ impl BinarySerializer {
         })?;
 
         // Write header
-        let header_data = bincode::serialize(&header).map_err(|e| {
-            TrustformersError::serialization_error(format!("Failed to serialize header: {}", e))
-        })?;
+        let header_data = oxicode::serde::encode_to_vec(&header, oxicode::config::standard())
+            .map_err(|e| {
+                TrustformersError::serialization_error(format!("Failed to serialize header: {}", e))
+            })?;
         let header_size = header_data.len() as u32;
 
         writer.write_all(&header_size.to_le_bytes()).map_err(|e| {
@@ -244,7 +249,11 @@ impl BinarySerializer {
             .read_exact(&mut header_data)
             .map_err(|e| TrustformersError::io_error(format!("Failed to read header: {}", e)))?;
 
-        let header: BinaryHeader = bincode::deserialize(&header_data).map_err(|e| {
+        let (header, _): (BinaryHeader, usize) = oxicode::serde::decode_from_slice(
+            &header_data,
+            oxicode::config::standard(),
+        )
+        .map_err(|e| {
             TrustformersError::serialization_error(format!("Failed to deserialize header: {}", e))
         })?;
 
@@ -281,12 +290,15 @@ impl BinarySerializer {
         }
 
         // Deserialize tokenizer
-        let tokenizer: BinaryTokenizer = bincode::deserialize(&final_data).map_err(|e| {
-            TrustformersError::serialization_error(format!(
-                "Failed to deserialize tokenizer: {}",
-                e
-            ))
-        })?;
+        let (tokenizer, _): (BinaryTokenizer, usize) =
+            oxicode::serde::decode_from_slice(&final_data, oxicode::config::standard()).map_err(
+                |e| {
+                    TrustformersError::serialization_error(format!(
+                        "Failed to deserialize tokenizer: {}",
+                        e
+                    ))
+                },
+            )?;
 
         Ok((tokenizer, header))
     }
@@ -368,7 +380,11 @@ impl BinarySerializer {
             .read_exact(&mut header_data)
             .map_err(|e| TrustformersError::io_error(format!("Failed to read header: {}", e)))?;
 
-        let header: BinaryHeader = bincode::deserialize(&header_data).map_err(|e| {
+        let (header, _): (BinaryHeader, usize) = oxicode::serde::decode_from_slice(
+            &header_data,
+            oxicode::config::standard(),
+        )
+        .map_err(|e| {
             TrustformersError::serialization_error(format!("Failed to deserialize header: {}", e))
         })?;
 

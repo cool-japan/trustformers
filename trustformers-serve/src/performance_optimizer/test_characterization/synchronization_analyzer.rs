@@ -1151,7 +1151,7 @@ impl SynchronizationAnalyzer {
         &self,
         test_id: &str,
     ) -> Result<Option<CachedSynchronizationAnalysis>> {
-        let cache = self.analysis_cache.lock().unwrap();
+        let cache = self.analysis_cache.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
 
         if let Some(cached) = cache.get(test_id) {
             if cached.expires_at > Utc::now() {
@@ -1168,7 +1168,7 @@ impl SynchronizationAnalyzer {
         test_id: &str,
         result: &SynchronizationAnalysisResult,
     ) -> Result<()> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
         let cache_duration = Duration::from_secs(3600); // 1 hour default
 
         let cached = CachedSynchronizationAnalysis {
@@ -1179,7 +1179,7 @@ impl SynchronizationAnalyzer {
             last_access: Utc::now(),
         };
 
-        let mut cache = self.analysis_cache.lock().unwrap();
+        let mut cache = self.analysis_cache.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
 
         // Implement cache size limit - collect keys first to avoid borrow conflict
         if cache.len() >= config.cache_size_limit {
@@ -1203,7 +1203,7 @@ impl SynchronizationAnalyzer {
 
     /// Updates analysis statistics
     async fn update_analysis_stats(&self, success: bool, duration: Duration, cache_hit: bool) {
-        let mut stats = self.analysis_stats.lock().unwrap();
+        let mut stats = self.analysis_stats.lock().expect("Lock poisoned");
 
         if success {
             stats.successful_analyses += 1;
@@ -1232,20 +1232,20 @@ impl SynchronizationAnalyzer {
 
     /// Gets analysis statistics
     pub async fn get_analysis_statistics(&self) -> Result<SynchronizationAnalysisStats> {
-        let stats = self.analysis_stats.lock().unwrap();
+        let stats = self.analysis_stats.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
         Ok(stats.clone())
     }
 
     /// Updates analyzer configuration
     pub async fn update_config(&self, new_config: SynchronizationAnalyzerConfig) -> Result<()> {
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
         *config = new_config;
         Ok(())
     }
 
     /// Clears analysis cache
     pub async fn clear_cache(&self) -> Result<()> {
-        let mut cache = self.analysis_cache.lock().unwrap();
+        let mut cache = self.analysis_cache.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
         cache.clear();
         Ok(())
     }
@@ -1647,7 +1647,7 @@ impl SynchronizationPointDetector {
 
     /// Updates detection metrics
     async fn update_detection_metrics(&self, points: &[DetectedSynchronizationPoint]) {
-        let mut metrics = self.detection_metrics.lock().unwrap();
+        let mut metrics = self.detection_metrics.lock().expect("Lock poisoned");
         metrics.total_detections += points.len() as u64;
         metrics.barrier_detections += points
             .iter()
@@ -1727,7 +1727,10 @@ impl CriticalSectionAnalyzer {
         };
 
         // Store in history
-        self.analysis_history.lock().unwrap().push(result.clone());
+        self.analysis_history
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Lock poisoned"))?
+            .push(result.clone());
 
         Ok(result)
     }
@@ -1817,7 +1820,8 @@ impl DeadlockPreventionEngine {
 
     /// Generates safe lock ordering
     async fn generate_safe_ordering(&self, dependencies: &[LockDependency]) -> Result<Vec<String>> {
-        let algorithms = self.ordering_algorithms.lock().unwrap();
+        let algorithms =
+            self.ordering_algorithms.lock().map_err(|_| anyhow::anyhow!("Lock poisoned"))?;
 
         for algorithm in algorithms.iter() {
             if let Ok(ordering) = algorithm.generate_ordering(dependencies) {
@@ -2130,6 +2134,12 @@ pub struct RecommendationInput {
 // Additional Supporting Types (Simplified implementations)
 // ================================================================================================
 
+impl Default for LockDependencyGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LockDependencyGraph {
     pub fn new() -> Self {
         Self {
@@ -2311,9 +2321,21 @@ pub struct AntiPatternFixAdvisor;
 pub struct TopologicalOrderingAlgorithm;
 pub struct PriorityBasedOrderingAlgorithm;
 
+impl Default for TopologicalOrderingAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TopologicalOrderingAlgorithm {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for PriorityBasedOrderingAlgorithm {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -2403,6 +2425,12 @@ impl std::fmt::Debug for SynchronizationPatternLibrary {
     }
 }
 
+impl Default for SynchronizationPatternLibrary {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SynchronizationPatternLibrary {
     pub fn new() -> Self {
         Self {
@@ -2414,6 +2442,12 @@ impl SynchronizationPatternLibrary {
 #[derive(Debug)]
 pub struct SynchronizationMetricsDatabase {
     metrics: Vec<SynchronizationMetrics>,
+}
+
+impl Default for SynchronizationMetricsDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SynchronizationMetricsDatabase {
@@ -2715,9 +2749,10 @@ mod tests {
     #[tokio::test]
     async fn test_analysis_statistics() {
         let config = SynchronizationAnalyzerConfig::default();
-        let analyzer = SynchronizationAnalyzer::new(config).await.unwrap();
+        let analyzer =
+            SynchronizationAnalyzer::new(config).await.expect("Failed to create analyzer");
 
-        let stats = analyzer.get_analysis_statistics().await.unwrap();
+        let stats = analyzer.get_analysis_statistics().await.expect("Failed to get stats");
         assert_eq!(stats.total_analyses, 0);
         assert_eq!(stats.successful_analyses, 0);
         assert_eq!(stats.failed_analyses, 0);

@@ -896,15 +896,13 @@ impl ResourceUtilizationTracker {
 
         let gpu_monitor = Arc::new(GpuUtilizationMonitor::new(config.gpu_config.clone()).await?);
 
-        let history_manager =
-            Arc::new(UtilizationHistoryManager::new(HistoryManagerConfig::default()).await?);
+        let history_manager = Arc::new(UtilizationHistoryManager::new(HistoryManagerConfig).await?);
 
-        let trend_analyzer = Arc::new(TrendAnalyzer::new(TrendAnalyzerConfig::default()).await?);
+        let trend_analyzer = Arc::new(TrendAnalyzer::new(TrendAnalyzerConfig).await?);
 
-        let alerting_system = Arc::new(AlertingSystem::new(AlertingConfig::default()).await?);
+        let alerting_system = Arc::new(AlertingSystem::new(AlertingConfig).await?);
 
-        let report_generator =
-            Arc::new(ReportGenerator::new(ReportGeneratorConfig::default()).await?);
+        let report_generator = Arc::new(ReportGenerator::new(ReportGeneratorConfig).await?);
 
         Ok(Self {
             cpu_monitor,
@@ -1203,7 +1201,7 @@ impl CpuUtilizationMonitor {
                     .iter()
                     .map(|(pid, thread)| (*pid, thread.cpu_utilization))
                     .collect();
-                threads.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                threads.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
                 let pids_to_keep: std::collections::HashSet<_> = threads
                     .iter()
@@ -1501,7 +1499,7 @@ impl UtilizationStats {
         let std_deviation = variance.sqrt();
 
         let mut sorted_samples = samples.to_vec();
-        sorted_samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let percentile_95_idx = ((samples.len() as f32 * 0.95) as usize).min(samples.len() - 1);
         let percentile_99_idx = ((samples.len() as f32 * 0.99) as usize).min(samples.len() - 1);
@@ -1782,7 +1780,7 @@ impl UtilizationHistoryManager {
         Ok(Self {
             storage_backend: Arc::new(StubStorageBackend),
             retention_policies: HashMap::new(),
-            compression_config: CompressionConfig::default(),
+            compression_config: CompressionConfig,
             cleanup_handle: Arc::new(Mutex::new(None)),
             config,
         })
@@ -1799,8 +1797,8 @@ impl TrendAnalyzer {
             analysis_algorithms: Vec::new(),
             prediction_models: Arc::new(RwLock::new(HashMap::new())),
             analysis_cache: Arc::new(RwLock::new(HashMap::new())),
-            seasonal_detector: Arc::new(SeasonalPatternDetector::default()),
-            anomaly_detector: Arc::new(AnomalyDetector::default()),
+            seasonal_detector: Arc::new(SeasonalPatternDetector),
+            anomaly_detector: Arc::new(AnomalyDetector),
             config,
         })
     }
@@ -1884,7 +1882,8 @@ mod tests {
     #[test]
     async fn test_utilization_tracker_creation() {
         let config = UtilizationTrackingConfig::default();
-        let tracker = ResourceUtilizationTracker::new(config).await.unwrap();
+        let tracker =
+            ResourceUtilizationTracker::new(config).await.expect("Failed to create tracker");
 
         let state = tracker.get_monitoring_state().await;
         assert!(!state.is_active);
@@ -1893,19 +1892,22 @@ mod tests {
     #[test]
     async fn test_cpu_monitor_creation() {
         let config = CpuMonitorConfig::default();
-        let monitor = CpuUtilizationMonitor::new(config).await.unwrap();
+        let monitor =
+            CpuUtilizationMonitor::new(config).await.expect("Failed to create CPU monitor");
 
         // Test sample collection
-        monitor.collect_sample().await.unwrap();
+        monitor.collect_sample().await.expect("Failed to collect sample");
     }
 
     #[test]
     async fn test_memory_monitor_creation() {
         let config = MemoryMonitorConfig::default();
-        let monitor = MemoryUtilizationMonitor::new(config).await.unwrap();
+        let monitor = MemoryUtilizationMonitor::new(config)
+            .await
+            .expect("Failed to create memory monitor");
 
         // Test sample collection
-        monitor.collect_sample().await.unwrap();
+        monitor.collect_sample().await.expect("Failed to collect sample");
     }
 
     #[test]
@@ -1919,7 +1921,10 @@ mod tests {
         history.add_sample(40.0, now); // Should remove first sample
 
         assert_eq!(history.len(), 3);
-        assert_eq!(history.get_latest_sample().unwrap().0, 40.0);
+        assert_eq!(
+            history.get_latest_sample().expect("No sample found").0,
+            40.0
+        );
     }
 
     #[test]

@@ -1,8 +1,9 @@
 use crate::linformer::config::LinformerConfig;
-use ndarray;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
-    errors::Result,
+    device::Device,
+    errors::{Result, TrustformersError},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -26,32 +27,39 @@ pub struct LinformerAttention {
     #[allow(dead_code)]
     dropout: f32,
     share_projection: bool,
+    device: Device,
 }
 
 impl LinformerAttention {
     pub fn new(config: &LinformerConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &LinformerConfig, device: Device) -> Result<Self> {
         let attention_head_size = config.head_dim();
         let all_head_size = config.num_attention_heads * attention_head_size;
 
-        let query = Linear::new(config.hidden_size, all_head_size, true);
-        let key = Linear::new(config.hidden_size, all_head_size, true);
-        let value = Linear::new(config.hidden_size, all_head_size, true);
-        let output = Linear::new(all_head_size, config.hidden_size, true);
+        let query = Linear::new_with_device(config.hidden_size, all_head_size, true, device);
+        let key = Linear::new_with_device(config.hidden_size, all_head_size, true, device);
+        let value = Linear::new_with_device(config.hidden_size, all_head_size, true, device);
+        let output = Linear::new_with_device(all_head_size, config.hidden_size, true, device);
 
         // Create projection matrices for linear complexity
         let (key_projection, value_projection) = if config.use_efficient_attention {
-            let key_proj = Linear::new(
+            let key_proj = Linear::new_with_device(
                 config.max_position_embeddings,
                 config.projected_attention_size,
                 false,
+                device,
             );
             let value_proj = if config.share_projection {
                 None // Will reuse key projection
             } else {
-                Some(Linear::new(
+                Some(Linear::new_with_device(
                     config.max_position_embeddings,
                     config.projected_attention_size,
                     false,
+                    device,
                 ))
             };
             (Some(key_proj), value_proj)
@@ -71,7 +79,12 @@ impl LinformerAttention {
             projected_size: config.projected_attention_size,
             dropout: config.attention_probs_dropout_prob,
             share_projection: config.share_projection,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Transpose tensor for multi-head attention
@@ -210,19 +223,31 @@ pub struct LinformerFeedForward {
     activation: String,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl LinformerFeedForward {
     pub fn new(config: &LinformerConfig) -> Result<Self> {
-        let dense1 = Linear::new(config.hidden_size, config.intermediate_size, true);
-        let dense2 = Linear::new(config.intermediate_size, config.hidden_size, true);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &LinformerConfig, device: Device) -> Result<Self> {
+        let dense1 =
+            Linear::new_with_device(config.hidden_size, config.intermediate_size, true, device);
+        let dense2 =
+            Linear::new_with_device(config.intermediate_size, config.hidden_size, true, device);
 
         Ok(Self {
             dense1,
             dense2,
             activation: config.hidden_act.clone(),
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn apply_activation(&self, x: &Tensor) -> Result<Tensor> {
@@ -259,21 +284,33 @@ pub struct LinformerLayer {
     feed_forward: LinformerFeedForward,
     attention_norm: LayerNorm,
     output_norm: LayerNorm,
+    device: Device,
 }
 
 impl LinformerLayer {
     pub fn new(config: &LinformerConfig) -> Result<Self> {
-        let attention = LinformerAttention::new(config)?;
-        let feed_forward = LinformerFeedForward::new(config)?;
-        let attention_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
-        let output_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &LinformerConfig, device: Device) -> Result<Self> {
+        let attention = LinformerAttention::new_with_device(config, device)?;
+        let feed_forward = LinformerFeedForward::new_with_device(config, device)?;
+        let attention_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
+        let output_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             attention,
             feed_forward,
             attention_norm,
             output_norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -311,20 +348,31 @@ pub struct LinformerEmbeddings {
     layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl LinformerEmbeddings {
     pub fn new(config: &LinformerConfig) -> Result<Self> {
-        let word_embeddings = Embedding::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &LinformerConfig, device: Device) -> Result<Self> {
+        let word_embeddings = Embedding::new_with_device(
             config.vocab_size,
             config.hidden_size,
             Some(config.pad_token_id as usize),
+            device,
         )?;
-        let position_embeddings =
-            Embedding::new(config.max_position_embeddings, config.hidden_size, None)?;
+        let position_embeddings = Embedding::new_with_device(
+            config.max_position_embeddings,
+            config.hidden_size,
+            None,
+            device,
+        )?;
         let token_type_embeddings =
-            Embedding::new(config.type_vocab_size, config.hidden_size, None)?;
-        let layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+            Embedding::new_with_device(config.type_vocab_size, config.hidden_size, None, device)?;
+        let layer_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             word_embeddings,
@@ -332,7 +380,12 @@ impl LinformerEmbeddings {
             token_type_embeddings,
             layer_norm,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -379,29 +432,36 @@ impl LinformerEmbeddings {
 pub struct LinformerEncoder {
     layers: Vec<LinformerLayer>,
     shared_projections: Option<(Linear, Option<Linear>)>, // Shared across layers if enabled
+    device: Device,
 }
 
 impl LinformerEncoder {
     pub fn new(config: &LinformerConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &LinformerConfig, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(LinformerLayer::new(config)?);
+            layers.push(LinformerLayer::new_with_device(config, device)?);
         }
 
         // Create shared projections if enabled
         let shared_projections = if config.share_layers && config.use_efficient_attention {
-            let key_proj = Linear::new(
+            let key_proj = Linear::new_with_device(
                 config.max_position_embeddings,
                 config.projected_attention_size,
                 false,
+                device,
             );
             let value_proj = if config.share_projection {
                 None
             } else {
-                Some(Linear::new(
+                Some(Linear::new_with_device(
                     config.max_position_embeddings,
                     config.projected_attention_size,
                     false,
+                    device,
                 ))
             };
             Some((key_proj, value_proj))
@@ -412,7 +472,12 @@ impl LinformerEncoder {
         Ok(Self {
             layers,
             shared_projections,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -449,20 +514,30 @@ pub struct LinformerModel {
     config: LinformerConfig,
     embeddings: LinformerEmbeddings,
     encoder: LinformerEncoder,
+    device: Device,
 }
 
 impl LinformerModel {
     pub fn new(config: LinformerConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LinformerConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let embeddings = LinformerEmbeddings::new(&config)?;
-        let encoder = LinformerEncoder::new(&config)?;
+        let embeddings = LinformerEmbeddings::new_with_device(&config, device)?;
+        let encoder = LinformerEncoder::new_with_device(&config, device)?;
 
         Ok(Self {
             config,
             embeddings,
             encoder,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -721,13 +796,21 @@ impl LinformerModel {
             );
             let output_path = model_path.join(file);
 
+            // Convert path to string once for both commands
+            let output_path_str = output_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!(
+                    "Invalid UTF-8 in path: {:?}",
+                    output_path
+                ))
+            })?;
+
             // Try curl first
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail silently on HTTP errors
                     "-o",
-                    output_path.to_str().unwrap(),
+                    output_path_str,
                     &url,
                 ])
                 .output();
@@ -740,7 +823,7 @@ impl LinformerModel {
                         .args([
                             "-q", // Quiet mode
                             "-O",
-                            output_path.to_str().unwrap(),
+                            output_path_str,
                             &url,
                         ])
                         .output();
@@ -784,18 +867,32 @@ pub struct LinformerForSequenceClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl LinformerForSequenceClassification {
     pub fn new(config: LinformerConfig, num_labels: usize) -> Result<Self> {
-        let linformer = LinformerModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: LinformerConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let linformer = LinformerModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             linformer,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -818,24 +915,29 @@ impl Model for LinformerForSequenceClassification {
                     let batch_size = shape[0];
                     let hidden_size = shape[2];
 
+                    let arr_slice = arr.as_slice().ok_or_else(|| {
+                        TrustformersError::tensor_op_error(
+                            "extract_cls_embeddings",
+                            "Tensor is not contiguous in memory",
+                        )
+                    })?;
+
                     let mut cls_data = Vec::with_capacity(batch_size * hidden_size);
                     for b in 0..batch_size {
                         for h in 0..hidden_size {
                             // Take first token (index 0) for each batch
                             let idx = (b * shape[1]) * hidden_size + h;
-                            cls_data.push(arr.as_slice().unwrap()[idx]);
+                            cls_data.push(arr_slice[idx]);
                         }
                     }
 
-                    let cls_array = ndarray::ArrayD::from_shape_vec(
-                        ndarray::IxDyn(&[batch_size, hidden_size]),
-                        cls_data,
-                    )
-                    .map_err(|_| {
-                        trustformers_core::errors::TrustformersError::shape_error(
-                            "Failed to create CLS token tensor".to_string(),
-                        )
-                    })?;
+                    let cls_array =
+                        ArrayD::from_shape_vec(IxDyn(&[batch_size, hidden_size]), cls_data)
+                            .map_err(|_| {
+                                trustformers_core::errors::TrustformersError::shape_error(
+                                    "Failed to create CLS token tensor".to_string(),
+                                )
+                            })?;
 
                     Tensor::F32(cls_array)
                 } else {
@@ -865,17 +967,27 @@ impl Model for LinformerForSequenceClassification {
 pub struct LinformerForMaskedLM {
     linformer: LinformerModel,
     mlm_head: Linear,
+    device: Device,
 }
 
 impl LinformerForMaskedLM {
     pub fn new(config: LinformerConfig) -> Result<Self> {
-        let linformer = LinformerModel::new(config.clone())?;
-        let mlm_head = Linear::new(config.hidden_size, config.vocab_size, true);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: LinformerConfig, device: Device) -> Result<Self> {
+        let linformer = LinformerModel::new_with_device(config.clone(), device)?;
+        let mlm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, true, device);
 
         Ok(Self {
             linformer,
             mlm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

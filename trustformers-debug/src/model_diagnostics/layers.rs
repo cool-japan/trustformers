@@ -51,7 +51,7 @@ impl Default for LayerAnalysisConfig {
 }
 
 /// Current state information for a layer.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct LayerState {
     /// Health score history
     health_scores: Vec<f64>,
@@ -60,16 +60,6 @@ struct LayerState {
     detected_issues: Vec<String>,
     /// Last analysis timestamp
     last_analysis_step: usize,
-}
-
-impl Default for LayerState {
-    fn default() -> Self {
-        Self {
-            health_scores: Vec::new(),
-            detected_issues: Vec::new(),
-            last_analysis_step: 0,
-        }
-    }
 }
 
 impl LayerAnalyzer {
@@ -96,8 +86,7 @@ impl LayerAnalyzer {
         // Calculate health score before mutable borrow
         let health_score = self.calculate_layer_health_score(&stats);
 
-        let layer_stats =
-            self.layer_activations.entry(layer_name.to_string()).or_insert_with(Vec::new);
+        let layer_stats = self.layer_activations.entry(layer_name.to_string()).or_default();
         layer_stats.push(stats);
 
         // Maintain reasonable history length
@@ -106,10 +95,7 @@ impl LayerAnalyzer {
         }
 
         // Update layer state
-        let layer_state = self
-            .layer_states
-            .entry(layer_name.to_string())
-            .or_insert_with(LayerState::default);
+        let layer_state = self.layer_states.entry(layer_name.to_string()).or_default();
         layer_state.health_scores.push(health_score);
 
         if layer_state.health_scores.len() > 50 {

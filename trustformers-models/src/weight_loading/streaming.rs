@@ -104,7 +104,11 @@ impl StreamingLoader {
         }
 
         // Store the underlying loader for later use
-        *self.underlying_loader.lock().unwrap() = Some(loader);
+        *self
+            .underlying_loader
+            .lock()
+            .map_err(|e| TrustformersError::io_error(format!("Failed to acquire lock: {}", e)))? =
+            Some(loader);
 
         Ok(())
     }
@@ -144,12 +148,19 @@ impl StreamingLoader {
         while self.total_memory_usage + chunk_memory > self.max_memory_usage
             && !self.chunk_access_order.is_empty()
         {
-            let oldest_chunk = self.chunk_access_order.pop_back().unwrap();
+            let oldest_chunk = self.chunk_access_order.pop_back().ok_or_else(|| {
+                TrustformersError::runtime_error(
+                    "chunk_access_order unexpectedly empty".to_string(),
+                )
+            })?;
             self.evict_chunk_internal(oldest_chunk)?;
         }
 
         // Load tensors for this chunk
-        let mut loader_guard = self.underlying_loader.lock().unwrap();
+        let mut loader_guard = self
+            .underlying_loader
+            .lock()
+            .map_err(|e| TrustformersError::io_error(format!("Failed to acquire lock: {}", e)))?;
         if let Some(loader) = loader_guard.as_mut() {
             for tensor_name in &chunk_info.tensor_names {
                 let tensor = loader.load_tensor(tensor_name)?;
@@ -310,7 +321,7 @@ impl WeightLoader for StreamingLoader {
         self.total_memory_usage = 0;
 
         // Close underlying loader
-        if let Some(mut loader) = self.underlying_loader.lock().unwrap().take() {
+        if let Some(mut loader) = self.underlying_loader.lock().expect("operation failed").take() {
             loader.close()?;
         }
 

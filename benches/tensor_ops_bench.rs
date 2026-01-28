@@ -1,6 +1,7 @@
 //! Benchmarks for core tensor operations
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use std::hint::black_box;
 use trustformers_core::tensor::Tensor;
 
 fn tensor_creation_benchmarks(c: &mut Criterion) {

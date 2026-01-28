@@ -404,8 +404,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         compute_pass.set_bind_group(0, &bind_group);
 
         // Dispatch with appropriate workgroup counts
-        let workgroup_x = (m + 7) / 8; // Round up to cover all rows
-        let workgroup_y = (n + 7) / 8; // Round up to cover all columns
+        let workgroup_x = m.div_ceil(8); // Round up to cover all rows
+        let workgroup_y = n.div_ceil(8); // Round up to cover all columns
         compute_pass.dispatch_workgroups(workgroup_x as u32, workgroup_y as u32, 1);
         compute_pass.end();
 
@@ -489,7 +489,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         compute_pass.set_bind_group(0, &bind_group);
 
         // Dispatch with appropriate workgroup count
-        let workgroup_count = (size + 63) / 64; // Round up to cover all elements
+        let workgroup_count = size.div_ceil(64); // Round up to cover all elements
         compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         compute_pass.end();
 
@@ -561,7 +561,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         compute_pass.set_bind_group(0, &bind_group);
 
         // Dispatch with appropriate workgroup count
-        let workgroup_count = (size + 63) / 64; // Round up to cover all elements
+        let workgroup_count = size.div_ceil(64); // Round up to cover all elements
         compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         compute_pass.end();
 
@@ -813,7 +813,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         compute_pass.set_bind_group(0, &bind_group);
 
         // Dispatch with appropriate workgroup count
-        let workgroup_count = (size + 63) / 64; // Round up to cover all elements
+        let workgroup_count = size.div_ceil(64); // Round up to cover all elements
         compute_pass.dispatch_workgroups(workgroup_count as u32, 1, 1);
         compute_pass.end();
 

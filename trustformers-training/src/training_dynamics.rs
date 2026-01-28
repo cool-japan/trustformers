@@ -520,11 +520,7 @@ impl TrainingDynamicsAnalyzer {
                     .sqrt();
                 Ok(norm)
             },
-            Tensor::Sparse(_) => Ok(1.0), // Default norm for sparse tensors
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok(1.0), // Default norm for Torch tensors
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok(1.0), // Default norm for Candle tensors
+            _ => Ok(1.0), // Default norm for sparse and other tensor types
         }
     }
 

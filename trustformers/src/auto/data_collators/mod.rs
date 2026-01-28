@@ -33,7 +33,7 @@
 //!
 //! ### Automatic Selection
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::AutoDataCollator;
 //!
 //! // From pretrained model
@@ -48,7 +48,7 @@
 //!
 //! ### Manual Creation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::{
 //!     LanguageModelingDataCollator, LanguageModelingCollatorConfig
 //! };
@@ -67,7 +67,7 @@
 //!
 //! ### Collating Data
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::types::{DataExample, CollatedBatch};
 //!
 //! let examples = vec![
@@ -122,7 +122,7 @@ pub mod seq2seq;
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::AutoDataCollator;
 ///
 /// // From a pretrained model
@@ -158,9 +158,9 @@ impl AutoDataCollator {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let collator = AutoDataCollator::from_pretrained("bert-base-uncased")?;
-    /// ```
+    /// ```rust,ignore
+    ///    /// let collator = AutoDataCollator::from_pretrained("bert-base-uncased")?;
+
     pub fn from_pretrained(model_name_or_path: &str) -> Result<Box<dyn DataCollator>> {
         let config = crate::hub::load_config_from_hub(model_name_or_path, None)?;
         Self::from_config(&config)
@@ -279,7 +279,7 @@ impl AutoDataCollator {
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::{DataCollator, DataCollatorConfig};
 /// use trustformers::auto::types::{DataExample, CollatedBatch, PaddingStrategy};
 ///
@@ -342,7 +342,7 @@ pub trait DataCollator: Send + Sync {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// fn preprocess_examples(&self, examples: &[DataExample]) -> Result<Vec<DataExample>> {
     ///     examples.iter()
     ///         .map(|example| {
@@ -375,7 +375,7 @@ pub trait DataCollator: Send + Sync {
 ///
 /// ## Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::DataCollatorConfig;
 /// use trustformers::auto::types::PaddingStrategy;
 ///

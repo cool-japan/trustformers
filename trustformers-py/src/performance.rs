@@ -1,5 +1,4 @@
-use crate::errors::{TrustformersPyError, TrustformersPyResult};
-use numpy::{PyArray, PyArrayMethods};
+use scirs2_numpy::{PyArray, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
@@ -9,6 +8,7 @@ use std::time::{Duration, Instant};
 
 /// Performance profiler for tensor operations
 #[pyclass]
+#[derive(Default)]
 pub struct PerformanceProfiler {
     measurements: HashMap<String, Vec<Duration>>,
     memory_usage: HashMap<String, usize>,
@@ -19,11 +19,7 @@ pub struct PerformanceProfiler {
 impl PerformanceProfiler {
     #[new]
     pub fn new() -> Self {
-        Self {
-            measurements: HashMap::new(),
-            memory_usage: HashMap::new(),
-            start_times: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Start timing an operation
@@ -37,7 +33,7 @@ impl PerformanceProfiler {
             let duration = start_time.elapsed();
             let duration_ms = duration.as_secs_f64() * 1000.0;
 
-            self.measurements.entry(operation).or_insert_with(Vec::new).push(duration);
+            self.measurements.entry(operation).or_default().push(duration);
 
             Ok(duration_ms)
         } else {
@@ -54,7 +50,7 @@ impl PerformanceProfiler {
     }
 
     /// Get timing statistics for an operation
-    pub fn get_stats(&self, py: Python<'_>, operation: String) -> PyResult<PyObject> {
+    pub fn get_stats(&self, py: Python<'_>, operation: String) -> PyResult<Py<PyAny>> {
         if let Some(measurements) = self.measurements.get(&operation) {
             if measurements.is_empty() {
                 return Ok(py.None());
@@ -105,7 +101,7 @@ impl PerformanceProfiler {
     }
 
     /// Get all recorded statistics
-    pub fn get_all_stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_all_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let all_stats = PyDict::new(py);
 
         for operation in self.measurements.keys() {
@@ -133,7 +129,7 @@ impl PerformanceProfiler {
         operation_name: String,
         tensor: &Bound<'_, PyArray<f32, scirs2_core::ndarray::IxDyn>>,
         iterations: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let mut durations = Vec::with_capacity(iterations);
 
@@ -197,7 +193,7 @@ impl PerformanceProfiler {
         operations: Vec<String>,
         tensor: &Bound<'_, PyArray<f32, scirs2_core::ndarray::IxDyn>>,
         iterations: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let mut results = Vec::new();
 
         for operation in operations {
@@ -226,7 +222,7 @@ impl PerformanceProfiler {
             },
             "relu" => Ok(array.mapv(|x| x.max(0.0))),
             "gelu" => Ok(array
-                .mapv(|x| 0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x.powi(3))).tanh()))),
+                .mapv(|x| 0.5 * x * (1.0 + (0.797_884_6 * (x + 0.044715 * x.powi(3))).tanh()))),
             "exp" => Ok(array.mapv(|x| x.exp())),
             "log" => Ok(array.mapv(|x| x.ln())),
             "sqrt" => Ok(array.mapv(|x| x.sqrt())),
@@ -241,6 +237,7 @@ impl PerformanceProfiler {
 
 /// Memory tracker for monitoring memory usage
 #[pyclass]
+#[derive(Default)]
 pub struct MemoryTracker {
     peak_usage: usize,
     current_usage: usize,
@@ -251,11 +248,7 @@ pub struct MemoryTracker {
 impl MemoryTracker {
     #[new]
     pub fn new() -> Self {
-        Self {
-            peak_usage: 0,
-            current_usage: 0,
-            allocations: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Record a memory allocation
@@ -281,7 +274,7 @@ impl MemoryTracker {
     }
 
     /// Get memory usage summary
-    pub fn get_summary(&self, py: Python<'_>) -> PyResult<PyObject> {
+    pub fn get_summary(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let summary = PyDict::new(py);
         summary.set_item("current_usage_bytes", self.current_usage)?;
         summary.set_item("current_usage_mb", self.current_usage_mb())?;
@@ -325,9 +318,9 @@ impl ProfilerContext {
     pub fn __exit__(
         &mut self,
         py: Python<'_>,
-        _exc_type: Option<PyObject>,
-        _exc_value: Option<PyObject>,
-        _traceback: Option<PyObject>,
+        _exc_type: Option<Py<PyAny>>,
+        _exc_value: Option<Py<PyAny>>,
+        _traceback: Option<Py<PyAny>>,
     ) -> PyResult<bool> {
         let _ = self.profiler.borrow_mut(py).stop_timer(self.operation.clone());
         Ok(false) // Don't suppress exceptions

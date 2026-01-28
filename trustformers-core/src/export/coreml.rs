@@ -1049,8 +1049,7 @@ mod tests {
 
         match array_feature {
             CoreMLFeatureType::MultiArray(_) => {},
-            _ => assert!(
-                false,
+            _ => panic!(
                 "Expected MultiArray feature type but got {:?}",
                 array_feature
             ),
@@ -1058,11 +1057,7 @@ mod tests {
 
         match string_feature {
             CoreMLFeatureType::String(_) => {},
-            _ => assert!(
-                false,
-                "Expected String feature type but got {:?}",
-                string_feature
-            ),
+            _ => panic!("Expected String feature type but got {:?}", string_feature),
         }
     }
 
@@ -1082,21 +1077,17 @@ mod tests {
 
         match relu {
             CoreMLActivationType::ReLU => {},
-            _ => assert!(false, "Expected ReLU activation but got {:?}", relu),
+            _ => panic!("Expected ReLU activation but got {:?}", relu),
         }
 
         match leaky_relu {
             CoreMLActivationType::LeakyReLU { alpha } => assert!((alpha - 0.1).abs() < 1e-6),
-            _ => assert!(
-                false,
-                "Expected LeakyReLU activation but got {:?}",
-                leaky_relu
-            ),
+            _ => panic!("Expected LeakyReLU activation but got {:?}", leaky_relu),
         }
 
         match sigmoid {
             CoreMLActivationType::Sigmoid => {},
-            _ => assert!(false, "Expected Sigmoid activation but got {:?}", sigmoid),
+            _ => panic!("Expected Sigmoid activation but got {:?}", sigmoid),
         }
     }
 

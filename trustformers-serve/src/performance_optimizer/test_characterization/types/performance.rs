@@ -515,6 +515,12 @@ pub struct PerformanceReportGenerator {
     pub include_charts: bool,
 }
 
+impl Default for PerformanceReportGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceReportGenerator {
     pub fn new() -> Self {
         Self {

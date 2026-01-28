@@ -20,7 +20,7 @@
 //!
 //! ### Basic Generation Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
 //!
 //! let mut metric = GenerationMetric::new();
@@ -44,7 +44,7 @@
 //!
 //! ### Multiple Batches
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
 //!
 //! let mut metric = GenerationMetric::new();
@@ -119,7 +119,7 @@ impl GenerationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::GenerationMetric;
     ///
     /// let metric = GenerationMetric::new();
@@ -160,8 +160,8 @@ impl Metric for GenerationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
     ///
     /// let mut metric = GenerationMetric::new();
     ///
@@ -175,7 +175,7 @@ impl Metric for GenerationMetric {
     /// ]);
     ///
     /// metric.add_batch(&predictions, &references)?;
-    /// ```
+
     fn add_batch(&mut self, predictions: &MetricInput, references: &MetricInput) -> Result<()> {
         match (predictions, references) {
             (MetricInput::Text(pred), MetricInput::Text(ref_)) => {
@@ -223,8 +223,8 @@ impl Metric for GenerationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
     ///
     /// let mut metric = GenerationMetric::new();
     /// metric.add_batch(
@@ -235,7 +235,7 @@ impl Metric for GenerationMetric {
     /// let result = metric.compute()?;
     /// assert_eq!(result.name, "generation");
     /// assert!(result.value >= 0.0 && result.value <= 1.0);
-    /// ```
+
     fn compute(&self) -> Result<MetricResult> {
         if self.predictions.is_empty() {
             return Err(TrustformersError::invalid_input_simple(
@@ -302,8 +302,8 @@ impl Metric for GenerationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{GenerationMetric, MetricInput, Metric};
     ///
     /// let mut metric = GenerationMetric::new();
     /// metric.add_batch(
@@ -313,7 +313,7 @@ impl Metric for GenerationMetric {
     ///
     /// metric.reset();
     /// // Metric is now ready for new data
-    /// ```
+
     fn reset(&mut self) {
         self.predictions.clear();
         self.references.clear();

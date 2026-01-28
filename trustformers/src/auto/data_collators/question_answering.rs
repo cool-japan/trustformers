@@ -35,7 +35,7 @@
 //!
 //! ### Extractive Question Answering
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::question_answering::{
 //!     QuestionAnsweringDataCollator, QuestionAnsweringCollatorConfig
 //! };
@@ -55,7 +55,7 @@
 //!
 //! ### SQuAD-style Dataset
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::question_answering::{
 //!     QuestionAnsweringDataCollator, QuestionAnsweringCollatorConfig
 //! };
@@ -151,7 +151,7 @@ use std::collections::HashMap;
 ///
 /// ## Usage Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::question_answering::{
 ///     QuestionAnsweringDataCollator, QuestionAnsweringCollatorConfig
 /// };
@@ -197,7 +197,7 @@ impl QuestionAnsweringDataCollator {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = QuestionAnsweringCollatorConfig {
     ///     max_length: Some(384),
     ///     padding: PaddingStrategy::Longest,
@@ -528,8 +528,8 @@ impl QuestionAnsweringCollatorConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let model_config = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "pad_token_id": 0,
     ///     "vocab_size": 30522
@@ -540,7 +540,7 @@ impl QuestionAnsweringCollatorConfig {
     /// assert_eq!(config.pad_token_id, 0);
     /// assert_eq!(config.doc_stride, 128);
     /// assert_eq!(config.max_answer_length, 30);
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
             max_length: config

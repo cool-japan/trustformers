@@ -30,7 +30,7 @@ impl Variable {
     pub fn new(tensor: Tensor, requires_grad: bool) -> Self {
         let graph = Arc::new(Mutex::new(ComputationGraph::new()));
         let node_id = {
-            let mut graph_guard = graph.lock().unwrap();
+            let mut graph_guard = graph.lock().expect("lock should not be poisoned");
             graph_guard.add_node(tensor, requires_grad, None)
         };
 
@@ -45,7 +45,7 @@ impl Variable {
     pub fn new_with_name(tensor: Tensor, requires_grad: bool, name: String) -> Self {
         let graph = Arc::new(Mutex::new(ComputationGraph::new()));
         let node_id = {
-            let mut graph_guard = graph.lock().unwrap();
+            let mut graph_guard = graph.lock().expect("lock should not be poisoned");
             graph_guard.add_node(tensor, requires_grad, Some(name))
         };
 
@@ -67,7 +67,7 @@ impl Variable {
 
     /// Get the tensor data
     pub fn data(&self) -> Result<Tensor> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         graph.get_value(self.node_id).cloned().ok_or_else(|| {
             TrustformersError::tensor_op_error(
                 &format!("Node {} not found in graph", self.node_id),
@@ -78,7 +78,7 @@ impl Variable {
 
     /// Get the gradient
     pub fn grad(&self) -> Result<Option<Tensor>> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         Ok(graph.get_gradient(self.node_id).cloned())
     }
 
@@ -99,7 +99,7 @@ impl Variable {
 
     /// Get the shape of the tensor
     pub fn shape(&self) -> Result<Vec<usize>> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         graph.get_value(self.node_id).map(|tensor| tensor.shape()).ok_or_else(|| {
             TrustformersError::tensor_op_error(
                 &format!("Node {} not found in graph", self.node_id),
@@ -116,19 +116,19 @@ impl Variable {
 
     /// Compute backward pass for this variable
     pub fn backward(&self) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(self.node_id, None)
     }
 
     /// Compute backward pass with custom gradient
     pub fn backward_with_grad(&self, grad: Tensor) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(self.node_id, Some(grad))
     }
 
     /// Zero the gradients
     pub fn zero_grad(&self) {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.zero_grad();
     }
 
@@ -146,7 +146,7 @@ impl Variable {
 
     /// Update the value of this variable
     pub fn set_data(&self, tensor: Tensor) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.update_value(self.node_id, tensor)
     }
 
@@ -309,7 +309,7 @@ impl Variable {
         // Add operation node to the graph
         let requires_grad = self.requires_grad || other.requires_grad;
         let node_id = {
-            let mut graph = self.graph.lock().unwrap();
+            let mut graph = self.graph.lock().expect("lock should not be poisoned");
             graph.add_operation_node(
                 result_tensor,
                 op,
@@ -333,7 +333,7 @@ impl Variable {
 
         // Add operation node to the graph
         let node_id = {
-            let mut graph = self.graph.lock().unwrap();
+            let mut graph = self.graph.lock().expect("lock should not be poisoned");
             graph.add_operation_node(
                 result_tensor,
                 op,
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_variable_creation() {
-        let tensor = Tensor::ones(&[2, 3]).unwrap();
+        let tensor = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
         let var = Variable::new(tensor, true);
 
         assert!(var.requires_grad());
@@ -530,10 +530,10 @@ mod tests {
         let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
         let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
 
-        let c = a.add(&b).unwrap();
+        let c = a.add(&b).expect("Addition failed");
         assert_eq!(c.item().unwrap(), 5.0);
 
-        let d = a.mul(&b).unwrap();
+        let d = a.mul(&b).expect("Multiplication failed");
         assert_eq!(d.item().unwrap(), 6.0);
     }
 
@@ -546,7 +546,7 @@ mod tests {
         let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
         let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
 
-        let c = a.mul(&b).unwrap();
+        let c = a.mul(&b).expect("Multiplication failed");
         engine.backward(&c, None).unwrap();
 
         let grad_a = engine.get_grad(&a).unwrap().unwrap();
@@ -560,10 +560,10 @@ mod tests {
     fn test_activation_functions() {
         let x = Variable::scalar(0.0, true).unwrap();
 
-        let sigmoid_x = x.sigmoid().unwrap();
+        let sigmoid_x = x.sigmoid().expect("Sigmoid failed");
         assert_eq!(sigmoid_x.item().unwrap(), 0.5);
 
-        let tanh_x = x.tanh().unwrap();
+        let tanh_x = x.tanh().expect("Tanh failed");
         assert_eq!(tanh_x.item().unwrap(), 0.0);
     }
 
@@ -574,14 +574,14 @@ mod tests {
         let sum_x = x.sum(None).unwrap();
         assert_eq!(sum_x.item().unwrap(), 6.0);
 
-        let mean_x = x.mean(None).unwrap();
+        let mean_x = x.mean(None).expect("Mean calculation failed");
         assert_eq!(mean_x.item().unwrap(), 1.0);
     }
 
     #[test]
     fn test_reshape_operation() {
         let x = Variable::ones(&[2, 3], true).unwrap();
-        let reshaped = x.reshape(vec![3, 2]).unwrap();
+        let reshaped = x.reshape(vec![3, 2]).expect("Reshape failed");
 
         assert_eq!(reshaped.shape().unwrap(), vec![3, 2]);
     }

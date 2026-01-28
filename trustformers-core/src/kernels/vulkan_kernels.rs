@@ -598,10 +598,8 @@ impl VulkanKernel {
 
         // Dispatch compute work
         let workgroup_count = [
-            ((b_shape[1] + config.workgroup_size[0] as usize - 1)
-                / config.workgroup_size[0] as usize) as u32,
-            ((a_shape[0] + config.workgroup_size[1] as usize - 1)
-                / config.workgroup_size[1] as usize) as u32,
+            b_shape[1].div_ceil(config.workgroup_size[0] as usize) as u32,
+            a_shape[0].div_ceil(config.workgroup_size[1] as usize) as u32,
             1,
         ];
 
@@ -753,7 +751,7 @@ impl VulkanKernel {
     /// Get memory statistics
     pub fn get_memory_stats(&self, device_id: usize) -> Result<(u64, u64, u64)> {
         if let Some(pool) = self.memory_pools.get(&device_id) {
-            let pool = pool.lock().unwrap();
+            let pool = pool.lock().expect("Lock poisoned");
             let free_memory = pool.free_blocks.iter().map(|b| b.size).sum();
             Ok((pool.total_allocated, pool.peak_allocated, free_memory))
         } else {
@@ -1046,9 +1044,9 @@ mod tests {
         assert!(stats.is_ok());
 
         let (total, peak, free) = stats.unwrap();
-        assert!(total >= 0);
-        assert!(peak >= 0);
-        assert!(free >= 0);
+        // assert!(total >= 0);
+        // assert!(peak >= 0);
+        // assert!(free >= 0);
     }
 
     #[test]

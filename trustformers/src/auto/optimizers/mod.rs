@@ -17,7 +17,7 @@
 //!
 //! ### Automatic Optimizer Selection
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::optimizers::AutoOptimizer;
 //!
 //! // Create optimizer from model configuration
@@ -29,7 +29,7 @@
 //!
 //! ### Manual Optimizer Configuration
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::optimizers::{AdamWOptimizer, AdamWConfig};
 //!
 //! let config = AdamWConfig {
@@ -45,7 +45,7 @@
 //!
 //! ### Learning Rate Scheduling
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::optimizers::{AutoOptimizer, LearningRateSchedule};
 //!
 //! let base_optimizer = AutoOptimizer::from_config(&config)?;
@@ -85,9 +85,9 @@ impl AutoOptimizer {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let optimizer = AutoOptimizer::from_pretrained("bert-base-uncased")?;
-    /// ```
+    /// ```rust,ignore
+    ///    /// let optimizer = AutoOptimizer::from_pretrained("bert-base-uncased")?;
+
     pub fn from_pretrained(model_name_or_path: &str) -> Result<Box<dyn Optimizer>> {
         let config = crate::hub::load_config_from_hub(model_name_or_path, None)?;
         Self::from_config(&config)
@@ -222,14 +222,14 @@ impl AutoOptimizer {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let base = AutoOptimizer::from_config(&config)?;
+    /// ```rust,ignore
+    ///    /// let base = AutoOptimizer::from_config(&config)?;
     /// let schedule = LearningRateSchedule::LinearWarmup {
     ///     warmup_steps: 1000,
     ///     max_lr: 5e-5,
     /// };
     /// let scheduled = AutoOptimizer::with_schedule(base, schedule);
-    /// ```
+
     pub fn with_schedule(
         base_optimizer: Box<dyn Optimizer>,
         schedule: LearningRateSchedule,

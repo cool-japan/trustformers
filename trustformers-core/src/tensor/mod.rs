@@ -52,8 +52,9 @@ mod utils;
 mod property_tests;
 
 use crate::errors::Result;
-use ndarray::ArrayD;
-use num_complex::{Complex32, Complex64};
+use scirs2_core::ndarray::{ArrayBase, ArrayD, Dim, IxDynImpl, OwnedRepr};
+use scirs2_core::Complex;
+use scirs2_core::{Complex32, Complex64};
 use serde::{Deserialize, Serialize};
 
 /// Data types supported by tensors
@@ -152,7 +153,50 @@ impl DType {
 /// # Ok(())
 /// # }
 /// ```
+/// Metal GPU buffer wrapper for GPU-resident tensors
+#[cfg(all(target_os = "macos", feature = "metal"))]
 #[derive(Debug)]
+pub struct MetalTensorData {
+    pub buffer_id: crate::gpu_ops::metal::BufferId,
+    pub shape: Vec<usize>,
+    pub dtype: DType,
+}
+
+#[cfg(all(target_os = "macos", feature = "metal"))]
+impl Clone for MetalTensorData {
+    fn clone(&self) -> Self {
+        // Note: This creates a reference to the same GPU buffer
+        // Actual data is not copied - buffer is reference counted
+        Self {
+            buffer_id: self.buffer_id,
+            shape: self.shape.clone(),
+            dtype: self.dtype,
+        }
+    }
+}
+
+/// CUDA GPU buffer wrapper for GPU-resident tensors
+#[cfg(feature = "cuda")]
+#[derive(Debug)]
+pub struct CudaTensorData {
+    pub buffer_id: crate::gpu_ops::cuda::BufferId,
+    pub shape: Vec<usize>,
+    pub dtype: DType,
+}
+
+#[cfg(feature = "cuda")]
+impl Clone for CudaTensorData {
+    fn clone(&self) -> Self {
+        // Note: This creates a reference to the same GPU buffer
+        // Actual data is not copied - buffer is reference counted
+        Self {
+            buffer_id: self.buffer_id,
+            shape: self.shape.clone(),
+            dtype: self.dtype,
+        }
+    }
+}
+
 pub enum Tensor {
     // Standard ndarray types
     F32(ArrayD<f32>),
@@ -163,8 +207,8 @@ pub enum Tensor {
     // Complex number types
     C32(ArrayD<Complex32>),
     C64(ArrayD<Complex64>),
-    CF16(ArrayD<num_complex::Complex<half::f16>>),
-    CBF16(ArrayD<num_complex::Complex<half::bf16>>),
+    CF16(ArrayD<Complex<half::f16>>),
+    CBF16(ArrayD<Complex<half::bf16>>),
     // Sparse tensor variant
     Sparse(crate::sparse_tensor::SparseTensor),
     // GPU support available via hardware acceleration module (CUDA, ROCm, Intel OneAPI, Vulkan, Metal)
@@ -173,6 +217,12 @@ pub enum Tensor {
     Torch(tch::Tensor),
     #[cfg(feature = "candle")]
     Candle(candle_core::Tensor),
+    // Metal GPU-resident tensor (data lives on GPU)
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    Metal(MetalTensorData),
+    // CUDA GPU-resident tensor (data lives on GPU)
+    #[cfg(feature = "cuda")]
+    CUDA(CudaTensorData),
 }
 
 // Manual Clone implementation because tch::Tensor doesn't implement Clone
@@ -193,6 +243,44 @@ impl Clone for Tensor {
             Tensor::Torch(t) => Tensor::Torch(t.shallow_clone()),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => Tensor::Candle(t.clone()),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => Tensor::Metal(data.clone()),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => Tensor::CUDA(data.clone()),
+        }
+    }
+}
+
+// Manual Debug implementation for Tensor
+impl std::fmt::Debug for Tensor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Tensor::F32(_) => write!(f, "Tensor::F32(shape: {:?}, dtype: F32)", self.shape()),
+            Tensor::F64(_) => write!(f, "Tensor::F64(shape: {:?}, dtype: F64)", self.shape()),
+            Tensor::F16(_) => write!(f, "Tensor::F16(shape: {:?}, dtype: F16)", self.shape()),
+            Tensor::BF16(_) => write!(f, "Tensor::BF16(shape: {:?}, dtype: BF16)", self.shape()),
+            Tensor::I64(_) => write!(f, "Tensor::I64(shape: {:?}, dtype: I64)", self.shape()),
+            Tensor::C32(_) => write!(f, "Tensor::C32(shape: {:?}, dtype: C32)", self.shape()),
+            Tensor::C64(_) => write!(f, "Tensor::C64(shape: {:?}, dtype: C64)", self.shape()),
+            Tensor::CF16(_) => write!(f, "Tensor::CF16(shape: {:?}, dtype: CF16)", self.shape()),
+            Tensor::CBF16(_) => write!(f, "Tensor::CBF16(shape: {:?}, dtype: CBF16)", self.shape()),
+            Tensor::Sparse(s) => write!(f, "Tensor::Sparse({:?})", s),
+            #[cfg(feature = "torch")]
+            Tensor::Torch(_) => write!(f, "Tensor::Torch(shape: {:?})", self.shape()),
+            #[cfg(feature = "candle")]
+            Tensor::Candle(_) => write!(f, "Tensor::Candle(shape: {:?})", self.shape()),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => write!(
+                f,
+                "Tensor::Metal(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
+                data.shape, data.dtype, data.buffer_id
+            ),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => write!(
+                f,
+                "Tensor::CUDA(shape: {:?}, dtype: {:?}, buffer_id: {:?})",
+                data.shape, data.dtype, data.buffer_id
+            ),
         }
     }
 }
@@ -207,17 +295,13 @@ unsafe impl Sync for Tensor {}
 
 // The implementations are in separate modules but the methods are part of the Tensor impl blocks
 
-impl From<ndarray::ArrayBase<ndarray::OwnedRepr<f32>, ndarray::Dim<ndarray::IxDynImpl>>>
-    for Tensor
-{
+impl From<ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>>> for Tensor {
     fn from(arr: ArrayD<f32>) -> Self {
         Tensor::F32(arr)
     }
 }
 
-impl From<ndarray::ArrayBase<ndarray::OwnedRepr<f64>, ndarray::Dim<ndarray::IxDynImpl>>>
-    for Tensor
-{
+impl From<ArrayBase<OwnedRepr<f64>, Dim<IxDynImpl>>> for Tensor {
     fn from(arr: ArrayD<f64>) -> Self {
         Tensor::F64(arr)
     }

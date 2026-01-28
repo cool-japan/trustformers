@@ -4,7 +4,7 @@ use trustformers_models::{bert::BertConfig, gpt2::Gpt2Config, llama::LlamaConfig
 
 /// Parse GPT-2 config from Python dict
 pub fn parse_gpt2_config(config_dict: &Bound<'_, PyAny>) -> PyResult<Gpt2Config> {
-    let dict = config_dict.downcast::<PyDict>()?;
+    let dict = config_dict.cast::<PyDict>()?;
     let mut config = Gpt2Config::default();
 
     if let Ok(Some(val)) = dict.get_item("vocab_size") {
@@ -48,7 +48,7 @@ pub fn gpt2_config_to_dict<'py>(
 
 /// Parse T5 config from Python dict
 pub fn parse_t5_config(config_dict: &Bound<'_, PyAny>) -> PyResult<T5Config> {
-    let dict = config_dict.downcast::<PyDict>()?;
+    let dict = config_dict.cast::<PyDict>()?;
     let mut config = T5Config::default();
 
     if let Ok(Some(val)) = dict.get_item("vocab_size") {
@@ -96,7 +96,7 @@ pub fn t5_config_to_dict<'py>(py: Python<'py>, config: &T5Config) -> PyResult<Bo
 
 /// Parse LLaMA config from Python dict
 pub fn parse_llama_config(config_dict: &Bound<'_, PyAny>) -> PyResult<LlamaConfig> {
-    let dict = config_dict.downcast::<PyDict>()?;
+    let dict = config_dict.cast::<PyDict>()?;
     let mut config = LlamaConfig::default();
 
     if let Ok(Some(val)) = dict.get_item("vocab_size") {

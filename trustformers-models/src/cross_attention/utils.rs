@@ -205,8 +205,8 @@ pub fn create_hierarchical_mask(
 
     for level in 0..num_levels {
         let level_pooling = pooling_factor.pow(level as u32);
-        let level_query_len = (query_len + level_pooling - 1) / level_pooling;
-        let level_key_len = (key_len + level_pooling - 1) / level_pooling;
+        let level_query_len = query_len.div_ceil(level_pooling);
+        let level_key_len = key_len.div_ceil(level_pooling);
 
         let mask = create_attention_mask(level_query_len, level_key_len, MaskType::None)?;
         masks.push(mask);

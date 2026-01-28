@@ -664,6 +664,12 @@ pub struct ActivitySummary {
     pub period_days: u32,
 }
 
+impl Default for NotificationSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NotificationSystem {
     pub fn new() -> Self {
         Self {

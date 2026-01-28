@@ -420,7 +420,7 @@ impl ThreadPool {
         }
 
         // Divide work among threads
-        let rows_per_thread = (a_rows + self.max_threads - 1) / self.max_threads;
+        let rows_per_thread = a_rows.div_ceil(self.max_threads);
         let _tasks: Vec<js_sys::Object> = Vec::new();
 
         for (thread_id, worker) in self.workers.iter().enumerate() {
@@ -475,6 +475,7 @@ impl ThreadPool {
             let mut all_complete = true;
 
             for thread_id in 0..self.max_threads {
+                #[allow(unused_imports)]
                 let control_index = thread_id * 16;
                 let status = Atomics::load(control_buffer, control_index as u32)?;
 
@@ -655,9 +656,11 @@ pub fn initialize() -> Result<(), crate::compute::ComputeError> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_threading_support_detection() {
         // These tests will only pass in environments with proper threading support
         let _supported = is_threading_supported();

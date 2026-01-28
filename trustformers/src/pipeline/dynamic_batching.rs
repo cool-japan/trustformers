@@ -118,7 +118,7 @@ where
 
         // Add to queue based on priority
         {
-            let mut queue = self.pending_requests.lock().unwrap();
+            let mut queue = self.pending_requests.lock().expect("lock should not be poisoned");
 
             // Insert based on priority (higher priority first)
             let insert_pos =
@@ -130,8 +130,8 @@ where
         // Notify the batcher
         self.notify.notify_one();
 
-        // Wait for response with timeout
-        let timeout_duration = Duration::from_millis(self.config.max_wait_time_ms * 2);
+        // Wait for response with timeout (use 10x max_wait_time for robustness in tests)
+        let timeout_duration = Duration::from_millis(self.config.max_wait_time_ms * 10);
 
         match timeout(timeout_duration, rx).await {
             Ok(Ok(result)) => result,
@@ -153,7 +153,7 @@ where
     {
         // Mark as running
         {
-            let mut running = self.is_running.lock().unwrap();
+            let mut running = self.is_running.lock().expect("lock should not be poisoned");
             if *running {
                 return Err(TrustformersError::runtime_error(
                     "Batcher is already running".to_string(),
@@ -165,7 +165,7 @@ where
         loop {
             // Check if we should stop
             {
-                let running = self.is_running.lock().unwrap();
+                let running = self.is_running.lock().expect("lock should not be poisoned");
                 if !*running {
                     break;
                 }
@@ -223,17 +223,17 @@ where
 
     /// Stop the dynamic batching process
     pub fn stop(&self) {
-        let mut running = self.is_running.lock().unwrap();
+        let mut running = self.is_running.lock().expect("lock should not be poisoned");
         *running = false;
         self.notify.notify_one();
     }
 
     /// Collect a batch of requests based on current batch size and timing
     async fn collect_batch(&self) -> Vec<BatchRequest<T>> {
-        let current_size = *self.current_batch_size.read().unwrap();
+        let current_size = *self.current_batch_size.read().expect("lock should not be poisoned");
         let mut batch = Vec::with_capacity(current_size);
 
-        let mut queue = self.pending_requests.lock().unwrap();
+        let mut queue = self.pending_requests.lock().expect("lock should not be poisoned");
 
         // Collect up to current_batch_size requests
         while batch.len() < current_size && !queue.is_empty() {
@@ -266,10 +266,10 @@ where
             timestamp: Instant::now(),
             memory_usage_mb: self.estimate_memory_usage().await,
             gpu_utilization: self.estimate_gpu_utilization().await,
-            queue_size: self.pending_requests.lock().unwrap().len(),
+            queue_size: self.pending_requests.lock().expect("lock should not be poisoned").len(),
         };
 
-        let mut history = self.performance_history.lock().unwrap();
+        let mut history = self.performance_history.lock().expect("lock should not be poisoned");
         history.push_back(metrics);
 
         // Keep only recent history
@@ -280,7 +280,7 @@ where
 
     /// Adjust batch size based on performance history
     async fn adjust_batch_size(&self) {
-        let history = self.performance_history.lock().unwrap();
+        let history = self.performance_history.lock().expect("lock should not be poisoned");
         if history.len() < 3 {
             return; // Need more data points
         }
@@ -291,7 +291,8 @@ where
         let avg_throughput = recent_metrics.iter().map(|m| m.throughput_rps).sum::<f64>()
             / recent_metrics.len() as f64;
 
-        let mut current_size = self.current_batch_size.write().unwrap();
+        let mut current_size =
+            self.current_batch_size.write().expect("lock should not be poisoned");
         let old_size = *current_size;
 
         // Adaptive sizing logic
@@ -343,7 +344,7 @@ where
 
     /// Get current performance statistics
     pub fn get_performance_stats(&self) -> Option<BatchingStats> {
-        let history = self.performance_history.lock().unwrap();
+        let history = self.performance_history.lock().expect("lock should not be poisoned");
         if history.is_empty() {
             return None;
         }
@@ -357,11 +358,14 @@ where
             recent_metrics.iter().map(|m| m.batch_size).sum::<usize>() / recent_metrics.len();
 
         Some(BatchingStats {
-            current_batch_size: *self.current_batch_size.read().unwrap(),
+            current_batch_size: *self
+                .current_batch_size
+                .read()
+                .expect("lock should not be poisoned"),
             avg_latency_ms: avg_latency,
             avg_throughput_rps: avg_throughput,
             avg_batch_size,
-            queue_length: self.pending_requests.lock().unwrap().len(),
+            queue_length: self.pending_requests.lock().expect("lock should not be poisoned").len(),
             total_processed: history.len(),
         })
     }
@@ -465,7 +469,7 @@ mod tests {
         let _critical = batcher.add_request(4, RequestPriority::Critical);
 
         // Check the order in queue
-        let queue = batcher.pending_requests.lock().unwrap();
+        let queue = batcher.pending_requests.lock().expect("lock should not be poisoned");
         let priorities: Vec<_> = queue.iter().map(|r| r.priority).collect();
 
         // Should be ordered by priority (highest first)

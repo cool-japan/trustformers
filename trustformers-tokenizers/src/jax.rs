@@ -119,14 +119,13 @@ pub enum JaxDevice {
     Custom(String),
 }
 
-impl JaxDevice {
-    /// Get device string representation
-    pub fn to_string(&self) -> String {
+impl std::fmt::Display for JaxDevice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            JaxDevice::Cpu => "cpu".to_string(),
-            JaxDevice::Gpu(id) => format!("gpu:{}", id),
-            JaxDevice::Tpu(id) => format!("tpu:{}", id),
-            JaxDevice::Custom(name) => name.clone(),
+            JaxDevice::Cpu => write!(f, "cpu"),
+            JaxDevice::Gpu(id) => write!(f, "gpu:{}", id),
+            JaxDevice::Tpu(id) => write!(f, "tpu:{}", id),
+            JaxDevice::Custom(name) => write!(f, "{}", name),
         }
     }
 }
@@ -885,7 +884,7 @@ impl JaxUtils {
             "JaxArray(shape={:?}, dtype={:?}, device={}, data={:?})",
             array.shape,
             array.dtype,
-            array.device.to_string(),
+            array.device,
             &array.data[..array.data.len().min(10)] // Show first 10 elements
         )
     }

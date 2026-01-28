@@ -175,11 +175,19 @@ impl AsyncRuntimeChaosFramework {
             },
         }
 
-        // Wait for all tasks to complete or timeout
+        // Wait for all tasks to complete or timeout and count aborted tasks
         let timeout_duration = config.completion_timeout;
-        let wait_result = timeout(timeout_duration, async {
+        let aborted_count = Arc::new(AtomicUsize::new(0));
+        let aborted_count_clone = Arc::clone(&aborted_count);
+
+        let wait_result = timeout(timeout_duration, async move {
             for handle in task_handles {
-                let _ = handle.await;
+                match handle.await {
+                    Err(e) if e.is_cancelled() => {
+                        aborted_count_clone.fetch_add(1, Ordering::SeqCst);
+                    },
+                    _ => {},
+                }
             }
         })
         .await;
@@ -187,14 +195,18 @@ impl AsyncRuntimeChaosFramework {
         let duration = start_time.elapsed();
         let final_completed = completed_count.load(Ordering::SeqCst);
         let final_cancelled = cancelled_count.load(Ordering::SeqCst);
+        let final_aborted = aborted_count.load(Ordering::SeqCst);
+
+        // Total cancelled includes both broadcast-cancelled and aborted tasks
+        let total_cancelled = final_cancelled + final_aborted;
 
         // Record results
         results.record_metric("experiment_duration_ms", duration.as_millis() as f64);
         results.record_metric("completed_tasks", final_completed as f64);
-        results.record_metric("cancelled_tasks", final_cancelled as f64);
+        results.record_metric("cancelled_tasks", total_cancelled as f64);
         results.record_metric(
             "cancellation_success_rate",
-            final_cancelled as f64 / config.task_count as f64 * 100.0,
+            total_cancelled as f64 / config.task_count as f64 * 100.0,
         );
 
         // Check for task leaks
@@ -278,7 +290,7 @@ impl AsyncRuntimeChaosFramework {
                 // Wait for graceful shutdown or timeout
                 let shutdown_start = Instant::now();
                 let graceful_shutdown = timeout(config.graceful_shutdown_timeout, async {
-                    while join_set.len() > 0 {
+                    while !join_set.is_empty() {
                         if let Some(result) = join_set.join_next().await {
                             if let Err(e) = result {
                                 if e.is_cancelled() {
@@ -526,6 +538,9 @@ impl AsyncRuntimeChaosFramework {
         memory_hogs.clear();
         pressure_applied.store(false, Ordering::SeqCst);
 
+        // Give allocator time to release memory
+        sleep(Duration::from_millis(500)).await;
+
         // Wait for async tasks to complete
         let mut total_operations = 0;
         let mut task_failures = 0;
@@ -536,6 +551,14 @@ impl AsyncRuntimeChaosFramework {
                 Err(_) => task_failures += 1,
             }
         }
+
+        // Give additional time for memory to be released
+        sleep(Duration::from_secs(1)).await;
+
+        // Force some allocation activity to help allocator release memory
+        let _churn: Vec<Vec<u8>> = (0..10).map(|_| vec![0u8; 1024 * 1024]).collect();
+        drop(_churn);
+        sleep(Duration::from_millis(500)).await;
 
         let final_memory = get_memory_usage_mb();
         let duration = start_time.elapsed();
@@ -550,7 +573,7 @@ impl AsyncRuntimeChaosFramework {
         );
         results.record_metric("total_async_operations", total_operations as f64);
         results.record_metric("task_failures", task_failures as f64);
-        results.record_metric("memory_recovery_mb", peak_memory - final_memory);
+        results.record_metric("memory_recovery_mb", (peak_memory - final_memory).max(0.0));
 
         // Success criteria: tasks completed despite memory pressure and memory was recovered
         let memory_recovered =
@@ -1339,6 +1362,12 @@ pub struct AsyncTestSuiteResult {
     pub success_rate: f64,
     pub total_duration: Duration,
     pub timestamp: DateTime<Utc>,
+}
+
+impl Default for AsyncTestSuiteResult {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AsyncTestSuiteResult {

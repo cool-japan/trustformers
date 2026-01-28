@@ -90,6 +90,7 @@ unsafe impl Sync for ThreadSafeTagger {}
 
 #[cfg(feature = "mecab")]
 impl ThreadSafeTagger {
+    #[allow(clippy::arc_with_non_send_sync)]
     fn new(config: &str) -> Result<Self> {
         let tagger = Tagger::new(config);
         Ok(Self {
@@ -98,7 +99,7 @@ impl ThreadSafeTagger {
     }
 
     fn parse_to_node(&self, text: &str) -> Result<Vec<(String, String)>> {
-        let mut tagger = self.tagger.lock().unwrap();
+        let mut tagger = self.tagger.lock().expect("lock should not be poisoned");
         let node = tagger.parse_to_node(text);
         let mut result = Vec::new();
 

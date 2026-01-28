@@ -42,11 +42,17 @@ impl OpenApiGenerator {
         let mut spec = json!({
             "openapi": "3.0.3",
             "info": {
-                "title": interface.metadata.library_name.clone().or_else(||
-                    Some(self.config.package_info.name.clone())).unwrap_or_else(|| "TrustformeRS API".to_string()),
+                "title": if interface.metadata.library_name.is_empty() {
+                    self.config.package_info.name.clone()
+                } else {
+                    interface.metadata.library_name.clone()
+                },
                 "description": self.config.package_info.description.clone(),
-                "version": interface.metadata.version.clone().or_else(||
-                    Some(self.config.package_info.version.clone())).unwrap_or_else(|| "1.0.0".to_string()),
+                "version": if interface.metadata.version.is_empty() {
+                    self.config.package_info.version.clone()
+                } else {
+                    interface.metadata.version.clone()
+                },
                 "contact": {
                     "name": self.config.package_info.author.clone(),
                     "url": self.config.package_info.repository.clone()
@@ -255,22 +261,22 @@ impl OpenApiGenerator {
         // Handle common patterns
         let path = if parts.len() >= 2 {
             match (parts[0], parts[1]) {
-                ("model", "load") => "/models/load",
-                ("model", "unload") => "/models/unload",
-                ("model", "info") => "/models/info",
-                ("model", "list") => "/models",
-                ("tokenizer", "create") => "/tokenizers",
-                ("tokenizer", "encode") => "/tokenizers/encode",
-                ("tokenizer", "decode") => "/tokenizers/decode",
-                ("pipeline", "create") => "/pipelines",
-                ("pipeline", "run") => "/pipelines/run",
-                ("tensor", "create") => "/tensors",
+                ("model", "load") => "/models/load".to_string(),
+                ("model", "unload") => "/models/unload".to_string(),
+                ("model", "info") => "/models/info".to_string(),
+                ("model", "list") => "/models".to_string(),
+                ("tokenizer", "create") => "/tokenizers".to_string(),
+                ("tokenizer", "encode") => "/tokenizers/encode".to_string(),
+                ("tokenizer", "decode") => "/tokenizers/decode".to_string(),
+                ("pipeline", "create") => "/pipelines".to_string(),
+                ("pipeline", "run") => "/pipelines/run".to_string(),
+                ("tensor", "create") => "/tensors".to_string(),
                 ("tensor", "from") if parts.len() > 2 => {
                     format!("/tensors/from/{}", parts[2..].join("/"))
                 },
-                ("inference", "run") => "/inference",
-                ("config", "load") => "/config",
-                ("config", "save") => "/config",
+                ("inference", "run") => "/inference".to_string(),
+                ("config", "load") => "/config".to_string(),
+                ("config", "save") => "/config".to_string(),
                 _ => {
                     // Generic conversion: first part is resource, rest is action
                     if parts.len() == 2 {
@@ -284,7 +290,7 @@ impl OpenApiGenerator {
             format!("/{}", name)
         };
 
-        path.to_string()
+        path
     }
 
     /// Generate operation object for a function
@@ -901,7 +907,7 @@ impl OpenApiGenerator {
         let mut functions_by_tag: HashMap<String, Vec<&FfiFunction>> = HashMap::new();
         for func in &interface.functions {
             let tag = self.extract_tag_from_function(&func.name);
-            functions_by_tag.entry(tag).or_insert_with(Vec::new).push(func);
+            functions_by_tag.entry(tag).or_default().push(func);
         }
 
         for (tag, functions) in &functions_by_tag {
@@ -1296,6 +1302,7 @@ mod tests {
                 license: "MIT".to_string(),
                 repository: "https://github.com/test/repo".to_string(),
             },
+            package_name: Some("com.trustformers.openapi".to_string()),
             features: HashMap::new(),
             type_mappings: HashMap::new(),
         }

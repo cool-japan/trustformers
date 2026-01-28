@@ -6,41 +6,54 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-py"
 description = "Python bindings for TrustformeRS transformer library"
 categories = ["api-bindings", "science"]
 keywords = ["transformers", "python", "machine-learning", "nlp", "pyo3"]
+readme = "README.md"
+
+# Standalone crate (not part of main workspace for v0.1.0-alpha.2)
+[workspace]
 
 [lib]
 name = "trustformers"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { workspace = true, features = ["extension-module", "abi3-py38"] }
-numpy.workspace = true
-anyhow.workspace = true
-thiserror.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-rayon.workspace = true
-parking_lot.workspace = true
-lazy_static.workspace = true
-approx.workspace = true
+# Python bindings (same version as scirs2-core)
+pyo3 = { version = "0.27.2", features = ["extension-module", "abi3-py39"] }
+scirs2-numpy = { path = "../../scirs/scirs2-numpy" }  # SciRS2 fork with ndarray 0.17 support
+
+# Error handling
+anyhow = "1.0.100"
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+parking_lot = "0.12.5"
+lazy_static = "1.5"
+approx = "0.5"
 libc = "0.2"
-num-complex = "0.4"
 
 # SciRS2 Integration Policy: Use scirs2-core abstractions instead of direct dependencies
-scirs2-core = { workspace = true, features = ["random"] }
+scirs2-core = { path = "../../scirs/scirs2-core", default-features = false, features = ["python", "random", "parallel", "array", "serialization"] }
 
-# TrustformeRS dependencies
-trustformers-core.workspace = true
-trustformers-models = { workspace = true, features = ["bert", "gpt2", "t5", "llama"] }
-trustformers-tokenizers.workspace = true
-trustformers-optim.workspace = true
-trustformers-training.workspace = true
-trustformers = { workspace = true, features = ["all-models"] }
+# TrustformeRS dependencies (path-based for standalone build)
+trustformers-core = { path = "../trustformers-core", default-features = false }
+trustformers-models = { path = "../trustformers-models", default-features = false, features = ["bert", "gpt2", "t5", "llama"] }
+trustformers-tokenizers = { path = "../trustformers-tokenizers", default-features = false }
+trustformers-optim = { path = "../trustformers-optim", default-features = false }
+trustformers-training = { path = "../trustformers-training", default-features = false }
+trustformers = { path = "../trustformers", default-features = false, features = ["all-models"] }
 
 [build-dependencies]
-pyo3-build-config = "0.27.1"
+pyo3-build-config = { version = "0.27", features = ["resolve-config"] }
 
 [features]
-default = ["pyo3/auto-initialize"]
+default = ["pyo3/auto-initialize", "python-gc"]
+python-gc = []  # Enable Python garbage collection integration
+cuda = []  # CUDA support
+metal = []  # Metal support
+
+# All features
+full = ["python-gc", "cuda", "metal"]

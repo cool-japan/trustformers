@@ -1,5 +1,5 @@
+#![allow(unused_variables)]
 use anyhow::Result;
-#[allow(unused_variables)]
 use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Duration;

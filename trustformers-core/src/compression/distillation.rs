@@ -608,10 +608,12 @@ mod tests {
         let teacher = MockTeacherModel::new("teacher");
         let student = MockStudentModel::new("student");
 
-        let mut config = DistillationConfig::default();
-        config.epochs = 3; // Small number for testing
-        config.batch_size = 4;
-        config.learning_rate = 0.01;
+        let config = DistillationConfig {
+            epochs: 3, // Small number for testing
+            batch_size: 4,
+            learning_rate: 0.01,
+            ..Default::default()
+        };
 
         // Test that the training loop executes the training process
         let result = distiller.distill(&teacher, &student, &config).await;
@@ -633,11 +635,13 @@ mod tests {
         let teacher = MockTeacherModel::new("teacher");
         let student = MockStudentModel::new("student");
 
-        let mut config = DistillationConfig::default();
-        config.epochs = 2;
-        config.batch_size = 4;
-        config.use_feature_distillation = true;
-        config.feature_weight = 0.1;
+        let config = DistillationConfig {
+            epochs: 2,
+            batch_size: 4,
+            use_feature_distillation: true,
+            feature_weight: 0.1,
+            ..Default::default()
+        };
 
         // Test with feature distillation enabled
         let result = distiller.distill(&teacher, &student, &config).await;
@@ -656,8 +660,10 @@ mod tests {
     fn test_distillation_loss_computation() {
         let distiller = KnowledgeDistiller::new(3.0);
 
-        let student_logits = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
-        let teacher_logits = Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).unwrap();
+        let student_logits =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let teacher_logits =
+            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
 
         let loss = distiller.compute_distillation_loss(&student_logits, &teacher_logits);
         assert!(loss.is_ok(), "Loss computation should succeed");
@@ -671,8 +677,10 @@ mod tests {
         let distiller = KnowledgeDistiller::new(3.0);
         let config = DistillationConfig::default();
 
-        let student_logits = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
-        let teacher_logits = Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).unwrap();
+        let student_logits =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("Tensor from_vec failed");
+        let teacher_logits =
+            Tensor::from_vec(vec![1.5, 2.5, 3.5], &[1, 3]).expect("Tensor from_vec failed");
 
         let grad_norm =
             distiller.simulate_gradient_computation(&student_logits, &teacher_logits, &config);

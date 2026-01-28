@@ -189,9 +189,9 @@ impl AdvancedQuantizer {
     fn quantize_nf4(&self, tensor: &Tensor) -> Result<QuantizedTensor> {
         let tensor_data = tensor.data_f32()?;
         let total_elements = tensor_data.len();
-        let num_blocks = (total_elements + self.config.block_size - 1) / self.config.block_size;
+        let num_blocks = total_elements.div_ceil(self.config.block_size);
 
-        let mut quantized_data = Vec::with_capacity((total_elements + 1) / 2); // 4 bits per element
+        let mut quantized_data = Vec::with_capacity(total_elements.div_ceil(2)); // 4 bits per element
         let mut scales = Vec::with_capacity(num_blocks);
         let mut outlier_indices = Vec::new();
         let mut outlier_values = Vec::new();
@@ -284,9 +284,9 @@ impl AdvancedQuantizer {
     fn quantize_fp4(&self, tensor: &Tensor) -> Result<QuantizedTensor> {
         let tensor_data = tensor.data_f32()?;
         let total_elements = tensor_data.len();
-        let num_blocks = (total_elements + self.config.block_size - 1) / self.config.block_size;
+        let num_blocks = total_elements.div_ceil(self.config.block_size);
 
-        let mut quantized_data = Vec::with_capacity((total_elements + 1) / 2);
+        let mut quantized_data = Vec::with_capacity(total_elements.div_ceil(2));
         let mut scales = Vec::with_capacity(num_blocks);
 
         for block_idx in 0..num_blocks {
@@ -364,9 +364,9 @@ impl AdvancedQuantizer {
     fn quantize_int4_asymmetric(&self, tensor: &Tensor) -> Result<QuantizedTensor> {
         let tensor_data = tensor.data_f32()?;
         let total_elements = tensor_data.len();
-        let num_blocks = (total_elements + self.config.block_size - 1) / self.config.block_size;
+        let num_blocks = total_elements.div_ceil(self.config.block_size);
 
-        let mut quantized_data = Vec::with_capacity((total_elements + 1) / 2);
+        let mut quantized_data = Vec::with_capacity(total_elements.div_ceil(2));
         let mut scales = Vec::with_capacity(num_blocks);
         let mut zero_points = Vec::with_capacity(num_blocks);
 
@@ -419,7 +419,7 @@ impl AdvancedQuantizer {
     fn quantize_int8_blockwise(&self, tensor: &Tensor) -> Result<QuantizedTensor> {
         let tensor_data = tensor.data_f32()?;
         let total_elements = tensor_data.len();
-        let num_blocks = (total_elements + self.config.block_size - 1) / self.config.block_size;
+        let num_blocks = total_elements.div_ceil(self.config.block_size);
 
         let mut quantized_data = Vec::with_capacity(total_elements);
         let mut scales = Vec::with_capacity(num_blocks);

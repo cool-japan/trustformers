@@ -8,6 +8,7 @@
 use super::common::{
     AttentionConfig, AttentionOptimizationHints, AttentionProjections, AttentionUtils,
 };
+use crate::device::Device;
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 use crate::traits::Layer;
@@ -27,15 +28,16 @@ pub struct MultiHeadAttention {
 }
 
 impl MultiHeadAttention {
-    /// Create a new multi-head attention layer
-    pub fn new(
+    /// Create a new multi-head attention layer with device support
+    pub fn new_with_device(
         hidden_size: usize,
         num_heads: usize,
         dropout_prob: f32,
         bias: bool,
+        device: Device,
     ) -> Result<Self> {
         let config = AttentionConfig::new(hidden_size, num_heads, dropout_prob, bias)?;
-        let projections = AttentionProjections::new(&config);
+        let projections = AttentionProjections::new_with_device(&config, device);
         let optimization_hints = AttentionOptimizationHints::default();
 
         Ok(Self {
@@ -43,6 +45,16 @@ impl MultiHeadAttention {
             projections,
             optimization_hints,
         })
+    }
+
+    /// Create a new multi-head attention layer
+    pub fn new(
+        hidden_size: usize,
+        num_heads: usize,
+        dropout_prob: f32,
+        bias: bool,
+    ) -> Result<Self> {
+        Self::new_with_device(hidden_size, num_heads, dropout_prob, bias, Device::CPU)
     }
 
     /// Create a new multi-head attention layer from an existing config
@@ -96,6 +108,46 @@ impl MultiHeadAttention {
             + self.projections.key.parameter_count()
             + self.projections.value.parameter_count()
             + self.projections.out_proj.parameter_count()
+    }
+
+    /// Set weights for the query projection
+    pub fn set_query_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.query.set_weight(weight)
+    }
+
+    /// Set bias for the query projection
+    pub fn set_query_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.query.set_bias(bias)
+    }
+
+    /// Set weights for the key projection
+    pub fn set_key_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.key.set_weight(weight)
+    }
+
+    /// Set bias for the key projection
+    pub fn set_key_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.key.set_bias(bias)
+    }
+
+    /// Set weights for the value projection
+    pub fn set_value_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.value.set_weight(weight)
+    }
+
+    /// Set bias for the value projection
+    pub fn set_value_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.value.set_bias(bias)
+    }
+
+    /// Set weights for the output projection
+    pub fn set_out_proj_weight(&mut self, weight: Tensor) -> Result<()> {
+        self.projections.out_proj.set_weight(weight)
+    }
+
+    /// Set bias for the output projection
+    pub fn set_out_proj_bias(&mut self, bias: Tensor) -> Result<()> {
+        self.projections.out_proj.set_bias(bias)
     }
 
     /// Compute attention for training (with query, key, value from same input)
@@ -219,8 +271,8 @@ impl MultiHeadAttention {
         let output = Tensor::zeros(&[batch_size, num_heads, seq_q, head_dim])?;
 
         // Tile over the sequence dimension
-        let num_blocks_q = (seq_q + block_size - 1) / block_size;
-        let num_blocks_k = (seq_k + block_size - 1) / block_size;
+        let num_blocks_q = seq_q.div_ceil(block_size);
+        let num_blocks_k = seq_k.div_ceil(block_size);
 
         for q_block_idx in 0..num_blocks_q {
             let q_start = q_block_idx * block_size;
@@ -561,8 +613,8 @@ mod tests {
     #[test]
     fn test_self_attention_forward() {
         let attention = MultiHeadAttention::new(512, 8, 0.1, true).unwrap();
-        let input = Tensor::randn(&[2, 10, 512]).unwrap();
-        let output = attention.forward(input).unwrap();
+        let input = Tensor::randn(&[2, 10, 512]).expect("Failed to create random tensor");
+        let output = attention.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 10, 512]);
     }
 

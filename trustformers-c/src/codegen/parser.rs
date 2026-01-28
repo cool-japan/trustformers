@@ -3,7 +3,7 @@
 //! Parses Rust source files to extract FFI function definitions, structs, enums,
 //! and other interface elements that can be used to generate language bindings.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use quote::ToTokens;
 use regex::Regex;
 use std::collections::HashMap;
@@ -12,6 +12,7 @@ use std::path::Path;
 use syn::{File, ForeignItemFn, Item, ItemConst, ItemEnum, ItemFn, ItemStruct, ItemType};
 
 use super::ast::*;
+use crate::error::TrustformersResult;
 
 /// Parser for extracting FFI interface from Rust source code
 pub struct FfiParser {
@@ -66,6 +67,12 @@ impl Default for ParserConfig {
             exclude_files: vec!["tests".to_string(), "benches".to_string()],
             exclude_functions: Vec::new(),
         }
+    }
+}
+
+impl Default for FfiParser {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -198,7 +205,7 @@ impl FfiParser {
                             }
                         }
                         visit_dir(&path, rust_files)?;
-                    } else if path.extension().map_or(false, |ext| ext == "rs") {
+                    } else if path.extension().is_some_and(|ext| ext == "rs") {
                         rust_files.push(path);
                     }
                 }
@@ -407,7 +414,6 @@ impl FfiParser {
             "f32" | "c_float" => Some(PrimitiveType::Float32),
             "f64" | "c_double" => Some(PrimitiveType::Float64),
             "bool" | "c_bool" => Some(PrimitiveType::Bool),
-            "c_char" => Some(PrimitiveType::Char),
             "c_void" | "()" => Some(PrimitiveType::Void),
             "CString" | "CStr" => Some(PrimitiveType::CString),
             name if name.ends_with("Handle") => Some(PrimitiveType::Handle),

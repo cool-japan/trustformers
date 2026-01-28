@@ -537,7 +537,7 @@ impl BlasOptimizer {
 
         if self.config.use_parallel && n > 1000 {
             let indices: Vec<usize> = (0..n).collect();
-            let chunk_size = (n + 3) / 4; // 4 threads
+            let chunk_size = n.div_ceil(4); // 4 threads
 
             let chunks: Vec<Vec<usize>> =
                 indices.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect();
@@ -566,7 +566,7 @@ impl BlasOptimizer {
 
         if self.config.use_parallel && n > 1000 {
             let indices: Vec<usize> = (0..n).collect();
-            let chunk_size = (n + 3) / 4;
+            let chunk_size = n.div_ceil(4);
 
             let chunks: Vec<Vec<usize>> =
                 indices.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect();
@@ -631,17 +631,17 @@ pub fn init_blas(config: BlasConfig) -> Result<()> {
 
 /// Optimized matrix multiplication using global BLAS optimizer
 pub fn optimized_gemm(a: &Tensor, b: &Tensor) -> Result<Tensor> {
-    blas_optimizer().lock().unwrap().gemm(a, b, 1.0, 0.0, None)
+    blas_optimizer().lock().expect("Lock poisoned").gemm(a, b, 1.0, 0.0, None)
 }
 
 /// Optimized matrix-vector multiplication using global BLAS optimizer
 pub fn optimized_gemv(a: &Tensor, x: &Tensor) -> Result<Tensor> {
-    blas_optimizer().lock().unwrap().gemv(a, x, 1.0, 0.0, None)
+    blas_optimizer().lock().expect("Lock poisoned").gemv(a, x, 1.0, 0.0, None)
 }
 
 /// Optimized vector dot product using global BLAS optimizer
 pub fn optimized_dot(x: &Tensor, y: &Tensor) -> Result<f32> {
-    blas_optimizer().lock().unwrap().dot(x, y)
+    blas_optimizer().lock().expect("Lock poisoned").dot(x, y)
 }
 
 #[cfg(test)]
@@ -659,12 +659,9 @@ mod tests {
     #[test]
     fn test_blas_backend_default() {
         let backend = BlasBackend::default();
-
-        #[cfg(target_os = "macos")]
+        // Default is Accelerate as specified by #[default] attribute
+        // Runtime fallback to available backends happens in BlasOptimizer
         assert_eq!(backend, BlasBackend::Accelerate);
-
-        #[cfg(all(not(target_os = "macos"), target_arch = "x86_64"))]
-        assert_eq!(backend, BlasBackend::OpenBlas);
     }
 
     #[test]
@@ -677,8 +674,10 @@ mod tests {
     fn test_optimized_gemm() -> Result<()> {
         let mut optimizer = BlasOptimizer::default();
 
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let a =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
+        let b =
+            Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Tensor from_vec failed");
 
         let result = optimizer.gemm(&a, &b, 1.0, 0.0, None).unwrap();
         let expected_data = [19.0, 22.0, 43.0, 50.0]; // Expected matrix multiplication result
@@ -700,8 +699,9 @@ mod tests {
     fn test_optimized_gemv() -> Result<()> {
         let mut optimizer = BlasOptimizer::default();
 
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        let x = Tensor::from_vec(vec![5.0, 6.0], &[2]).unwrap();
+        let a =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
+        let x = Tensor::from_vec(vec![5.0, 6.0], &[2]).expect("Tensor from_vec failed");
 
         let result = optimizer.gemv(&a, &x, 1.0, 0.0, None).unwrap();
         let expected_data = [17.0, 39.0]; // [1*5+2*6, 3*5+4*6]
@@ -723,8 +723,8 @@ mod tests {
     fn test_optimized_dot() {
         let optimizer = BlasOptimizer::default();
 
-        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
-        let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], &[3]).unwrap();
+        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Tensor from_vec failed");
+        let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], &[3]).expect("Tensor from_vec failed");
 
         let result = optimizer.dot(&x, &y).unwrap();
         let expected = 32.0; // 1*4 + 2*5 + 3*6
@@ -741,7 +741,7 @@ mod tests {
     fn test_optimized_nrm2() {
         let optimizer = BlasOptimizer::default();
 
-        let x = Tensor::from_vec(vec![3.0, 4.0], &[2]).unwrap();
+        let x = Tensor::from_vec(vec![3.0, 4.0], &[2]).expect("Tensor from_vec failed");
         let result = optimizer.nrm2(&x).unwrap();
         let expected = 5.0; // sqrt(3^2 + 4^2)
 
@@ -757,7 +757,7 @@ mod tests {
     fn test_optimized_scal() -> Result<()> {
         let optimizer = BlasOptimizer::default();
 
-        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Tensor from_vec failed");
         let result = optimizer.scal(2.0, &x).unwrap();
         let expected_data = [2.0, 4.0, 6.0];
 
@@ -778,8 +778,8 @@ mod tests {
     fn test_optimized_axpy() -> Result<()> {
         let optimizer = BlasOptimizer::default();
 
-        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
-        let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], &[3]).unwrap();
+        let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Tensor from_vec failed");
+        let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], &[3]).expect("Tensor from_vec failed");
 
         let result = optimizer.axpy(2.0, &x, &y).unwrap();
         let expected_data = [6.0, 9.0, 12.0]; // 2*[1,2,3] + [4,5,6]
@@ -809,8 +809,10 @@ mod tests {
 
     #[test]
     fn test_global_blas_optimizer() {
-        let a = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        let b = Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let a =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
+        let b =
+            Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Tensor from_vec failed");
 
         let result = optimized_gemm(&a, &b).unwrap();
         assert_eq!(result.shape(), vec![2, 2]);
@@ -826,8 +828,9 @@ mod tests {
     #[test]
     fn test_blas_config_serialization() {
         let config = BlasConfig::default();
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: BlasConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: BlasConfig =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(config.backend, deserialized.backend);
         assert_eq!(config.auto_tune, deserialized.auto_tune);

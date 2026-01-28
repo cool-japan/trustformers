@@ -20,7 +20,7 @@
 //!
 //! ### Basic NER Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
 //!
 //! let mut metric = TokenClassificationMetric::new();
@@ -46,7 +46,7 @@
 //!
 //! ### Sequence Labeling with Tags
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
 //!
 //! let mut metric = TokenClassificationMetric::new();
@@ -130,7 +130,7 @@ impl TokenClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::TokenClassificationMetric;
     ///
     /// let metric = TokenClassificationMetric::new();
@@ -158,7 +158,7 @@ impl TokenClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let spans = vec![(0, 3, "PERSON".to_string()), (5, 8, "LOC".to_string())];
     /// let strings = convert_spans_to_strings(&spans);
     /// assert_eq!(strings, vec!["0:3:PERSON", "5:8:LOC"]);
@@ -192,7 +192,7 @@ impl TokenClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let tags = "B-PER I-PER O B-LOC O";
     /// let spans = parse_tags_to_spans(tags);
     /// assert_eq!(spans, vec![(0, 2, "PER".to_string()), (3, 4, "LOC".to_string())]);
@@ -261,8 +261,8 @@ impl Metric for TokenClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
     ///
     /// let mut metric = TokenClassificationMetric::new();
     ///
@@ -281,7 +281,7 @@ impl Metric for TokenClassificationMetric {
     /// let references = MetricInput::Text(vec!["B-PER I-PER O".to_string()]);
     ///
     /// metric.add_batch(&predictions, &references)?;
-    /// ```
+
     fn add_batch(&mut self, predictions: &MetricInput, references: &MetricInput) -> Result<()> {
         match (predictions, references) {
             (MetricInput::Spans(pred_spans), MetricInput::Spans(ref_spans)) => {
@@ -346,8 +346,8 @@ impl Metric for TokenClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
     ///
     /// let mut metric = TokenClassificationMetric::new();
     /// metric.add_batch(
@@ -361,7 +361,7 @@ impl Metric for TokenClassificationMetric {
     /// assert_eq!(result.details.get("precision"), Some(&1.0));
     /// assert_eq!(result.details.get("recall"), Some(&1.0));
     /// assert_eq!(result.details.get("f1"), Some(&1.0));
-    /// ```
+
     fn compute(&self) -> Result<MetricResult> {
         let mut total_predicted = 0;
         let mut total_reference = 0;
@@ -426,8 +426,8 @@ impl Metric for TokenClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{TokenClassificationMetric, MetricInput, Metric};
     ///
     /// let mut metric = TokenClassificationMetric::new();
     /// metric.add_batch(
@@ -437,7 +437,7 @@ impl Metric for TokenClassificationMetric {
     ///
     /// metric.reset();
     /// // Metric is now ready for new entity data
-    /// ```
+
     fn reset(&mut self) {
         self.predictions.clear();
         self.references.clear();

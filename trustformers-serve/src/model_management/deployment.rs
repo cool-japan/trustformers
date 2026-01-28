@@ -468,7 +468,7 @@ impl DeploymentManager {
 
         if all_passed {
             // Switch to green environment
-            self.switch_to_green_environment(&deployment_id).await?;
+            self.switch_to_green_environment(deployment_id).await?;
         } else if deployment.config.auto_rollback {
             // Rollback (keep blue active)
             deployment.status = DeploymentStatus::RolledBack;

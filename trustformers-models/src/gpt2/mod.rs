@@ -104,10 +104,12 @@
 //! - Respect OpenAI's responsible use guidelines
 
 pub mod config;
+pub mod generation;
 pub mod model;
 
 #[cfg(test)]
 mod tests;
 
 pub use config::Gpt2Config;
+pub use generation::GenerativeModel;
 pub use model::{Gpt2LMHeadModel, Gpt2Model};

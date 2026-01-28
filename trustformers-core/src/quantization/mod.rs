@@ -8,6 +8,8 @@
 //! - Learned quantization with trainable parameters
 //! - SmoothQuant for W8A8 quantization
 //! - Advanced GGML Q5/Q6 formats
+//! - GGUF K-quant formats (Q2_K, Q3_K, Q4_K)
+//! - FP8 quantization (E4M3/E5M2) for modern GPUs
 //! - Activation quantization for runtime inference optimization
 //! - Unified calibration toolkit for comprehensive quantization workflow management
 
@@ -15,7 +17,9 @@ mod activation;
 mod base;
 mod bitsandbytes;
 mod calibration_toolkit;
+mod fp8;
 mod ggml_advanced;
+mod gguf_k_quants;
 mod learned;
 mod mixed_bit;
 mod qat;
@@ -78,4 +82,15 @@ pub use calibration_toolkit::{
     DatasetStatistics, DistributionAnalysis, DistributionType, DynamicRange, LayerQualityMetrics,
     MethodComparison, QualityMetrics, QualityThresholds, RecommendationType, TensorStatistics,
     TradeOffAnalysis,
+};
+
+// Re-export FP8 quantization items
+pub use fp8::{
+    estimate_quantization_error, select_fp8_format, DelayedScalingConfig, FP8Config, FP8Format,
+    FP8Quantizer, FP8Tensor, ScaleFactors, ScalingStrategy,
+};
+
+// Re-export GGUF K-quant items
+pub use gguf_k_quants::{
+    BlockQ2K, BlockQ3K, BlockQ4K, KQuantConfig, KQuantTensor, KQuantType, KQuantizer,
 };

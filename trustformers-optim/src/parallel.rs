@@ -12,7 +12,7 @@
 //! - **Scalability**: Efficient scaling from 2 to 64+ cores
 
 use crate::common::{BiasCorrection, ParameterUpdate, StateMemoryStats};
-use rayon::prelude::*;
+use scirs2_core::parallel_ops::*; // SciRS2 Integration Policy - replaces rayon
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use trustformers_core::errors::{Result, TrustformersError};
@@ -280,7 +280,7 @@ impl ParallelAdam {
         let chunk_size = self.state.config.chunk_size;
 
         // Lock the parameter state
-        let mut param_state = state_arc.lock().unwrap();
+        let mut param_state = state_arc.lock().expect("Parallel optimizer state lock poisoned");
         param_state.step += 1;
         param_state.last_update = std::time::Instant::now();
 
@@ -433,15 +433,12 @@ impl ParallelAdam {
     pub fn configure_thread_pool(&self) -> Result<()> {
         let num_threads = self.state.config.effective_num_threads();
 
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .build_global()
-            .map_err(|e| {
-                TrustformersError::tensor_op_error(
-                    &format!("Failed to configure thread pool: {}", e),
-                    "configure_thread_pool",
-                )
-            })?;
+        ThreadPoolBuilder::new().num_threads(num_threads).build_global().map_err(|e| {
+            TrustformersError::tensor_op_error(
+                &format!("Failed to configure thread pool: {}", e),
+                "configure_thread_pool",
+            )
+        })?;
 
         Ok(())
     }
@@ -597,7 +594,7 @@ mod tests {
         assert_eq!(state.get_step(), 1);
 
         let param_state = state.get_or_create_state("test_param".to_string(), 100);
-        let locked_state = param_state.lock().unwrap();
+        let locked_state = param_state.lock().expect("Parallel optimizer state lock poisoned");
         assert_eq!(locked_state.momentum.len(), 100);
         assert_eq!(locked_state.variance.len(), 100);
     }

@@ -290,7 +290,7 @@ mod tests {
         assert!(score.is_ok());
 
         if let Ok(s) = score {
-            assert!(s >= 0.0 && s <= 1.0);
+            assert!((0.0..=1.0).contains(&s));
         }
     }
 

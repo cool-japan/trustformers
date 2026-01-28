@@ -376,6 +376,12 @@ pub enum LoadBalancingEvent {
 // LOAD BALANCER IMPLEMENTATION
 // ================================================================================================
 
+impl Default for GpuLoadBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GpuLoadBalancer {
     /// Create a new GPU load balancer with default configuration
     ///
@@ -720,11 +726,12 @@ impl GpuLoadBalancer {
         devices: &HashMap<usize, GpuDeviceInfo>,
         requirements: &GpuPerformanceRequirements,
     ) -> Result<Option<usize>> {
-        // Select device with minimum memory that still meets requirements
+        // Select device with minimum available memory that still meets requirements
+        // Use total_memory as tiebreaker when available_memory is the same
         let selected = devices
             .values()
             .filter(|device| device.available_memory_mb >= requirements.min_memory_mb)
-            .min_by_key(|device| device.total_memory_mb)
+            .min_by_key(|device| (device.available_memory_mb, device.total_memory_mb))
             .map(|device| device.device_id);
 
         Ok(selected)
@@ -956,7 +963,7 @@ impl GpuLoadBalancer {
                 },
                 _ => {
                     // For other strategies, give equal scores
-                    devices.iter().map(|(id, _)| (*id, 1.0)).collect::<HashMap<_, _>>()
+                    devices.keys().map(|id| (*id, 1.0)).collect::<HashMap<_, _>>()
                 },
             };
 
@@ -1406,7 +1413,7 @@ impl GpuLoadBalancer {
         let mut hasher = DefaultHasher::new();
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("Operation should succeed")
             .as_nanos()
             .hash(&mut hasher);
         hasher.finish() as usize
@@ -1592,7 +1599,10 @@ mod tests {
     async fn test_strategy_setting() {
         let load_balancer = GpuLoadBalancer::new();
 
-        load_balancer.set_strategy(LoadBalancingStrategy::RoundRobin).await.unwrap();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::RoundRobin)
+            .await
+            .expect("Set strategy should succeed");
         let strategy = load_balancer.get_strategy().await;
         assert_eq!(strategy, LoadBalancingStrategy::RoundRobin);
 
@@ -1613,14 +1623,17 @@ mod tests {
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
         assert_eq!(selected, Some(1)); // Should select device with lowest utilization
     }
 
     #[tokio::test]
     async fn test_round_robin_strategy() {
         let load_balancer = GpuLoadBalancer::new();
-        load_balancer.set_strategy(LoadBalancingStrategy::RoundRobin).await.unwrap();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::RoundRobin)
+            .await
+            .expect("Set strategy should succeed");
 
         let requirements = create_test_requirements();
 
@@ -1633,19 +1646,19 @@ mod tests {
         let selected1 = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
         let selected2 = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
         let selected3 = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
         let selected4 = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
 
         assert!(selected1.is_some());
         assert!(selected2.is_some());
@@ -1656,19 +1669,22 @@ mod tests {
     #[tokio::test]
     async fn test_best_fit_strategy() {
         let load_balancer = GpuLoadBalancer::new();
-        load_balancer.set_strategy(LoadBalancingStrategy::BestFit).await.unwrap();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::BestFit)
+            .await
+            .expect("Set strategy should succeed");
 
         let requirements = create_test_requirements(); // Requires 4096MB
 
         let mut devices = HashMap::new();
         devices.insert(0, create_test_device(0, 0.5, 16384)); // More memory than needed
         devices.insert(1, create_test_device(1, 0.5, 8192)); // Less memory than device 0
-        devices.insert(2, create_test_device(2, 0.5, 4096)); // Exact fit
+        devices.insert(2, create_test_device(2, 0.0, 4096)); // Exact fit (no utilization)
 
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
         assert_eq!(selected, Some(2)); // Should select device with least memory that meets requirements
     }
 
@@ -1677,17 +1693,29 @@ mod tests {
         let load_balancer = GpuLoadBalancer::new();
 
         // Update device loads
-        load_balancer.update_device_load(0, 0.7).await.unwrap();
-        load_balancer.update_device_load(1, 0.3).await.unwrap();
+        load_balancer
+            .update_device_load(0, 0.7)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(1, 0.3)
+            .await
+            .expect("Update load should succeed");
 
         // Verify loads are tracked
         let device_0_load = load_balancer.get_device_load(0).await;
         assert!(device_0_load.is_some());
-        assert_eq!(device_0_load.unwrap().utilization, 0.7);
+        assert_eq!(
+            device_0_load.expect("Should get device load").utilization,
+            0.7
+        );
 
         let device_1_load = load_balancer.get_device_load(1).await;
         assert!(device_1_load.is_some());
-        assert_eq!(device_1_load.unwrap().utilization, 0.3);
+        assert_eq!(
+            device_1_load.expect("Should get device load").utilization,
+            0.3
+        );
 
         let all_loads = load_balancer.get_all_device_loads().await;
         assert_eq!(all_loads.len(), 2);
@@ -1696,17 +1724,38 @@ mod tests {
     #[tokio::test]
     async fn test_weighted_strategy() {
         let load_balancer = GpuLoadBalancer::new();
-        load_balancer.set_strategy(LoadBalancingStrategy::Weighted).await.unwrap();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::Weighted)
+            .await
+            .expect("Set strategy should succeed");
 
         // Set different weights
-        load_balancer.set_device_weight(0, 1.0).await.unwrap();
-        load_balancer.set_device_weight(1, 2.0).await.unwrap(); // Higher weight
-        load_balancer.set_device_weight(2, 0.5).await.unwrap();
+        load_balancer
+            .set_device_weight(0, 1.0)
+            .await
+            .expect("Set weight should succeed");
+        load_balancer
+            .set_device_weight(1, 2.0)
+            .await
+            .expect("Set weight should succeed"); // Higher weight
+        load_balancer
+            .set_device_weight(2, 0.5)
+            .await
+            .expect("Set weight should succeed");
 
         // Set equal loads
-        load_balancer.update_device_load(0, 0.5).await.unwrap();
-        load_balancer.update_device_load(1, 0.5).await.unwrap();
-        load_balancer.update_device_load(2, 0.5).await.unwrap();
+        load_balancer
+            .update_device_load(0, 0.5)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(1, 0.5)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(2, 0.5)
+            .await
+            .expect("Update load should succeed");
 
         let requirements = create_test_requirements();
 
@@ -1719,7 +1768,7 @@ mod tests {
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
         assert_eq!(selected, Some(1));
     }
 
@@ -1734,15 +1783,21 @@ mod tests {
         devices.insert(1, create_test_device(1, 0.7, 8192));
 
         // Update device loads
-        load_balancer.update_device_load(0, 0.3).await.unwrap();
-        load_balancer.update_device_load(1, 0.7).await.unwrap();
+        load_balancer
+            .update_device_load(0, 0.3)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(1, 0.7)
+            .await
+            .expect("Update load should succeed");
 
         // Perform some selections
         for _ in 0..5 {
             load_balancer
                 .select_optimal_device(&devices, &requirements, None)
                 .await
-                .unwrap();
+                .expect("Operation should succeed");
         }
 
         let analytics = load_balancer.get_load_analytics().await;
@@ -1757,18 +1812,30 @@ mod tests {
         let load_balancer = GpuLoadBalancer::new();
 
         // Update some device loads
-        load_balancer.update_device_load(0, 0.4).await.unwrap();
-        load_balancer.update_device_load(1, 0.6).await.unwrap();
+        load_balancer
+            .update_device_load(0, 0.4)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(1, 0.6)
+            .await
+            .expect("Update load should succeed");
 
         // Take a snapshot
-        load_balancer.take_load_snapshot().await.unwrap();
+        load_balancer.take_load_snapshot().await.expect("Take snapshot should succeed");
 
         // Update loads again
-        load_balancer.update_device_load(0, 0.8).await.unwrap();
-        load_balancer.update_device_load(1, 0.2).await.unwrap();
+        load_balancer
+            .update_device_load(0, 0.8)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(1, 0.2)
+            .await
+            .expect("Update load should succeed");
 
         // Take another snapshot
-        load_balancer.take_load_snapshot().await.unwrap();
+        load_balancer.take_load_snapshot().await.expect("Take snapshot should succeed");
 
         let history = load_balancer.get_load_history().await;
         assert_eq!(history.len(), 2);
@@ -1794,12 +1861,15 @@ mod tests {
             last_updated: Utc::now(),
         };
 
-        load_balancer.update_comprehensive_load(0, load_info.clone()).await.unwrap();
+        load_balancer
+            .update_comprehensive_load(0, load_info.clone())
+            .await
+            .expect("Update comprehensive load should succeed");
 
         let retrieved_load = load_balancer.get_device_load(0).await;
         assert!(retrieved_load.is_some());
 
-        let retrieved = retrieved_load.unwrap();
+        let retrieved = retrieved_load.expect("Should retrieve load info");
         assert_eq!(retrieved.utilization, 0.75);
         assert_eq!(retrieved.memory_usage, 0.80);
         assert_eq!(retrieved.power_consumption, 250.0);
@@ -1815,8 +1885,14 @@ mod tests {
         });
 
         // Create imbalanced load scenario
-        load_balancer.update_device_load(0, 0.9).await.unwrap(); // Heavily loaded
-        load_balancer.update_device_load(1, 0.1).await.unwrap(); // Lightly loaded
+        load_balancer
+            .update_device_load(0, 0.9)
+            .await
+            .expect("Update load should succeed"); // Heavily loaded
+        load_balancer
+            .update_device_load(1, 0.1)
+            .await
+            .expect("Update load should succeed"); // Lightly loaded
 
         // Wait a moment for rebalancing check
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1845,11 +1921,17 @@ mod tests {
         load_balancer
             .set_strategy(LoadBalancingStrategy::Hybrid(hybrid_strategies))
             .await
-            .unwrap();
+            .expect("Operation should succeed");
 
         // Update device loads
-        load_balancer.update_device_load(0, 0.8).await.unwrap();
-        load_balancer.update_device_load(1, 0.2).await.unwrap();
+        load_balancer
+            .update_device_load(0, 0.8)
+            .await
+            .expect("Update load should succeed");
+        load_balancer
+            .update_device_load(1, 0.2)
+            .await
+            .expect("Update load should succeed");
 
         let requirements = create_test_requirements();
 
@@ -1860,7 +1942,7 @@ mod tests {
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
 
         // Hybrid strategy should consider both least loaded and performance
         assert!(selected.is_some());
@@ -1869,7 +1951,10 @@ mod tests {
     #[tokio::test]
     async fn test_power_aware_strategy() {
         let load_balancer = GpuLoadBalancer::new();
-        load_balancer.set_strategy(LoadBalancingStrategy::PowerAware).await.unwrap();
+        load_balancer
+            .set_strategy(LoadBalancingStrategy::PowerAware)
+            .await
+            .expect("Set strategy should succeed");
 
         let requirements = create_test_requirements();
 
@@ -1889,7 +1974,7 @@ mod tests {
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, Some(&workload_profile))
             .await
-            .unwrap();
+            .expect("Operation should succeed");
 
         assert!(selected.is_some());
     }
@@ -1900,7 +1985,7 @@ mod tests {
         load_balancer
             .set_strategy(LoadBalancingStrategy::MemoryOptimized)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
 
         // Update memory usage for devices
         let load_info_0 = DeviceLoadInfo {
@@ -1927,8 +2012,14 @@ mod tests {
             last_updated: Utc::now(),
         };
 
-        load_balancer.update_comprehensive_load(0, load_info_0).await.unwrap();
-        load_balancer.update_comprehensive_load(1, load_info_1).await.unwrap();
+        load_balancer
+            .update_comprehensive_load(0, load_info_0)
+            .await
+            .expect("Update comprehensive load should succeed");
+        load_balancer
+            .update_comprehensive_load(1, load_info_1)
+            .await
+            .expect("Update comprehensive load should succeed");
 
         let requirements = create_test_requirements();
 
@@ -1939,7 +2030,7 @@ mod tests {
         let selected = load_balancer
             .select_optimal_device(&devices, &requirements, None)
             .await
-            .unwrap();
+            .expect("Operation should succeed");
         assert_eq!(selected, Some(1)); // Should select device with lower memory usage
     }
 }

@@ -23,10 +23,26 @@ pub struct MemorySummary {
 impl super::profiler::MemoryProfiler {
     /// Generate a comprehensive memory report
     pub async fn generate_report(&self) -> Result<MemoryDashboardReport> {
-        let metrics_history = self.get_metrics_history().lock().unwrap().clone();
-        let allocations = self.get_allocations().lock().unwrap().clone();
-        let alerts = self.get_alerts_internal().lock().unwrap().clone();
-        let patterns = self.get_patterns_internal().lock().unwrap().clone();
+        let metrics_history = self
+            .get_metrics_history()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock metrics history: {}", e))?
+            .clone();
+        let allocations = self
+            .get_allocations()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock allocations: {}", e))?
+            .clone();
+        let alerts = self
+            .get_alerts_internal()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock alerts: {}", e))?
+            .clone();
+        let patterns = self
+            .get_patterns_internal()
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Failed to lock patterns: {}", e))?
+            .clone();
 
         // Calculate summary statistics
         let summary = if !metrics_history.is_empty() {
@@ -376,9 +392,9 @@ impl super::profiler::MemoryProfiler {
 
     /// Get current memory usage summary
     pub fn get_current_summary(&self) -> Option<MemorySummary> {
-        let history = self.get_metrics_history().lock().unwrap();
-        let alerts = self.get_alerts_internal().lock().unwrap();
-        let allocations = self.get_allocations().lock().unwrap();
+        let history = self.get_metrics_history().lock().ok()?;
+        let alerts = self.get_alerts_internal().lock().ok()?;
+        let allocations = self.get_allocations().lock().ok()?;
 
         if let Some(latest) = history.back() {
             let total_memory: f64 = history.iter().map(|m| m.total_memory_mb).sum();

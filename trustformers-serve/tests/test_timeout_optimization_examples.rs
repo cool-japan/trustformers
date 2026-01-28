@@ -211,10 +211,13 @@ async fn example_property_test() -> Result<()> {
             prop_assert_eq!(a + b, b + a);
         });
 
-        // Property: multiplication by zero
-        proptest!(|(a in -1000i32..1000)| {
-            prop_assert_eq!(a * 0, 0);
-        });
+        // Property: multiplication by zero (intentional mathematical property test)
+        #[allow(clippy::erasing_op)]
+        {
+            proptest!(|(a in -1000i32..1000)| {
+                prop_assert_eq!(a * 0, 0);
+            });
+        }
 
         // Property: division and multiplication inverse
         proptest!(|(a in 1i32..1000, b in 1i32..1000)| {
@@ -236,6 +239,7 @@ async fn example_property_test() -> Result<()> {
 }
 
 /// Example 6: Long-running test with periodic progress updates
+#[allow(clippy::excessive_nesting)] // Batch processing requires nesting
 #[tokio::test]
 async fn example_long_running_test() -> Result<()> {
     setup_test_framework().await?;

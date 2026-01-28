@@ -17,11 +17,22 @@ use trustformers_core::Tensor;
 
 /// Quantization scheme types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(non_camel_case_types)]
 pub enum QuantizationScheme {
     Int4,
     Int8,
     FP16,
     Dynamic,
+    /// GGUF Q2_K: 2.5625 bits per weight, ultra-low memory
+    GGUF_Q2_K,
+    /// GGUF Q3_K: 3.4375 bits per weight, balanced
+    GGUF_Q3_K,
+    /// GGUF Q4_K: 4.5 bits per weight, high quality
+    GGUF_Q4_K,
+    /// GGUF Q5_0: 5.5 bits per weight, very high quality
+    GGUF_Q5_0,
+    /// GGUF Q6_K: 6.5 bits per weight, near-lossless
+    GGUF_Q6_K,
 }
 
 impl std::fmt::Display for QuantizationScheme {
@@ -31,6 +42,11 @@ impl std::fmt::Display for QuantizationScheme {
             QuantizationScheme::Int8 => write!(f, "INT8"),
             QuantizationScheme::FP16 => write!(f, "FP16"),
             QuantizationScheme::Dynamic => write!(f, "Dynamic"),
+            QuantizationScheme::GGUF_Q2_K => write!(f, "GGUF_Q2_K"),
+            QuantizationScheme::GGUF_Q3_K => write!(f, "GGUF_Q3_K"),
+            QuantizationScheme::GGUF_Q4_K => write!(f, "GGUF_Q4_K"),
+            QuantizationScheme::GGUF_Q5_0 => write!(f, "GGUF_Q5_0"),
+            QuantizationScheme::GGUF_Q6_K => write!(f, "GGUF_Q6_K"),
         }
     }
 }
@@ -315,7 +331,7 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn calibrate(&self, data: &[Tensor]) -> Result<()> {
-        let mut calibration = self.calibration.write().unwrap();
+        let mut calibration = self.calibration.write().expect("RwLock poisoned");
 
         for tensor in data {
             let tensor_data = tensor.data()?;
@@ -335,12 +351,15 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn quantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         // Get or compute scale and zero point
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             // Compute on the fly if not calibrated
             let min_val = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
@@ -364,12 +383,15 @@ impl MobileQuantizer for Int4Quantizer {
     }
 
     fn dequantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         // Get quantization parameters from calibration data
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             // Fallback: estimate from quantized data range
             let min_q = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b)) as i8;
@@ -438,7 +460,7 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn calibrate(&self, data: &[Tensor]) -> Result<()> {
-        let mut calibration = self.calibration.write().unwrap();
+        let mut calibration = self.calibration.write().expect("RwLock poisoned");
 
         for tensor in data {
             let tensor_data = tensor.data()?;
@@ -451,7 +473,7 @@ impl MobileQuantizer for Int8Quantizer {
                 },
                 CalibrationMethod::Percentile => {
                     let mut sorted = tensor_data.to_vec();
-                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     let percentile_idx =
                         (sorted.len() as f32 * self.context.percentile / 100.0) as usize;
                     let min_idx =
@@ -482,11 +504,14 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn quantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             let min_val = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b));
             let max_val = tensor_data.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
@@ -511,12 +536,15 @@ impl MobileQuantizer for Int8Quantizer {
     }
 
     fn dequantize_tensor(&self, tensor: &Tensor) -> Result<Tensor> {
-        let calibration = self.calibration.read().unwrap();
+        let calibration = self.calibration.read().expect("RwLock poisoned");
         let tensor_data = tensor.data()?;
 
         // Get quantization parameters from calibration data
         let (scale, zero_point) = if let Some(&scale) = calibration.scales.get("global") {
-            (scale, *calibration.zero_points.get("global").unwrap())
+            (
+                scale,
+                *calibration.zero_points.get("global").expect("No global zero point"),
+            )
         } else {
             // Fallback: estimate from quantized data range
             let min_q = tensor_data.iter().fold(f32::INFINITY, |a, &b| a.min(b)) as i32;
@@ -706,6 +734,16 @@ impl MobileQuantizer for DynamicQuantizer {
             },
             QuantizationScheme::Int8 => self.int8_quantizer.quantize_tensor(tensor),
             QuantizationScheme::FP16 => self.fp16_quantizer.quantize_tensor(tensor),
+            // GGUF schemes fall back to INT8 (will be handled by dedicated GGUF quantizer)
+            QuantizationScheme::GGUF_Q2_K
+            | QuantizationScheme::GGUF_Q3_K
+            | QuantizationScheme::GGUF_Q4_K
+            | QuantizationScheme::GGUF_Q5_0
+            | QuantizationScheme::GGUF_Q6_K => {
+                // Note: GGUF quantization should use MobileGGUFQuantizer directly
+                // For now, fall back to INT8
+                self.int8_quantizer.quantize_tensor(tensor)
+            },
             QuantizationScheme::Dynamic => {
                 // This shouldn't happen after our check above, but handle gracefully
                 let selected_scheme = self.select_quantization_scheme(tensor)?;
@@ -716,6 +754,12 @@ impl MobileQuantizer for DynamicQuantizer {
                     },
                     QuantizationScheme::Int8 => self.int8_quantizer.quantize_tensor(tensor),
                     QuantizationScheme::FP16 => self.fp16_quantizer.quantize_tensor(tensor),
+                    // GGUF schemes fall back to INT8
+                    QuantizationScheme::GGUF_Q2_K
+                    | QuantizationScheme::GGUF_Q3_K
+                    | QuantizationScheme::GGUF_Q4_K
+                    | QuantizationScheme::GGUF_Q5_0
+                    | QuantizationScheme::GGUF_Q6_K => self.int8_quantizer.quantize_tensor(tensor),
                     QuantizationScheme::Dynamic => {
                         // If still Dynamic, default to Int8 as fallback
                         self.int8_quantizer.quantize_tensor(tensor)
@@ -745,6 +789,16 @@ impl MobileQuantizer for DynamicQuantizer {
                 // For int4, we need to create a quantizer instance
                 let int4_quantizer = Int4Quantizer::new();
                 int4_quantizer.dequantize_tensor(tensor)
+            },
+            // GGUF schemes fall back to INT8 dequantization
+            QuantizationScheme::GGUF_Q2_K
+            | QuantizationScheme::GGUF_Q3_K
+            | QuantizationScheme::GGUF_Q4_K
+            | QuantizationScheme::GGUF_Q5_0
+            | QuantizationScheme::GGUF_Q6_K => {
+                // Note: GGUF dequantization should use MobileGGUFQuantizer directly
+                // For now, fall back to INT8
+                self.int8_quantizer.dequantize_tensor(tensor)
             },
             QuantizationScheme::Dynamic => {
                 // For dynamic schemes, fall back to the selection logic
@@ -788,10 +842,15 @@ impl QuantizationUtils {
     /// Get compression ratio
     pub fn compression_ratio(scheme: QuantizationScheme) -> f32 {
         match scheme {
-            QuantizationScheme::Int4 => 8.0,    // 32-bit to 4-bit
-            QuantizationScheme::Int8 => 4.0,    // 32-bit to 8-bit
-            QuantizationScheme::FP16 => 2.0,    // 32-bit to 16-bit
-            QuantizationScheme::Dynamic => 3.0, // Average
+            QuantizationScheme::Int4 => 8.0,                // 32-bit to 4-bit
+            QuantizationScheme::Int8 => 4.0,                // 32-bit to 8-bit
+            QuantizationScheme::FP16 => 2.0,                // 32-bit to 16-bit
+            QuantizationScheme::Dynamic => 3.0,             // Average
+            QuantizationScheme::GGUF_Q2_K => 32.0 / 2.5625, // 32-bit to 2.5625-bit
+            QuantizationScheme::GGUF_Q3_K => 32.0 / 3.4375, // 32-bit to 3.4375-bit
+            QuantizationScheme::GGUF_Q4_K => 32.0 / 4.5,    // 32-bit to 4.5-bit
+            QuantizationScheme::GGUF_Q5_0 => 32.0 / 5.5,    // 32-bit to 5.5-bit
+            QuantizationScheme::GGUF_Q6_K => 32.0 / 6.5,    // 32-bit to 6.5-bit
         }
     }
 
@@ -809,52 +868,56 @@ mod tests {
     #[test]
     fn test_int4_quantization() {
         let quantizer = Int4Quantizer::new();
-        let tensor =
-            Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4]).unwrap();
+        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 4])
+            .expect("Failed to create tensor");
 
         // Calibrate
-        quantizer.calibrate(&[tensor.clone()]).unwrap();
+        quantizer.calibrate(&[tensor.clone()]).expect("Calibration failed");
 
         // Quantize
-        let quantized = quantizer.quantize_tensor(&tensor).unwrap();
+        let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
         assert_eq!(quantized.shape(), tensor.shape());
 
         // Dequantize
-        let dequantized = quantizer.dequantize_tensor(&quantized).unwrap();
+        let dequantized = quantizer.dequantize_tensor(&quantized).expect("Dequantization failed");
         assert_eq!(dequantized.shape(), tensor.shape());
 
         // Check error is reasonable
-        let error = QuantizationUtils::compute_error(&tensor, &dequantized).unwrap();
+        let error = QuantizationUtils::compute_error(&tensor, &dequantized)
+            .expect("Error computation failed");
         assert!(error < 1.0); // Error should be small
     }
 
     #[test]
     fn test_int8_quantization() {
         let quantizer = Int8Quantizer::new();
-        let tensor = Tensor::from_vec(vec![-10.0, -5.0, 0.0, 5.0, 10.0], &[5]).unwrap();
+        let tensor = Tensor::from_vec(vec![-10.0, -5.0, 0.0, 5.0, 10.0], &[5])
+            .expect("Failed to create tensor");
 
-        quantizer.calibrate(&[tensor.clone()]).unwrap();
+        quantizer.calibrate(&[tensor.clone()]).expect("Calibration failed");
 
-        let quantized = quantizer.quantize_tensor(&tensor).unwrap();
-        let dequantized = quantizer.dequantize_tensor(&quantized).unwrap();
+        let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
+        let dequantized = quantizer.dequantize_tensor(&quantized).expect("Dequantization failed");
 
-        let error = QuantizationUtils::compute_error(&tensor, &dequantized).unwrap();
+        let error = QuantizationUtils::compute_error(&tensor, &dequantized)
+            .expect("Error computation failed");
         assert!(error < 0.1); // INT8 should have very low error
     }
 
     #[test]
     fn test_fp16_quantization() {
         let quantizer = FP16Quantizer::new();
-        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
+        let tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Operation failed");
 
         // FP16 doesn't require calibration
         assert!(!quantizer.requires_calibration());
 
-        let quantized = quantizer.quantize_tensor(&tensor).unwrap();
-        let dequantized = quantizer.dequantize_tensor(&quantized).unwrap();
+        let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
+        let dequantized = quantizer.dequantize_tensor(&quantized).expect("Dequantization failed");
 
         // FP16 should have minimal error for normal range values
-        let error = QuantizationUtils::compute_error(&tensor, &dequantized).unwrap();
+        let error = QuantizationUtils::compute_error(&tensor, &dequantized)
+            .expect("Error computation failed");
         assert!(error < 0.001);
     }
 
@@ -863,10 +926,11 @@ mod tests {
         let mut quantizer = DynamicQuantizer::new();
 
         // Small range tensor - should use INT8
-        let small_range = Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[4]).unwrap();
+        let small_range =
+            Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[4]).expect("Operation failed");
 
-        quantizer.calibrate(&[small_range.clone()]).unwrap();
-        let quantized = quantizer.quantize_tensor(&small_range).unwrap();
+        quantizer.calibrate(&[small_range.clone()]).expect("Operation failed");
+        let quantized = quantizer.quantize_tensor(&small_range).expect("Operation failed");
 
         // Test external storage functionality
         let tensor_id = QuantizationSchemeStorage::generate_tensor_id(&small_range, None);
@@ -877,14 +941,14 @@ mod tests {
             .set_tensor_scheme(tensor_id.clone(), QuantizationScheme::FP16);
 
         // Quantize again - should now use FP16 due to external storage
-        let quantized_fp16 = quantizer.quantize_tensor(&small_range).unwrap();
+        let quantized_fp16 = quantizer.quantize_tensor(&small_range).expect("Operation failed");
 
         // Verify the storage can retrieve the scheme
         let stored_scheme = quantizer.scheme_storage_mut().determine_scheme(&tensor_id, None, None);
         assert_eq!(stored_scheme, QuantizationScheme::FP16);
 
         // Test default fallback
-        let unknown_tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let unknown_tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Operation failed");
         let unknown_id = QuantizationSchemeStorage::generate_tensor_id(&unknown_tensor, None);
         let default_scheme =
             quantizer.scheme_storage_mut().determine_scheme(&unknown_id, None, None);

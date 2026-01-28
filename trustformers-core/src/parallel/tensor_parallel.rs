@@ -253,7 +253,7 @@ impl TensorParallelOps {
         let last_dim = shape.len() - 1;
         let columns = shape[last_dim];
 
-        let columns_per_rank = (columns + world_size - 1) / world_size;
+        let columns_per_rank = columns.div_ceil(world_size);
         let start_col = rank * columns_per_rank;
         let end_col = ((rank + 1) * columns_per_rank).min(columns);
 
@@ -270,7 +270,7 @@ impl TensorParallelOps {
         let second_last_dim = shape.len() - 2;
         let rows = shape[second_last_dim];
 
-        let rows_per_rank = (rows + world_size - 1) / world_size;
+        let rows_per_rank = rows.div_ceil(world_size);
         let start_row = rank * rows_per_rank;
         let end_row = ((rank + 1) * rows_per_rank).min(rows);
 
@@ -307,7 +307,7 @@ impl TensorParallelOps {
                 }
 
                 let dim_size = global_shape[dim];
-                let chunk_size = (dim_size + world_size - 1) / world_size;
+                let chunk_size = dim_size.div_ceil(world_size);
                 let start_idx = rank * chunk_size;
                 let end_idx = (start_idx + chunk_size).min(dim_size);
 
@@ -339,7 +339,7 @@ impl TensorParallelOps {
                 }
 
                 let dim_size = global_shape[dim];
-                let chunk_size = (dim_size + world_size - 1) / world_size;
+                let chunk_size = dim_size.div_ceil(world_size);
                 let start_idx = rank * chunk_size;
                 let end_idx = (start_idx + chunk_size).min(dim_size);
 
@@ -394,8 +394,8 @@ impl TensorParallelOps {
 
                 let row_size = global_shape[row_dim];
                 let col_size = global_shape[col_dim];
-                let row_chunk = (row_size + grid_size - 1) / grid_size;
-                let col_chunk = (col_size + grid_size - 1) / grid_size;
+                let row_chunk = row_size.div_ceil(grid_size);
+                let col_chunk = col_size.div_ceil(grid_size);
 
                 let row_start = row_rank * row_chunk;
                 let row_end = (row_start + row_chunk).min(row_size);
@@ -482,7 +482,7 @@ impl TensorParallelInit {
         rank: usize,
         init_method: InitMethod,
     ) -> Result<Tensor> {
-        let out_features_per_rank = (out_features + world_size - 1) / world_size;
+        let out_features_per_rank = out_features.div_ceil(world_size);
         let local_out_features = if rank == world_size - 1 {
             out_features - rank * out_features_per_rank
         } else {
@@ -500,7 +500,7 @@ impl TensorParallelInit {
         rank: usize,
         init_method: InitMethod,
     ) -> Result<Tensor> {
-        let in_features_per_rank = (in_features + world_size - 1) / world_size;
+        let in_features_per_rank = in_features.div_ceil(world_size);
         let local_in_features = if rank == world_size - 1 {
             in_features - rank * in_features_per_rank
         } else {
@@ -511,17 +511,16 @@ impl TensorParallelInit {
     }
 
     fn init_weight(shape: &[usize], method: InitMethod) -> Result<Tensor> {
-        use rand::thread_rng;
-        use rand_distr::{Distribution, Normal, Uniform as UniformDist};
+        use scirs2_core::random::*;
 
         let mut rng = thread_rng();
         let size = shape.iter().product();
 
         match method {
             InitMethod::Normal { mean, std } => {
-                let normal = Normal::new(mean, std)
+                let normal = Normal::new(mean as f64, std as f64)
                     .map_err(|e| invalid_input(format!("Normal distribution parameters: {}", e)))?;
-                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
             InitMethod::Uniform { low, high } => {
@@ -531,29 +530,29 @@ impl TensorParallelInit {
                         low, high
                     )));
                 }
-                let uniform = UniformDist::new(low, high).map_err(|e| {
+                let uniform = UniformDist::new(low as f64, high as f64).map_err(|e| {
                     invalid_input(format!("Uniform distribution parameters: {}", e))
                 })?;
-                let data: Vec<f32> = (0..size).map(|_| uniform.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| uniform.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
             InitMethod::Xavier => {
                 let fan_in = shape[0] as f32;
                 let fan_out = shape[1] as f32;
                 let std = (2.0 / (fan_in + fan_out)).sqrt();
-                let normal = Normal::new(0.0, std).map_err(|e| {
+                let normal = Normal::new(0.0, std as f64).map_err(|e| {
                     invalid_input(format!("Xavier initialization parameters: {}", e))
                 })?;
-                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
             InitMethod::Kaiming => {
                 let fan_in = shape[0] as f32;
                 let std = (2.0 / fan_in).sqrt();
-                let normal = Normal::new(0.0, std).map_err(|e| {
+                let normal = Normal::new(0.0, std as f64).map_err(|e| {
                     invalid_input(format!("Kaiming initialization parameters: {}", e))
                 })?;
-                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
+                let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng) as f32).collect();
                 Ok(Tensor::from_data(data, shape)?)
             },
         }
@@ -595,7 +594,7 @@ impl TensorParallelShapes {
         let last_dim = local_shape.len() - 1;
         let global_columns = global_shape[last_dim];
 
-        let columns_per_rank = (global_columns + world_size - 1) / world_size;
+        let columns_per_rank = global_columns.div_ceil(world_size);
         local_shape[last_dim] = if rank == world_size - 1 {
             global_columns - rank * columns_per_rank
         } else {
@@ -615,7 +614,7 @@ impl TensorParallelShapes {
         let second_last_dim = local_shape.len() - 2;
         let global_rows = global_shape[second_last_dim];
 
-        let rows_per_rank = (global_rows + world_size - 1) / world_size;
+        let rows_per_rank = global_rows.div_ceil(world_size);
         local_shape[second_last_dim] = if rank == world_size - 1 {
             global_rows - rank * rows_per_rank
         } else {

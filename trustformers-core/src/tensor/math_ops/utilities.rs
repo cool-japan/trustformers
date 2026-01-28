@@ -19,7 +19,7 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::{IxDyn, Zip};
+use scirs2_core::ndarray::{IxDyn, Zip};
 use std::sync::OnceLock;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -207,7 +207,7 @@ impl Tensor {
                 }
 
                 // Convert to IxDyn
-                let ix = ndarray::IxDyn(indices);
+                let ix = IxDyn(indices);
                 match a.get(ix) {
                     Some(val) => Ok(*val),
                     None => Err(TrustformersError::shape_error("Index out of bounds".into())),
@@ -222,7 +222,7 @@ impl Tensor {
                     )));
                 }
 
-                let ix = ndarray::IxDyn(indices);
+                let ix = IxDyn(indices);
                 match a.get(ix) {
                     Some(val) => Ok(*val as f32),
                     None => Err(TrustformersError::shape_error("Index out of bounds".into())),
@@ -257,7 +257,7 @@ impl Tensor {
                 }
 
                 let mut result = a.clone();
-                let ix = ndarray::IxDyn(indices);
+                let ix = IxDyn(indices);
 
                 // Check bounds
                 if !indices.iter().zip(a.shape()).all(|(&idx, &dim)| idx < dim) {
@@ -277,7 +277,7 @@ impl Tensor {
                 }
 
                 let mut result = a.clone();
-                let ix = ndarray::IxDyn(indices);
+                let ix = IxDyn(indices);
 
                 // Check bounds
                 if !indices.iter().zip(a.shape()).all(|(&idx, &dim)| idx < dim) {

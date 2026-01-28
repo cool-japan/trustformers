@@ -146,7 +146,7 @@ impl MambaConfig {
     pub fn get_dt_rank(&self) -> usize {
         self.dt_rank.unwrap_or_else(|| {
             // Standard computation: ceil(d_model / 16)
-            (self.d_model + 15) / 16
+            self.d_model.div_ceil(16)
         })
     }
 
@@ -243,7 +243,7 @@ mod tests {
     fn test_from_pretrained_name() {
         let config = MambaConfig::from_pretrained_name("state-spaces/mamba-130m");
         assert!(config.is_some());
-        assert_eq!(config.unwrap().d_model, 768);
+        assert_eq!(config.expect("operation failed").d_model, 768);
 
         let config = MambaConfig::from_pretrained_name("unknown-model");
         assert!(config.is_none());

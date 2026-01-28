@@ -142,17 +142,17 @@ impl PerformanceProfiler {
 
     /// Enable profiling
     pub fn enable(&self) {
-        *self.enabled.lock().unwrap() = true;
+        *self.enabled.lock().expect("Lock poisoned") = true;
     }
 
     /// Disable profiling
     pub fn disable(&self) {
-        *self.enabled.lock().unwrap() = false;
+        *self.enabled.lock().expect("Lock poisoned") = false;
     }
 
     /// Check if profiling is enabled
     pub fn is_enabled(&self) -> bool {
-        *self.enabled.lock().unwrap()
+        *self.enabled.lock().expect("Lock poisoned")
     }
 
     /// Start profiling an operation
@@ -170,7 +170,7 @@ impl PerformanceProfiler {
             result: ProfileResult::new(name.to_string()),
         };
 
-        self.stack.lock().unwrap().push(node);
+        self.stack.lock().expect("Lock poisoned").push(node);
 
         ProfileGuard {
             profiler: Some(self.clone()),
@@ -180,7 +180,7 @@ impl PerformanceProfiler {
 
     /// End profiling an operation
     fn end_operation(&self, name: &str) {
-        let mut stack = self.stack.lock().unwrap();
+        let mut stack = self.stack.lock().expect("Lock poisoned");
 
         if let Some(node) = stack.pop() {
             if node.name != name {
@@ -194,7 +194,7 @@ impl PerformanceProfiler {
 
             if stack.is_empty() {
                 // This is a root operation
-                let mut roots = self.roots.lock().unwrap();
+                let mut roots = self.roots.lock().expect("Lock poisoned");
                 roots
                     .entry(name.to_string())
                     .and_modify(|r| {
@@ -216,7 +216,7 @@ impl PerformanceProfiler {
 
     /// Get profile results
     pub fn get_results(&self) -> HashMap<String, ProfileResult> {
-        let mut results = self.roots.lock().unwrap().clone();
+        let mut results = self.roots.lock().expect("Lock poisoned").clone();
 
         // Calculate self times and percentages
         for result in results.values_mut() {
@@ -228,8 +228,8 @@ impl PerformanceProfiler {
 
     /// Clear all profile data
     pub fn clear(&self) {
-        self.stack.lock().unwrap().clear();
-        self.roots.lock().unwrap().clear();
+        self.stack.lock().expect("Lock poisoned").clear();
+        self.roots.lock().expect("Lock poisoned").clear();
     }
 
     /// Print profile summary

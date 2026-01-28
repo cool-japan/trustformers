@@ -44,10 +44,8 @@ impl HitRateTracker {
         self.hits += 1;
         self.hit_history.push(true);
 
-        if self.hit_history.len() > self.window_size {
-            if !self.hit_history.remove(0) {
-                self.misses = self.misses.saturating_sub(1);
-            }
+        if self.hit_history.len() > self.window_size && !self.hit_history.remove(0) {
+            self.misses = self.misses.saturating_sub(1);
         }
     }
 
@@ -56,10 +54,8 @@ impl HitRateTracker {
         self.misses += 1;
         self.hit_history.push(false);
 
-        if self.hit_history.len() > self.window_size {
-            if self.hit_history.remove(0) {
-                self.hits = self.hits.saturating_sub(1);
-            }
+        if self.hit_history.len() > self.window_size && self.hit_history.remove(0) {
+            self.hits = self.hits.saturating_sub(1);
         }
     }
 
@@ -88,6 +84,12 @@ impl HitRateTracker {
 pub struct EvictionTracker {
     evictions_by_reason: HashMap<String, u64>,
     total_evictions: u64,
+}
+
+impl Default for EvictionTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EvictionTracker {
@@ -181,6 +183,12 @@ pub struct CacheStatsCollector {
     eviction_trackers: Arc<RwLock<HashMap<String, EvictionTracker>>>,
     performance_monitor: Arc<RwLock<PerformanceMonitor>>,
     cache_sizes: Arc<RwLock<HashMap<String, usize>>>,
+}
+
+impl Default for CacheStatsCollector {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CacheStatsCollector {

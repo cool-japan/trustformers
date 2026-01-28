@@ -209,7 +209,7 @@ impl InContextLearner {
 
     /// Random selection
     fn select_random(&self, examples: &[ICLExample], num: usize) -> Vec<ICLExample> {
-        use rand::seq::SliceRandom;
+        // SliceRandom already available via scirs2_core::random::*
         let mut rng = thread_rng();
         let mut indices: Vec<_> = (0..examples.len()).collect();
         indices.shuffle(&mut rng);

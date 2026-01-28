@@ -5,23 +5,24 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-models"
 description = "Model implementations for TrustformeRS"
+keywords = ["transformers", "bert", "gpt", "llama", "models"]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true
 
 [dependencies]
-trustformers-core.workspace = true
-scirs2-core.workspace = true
+trustformers-core = { workspace = true }
+# Note: ndarray support provided by scirs2-core
+scirs2-core = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-ndarray.workspace = true
-ndarray-linalg.workspace = true
-num-complex.workspace = true
-rand.workspace = true
-rand_distr.workspace = true
 uuid.workspace = true
 memmap2.workspace = true
 serde_yaml.workspace = true
@@ -55,6 +56,7 @@ electra = []
 deberta = []
 vit = []
 llama = []
+gpt_neox = ["llama"]  # GPT-NeoX reuses RotaryEmbedding from LLaMA
 mistral = []
 clip = []
 gemma = []
@@ -69,4 +71,7 @@ blip2 = []
 llava = []
 dalle = []
 flamingo = []
-all = ["bert", "roberta", "distilbert", "gpt2", "gpt_neo", "gpt_j", "t5", "albert", "electra", "deberta", "vit", "llama", "mistral", "clip", "gemma", "qwen", "phi3", "mamba", "rwkv", "s4", "stablelm", "falcon", "blip2", "llava", "dalle", "flamingo"]
+linformer = []
+metal = ["trustformers-core/metal"]
+cuda = ["trustformers-core/cuda"]
+all = ["bert", "roberta", "distilbert", "gpt2", "gpt_neo", "gpt_j", "t5", "albert", "electra", "deberta", "vit", "llama", "gpt_neox", "mistral", "clip", "gemma", "qwen", "phi3", "mamba", "rwkv", "s4", "stablelm", "falcon", "blip2", "llava", "dalle", "flamingo", "linformer"]

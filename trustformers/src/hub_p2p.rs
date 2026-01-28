@@ -146,7 +146,7 @@ pub struct P2PConfig {
 impl Default for P2PConfig {
     fn default() -> Self {
         Self {
-            listen_address: "127.0.0.1:8080".parse().unwrap(),
+            listen_address: "127.0.0.1:8080".parse().expect("failed to parse"),
             discovery_port: 8081,
             max_peers: 100,
             heartbeat_interval: Duration::from_secs(30),
@@ -438,7 +438,7 @@ impl P2PNode {
 
             loop {
                 interval.tick().await;
-                let mut reputation_lock = reputation.lock().unwrap();
+                let mut reputation_lock = reputation.lock().expect("lock should not be poisoned");
                 reputation_lock.decay_reputations();
             }
         });
@@ -728,7 +728,7 @@ impl P2PNode {
 
     async fn select_best_peer(&self, peers: &[PeerInfo]) -> PeerInfo {
         // Simple selection based on reputation and bandwidth
-        let reputation_lock = self.reputation.lock().unwrap();
+        let reputation_lock = self.reputation.lock().expect("lock should not be poisoned");
 
         peers
             .iter()
@@ -920,7 +920,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_peer_creation() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
         let config = P2PConfig {
             storage_path: temp_dir.path().to_path_buf(),
             ..Default::default()
@@ -951,7 +951,7 @@ mod tests {
     fn test_peer_info_serialization() {
         let peer_info = PeerInfo {
             peer_id: "test_peer".to_string(),
-            address: "127.0.0.1:8080".parse().unwrap(),
+            address: "127.0.0.1:8080".parse().expect("failed to parse"),
             public_key: "test_key".to_string(),
             last_seen: SystemTime::now(),
             reputation: 0.8,

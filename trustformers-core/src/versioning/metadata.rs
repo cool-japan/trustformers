@@ -393,7 +393,10 @@ impl VersionedModel {
         }
 
         // Custom format (alphanumeric, dots, dashes, underscores)
-        if regex::Regex::new(r"^[a-zA-Z0-9._-]+$").unwrap().is_match(version) {
+        if regex::Regex::new(r"^[a-zA-Z0-9._-]+$")
+            .expect("Regex compilation failed")
+            .is_match(version)
+        {
             return true;
         }
 

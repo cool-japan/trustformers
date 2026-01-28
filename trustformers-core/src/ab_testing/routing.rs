@@ -3,6 +3,7 @@
 use super::experiment::ExperimentStatus;
 use super::{Experiment, Variant};
 use anyhow::Result;
+use scirs2_core::random::*;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -194,7 +195,8 @@ impl TrafficSplitter {
             return self.route_hash_based(experiment, &uuid::Uuid::new_v4().to_string());
         }
 
-        let random_value = rand::random::<f64>() * total_weight;
+        let mut rng = thread_rng();
+        let random_value: f64 = rng.gen_range(0.0..total_weight);
         let mut cumulative_weight = 0.0;
 
         for variant in variants {

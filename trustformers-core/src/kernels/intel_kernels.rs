@@ -696,7 +696,7 @@ void flash_attention_kernel(
 
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> Result<IntelMemoryStats> {
-        let pool = self.memory_pool.lock().unwrap();
+        let pool = self.memory_pool.lock().expect("Lock poisoned");
         Ok(IntelMemoryStats {
             total_allocated: pool.total_allocated,
             peak_allocated: pool.peak_allocated,
@@ -806,8 +806,8 @@ impl IntelUtils {
 
     /// Get optimal workgroup size for a given problem size
     pub fn get_optimal_workgroup_size(problem_size: usize, max_workgroup_size: usize) -> usize {
-        // Simple heuristic for workgroup size selection
-        let candidates = vec![32, 64, 128, 256, 512, 1024];
+        // Simple heuristic for workgroup size selection - prefer larger sizes for better performance
+        let candidates = vec![1024, 512, 256, 128, 64, 32];
 
         for &size in &candidates {
             if size <= max_workgroup_size && problem_size % size == 0 {

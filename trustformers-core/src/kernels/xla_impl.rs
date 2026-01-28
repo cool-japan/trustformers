@@ -800,8 +800,9 @@ mod tests {
     #[test]
     fn test_xla_platform_serialization() {
         let platform = XlaPlatform::TPU;
-        let serialized = serde_json::to_string(&platform).unwrap();
-        let deserialized: XlaPlatform = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&platform).expect("JSON serialization failed");
+        let deserialized: XlaPlatform =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(platform, deserialized);
     }
 

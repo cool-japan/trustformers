@@ -12,6 +12,12 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct RequestId(pub Uuid);
 
+impl Default for RequestId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RequestId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -212,6 +218,12 @@ impl BatchingStrategy for PriorityStrategy {
 /// Continuous batching strategy for LLM serving
 pub struct ContinuousBatchingStrategy {
     active_sequences: Arc<Mutex<HashMap<RequestId, SequenceState>>>,
+}
+
+impl Default for ContinuousBatchingStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ContinuousBatchingStrategy {
@@ -548,9 +560,27 @@ impl BatchAggregator {
         Ok(())
     }
 
+    /// Try to form a batch based on timeout (called periodically by background task)
+    /// This is the public version that can be called from the batching service
+    pub async fn try_form_batch_on_timeout(&mut self) -> Result<()> {
+        self.try_form_batch().await
+    }
+
     /// Get the next batch (called by scheduler)
     pub async fn get_next_batch(&self) -> Option<RequestBatch> {
         self.batch_rx.lock().await.recv().await
+    }
+
+    /// Get access to the batch receiver Arc for external processing without holding aggregator lock
+    pub fn batch_receiver(&self) -> Arc<tokio::sync::Mutex<mpsc::Receiver<RequestBatch>>> {
+        self.batch_rx.clone()
+    }
+
+    /// Get access to the response channels Arc for external processing
+    pub fn response_channels(
+        &self,
+    ) -> Arc<tokio::sync::Mutex<HashMap<RequestId, oneshot::Sender<ProcessingResult>>>> {
+        self.response_channels.clone()
     }
 
     /// Process batch results
@@ -598,11 +628,16 @@ impl BatchAggregator {
 
     /// Get aggregator statistics
     pub fn get_stats(&self) -> AggregatorStats {
+        // Get metrics summary from the metrics collector
+        let summary = self.metrics.get_summary();
+
+        // Note: queue_depth and pending_requests require async access to locks
+        // For now, we return the key metrics from the summary
         AggregatorStats {
-            queue_depth: 0, // Would need async access to queue
-            pending_requests: 0,
-            total_batches_formed: 0,
-            avg_batch_size: 0.0,
+            queue_depth: summary.queue_depth,
+            pending_requests: 0, // Would need async access to get current pending requests
+            total_batches_formed: summary.total_batches,
+            avg_batch_size: summary.avg_batch_size,
         }
     }
 }
@@ -878,6 +913,12 @@ impl BatchingStrategy for LoadAwareBatchingStrategy {
 pub struct PredictiveBatchingStrategy {
     predictor: Arc<Mutex<SimplePredictor>>,
     performance_history: Arc<Mutex<VecDeque<PerformanceMetric>>>,
+}
+
+impl Default for PredictiveBatchingStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PredictiveBatchingStrategy {

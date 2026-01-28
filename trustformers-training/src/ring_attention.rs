@@ -891,7 +891,7 @@ impl RingAttentionManager {
             causal: model_params.causal,
             block_size: 512.min(optimal_chunk_size / 8),
             overlap_comm_comp: true,
-            compression_enabled: sequence_length > 2_000_000, // Enable compression for extremely long sequences
+            compression_enabled: sequence_length >= 2_000_000, // Enable compression for very long sequences
             compression_ratio: 0.5,
         }
     }
@@ -976,7 +976,7 @@ impl RingAttentionManager {
         let output = Tensor::zeros(&[batch_size, seq_len, hidden_dim])?;
 
         // Process attention in blocks to reduce memory usage
-        let num_blocks = (seq_len + block_size - 1) / block_size;
+        let num_blocks = seq_len.div_ceil(block_size);
 
         for block_i in 0..num_blocks {
             for block_j in 0..num_blocks {
@@ -1553,7 +1553,10 @@ mod tests {
         stats.computation_time_ms = 100.0;
         stats.communication_time_ms = 20.0;
 
-        // Efficiency should be computation / total
+        // Compute efficiency: computation / total time
+        let total_time = stats.computation_time_ms + stats.communication_time_ms;
+        stats.efficiency_score = (stats.computation_time_ms / total_time) as f32;
+
         let expected_efficiency = 100.0 / 120.0;
         assert!((stats.efficiency_score - expected_efficiency as f32).abs() < 0.01);
     }

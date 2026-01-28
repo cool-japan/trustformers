@@ -48,7 +48,7 @@ use scirs2_core::random::*; // SciRS2 Integration Policy (was: use rand::{Rng, R
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
-use trustformers_core::errors::{invalid_input, Result};
+use trustformers_core::errors::{invalid_input, Result, TrustformersError};
 
 /// Configuration for Neural Architecture Search
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -272,7 +272,7 @@ impl DimensionRange {
     }
 
     #[allow(deprecated)]
-    pub fn sample(&self, rng: &mut impl rand::Rng) -> i32 {
+    pub fn sample(&self, rng: &mut impl Rng) -> i32 {
         let steps = (self.max - self.min) / self.step + 1;
         let step_idx = rng.gen_range(0..steps);
         self.min + step_idx * self.step
@@ -519,7 +519,7 @@ impl Architecture {
 
     /// Generate a random architecture within the search space
     #[allow(deprecated)]
-    pub fn random(search_space: &SearchSpace, rng: &mut impl rand::Rng) -> Self {
+    pub fn random(search_space: &SearchSpace, rng: &mut impl Rng) -> Self {
         let mut architecture = Architecture::new();
 
         // Sample dimensions
@@ -540,12 +540,7 @@ impl Architecture {
 
     /// Mutate the architecture for evolutionary search
     #[allow(deprecated)]
-    pub fn mutate(
-        &mut self,
-        search_space: &SearchSpace,
-        mutation_rate: f32,
-        rng: &mut impl rand::Rng,
-    ) {
+    pub fn mutate(&mut self, search_space: &SearchSpace, mutation_rate: f32, rng: &mut impl Rng) {
         // Mutate dimensions
         for (name, value) in &mut self.dimensions {
             if rng.gen::<f32>() < mutation_rate {
@@ -571,7 +566,7 @@ impl Architecture {
 
     /// Create a crossover between two architectures
     #[allow(deprecated)]
-    pub fn crossover(&self, other: &Architecture, rng: &mut impl rand::Rng) -> Architecture {
+    pub fn crossover(&self, other: &Architecture, rng: &mut impl Rng) -> Architecture {
         let mut child = Architecture::new();
 
         // Crossover dimensions
@@ -666,7 +661,7 @@ impl NeuralArchitectureSearcher {
         let rng = if let Some(seed) = config.seed {
             StdRng::seed_from_u64(seed)
         } else {
-            StdRng::seed_from_u64(rand::random::<u64>())
+            StdRng::seed_from_u64(random::<u64>())
         };
 
         Ok(Self {
@@ -701,15 +696,18 @@ impl NeuralArchitectureSearcher {
             self.evaluation_history.push(evaluation);
 
             if i % 100 == 0 {
-                println!(
-                    "Random search iteration {}, best fitness: {:.4}",
-                    i,
-                    self.best_architecture.as_ref().unwrap().fitness
-                );
+                if let Some(ref best) = self.best_architecture {
+                    println!(
+                        "Random search iteration {}, best fitness: {:.4}",
+                        i, best.fitness
+                    );
+                }
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        self.best_architecture.clone().ok_or_else(|| {
+            TrustformersError::invalid_config("No architecture found during search".to_string())
+        })
     }
 
     #[allow(deprecated)]
@@ -747,11 +745,13 @@ impl NeuralArchitectureSearcher {
             println!(
                 "Generation {}, best fitness: {:.4}",
                 generation,
-                self.best_architecture.as_ref().unwrap().fitness
+                self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
             );
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        self.best_architecture.clone().ok_or_else(|| {
+            TrustformersError::invalid_config("No architecture found during search".to_string())
+        })
     }
 
     fn rl_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -768,12 +768,14 @@ impl NeuralArchitectureSearcher {
                 println!(
                     "RL search iteration {}, best fitness: {:.4}",
                     i,
-                    self.best_architecture.as_ref().unwrap().fitness
+                    self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
                 );
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        self.best_architecture.clone().ok_or_else(|| {
+            TrustformersError::invalid_config("No architecture found during search".to_string())
+        })
     }
 
     fn darts_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -790,12 +792,14 @@ impl NeuralArchitectureSearcher {
                 println!(
                     "DARTS iteration {}, best fitness: {:.4}",
                     i,
-                    self.best_architecture.as_ref().unwrap().fitness
+                    self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
                 );
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        self.best_architecture.clone().ok_or_else(|| {
+            TrustformersError::invalid_config("No architecture found during search".to_string())
+        })
     }
 
     fn progressive_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -827,13 +831,15 @@ impl NeuralArchitectureSearcher {
                         "Progressive search stage {}, iteration {}, best fitness: {:.4}",
                         stage,
                         i,
-                        self.best_architecture.as_ref().unwrap().fitness
+                        self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
                     );
                 }
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        self.best_architecture.clone().ok_or_else(|| {
+            TrustformersError::invalid_config("No architecture found during search".to_string())
+        })
     }
 
     fn bayesian_search(&mut self) -> Result<ArchitectureEvaluation> {
@@ -845,7 +851,12 @@ impl NeuralArchitectureSearcher {
                 Architecture::random(&self.search_space, &mut self.rng)
             } else {
                 // Use best architecture as guidance (simplified acquisition function)
-                let mut arch = self.best_architecture.as_ref().unwrap().architecture.clone();
+                let best = self.best_architecture.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "No best architecture available for guidance".to_string(),
+                    )
+                })?;
+                let mut arch = best.architecture.clone();
                 arch.mutate(&self.search_space, 0.2, &mut self.rng);
                 arch
             };
@@ -858,12 +869,14 @@ impl NeuralArchitectureSearcher {
                 println!(
                     "Bayesian search iteration {}, best fitness: {:.4}",
                     i,
-                    self.best_architecture.as_ref().unwrap().fitness
+                    self.best_architecture.as_ref().map_or(0.0, |a| a.fitness)
                 );
             }
         }
 
-        Ok(self.best_architecture.clone().unwrap())
+        self.best_architecture.clone().ok_or_else(|| {
+            TrustformersError::invalid_config("No architecture found during search".to_string())
+        })
     }
 
     #[allow(deprecated)]
@@ -899,7 +912,9 @@ impl NeuralArchitectureSearcher {
         }
 
         // Return the best overall architecture
-        Ok(self.best_architecture.clone().unwrap())
+        self.best_architecture.clone().ok_or_else(|| {
+            TrustformersError::invalid_config("No architecture found during search".to_string())
+        })
     }
 
     fn initialize_population(&mut self) -> Result<()> {
@@ -912,8 +927,10 @@ impl NeuralArchitectureSearcher {
         }
 
         // Update best architecture
-        if let Some(best) =
-            self.population.iter().max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
+        if let Some(best) = self
+            .population
+            .iter()
+            .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).expect("operation failed"))
         {
             self.best_architecture = Some(best.clone());
         }
@@ -936,8 +953,13 @@ impl NeuralArchitectureSearcher {
 
             let winner = tournament
                 .into_iter()
-                .max_by(|a, b| a.fitness.partial_cmp(&b.fitness).unwrap())
-                .unwrap();
+                .max_by(|a, b| {
+                    a.fitness.partial_cmp(&b.fitness).unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or_else(|| {
+                    // Fallback: should never happen as tournament has fixed size
+                    self.population[0].clone()
+                });
             parents.push(winner);
         }
 
@@ -950,16 +972,19 @@ impl NeuralArchitectureSearcher {
         combined.extend(offspring);
 
         // Sort by fitness
-        combined.sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap());
+        combined
+            .sort_by(|a, b| b.fitness.partial_cmp(&a.fitness).unwrap_or(std::cmp::Ordering::Equal));
 
         // Keep top individuals
         self.population = combined.into_iter().take(self.config.population_size).collect();
 
         // Update best architecture
         if let Some(best) = self.population.first() {
-            if self.best_architecture.is_none()
-                || best.fitness > self.best_architecture.as_ref().unwrap().fitness
-            {
+            let should_update = self
+                .best_architecture
+                .as_ref()
+                .map_or(true, |current| best.fitness > current.fitness);
+            if should_update {
                 self.best_architecture = Some(best.clone());
             }
         }
@@ -1038,9 +1063,11 @@ impl NeuralArchitectureSearcher {
     }
 
     fn update_best(&mut self, evaluation: &ArchitectureEvaluation) {
-        if self.best_architecture.is_none()
-            || evaluation.fitness > self.best_architecture.as_ref().unwrap().fitness
-        {
+        let should_update = self
+            .best_architecture
+            .as_ref()
+            .map_or(true, |current| evaluation.fitness > current.fitness);
+        if should_update {
             self.best_architecture = Some(evaluation.clone());
         }
     }

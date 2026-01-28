@@ -78,11 +78,11 @@ impl MarkdownDocGenerator {
     }
 
     /// Group functions by category based on naming patterns
-    fn categorize_functions(
+    fn categorize_functions<'a>(
         &self,
-        functions: &[FfiFunction],
-    ) -> HashMap<String, Vec<&FfiFunction>> {
-        let mut categories: HashMap<String, Vec<&FfiFunction>> = HashMap::new();
+        functions: &'a [FfiFunction],
+    ) -> HashMap<String, Vec<&'a FfiFunction>> {
+        let mut categories: HashMap<String, Vec<&'a FfiFunction>> = HashMap::new();
 
         for func in functions {
             let category = self.infer_category(&func.name);

@@ -772,12 +772,12 @@ mod tests {
     fn test_from_pretrained_name() {
         let config = CodeSpecializedConfig::from_pretrained_name("code-llama-7b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.model_variant, CodeModelVariant::CodeLlama);
 
         let config = CodeSpecializedConfig::from_pretrained_name("starcoder-15b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.model_variant, CodeModelVariant::StarCoder);
 
         let config = CodeSpecializedConfig::from_pretrained_name("unknown-model");
@@ -880,7 +880,7 @@ mod tests {
 
         let model = CodeSpecializedModel::new(config.clone());
         assert!(model.is_ok());
-        let model = model.unwrap();
+        let model = model.expect("operation failed");
         assert!(model.supports_fim());
         assert!(model.supports_language("python"));
 

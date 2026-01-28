@@ -1,8 +1,9 @@
 use crate::clip::config::{CLIPConfig, CLIPTextConfig, CLIPVisionConfig};
-use scirs2_core::ndarray::{Array2, Array3, Array4}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
-    errors::{tensor_op_error, Result},
+    device::Device,
+    errors::{tensor_op_error, Result, TrustformersError},
     layers::{Embedding, FeedForward, LayerNorm, Linear, MultiHeadAttention},
     tensor::Tensor,
     traits::{Config, Layer, Model},
@@ -15,11 +16,12 @@ pub struct CLIPVisionEmbeddings {
     position_embedding: Embedding,
     num_patches: usize,
     num_positions: usize,
+    device: Device,
 }
 
 impl CLIPVisionEmbeddings {
-    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
-        let patch_embedding = CLIPPatchEmbedding::new(config)?;
+    pub fn new_with_device(config: &CLIPVisionConfig, device: Device) -> Result<Self> {
+        let patch_embedding = CLIPPatchEmbedding::new_with_device(config, device)?;
         let num_patches = config.num_patches();
         let num_positions = config.seq_length();
 
@@ -32,7 +34,40 @@ impl CLIPVisionEmbeddings {
             position_embedding,
             num_patches,
             num_positions,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Load weights for vision embeddings
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
+        // Load patch embedding weights
+        self.patch_embedding
+            .load_weights(loader, &format!("{}.patch_embedding", prefix))?;
+
+        // Load class embedding
+        if let Ok(class_emb) = loader.load_tensor(&format!("{}.class_embedding", prefix)) {
+            self.class_embedding = class_emb;
+        }
+
+        // Load position embeddings
+        if let Ok(pos_weight) = loader.load_tensor(&format!("{}.position_embedding.weight", prefix))
+        {
+            self.position_embedding.set_weight(pos_weight)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -73,17 +108,13 @@ impl Layer for CLIPVisionEmbeddings {
 
                 // Set class tokens at position 0
                 for i in 0..batch_size {
-                    combined
-                        .slice_mut(ndarray::s![i, 0, ..])
-                        .assign(&class_arr.slice(ndarray::s![i, ..]));
+                    combined.slice_mut(s![i, 0, ..]).assign(&class_arr.slice(s![i, ..]));
                 }
 
                 // Set patch embeddings at positions 1..seq_len
                 for i in 0..batch_size {
                     for j in 0..self.num_patches {
-                        combined
-                            .slice_mut(ndarray::s![i, j + 1, ..])
-                            .assign(&patch_arr.slice(ndarray::s![i, j, ..]));
+                        combined.slice_mut(s![i, j + 1, ..]).assign(&patch_arr.slice(s![i, j, ..]));
                     }
                 }
 
@@ -110,10 +141,11 @@ pub struct CLIPPatchEmbedding {
     projection: Linear,
     patch_size: usize,
     hidden_size: usize,
+    device: Device,
 }
 
 impl CLIPPatchEmbedding {
-    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+    pub fn new_with_device(config: &CLIPVisionConfig, device: Device) -> Result<Self> {
         let in_features = config.patch_size * config.patch_size * config.num_channels;
         let projection = Linear::new(in_features, config.hidden_size, true);
 
@@ -121,7 +153,31 @@ impl CLIPPatchEmbedding {
             projection,
             patch_size: config.patch_size,
             hidden_size: config.hidden_size,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Load weights for patch embedding
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
+        if let Ok(weight) = loader.load_tensor(&format!("{}.weight", prefix)) {
+            self.projection.set_weight(weight)?;
+        }
+        if let Ok(bias) = loader.load_tensor(&format!("{}.bias", prefix)) {
+            self.projection.set_bias(bias)?;
+        }
+        Ok(())
     }
 }
 
@@ -187,19 +243,48 @@ pub struct CLIPTextTransformer {
     embeddings: CLIPTextEmbeddings,
     encoder: CLIPEncoder<CLIPTextConfig>,
     final_layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl CLIPTextTransformer {
-    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
-        let embeddings = CLIPTextEmbeddings::new(config)?;
-        let encoder = CLIPEncoder::new(config)?;
+    pub fn new_with_device(config: &CLIPTextConfig, device: Device) -> Result<Self> {
+        let embeddings = CLIPTextEmbeddings::new_with_device(config, device)?;
+        let encoder = CLIPEncoder::new_with_device(config, device)?;
         let final_layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
 
         Ok(Self {
             embeddings,
             encoder,
             final_layer_norm,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Load weights for text transformer
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
+        self.embeddings.load_weights(loader, &format!("{}.embeddings", prefix))?;
+        self.encoder.load_weights(loader, &format!("{}.encoder", prefix))?;
+
+        if let Ok(ln_weight) = loader.load_tensor(&format!("{}.final_layer_norm.weight", prefix)) {
+            self.final_layer_norm.set_weight(ln_weight)?;
+        }
+        if let Ok(ln_bias) = loader.load_tensor(&format!("{}.final_layer_norm.bias", prefix)) {
+            self.final_layer_norm.set_bias(ln_bias)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -219,19 +304,48 @@ pub struct CLIPVisionTransformer {
     embeddings: CLIPVisionEmbeddings,
     encoder: CLIPEncoder<CLIPVisionConfig>,
     layernorm: LayerNorm,
+    device: Device,
 }
 
 impl CLIPVisionTransformer {
-    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
-        let embeddings = CLIPVisionEmbeddings::new(config)?;
-        let encoder = CLIPEncoder::new(config)?;
+    pub fn new_with_device(config: &CLIPVisionConfig, device: Device) -> Result<Self> {
+        let embeddings = CLIPVisionEmbeddings::new_with_device(config, device)?;
+        let encoder = CLIPEncoder::new_with_device(config, device)?;
         let layernorm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
 
         Ok(Self {
             embeddings,
             encoder,
             layernorm,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPVisionConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Load weights for vision transformer
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
+        self.embeddings.load_weights(loader, &format!("{}.embeddings", prefix))?;
+        self.encoder.load_weights(loader, &format!("{}.encoder", prefix))?;
+
+        if let Ok(ln_weight) = loader.load_tensor(&format!("{}.layernorm.weight", prefix)) {
+            self.layernorm.set_weight(ln_weight)?;
+        }
+        if let Ok(ln_bias) = loader.load_tensor(&format!("{}.layernorm.bias", prefix)) {
+            self.layernorm.set_bias(ln_bias)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -250,10 +364,11 @@ impl Layer for CLIPVisionTransformer {
 pub struct CLIPTextEmbeddings {
     token_embedding: Embedding,
     position_embedding: Embedding,
+    device: Device,
 }
 
 impl CLIPTextEmbeddings {
-    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
+    pub fn new_with_device(config: &CLIPTextConfig, device: Device) -> Result<Self> {
         let token_embedding = Embedding::new(config.vocab_size, config.hidden_size, None)?;
         let position_embedding =
             Embedding::new(config.max_position_embeddings, config.hidden_size, None)?;
@@ -261,7 +376,37 @@ impl CLIPTextEmbeddings {
         Ok(Self {
             token_embedding,
             position_embedding,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPTextConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Load weights for text embeddings
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
+        // Load token embeddings
+        if let Ok(token_weight) = loader.load_tensor(&format!("{}.token_embedding.weight", prefix))
+        {
+            self.token_embedding.set_weight(token_weight)?;
+        }
+
+        // Load position embeddings
+        if let Ok(pos_weight) = loader.load_tensor(&format!("{}.position_embedding.weight", prefix))
+        {
+            self.position_embedding.set_weight(pos_weight)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -283,6 +428,7 @@ impl Layer for CLIPTextEmbeddings {
 /// Generic CLIP encoder (works for both text and vision)
 pub struct CLIPEncoder<C> {
     layers: Vec<CLIPEncoderLayer>,
+    device: Device,
     _phantom: std::marker::PhantomData<C>,
 }
 
@@ -290,7 +436,7 @@ impl<C> CLIPEncoder<C>
 where
     C: Config + Send + Sync,
 {
-    pub fn new(_config: &C) -> Result<Self> {
+    pub fn new_with_device(_config: &C, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
 
         // Note: This is a simplified implementation
@@ -308,13 +454,34 @@ where
 
         for _ in 0..12 {
             // This would come from config.num_hidden_layers
-            layers.push(CLIPEncoderLayer::new(&layer_config)?);
+            layers.push(CLIPEncoderLayer::new_with_device(&layer_config, device)?);
         }
 
         Ok(Self {
             layers,
+            device,
             _phantom: std::marker::PhantomData,
         })
+    }
+
+    pub fn new(_config: &C) -> Result<Self> {
+        Self::new_with_device(_config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Load weights for all encoder layers
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
+        for (i, layer) in self.layers.iter_mut().enumerate() {
+            layer.load_weights(loader, &format!("{}.layers.{}", prefix, i))?;
+        }
+        Ok(())
     }
 }
 
@@ -351,10 +518,11 @@ pub struct CLIPEncoderLayer {
     layer_norm1: LayerNorm,
     mlp: FeedForward,
     layer_norm2: LayerNorm,
+    device: Device,
 }
 
 impl CLIPEncoderLayer {
-    pub fn new(config: &CLIPEncoderLayerConfig) -> Result<Self> {
+    pub fn new_with_device(config: &CLIPEncoderLayerConfig, device: Device) -> Result<Self> {
         let self_attn = MultiHeadAttention::new(
             config.hidden_size,
             config.num_attention_heads,
@@ -370,7 +538,79 @@ impl CLIPEncoderLayer {
             layer_norm1,
             mlp,
             layer_norm2,
+            device,
         })
+    }
+
+    pub fn new(config: &CLIPEncoderLayerConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Load weights for encoder layer
+    pub fn load_weights(
+        &mut self,
+        loader: &mut dyn crate::weight_loading::WeightLoader,
+        prefix: &str,
+    ) -> Result<()> {
+        // Load attention weights
+        if let Ok(q_weight) = loader.load_tensor(&format!("{}.self_attn.q_proj.weight", prefix)) {
+            self.self_attn.set_query_weight(q_weight)?;
+        }
+        if let Ok(q_bias) = loader.load_tensor(&format!("{}.self_attn.q_proj.bias", prefix)) {
+            self.self_attn.set_query_bias(q_bias)?;
+        }
+        if let Ok(k_weight) = loader.load_tensor(&format!("{}.self_attn.k_proj.weight", prefix)) {
+            self.self_attn.set_key_weight(k_weight)?;
+        }
+        if let Ok(k_bias) = loader.load_tensor(&format!("{}.self_attn.k_proj.bias", prefix)) {
+            self.self_attn.set_key_bias(k_bias)?;
+        }
+        if let Ok(v_weight) = loader.load_tensor(&format!("{}.self_attn.v_proj.weight", prefix)) {
+            self.self_attn.set_value_weight(v_weight)?;
+        }
+        if let Ok(v_bias) = loader.load_tensor(&format!("{}.self_attn.v_proj.bias", prefix)) {
+            self.self_attn.set_value_bias(v_bias)?;
+        }
+        if let Ok(o_weight) = loader.load_tensor(&format!("{}.self_attn.out_proj.weight", prefix)) {
+            self.self_attn.set_out_proj_weight(o_weight)?;
+        }
+        if let Ok(o_bias) = loader.load_tensor(&format!("{}.self_attn.out_proj.bias", prefix)) {
+            self.self_attn.set_out_proj_bias(o_bias)?;
+        }
+
+        // Load MLP weights
+        if let Ok(fc1_weight) = loader.load_tensor(&format!("{}.mlp.fc1.weight", prefix)) {
+            self.mlp.set_dense_weight(fc1_weight)?;
+        }
+        if let Ok(fc1_bias) = loader.load_tensor(&format!("{}.mlp.fc1.bias", prefix)) {
+            self.mlp.set_dense_bias(fc1_bias)?;
+        }
+        if let Ok(fc2_weight) = loader.load_tensor(&format!("{}.mlp.fc2.weight", prefix)) {
+            self.mlp.set_output_weight(fc2_weight)?;
+        }
+        if let Ok(fc2_bias) = loader.load_tensor(&format!("{}.mlp.fc2.bias", prefix)) {
+            self.mlp.set_output_bias(fc2_bias)?;
+        }
+
+        // Load layer norms
+        if let Ok(ln1_weight) = loader.load_tensor(&format!("{}.layer_norm1.weight", prefix)) {
+            self.layer_norm1.set_weight(ln1_weight)?;
+        }
+        if let Ok(ln1_bias) = loader.load_tensor(&format!("{}.layer_norm1.bias", prefix)) {
+            self.layer_norm1.set_bias(ln1_bias)?;
+        }
+        if let Ok(ln2_weight) = loader.load_tensor(&format!("{}.layer_norm2.weight", prefix)) {
+            self.layer_norm2.set_weight(ln2_weight)?;
+        }
+        if let Ok(ln2_bias) = loader.load_tensor(&format!("{}.layer_norm2.bias", prefix)) {
+            self.layer_norm2.set_bias(ln2_bias)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -400,15 +640,16 @@ pub struct CLIPModel {
     vision_model: CLIPVisionTransformer,
     text_projection: Linear,
     visual_projection: Linear,
-    logit_scale: Tensor,
+    pub logit_scale: Tensor,
+    device: Device,
 }
 
 impl CLIPModel {
-    pub fn new(config: CLIPConfig) -> Result<Self> {
+    pub fn new_with_device(config: CLIPConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let text_model = CLIPTextTransformer::new(&config.text_config)?;
-        let vision_model = CLIPVisionTransformer::new(&config.vision_config)?;
+        let text_model = CLIPTextTransformer::new_with_device(&config.text_config, device)?;
+        let vision_model = CLIPVisionTransformer::new_with_device(&config.vision_config, device)?;
 
         let text_projection =
             Linear::new(config.text_config.hidden_size, config.projection_dim, false);
@@ -419,7 +660,7 @@ impl CLIPModel {
         );
 
         let logit_scale =
-            Tensor::F32(ndarray::Array1::from_elem(1, config.logit_scale_init_value).into_dyn());
+            Tensor::F32(Array1::from_elem(1, config.logit_scale_init_value).into_dyn());
 
         Ok(Self {
             config,
@@ -428,7 +669,16 @@ impl CLIPModel {
             text_projection,
             visual_projection,
             logit_scale,
+            device,
         })
+    }
+
+    pub fn new(config: CLIPConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Get text features
@@ -626,125 +876,26 @@ impl CLIPModel {
 
         let mut loader = auto_create_loader(model_path, Some(config))?;
 
-        // Load text model weights
-        // Text embeddings
-        if let Ok(_text_embeddings) =
-            loader.load_tensor("text_model.embeddings.token_embedding.weight")
-        {
-            // Note: This is a simplified implementation
-            // In a full implementation, we would need to access the text model's internal components
-            // For now, we indicate that the weight was found but cannot be set due to encapsulation
-        }
+        // Load text model weights using the new weight loading infrastructure
+        self.text_model.load_weights(loader.as_mut(), "text_model")?;
 
-        if let Ok(_text_pos_embeddings) =
-            loader.load_tensor("text_model.embeddings.position_embedding.weight")
-        {
-            // Similar placeholder for position embeddings
-        }
+        // Load vision model weights using the new weight loading infrastructure
+        self.vision_model.load_weights(loader.as_mut(), "vision_model")?;
 
-        // Text transformer layers
-        for layer_idx in 0..self.config.text_config.num_hidden_layers {
-            let layer_prefix = format!("text_model.encoder.layers.{}", layer_idx);
-
-            // Text attention weights
-            if let Ok(_q_weight) =
-                loader.load_tensor(&format!("{}.self_attn.q_proj.weight", layer_prefix))
-            {
-                // Placeholder for text attention weight loading
-            }
-            if let Ok(_k_weight) =
-                loader.load_tensor(&format!("{}.self_attn.k_proj.weight", layer_prefix))
-            {
-                // Placeholder for text attention weight loading
-            }
-            if let Ok(_v_weight) =
-                loader.load_tensor(&format!("{}.self_attn.v_proj.weight", layer_prefix))
-            {
-                // Placeholder for text attention weight loading
-            }
-            if let Ok(_o_weight) =
-                loader.load_tensor(&format!("{}.self_attn.out_proj.weight", layer_prefix))
-            {
-                // Placeholder for text attention weight loading
-            }
-
-            // Text MLP weights
-            if let Ok(_fc1_weight) = loader.load_tensor(&format!("{}.mlp.fc1.weight", layer_prefix))
-            {
-                // Placeholder for text MLP weight loading
-            }
-            if let Ok(_fc2_weight) = loader.load_tensor(&format!("{}.mlp.fc2.weight", layer_prefix))
-            {
-                // Placeholder for text MLP weight loading
-            }
-
-            // Text layer normalization
-            if let Ok(_ln1_weight) =
-                loader.load_tensor(&format!("{}.layer_norm1.weight", layer_prefix))
-            {
-                // Placeholder for text layer norm weight loading
-            }
-            if let Ok(_ln2_weight) =
-                loader.load_tensor(&format!("{}.layer_norm2.weight", layer_prefix))
-            {
-                // Placeholder for text layer norm weight loading
-            }
-        }
-
-        // Load vision model weights
-        // Vision patch embeddings
-        if let Ok(_patch_embeddings) =
-            loader.load_tensor("vision_model.embeddings.patch_embedding.weight")
-        {
-            // Placeholder for vision patch embedding weight loading
-        }
-
-        if let Ok(_class_embedding) = loader.load_tensor("vision_model.embeddings.class_embedding")
-        {
-            // Placeholder for vision class embedding weight loading
-        }
-
-        if let Ok(_pos_embeddings) =
-            loader.load_tensor("vision_model.embeddings.position_embedding.weight")
-        {
-            // Placeholder for vision position embedding weight loading
-        }
-
-        // Vision transformer layers
-        for layer_idx in 0..self.config.vision_config.num_hidden_layers {
-            let layer_prefix = format!("vision_model.encoder.layers.{}", layer_idx);
-
-            // Vision attention weights (similar pattern to text)
-            if let Ok(_q_weight) =
-                loader.load_tensor(&format!("{}.self_attn.q_proj.weight", layer_prefix))
-            {
-                // Placeholder for vision attention weight loading
-            }
-            // ... (similar for k_proj, v_proj, out_proj)
-
-            // Vision MLP weights
-            if let Ok(_fc1_weight) = loader.load_tensor(&format!("{}.mlp.fc1.weight", layer_prefix))
-            {
-                // Placeholder for vision MLP weight loading
-            }
-            // ... (similar for fc2)
-
-            // Vision layer normalization
-            if let Ok(_ln1_weight) =
-                loader.load_tensor(&format!("{}.layer_norm1.weight", layer_prefix))
-            {
-                // Placeholder for vision layer norm weight loading
-            }
-            // ... (similar for layer_norm2)
-        }
-
-        // Load projection layers
+        // Load text projection layer
         if let Ok(text_proj_weight) = loader.load_tensor("text_projection.weight") {
             self.text_projection.set_weight(text_proj_weight)?;
         }
+        if let Ok(text_proj_bias) = loader.load_tensor("text_projection.bias") {
+            self.text_projection.set_bias(text_proj_bias)?;
+        }
 
+        // Load visual projection layer
         if let Ok(visual_proj_weight) = loader.load_tensor("visual_projection.weight") {
             self.visual_projection.set_weight(visual_proj_weight)?;
+        }
+        if let Ok(visual_proj_bias) = loader.load_tensor("visual_projection.bias") {
+            self.visual_projection.set_bias(visual_proj_bias)?;
         }
 
         // Load logit scale
@@ -834,13 +985,18 @@ impl CLIPModel {
 
             println!("Attempting to download {}", file_url);
 
+            // Convert path to string once for both commands
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::invalid_config(format!("Invalid UTF-8 in path: {:?}", file_path))
+            })?;
+
             // Try using curl first
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -863,9 +1019,7 @@ impl CLIPModel {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {

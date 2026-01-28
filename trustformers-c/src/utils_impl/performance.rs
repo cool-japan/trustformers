@@ -329,7 +329,7 @@ pub mod monitoring {
         /// Start timing an operation by name
         pub fn start_timer(&self, name: &str) {
             let mut timers = self.timers.lock().unwrap();
-            let timer = timers.entry(name.to_string()).or_insert_with(PerformanceTimer::new);
+            let timer = timers.entry(name.to_string()).or_default();
             timer.start();
         }
 
@@ -421,7 +421,7 @@ pub mod monitoring {
         fn drop(&mut self) {
             let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
             let mut timers = self.monitor.timers.lock().unwrap();
-            let timer = timers.entry(self.name.clone()).or_insert_with(PerformanceTimer::new);
+            let timer = timers.entry(self.name.clone()).or_default();
             timer.add_measurement(elapsed);
         }
     }
@@ -464,14 +464,15 @@ mod tests {
     fn test_benchmark_function() {
         let result = benchmark_utils::benchmark_function(
             || {
-                // Simulate some work
-                let _: Vec<i32> = (0..1000).collect();
+                // Simulate some work with measurable duration
+                std::thread::sleep(Duration::from_micros(100));
             },
             10,
             2,
         );
 
         assert_eq!(result.iterations, 10);
-        assert!(result.avg_time_ms > 0.0);
+        // avg_time_ms should be at least 0.1ms (100 microseconds)
+        assert!(result.avg_time_ms >= 0.1, "avg_time_ms was {}", result.avg_time_ms);
     }
 }

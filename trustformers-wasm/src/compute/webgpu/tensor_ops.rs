@@ -148,8 +148,8 @@ impl TensorOps {
             pass.set_bind_group(0, &bind_group);
 
             // Dispatch compute shader
-            let workgroup_x = (m + 7) / 8;
-            let workgroup_y = (n + 7) / 8;
+            let workgroup_x = m.div_ceil(8);
+            let workgroup_y = n.div_ceil(8);
             pass.dispatch_workgroups(workgroup_x as u32, workgroup_y as u32, 1);
         }
 
@@ -209,7 +209,7 @@ impl TensorOps {
             let pass = encoder.begin_compute_pass();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group);
-            pass.dispatch_workgroups(((size + 255) / 256) as u32, 1, 1);
+            pass.dispatch_workgroups(size.div_ceil(256) as u32, 1, 1);
             pass.end();
 
             let command_buffer = encoder.finish();
@@ -259,7 +259,7 @@ impl TensorOps {
             let pass = encoder.begin_compute_pass();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group);
-            pass.dispatch_workgroups(((size + 255) / 256) as u32, 1, 1);
+            pass.dispatch_workgroups(size.div_ceil(256) as u32, 1, 1);
             pass.end();
 
             let command_buffer = encoder.finish();
@@ -308,7 +308,7 @@ impl TensorOps {
             let pass = encoder.begin_compute_pass();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &bind_group);
-            pass.dispatch_workgroups(((size + 255) / 256) as u32, 1, 1);
+            pass.dispatch_workgroups(size.div_ceil(256) as u32, 1, 1);
             pass.end();
 
             let command_buffer = encoder.finish();

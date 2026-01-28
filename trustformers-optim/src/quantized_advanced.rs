@@ -155,7 +155,7 @@ impl QuantizationUtils {
         let data = tensor.data()?;
         let shape = tensor.shape();
         let num_elements = data.len();
-        let num_blocks = (num_elements + block_size - 1) / block_size;
+        let num_blocks = num_elements.div_ceil(block_size);
 
         let mut quantized_data = Vec::new();
         let mut scales = Vec::with_capacity(num_blocks);
@@ -216,7 +216,7 @@ impl QuantizationUtils {
         let num_elements: usize = quantized.shape.iter().product();
         let mut data = Vec::with_capacity(num_elements);
         let block_size = quantized.block_size;
-        let num_blocks = (num_elements + block_size - 1) / block_size;
+        let num_blocks = num_elements.div_ceil(block_size);
 
         let mut data_idx = 0;
 

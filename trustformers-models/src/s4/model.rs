@@ -1,8 +1,9 @@
 use crate::s4::config::S4Config;
-use num_complex::Complex64;
 use scirs2_core::ndarray::{Array1, Array2}; // SciRS2 Integration Policy
+use scirs2_core::Complex64; // SciRS2 Integration Policy
 use std::f32::consts::PI;
 use trustformers_core::{
+    device::Device,
     errors::{
         compute_error, invalid_format, invalid_input, runtime_error, tensor_op_error, Result,
     },
@@ -231,10 +232,12 @@ pub struct S4Layer {
     // Cached discrete parameters
     a_bar: Option<Array2<Complex64>>,
     b_bar: Option<Array1<Complex64>>,
+    // Device for computation
+    device: Device,
 }
 
 impl S4Layer {
-    pub fn new(config: &S4Config) -> Result<Self> {
+    pub fn new_with_device(config: &S4Config, device: Device) -> Result<Self> {
         let n = config.d_state;
         let h = config.get_n_ssm();
 
@@ -277,7 +280,16 @@ impl S4Layer {
             dt,
             a_bar: None,
             b_bar: None,
+            device,
         })
+    }
+
+    pub fn new(config: &S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Discretize the continuous-time parameters
@@ -393,17 +405,18 @@ pub struct S4Block {
     out_proj: Linear,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl S4Block {
-    pub fn new(config: &S4Config) -> Result<Self> {
+    pub fn new_with_device(config: &S4Config, device: Device) -> Result<Self> {
         let d_model = config.d_model;
         let n_ssm = config.get_n_ssm();
 
-        let s4_layer = S4Layer::new(config)?;
-        let norm = LayerNorm::new(vec![d_model], config.layer_norm_eps)?;
-        let in_proj = Linear::new(d_model, n_ssm, config.use_bias);
-        let out_proj = Linear::new(n_ssm, d_model, config.use_bias);
+        let s4_layer = S4Layer::new_with_device(config, device)?;
+        let norm = LayerNorm::new_with_device(vec![d_model], config.layer_norm_eps, device)?;
+        let in_proj = Linear::new_with_device(d_model, n_ssm, config.use_bias, device);
+        let out_proj = Linear::new_with_device(n_ssm, d_model, config.use_bias, device);
 
         Ok(Self {
             config: config.clone(),
@@ -412,7 +425,16 @@ impl S4Block {
             in_proj,
             out_proj,
             dropout: config.dropout,
+            device,
         })
+    }
+
+    pub fn new(config: &S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -514,27 +536,38 @@ pub struct S4Model {
     pub embeddings: Embedding,
     pub blocks: Vec<S4Block>,
     pub ln_f: LayerNorm,
+    pub device: Device,
 }
 
 impl S4Model {
-    pub fn new(config: S4Config) -> Result<Self> {
-        let embeddings = Embedding::new(config.vocab_size, config.d_model, None);
+    pub fn new_with_device(config: S4Config, device: Device) -> Result<Self> {
+        let embeddings =
+            Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
 
         let mut blocks = Vec::new();
         for _ in 0..config.n_layer {
-            if let Ok(block) = S4Block::new(&config) {
+            if let Ok(block) = S4Block::new_with_device(&config, device) {
                 blocks.push(block);
             }
         }
 
-        let ln_f = LayerNorm::new(vec![config.d_model], config.layer_norm_eps)?;
+        let ln_f = LayerNorm::new_with_device(vec![config.d_model], config.layer_norm_eps, device)?;
 
         Ok(Self {
             config,
-            embeddings: embeddings?,
+            embeddings,
             blocks,
             ln_f,
+            device,
         })
+    }
+
+    pub fn new(config: S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -544,9 +577,25 @@ impl Model for S4Model {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        // Convert input to token IDs if needed
-        let input_ids = match input {
-            Tensor::I64(ref arr) => arr.mapv(|x| x as u32).into_raw_vec_and_offset().0,
+        // Get batch and sequence dimensions from input
+        let (batch_size, seq_len, input_ids) = match &input {
+            Tensor::I64(ref arr) => {
+                if arr.ndim() == 2 {
+                    let batch_size = arr.shape()[0];
+                    let seq_len = arr.shape()[1];
+                    let ids = arr.mapv(|x| x as u32).into_raw_vec_and_offset().0;
+                    (batch_size, seq_len, ids)
+                } else if arr.ndim() == 1 {
+                    let seq_len = arr.len();
+                    let ids = arr.mapv(|x| x as u32).into_raw_vec_and_offset().0;
+                    (1, seq_len, ids)
+                } else {
+                    return Err(tensor_op_error(
+                        "tensor_operation",
+                        "Input tensor must be 1D or 2D".to_string(),
+                    ));
+                }
+            },
             _ => {
                 return Err(tensor_op_error(
                     "tensor_operation",
@@ -554,8 +603,22 @@ impl Model for S4Model {
                 ))
             },
         };
-        // Get embeddings
-        let mut hidden = self.embeddings.forward(input_ids)?;
+
+        // Get embeddings - returns [total_tokens, d_model]
+        let embedded = self.embeddings.forward(input_ids)?;
+
+        // Reshape to 3D [batch_size, seq_len, d_model]
+        let mut hidden = if embedded.shape().len() == 2 {
+            let total_tokens = embedded.shape()[0];
+            let d_model = embedded.shape()[1];
+            if total_tokens == batch_size * seq_len {
+                embedded.reshape(&[batch_size, seq_len, d_model])?
+            } else {
+                embedded.reshape(&[1, total_tokens, d_model])?
+            }
+        } else {
+            embedded
+        };
 
         // Apply S4 blocks
         for block in &self.blocks {
@@ -926,18 +989,32 @@ impl S4Model {
 pub struct S4ForLanguageModeling {
     pub s4: S4Model,
     pub lm_head: Linear,
+    pub device: Device,
 }
 
 impl S4ForLanguageModeling {
-    pub fn new(config: S4Config) -> Result<Self> {
-        let s4 = S4Model::new(config.clone())?;
-        let lm_head = Linear::new(
+    pub fn new_with_device(config: S4Config, device: Device) -> Result<Self> {
+        let s4 = S4Model::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(
             config.d_model,
             config.vocab_size,
             false, // No bias for LM head
+            device,
         );
 
-        Ok(Self { s4, lm_head })
+        Ok(Self {
+            s4,
+            lm_head,
+            device,
+        })
+    }
+
+    pub fn new(config: S4Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -1022,7 +1099,7 @@ mod tests {
         let layer = S4Layer::new(&config);
         assert!(layer.is_ok());
 
-        let layer = layer.unwrap();
+        let layer = layer.expect("operation failed");
         assert_eq!(layer.a_real.shape(), &[config.d_state, config.d_state]);
         assert_eq!(layer.b_real.shape(), &[config.d_state]);
         assert_eq!(layer.c_real.shape(), &[config.d_state]);
@@ -1032,7 +1109,7 @@ mod tests {
     #[test]
     fn test_s4_model_creation() {
         let config = S4Config::s4_small();
-        let model = S4Model::new(config.clone()).unwrap();
+        let model = S4Model::new(config.clone()).expect("operation failed");
 
         assert_eq!(model.config.d_model, config.d_model);
         assert_eq!(model.blocks.len(), config.n_layer);
@@ -1041,7 +1118,7 @@ mod tests {
     #[test]
     fn test_s4_lm_creation() {
         let config = S4Config::s4_base();
-        let _model = S4ForLanguageModeling::new(config).unwrap();
+        let _model = S4ForLanguageModeling::new(config).expect("operation failed");
 
         // S4 language model created successfully - LM head dimensions are internal
     }

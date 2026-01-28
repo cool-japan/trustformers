@@ -602,6 +602,12 @@ struct ParallelismConfig {
     throughput_threshold: f64,
 }
 
+impl Default for ParallelismOptimizationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParallelismOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -722,12 +728,17 @@ impl LiveOptimizationAlgorithm for ParallelismOptimizationAlgorithm {
             let confidence = self.calculate_confidence(cpu_utilization, throughput, history);
             let impact = self.estimate_impact(current_parallelism, optimal_parallelism, metrics);
 
+            let action_type = if optimal_parallelism > current_parallelism {
+                ActionType::IncreaseParallelism
+            } else {
+                ActionType::DecreaseParallelism
+            };
+
             recommendations.push(OptimizationRecommendation {
                 id: format!("parallelism_{}", Utc::now().timestamp()),
                 timestamp: Utc::now(),
                 actions: vec![RecommendedAction {
-                    // TODO: ActionType::IncreaseParallelism doesn't exist, using TuneParameters
-                    action_type: ActionType::TuneParameters,
+                    action_type,
                     parameters: {
                         let mut params = HashMap::new();
                         params.insert(
@@ -848,7 +859,7 @@ impl ParallelismOptimizationAlgorithm {
             performance_impact,
             resource_impact,
             complexity,
-            risk_level: if change_ratio > 2.0 || change_ratio < 0.5 { 0.7 } else { 0.3 },
+            risk_level: if !(0.5..=2.0).contains(&change_ratio) { 0.7 } else { 0.3 },
             estimated_benefit: performance_impact.abs() * metrics.current_throughput as f32 / 100.0,
             implementation_time: Duration::from_secs(30),
         }
@@ -920,6 +931,12 @@ struct ResourceConfig {
     cpu_threshold_high: f32,
     io_threshold_high: f32,
     optimization_interval: Duration,
+}
+
+impl Default for ResourceOptimizationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourceOptimizationAlgorithm {
@@ -1199,6 +1216,12 @@ struct BatchMetrics {
     efficiency: f32,
 }
 
+impl Default for BatchingOptimizationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BatchingOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -1344,6 +1367,12 @@ struct TuningRecord {
     performance_delta: f32,
 }
 
+impl Default for PerformanceTuningAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceTuningAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -1477,6 +1506,12 @@ struct MemoryPattern {
     gc_pressure: f32,
 }
 
+impl Default for MemoryOptimizationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -1588,6 +1623,12 @@ struct IOPattern {
     queue_depth: usize,
 }
 
+impl Default for IOOptimizationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IOOptimizationAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -1697,6 +1738,12 @@ struct NetworkPattern {
     connection_count: usize,
     packet_loss: f32,
     round_trip_time: Duration,
+}
+
+impl Default for NetworkOptimizationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NetworkOptimizationAlgorithm {
@@ -1819,6 +1866,12 @@ struct ThreadPattern {
     idle_threads: usize,
     queue_length: usize,
     avg_task_duration: Duration,
+}
+
+impl Default for ThreadPoolOptimizationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ThreadPoolOptimizationAlgorithm {
@@ -2133,6 +2186,12 @@ pub struct HeuristicRecommendationAlgorithm {
     metrics: GenerationAlgorithmMetrics,
 }
 
+impl Default for HeuristicRecommendationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HeuristicRecommendationAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -2276,6 +2335,12 @@ struct RecommendationTemplate {
     action_type: ActionType,
     confidence_base: f32,
     impact_estimate: ImpactAssessment,
+}
+
+impl Default for PatternBasedRecommendationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PatternBasedRecommendationAlgorithm {
@@ -2467,6 +2532,12 @@ struct TrainingExample {
     output_success: bool,
     recommendation_type: String,
     timestamp: DateTime<Utc>,
+}
+
+impl Default for MLBasedRecommendationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MLBasedRecommendationAlgorithm {
@@ -2767,6 +2838,12 @@ struct HistoricalRecord {
     average_impact: f32,
 }
 
+impl Default for HistoricalConfidenceAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HistoricalConfidenceAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -2850,6 +2927,12 @@ pub struct StatisticalConfidenceAlgorithm {
     data_quality_weights: HashMap<String, f32>,
 }
 
+impl Default for StatisticalConfidenceAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatisticalConfidenceAlgorithm {
     pub fn new() -> Self {
         let mut weights = HashMap::new();
@@ -2926,6 +3009,12 @@ impl ConfidenceScoringAlgorithm for StatisticalConfidenceAlgorithm {
 /// Scores confidence based on risk assessment and mitigation strategies.
 pub struct RiskBasedConfidenceAlgorithm {
     risk_factors: HashMap<RiskType, f32>,
+}
+
+impl Default for RiskBasedConfidenceAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RiskBasedConfidenceAlgorithm {
@@ -3022,6 +3111,12 @@ impl ConfidenceScoringAlgorithm for RiskBasedConfidenceAlgorithm {
 pub struct ConsensusConfidenceAlgorithm {
     consensus_threshold: f32,
     agreement_bonus: f32,
+}
+
+impl Default for ConsensusConfidenceAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConsensusConfidenceAlgorithm {
@@ -3374,6 +3469,12 @@ struct PerformanceAnalysisRecord {
     latency_score: f32,
 }
 
+impl Default for PerformanceAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceAnalysisAlgorithm {
     pub fn new() -> Self {
         Self {
@@ -3486,6 +3587,12 @@ struct TrendDataPoint {
     memory_trend: f32,
     throughput_trend: f32,
     latency_trend: f32,
+}
+
+impl Default for TrendAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TrendAnalysisAlgorithm {
@@ -3609,6 +3716,12 @@ enum BottleneckType {
     Network,
     Concurrency,
     Unknown,
+}
+
+impl Default for BottleneckAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BottleneckAnalysisAlgorithm {
@@ -3768,6 +3881,12 @@ struct PredictionRecord {
     predicted_throughput: f64,
     predicted_latency: Duration,
     confidence: f32,
+}
+
+impl Default for PredictiveAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PredictiveAnalysisAlgorithm {
@@ -4767,7 +4886,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_recommendation_generator() {
-        let generator = RecommendationGenerator::new().await.unwrap();
+        let generator = RecommendationGenerator::new()
+            .await
+            .expect("Failed to create recommendation generator");
 
         let context =
             OptimizationContext::new(SystemState::default(), TestCharacteristics::default());
@@ -4780,7 +4901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_confidence_scorer() {
-        let scorer = ConfidenceScorer::new().await.unwrap();
+        let scorer = ConfidenceScorer::new().await.expect("Failed to create confidence scorer");
 
         let recommendation = OptimizationRecommendation {
             id: "test_rec".to_string(),
@@ -4803,8 +4924,8 @@ mod tests {
 
         let confidence = scorer.score_recommendation(&recommendation).await;
         assert!(confidence.is_ok());
-        let confidence_val = confidence.unwrap();
-        assert!(confidence_val >= 0.0 && confidence_val <= 1.0);
+        let confidence_val = confidence.expect("Confidence is None");
+        assert!((0.0..=1.0).contains(&confidence_val));
     }
 
     #[tokio::test]
@@ -4819,7 +4940,7 @@ mod tests {
         let recommendations = algorithm.optimize(&metrics, &[], &context);
         assert!(recommendations.is_ok());
 
-        let recs = recommendations.unwrap();
+        let recs = recommendations.expect("Recommendations is None");
         if !recs.is_empty() {
             // Should recommend increasing parallelism due to low CPU utilization
             assert!(recs.iter().any(|r| r
@@ -4831,7 +4952,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_time_analyzer() {
-        let analyzer = RealTimeAnalyzer::new().await.unwrap();
+        let analyzer = RealTimeAnalyzer::new().await.expect("Failed to create analyzer");
 
         let metrics = RealTimeMetrics::default();
 
@@ -4848,7 +4969,7 @@ mod tests {
         let results = analyzer.analyze(&metrics, &history).await;
         assert!(results.is_ok());
 
-        let analysis_results = results.unwrap();
+        let analysis_results = results.expect("Results is None");
         assert!(!analysis_results.is_empty());
     }
 
@@ -4864,7 +4985,7 @@ mod tests {
         };
 
         let score = impact.overall_score();
-        assert!(score >= 0.0 && score <= 1.0);
+        assert!((0.0..=1.0).contains(&score));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use crate::fnet::config::FNetConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::Result,
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
@@ -16,12 +17,22 @@ pub struct FourierTransform {
     bias: Option<Linear>,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl FourierTransform {
     pub fn new(config: &FNetConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FNetConfig, device: Device) -> Result<Self> {
         let bias = if config.use_bias_in_fourier {
-            Some(Linear::new(config.hidden_size, config.hidden_size, true))
+            Some(Linear::new_with_device(
+                config.hidden_size,
+                config.hidden_size,
+                true,
+                device,
+            ))
         } else {
             None
         };
@@ -31,7 +42,12 @@ impl FourierTransform {
             use_bias: config.use_bias_in_fourier,
             bias,
             dropout: config.fourier_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -204,19 +220,31 @@ pub struct FNetFeedForward {
     activation: String,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl FNetFeedForward {
     pub fn new(config: &FNetConfig) -> Result<Self> {
-        let dense1 = Linear::new(config.hidden_size, config.intermediate_size, true);
-        let dense2 = Linear::new(config.intermediate_size, config.hidden_size, true);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FNetConfig, device: Device) -> Result<Self> {
+        let dense1 =
+            Linear::new_with_device(config.hidden_size, config.intermediate_size, true, device);
+        let dense2 =
+            Linear::new_with_device(config.intermediate_size, config.hidden_size, true, device);
 
         Ok(Self {
             dense1,
             dense2,
             activation: config.hidden_act.clone(),
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -250,21 +278,33 @@ pub struct FNetLayer {
     feed_forward: FNetFeedForward,
     fourier_norm: LayerNorm,
     output_norm: LayerNorm,
+    device: Device,
 }
 
 impl FNetLayer {
     pub fn new(config: &FNetConfig) -> Result<Self> {
-        let fourier_transform = FourierTransform::new(config)?;
-        let feed_forward = FNetFeedForward::new(config)?;
-        let fourier_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
-        let output_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FNetConfig, device: Device) -> Result<Self> {
+        let fourier_transform = FourierTransform::new_with_device(config, device)?;
+        let feed_forward = FNetFeedForward::new_with_device(config, device)?;
+        let fourier_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
+        let output_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             fourier_transform,
             feed_forward,
             fourier_norm,
             output_norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -300,20 +340,31 @@ pub struct FNetEmbeddings {
     layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl FNetEmbeddings {
     pub fn new(config: &FNetConfig) -> Result<Self> {
-        let word_embeddings = Embedding::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FNetConfig, device: Device) -> Result<Self> {
+        let word_embeddings = Embedding::new_with_device(
             config.vocab_size,
             config.hidden_size,
             Some(config.pad_token_id as usize),
+            device,
         )?;
-        let position_embeddings =
-            Embedding::new(config.max_position_embeddings, config.hidden_size, None)?;
+        let position_embeddings = Embedding::new_with_device(
+            config.max_position_embeddings,
+            config.hidden_size,
+            None,
+            device,
+        )?;
         let token_type_embeddings =
-            Embedding::new(config.type_vocab_size, config.hidden_size, None)?;
-        let layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+            Embedding::new_with_device(config.type_vocab_size, config.hidden_size, None, device)?;
+        let layer_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             word_embeddings,
@@ -321,7 +372,12 @@ impl FNetEmbeddings {
             token_type_embeddings,
             layer_norm,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -358,16 +414,25 @@ impl Layer for FNetEmbeddings {
 /// FNet encoder
 pub struct FNetEncoder {
     layers: Vec<FNetLayer>,
+    device: Device,
 }
 
 impl FNetEncoder {
     pub fn new(config: &FNetConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &FNetConfig, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(FNetLayer::new(config)?);
+            layers.push(FNetLayer::new_with_device(config, device)?);
         }
 
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -395,20 +460,30 @@ pub struct FNetModel {
     config: FNetConfig,
     embeddings: FNetEmbeddings,
     encoder: FNetEncoder,
+    device: Device,
 }
 
 impl FNetModel {
     pub fn new(config: FNetConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: FNetConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let embeddings = FNetEmbeddings::new(&config)?;
-        let encoder = FNetEncoder::new(&config)?;
+        let embeddings = FNetEmbeddings::new_with_device(&config, device)?;
+        let encoder = FNetEncoder::new_with_device(&config, device)?;
 
         Ok(Self {
             config,
             embeddings,
             encoder,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -442,18 +517,28 @@ pub struct FNetForSequenceClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl FNetForSequenceClassification {
     pub fn new(config: FNetConfig, num_labels: usize) -> Result<Self> {
-        let fnet = FNetModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(config: FNetConfig, num_labels: usize, device: Device) -> Result<Self> {
+        let fnet = FNetModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             fnet,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -486,14 +571,27 @@ impl Model for FNetForSequenceClassification {
 pub struct FNetForMaskedLM {
     fnet: FNetModel,
     mlm_head: Linear,
+    device: Device,
 }
 
 impl FNetForMaskedLM {
     pub fn new(config: FNetConfig) -> Result<Self> {
-        let fnet = FNetModel::new(config.clone())?;
-        let mlm_head = Linear::new(config.hidden_size, config.vocab_size, true);
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { fnet, mlm_head })
+    pub fn new_with_device(config: FNetConfig, device: Device) -> Result<Self> {
+        let fnet = FNetModel::new_with_device(config.clone(), device)?;
+        let mlm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, true, device);
+
+        Ok(Self {
+            fnet,
+            mlm_head,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

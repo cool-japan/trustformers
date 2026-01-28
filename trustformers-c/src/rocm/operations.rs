@@ -53,10 +53,7 @@ impl RocmOperations {
         }
 
         #[cfg(feature = "rocm")]
-        Err(anyhow!(
-            "ROCm device {} not found or allocation failed",
-            device_id
-        ))
+        Err(anyhow!("ROCm device {} not found or allocation failed", device_id).into())
     }
 
     /// Free ROCm tensor memory
@@ -67,7 +64,7 @@ impl RocmOperations {
             if result == 0 {
                 Ok(())
             } else {
-                Err(anyhow!("Failed to free HIP memory: error code {}", result))
+                Err(anyhow!("Failed to free HIP memory: error code {}", result).into())
             }
         }
 
@@ -84,9 +81,7 @@ impl RocmOperations {
         tensor: &mut RocmTensor,
     ) -> TrustformersResult<()> {
         if host_data.len() * std::mem::size_of::<f32>() != tensor.size_bytes {
-            return Err(anyhow!(
-                "Size mismatch: host data size doesn't match tensor size"
-            ));
+            return Err(anyhow!("Size mismatch: host data size doesn't match tensor size").into());
         }
 
         #[cfg(feature = "rocm")]
@@ -102,10 +97,7 @@ impl RocmOperations {
             if result == 0 {
                 Ok(())
             } else {
-                Err(anyhow!(
-                    "Failed to copy data to device: error code {}",
-                    result
-                ))
+                Err(anyhow!("Failed to copy data to device: error code {}", result).into())
             }
         }
 
@@ -123,9 +115,7 @@ impl RocmOperations {
         host_data: &mut [f32],
     ) -> TrustformersResult<()> {
         if host_data.len() * std::mem::size_of::<f32>() != tensor.size_bytes {
-            return Err(anyhow!(
-                "Size mismatch: host data size doesn't match tensor size"
-            ));
+            return Err(anyhow!("Size mismatch: host data size doesn't match tensor size").into());
         }
 
         #[cfg(feature = "rocm")]
@@ -141,10 +131,7 @@ impl RocmOperations {
             if result == 0 {
                 Ok(())
             } else {
-                Err(anyhow!(
-                    "Failed to copy data from device: error code {}",
-                    result
-                ))
+                Err(anyhow!("Failed to copy data from device: error code {}", result).into())
             }
         }
 
@@ -171,7 +158,7 @@ impl RocmOperations {
     ) -> TrustformersResult<()> {
         // Validate dimensions
         if a.shape != [m, k] || b.shape != [k, n] || c.shape != [m, n] {
-            return Err(anyhow!("Matrix dimension mismatch"));
+            return Err(anyhow!("Matrix dimension mismatch").into());
         }
 
         #[cfg(feature = "rocm")]
@@ -202,13 +189,10 @@ impl RocmOperations {
                 if result == 0 {
                     Ok(())
                 } else {
-                    Err(anyhow!("ROCblas SGEMM failed: error code {}", result))
+                    Err(anyhow!("ROCblas SGEMM failed: error code {}", result).into())
                 }
             } else {
-                Err(anyhow!(
-                    "ROCblas handle not found for device {}",
-                    a.device_id
-                ))
+                Err(anyhow!("ROCblas handle not found for device {}", a.device_id).into())
             }
         }
 
@@ -227,7 +211,7 @@ impl RocmOperations {
         result: &mut RocmTensor,
     ) -> TrustformersResult<()> {
         if a.shape != b.shape || a.shape != result.shape {
-            return Err(anyhow!("Tensor shape mismatch for addition"));
+            return Err(anyhow!("Tensor shape mismatch for addition").into());
         }
 
         #[cfg(feature = "rocm")]
@@ -249,13 +233,10 @@ impl RocmOperations {
                 if result_code == 0 {
                     Ok(())
                 } else {
-                    Err(anyhow!(
-                        "Failed to copy tensor data: error code {}",
-                        result_code
-                    ))
+                    Err(anyhow!("Failed to copy tensor data: error code {}", result_code).into())
                 }
             } else {
-                Err(anyhow!("ROCm device {} not found", a.device_id))
+                Err(anyhow!("ROCm device {} not found", a.device_id).into())
             }
         }
 
@@ -279,7 +260,7 @@ impl RocmOperations {
         activation: &str,
     ) -> TrustformersResult<()> {
         if input.shape != output.shape {
-            return Err(anyhow!("Input and output tensor shapes must match"));
+            return Err(anyhow!("Input and output tensor shapes must match").into());
         }
 
         #[cfg(feature = "rocm")]
@@ -299,7 +280,7 @@ impl RocmOperations {
                 };
 
                 if result != 0 {
-                    return Err(anyhow!("Failed to copy tensor data: error code {}", result));
+                    return Err(anyhow!("Failed to copy tensor data: error code {}", result).into());
                 }
 
                 // Custom kernels would be launched here for each activation type
@@ -313,12 +294,16 @@ impl RocmOperations {
                     "tanh" => {
                         // Launch tanh kernel (placeholder)
                     },
-                    _ => return Err(anyhow!("Unsupported activation function: {}", activation)),
+                    _ => {
+                        return Err(
+                            anyhow!("Unsupported activation function: {}", activation).into()
+                        )
+                    },
                 }
 
                 Ok(())
             } else {
-                Err(anyhow!("ROCm device {} not found", input.device_id))
+                Err(anyhow!("ROCm device {} not found", input.device_id).into())
             }
         }
 
@@ -341,7 +326,7 @@ impl RocmOperations {
                     output.device_ptr,
                     input.shape.iter().product(),
                 ),
-                _ => return Err(anyhow!("Unsupported activation function: {}", activation)),
+                _ => return Err(anyhow!("Unsupported activation function: {}", activation).into()),
             }
             Ok(())
         }

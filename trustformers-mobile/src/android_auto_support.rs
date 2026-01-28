@@ -923,12 +923,12 @@ mod tests {
     #[test]
     fn test_android_auto_connection() {
         let config = AndroidAutoConfig::default();
-        let integration = AndroidAutoIntegration::new(config).unwrap();
+        let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
 
         let result = integration.connect();
         assert!(result.is_ok());
 
-        let status = integration.get_status().unwrap();
+        let status = integration.get_status().expect("Operation failed");
         assert!(status.connected);
         assert!(status.vehicle_info.is_some());
     }
@@ -936,28 +936,28 @@ mod tests {
     #[test]
     fn test_driving_state_updates() {
         let config = AndroidAutoConfig::default();
-        let integration = AndroidAutoIntegration::new(config).unwrap();
+        let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
 
-        integration.connect().unwrap();
+        integration.connect().expect("Operation failed");
 
         // Test moving state applies restrictions
-        integration.update_driving_state(DrivingState::Moving).unwrap();
-        let status = integration.get_status().unwrap();
+        integration.update_driving_state(DrivingState::Moving).expect("Operation failed");
+        let status = integration.get_status().expect("Operation failed");
         assert_eq!(status.driving_state, DrivingState::Moving);
         assert!(!status.safety_restrictions.is_empty());
 
         // Test parked state removes restrictions
-        integration.update_driving_state(DrivingState::Parked).unwrap();
-        let status = integration.get_status().unwrap();
+        integration.update_driving_state(DrivingState::Parked).expect("Operation failed");
+        let status = integration.get_status().expect("Operation failed");
         assert_eq!(status.driving_state, DrivingState::Parked);
     }
 
     #[test]
     fn test_emergency_handling() {
         let config = AndroidAutoConfig::default();
-        let integration = AndroidAutoIntegration::new(config).unwrap();
+        let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
 
-        integration.connect().unwrap();
+        integration.connect().expect("Operation failed");
 
         let result = integration.handle_emergency("collision_detected");
         assert!(result.is_ok());
@@ -968,9 +968,9 @@ mod tests {
         let mut config = AndroidAutoConfig::default();
         config.safety_mode.voice_only_while_driving = false;
 
-        let integration = AndroidAutoIntegration::new(config).unwrap();
-        integration.connect().unwrap();
-        integration.update_driving_state(DrivingState::Moving).unwrap();
+        let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
+        integration.connect().expect("Operation failed");
+        integration.update_driving_state(DrivingState::Moving).expect("Operation failed");
 
         let audio_data = vec![0.0; 1000];
         let result = integration.process_voice_command(&audio_data);
@@ -980,7 +980,7 @@ mod tests {
     #[test]
     fn test_sensor_data_updates() {
         let config = AndroidAutoConfig::default();
-        let integration = AndroidAutoIntegration::new(config).unwrap();
+        let integration = AndroidAutoIntegration::new(config).expect("Operation failed");
 
         let result = integration.update_sensor_data(
             "speed".to_string(),

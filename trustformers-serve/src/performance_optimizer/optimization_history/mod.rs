@@ -680,13 +680,37 @@ mod tests {
                 system_state: crate::performance_optimizer::types::SystemState::default(),
             },
             crate::performance_optimizer::types::PerformanceDataPoint {
+                parallelism: 2,
+                throughput: 190.0,
+                latency: std::time::Duration::from_millis(28),
+                cpu_utilization: 0.75,
+                memory_utilization: 0.62,
+                resource_efficiency: 0.86,
+                timestamp: Utc::now() + chrono::Duration::minutes(3),
+                test_characteristics:
+                    crate::performance_optimizer::types::TestCharacteristics::default(),
+                system_state: crate::performance_optimizer::types::SystemState::default(),
+            },
+            crate::performance_optimizer::types::PerformanceDataPoint {
                 parallelism: 4,
                 throughput: 320.0,
                 latency: std::time::Duration::from_millis(25),
                 cpu_utilization: 0.9,
                 memory_utilization: 0.7,
                 resource_efficiency: 0.9,
-                timestamp: Utc::now() + chrono::Duration::minutes(3),
+                timestamp: Utc::now() + chrono::Duration::minutes(4),
+                test_characteristics:
+                    crate::performance_optimizer::types::TestCharacteristics::default(),
+                system_state: crate::performance_optimizer::types::SystemState::default(),
+            },
+            crate::performance_optimizer::types::PerformanceDataPoint {
+                parallelism: 4,
+                throughput: 340.0,
+                latency: std::time::Duration::from_millis(23),
+                cpu_utilization: 0.92,
+                memory_utilization: 0.72,
+                resource_efficiency: 0.91,
+                timestamp: Utc::now() + chrono::Duration::minutes(5),
                 test_characteristics:
                     crate::performance_optimizer::types::TestCharacteristics::default(),
                 system_state: crate::performance_optimizer::types::SystemState::default(),
@@ -698,7 +722,43 @@ mod tests {
                 cpu_utilization: 0.95,
                 memory_utilization: 0.8,
                 resource_efficiency: 0.87,
-                timestamp: Utc::now() + chrono::Duration::minutes(4),
+                timestamp: Utc::now() + chrono::Duration::minutes(6),
+                test_characteristics:
+                    crate::performance_optimizer::types::TestCharacteristics::default(),
+                system_state: crate::performance_optimizer::types::SystemState::default(),
+            },
+            crate::performance_optimizer::types::PerformanceDataPoint {
+                parallelism: 8,
+                throughput: 600.0,
+                latency: std::time::Duration::from_millis(21),
+                cpu_utilization: 0.96,
+                memory_utilization: 0.82,
+                resource_efficiency: 0.88,
+                timestamp: Utc::now() + chrono::Duration::minutes(7),
+                test_characteristics:
+                    crate::performance_optimizer::types::TestCharacteristics::default(),
+                system_state: crate::performance_optimizer::types::SystemState::default(),
+            },
+            crate::performance_optimizer::types::PerformanceDataPoint {
+                parallelism: 16,
+                throughput: 1000.0,
+                latency: std::time::Duration::from_millis(20),
+                cpu_utilization: 0.98,
+                memory_utilization: 0.85,
+                resource_efficiency: 0.85,
+                timestamp: Utc::now() + chrono::Duration::minutes(8),
+                test_characteristics:
+                    crate::performance_optimizer::types::TestCharacteristics::default(),
+                system_state: crate::performance_optimizer::types::SystemState::default(),
+            },
+            crate::performance_optimizer::types::PerformanceDataPoint {
+                parallelism: 16,
+                throughput: 1050.0,
+                latency: std::time::Duration::from_millis(19),
+                cpu_utilization: 0.99,
+                memory_utilization: 0.87,
+                resource_efficiency: 0.84,
+                timestamp: Utc::now() + chrono::Duration::minutes(9),
                 test_characteristics:
                     crate::performance_optimizer::types::TestCharacteristics::default(),
                 system_state: crate::performance_optimizer::types::SystemState::default(),
@@ -712,6 +772,6 @@ mod tests {
         assert!(analysis.is_ok());
 
         let result = analysis.unwrap();
-        assert_eq!(result.data_points, 5);
+        assert_eq!(result.data_points, 10);
     }
 }

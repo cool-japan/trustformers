@@ -940,7 +940,15 @@ impl NotificationManager {
             let handle = tokio::spawn(async move {
                 loop {
                     // Acquire processing permit
-                    let _permit = semaphore.acquire().await.unwrap();
+                    let _permit = match semaphore.acquire().await {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            tracing::warn!(
+                                "Notification processing semaphore closed, shutting down worker"
+                            );
+                            break;
+                        },
+                    };
 
                     // Get next notification from queue
                     let notification = {
@@ -3100,6 +3108,12 @@ impl GlobalRateLimiter {
     }
 }
 
+impl Default for PriorityQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PriorityQueue {
     pub fn new() -> Self {
         Self {
@@ -3153,8 +3167,7 @@ impl AdaptiveRateController {
         };
 
         // TODO: Added f64 type annotation to fix E0689 ambiguous numeric type
-        let clamped_rate =
-            target_rate.clamp(self.config.min_rate as f64, self.config.max_rate as f64);
+        let clamped_rate = target_rate.clamp(self.config.min_rate, self.config.max_rate);
 
         if (clamped_rate - current_rate).abs() > current_rate * self.config.sensitivity as f64 {
             Some(RateAdjustment {
@@ -3322,7 +3335,7 @@ impl AlertProcessor for DefaultAlertProcessor {
                 SeverityLevel::Medium => NotificationPriority::Normal,
                 _ => NotificationPriority::Low,
             },
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::BestEffort,
             created_at: Utc::now(),
             deadline: None,
@@ -3383,7 +3396,7 @@ impl AlertProcessor for PerformanceAlertProcessor {
             subject: format!("Performance Alert: {}", alert.threshold.name),
             content: format!("Performance issue detected: {}", alert.message),
             priority: NotificationPriority::High,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::AtLeastOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(15)),
@@ -3457,7 +3470,7 @@ impl AlertProcessor for ResourceAlertProcessor {
             subject: format!("Resource Alert: {}", alert.threshold.name),
             content: format!("Resource issue detected: {}", alert.message),
             priority: NotificationPriority::High,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::AtLeastOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(10)),
@@ -3549,7 +3562,7 @@ impl AlertProcessor for CriticalAlertProcessor {
                 alert.message
             ),
             priority: NotificationPriority::Emergency,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::ExactlyOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(5)),
@@ -3599,7 +3612,7 @@ impl AlertProcessor for CriticalAlertProcessor {
                 alert.message
             ),
             priority: NotificationPriority::Emergency,
-            severity: alert.severity.clone(),
+            severity: alert.severity,
             delivery_guarantee: DeliveryGuarantee::ExactlyOnce,
             created_at: Utc::now(),
             deadline: Some(Utc::now() + ChronoDuration::minutes(2)),
@@ -4249,7 +4262,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_default_alert_processor() {
-        let processor = DefaultAlertProcessor::new().await.unwrap();
+        let processor = DefaultAlertProcessor::new().await.expect("Failed to create processor");
 
         let alert = AlertEvent {
             timestamp: Utc::now(),
@@ -4277,14 +4290,14 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        let notifications = processor.process_alert(&alert).await.unwrap();
+        let notifications = processor.process_alert(&alert).await.expect("Failed to process alert");
         assert_eq!(notifications.len(), 1);
         assert_eq!(notifications[0].alert_id, "test_alert");
     }
 
     #[tokio::test]
     async fn test_log_notification_channel() {
-        let channel = LogNotificationChannel::new().await.unwrap();
+        let channel = LogNotificationChannel::new().await.expect("Failed to create channel");
 
         let notification = Notification {
             id: "test_notification".to_string(),
@@ -4306,7 +4319,10 @@ mod tests {
             correlation_id: None,
         };
 
-        let result = channel.send_notification(&notification).await.unwrap();
+        let result = channel
+            .send_notification(&notification)
+            .await
+            .expect("Failed to send notification");
         assert!(result.success);
         assert!(result.delivered_at.is_some());
     }

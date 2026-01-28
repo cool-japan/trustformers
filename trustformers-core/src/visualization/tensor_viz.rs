@@ -6,6 +6,7 @@
 
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
+use scirs2_core::ArrayD;
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
 
@@ -660,7 +661,7 @@ impl TensorVisualizer {
     }
 
     /// Format 1D tensor
-    fn format_1d_tensor(&self, arr: &ndarray::ArrayD<f32>) -> Result<String> {
+    fn format_1d_tensor(&self, arr: &ArrayD<f32>) -> Result<String> {
         let mut output = String::new();
         let len = arr.len();
         let max_display = self.config.max_display_elements;
@@ -716,7 +717,7 @@ impl TensorVisualizer {
     }
 
     /// Format 2D tensor
-    fn format_2d_tensor(&self, arr: &ndarray::ArrayD<f32>) -> Result<String> {
+    fn format_2d_tensor(&self, arr: &ArrayD<f32>) -> Result<String> {
         let mut output = String::new();
         let shape = arr.shape();
         let rows = shape[0];
@@ -799,7 +800,7 @@ impl TensorVisualizer {
     }
 
     /// Format N-dimensional tensor
-    fn format_nd_tensor(&self, arr: &ndarray::ArrayD<f32>) -> Result<String> {
+    fn format_nd_tensor(&self, arr: &ArrayD<f32>) -> Result<String> {
         let shape = arr.shape();
         Ok(format!(
             "Tensor with shape {:?} (displaying shape only for >2D tensors)",
@@ -951,7 +952,7 @@ mod tests {
     #[test]
     fn test_statistics_computation() {
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let tensor = Tensor::from_vec(data, &[5]).unwrap();
+        let tensor = Tensor::from_vec(data, &[5]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
         let stats = visualizer.compute_statistics(&tensor).unwrap();
@@ -966,7 +967,7 @@ mod tests {
     #[test]
     fn test_heatmap_creation() {
         let data = vec![1.0, 2.0, 3.0, 4.0];
-        let tensor = Tensor::from_vec(data, &[2, 2]).unwrap();
+        let tensor = Tensor::from_vec(data, &[2, 2]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
         let heatmap = visualizer.create_heatmap(&tensor).unwrap();
@@ -980,7 +981,7 @@ mod tests {
     #[test]
     fn test_histogram_creation() {
         let data = vec![1.0, 2.0, 2.0, 3.0, 3.0, 3.0];
-        let tensor = Tensor::from_vec(data, &[6]).unwrap();
+        let tensor = Tensor::from_vec(data, &[6]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
         let histogram = visualizer.create_histogram(&tensor, 3).unwrap();
@@ -993,7 +994,7 @@ mod tests {
     #[test]
     fn test_text_visualization() {
         let data = vec![1.0, 2.0, 3.0, 4.0];
-        let tensor = Tensor::from_vec(data, &[2, 2]).unwrap();
+        let tensor = Tensor::from_vec(data, &[2, 2]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
         let result = visualizer.visualize_tensor(&tensor).unwrap();
@@ -1006,10 +1007,12 @@ mod tests {
     #[test]
     fn test_json_visualization() {
         let data = vec![1.0, 2.0, 3.0, 4.0];
-        let tensor = Tensor::from_vec(data, &[4]).unwrap();
+        let tensor = Tensor::from_vec(data, &[4]).expect("Tensor from_vec failed");
 
-        let mut config = VisualizationConfig::default();
-        config.output_format = OutputFormat::JSON;
+        let config = VisualizationConfig {
+            output_format: OutputFormat::JSON,
+            ..Default::default()
+        };
         let visualizer = TensorVisualizer::with_config(config);
 
         let result = visualizer.visualize_tensor(&tensor).unwrap();
@@ -1020,10 +1023,12 @@ mod tests {
     #[test]
     fn test_html_visualization() {
         let data = vec![1.0, 2.0, 3.0, 4.0];
-        let tensor = Tensor::from_vec(data, &[2, 2]).unwrap();
+        let tensor = Tensor::from_vec(data, &[2, 2]).expect("Tensor from_vec failed");
 
-        let mut config = VisualizationConfig::default();
-        config.output_format = OutputFormat::HTML;
+        let config = VisualizationConfig {
+            output_format: OutputFormat::HTML,
+            ..Default::default()
+        };
         let visualizer = TensorVisualizer::with_config(config);
 
         let result = visualizer.visualize_tensor(&tensor).unwrap();
@@ -1044,8 +1049,8 @@ mod tests {
     fn test_tensor_comparison() {
         let data1 = vec![1.0, 2.0, 3.0, 4.0];
         let data2 = vec![1.1, 2.1, 3.1, 4.1];
-        let tensor1 = Tensor::from_vec(data1, &[4]).unwrap();
-        let tensor2 = Tensor::from_vec(data2, &[4]).unwrap();
+        let tensor1 = Tensor::from_vec(data1, &[4]).expect("Tensor from_vec failed");
+        let tensor2 = Tensor::from_vec(data2, &[4]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
         let comparison = visualizer.compare_tensors(&tensor1, &tensor2).unwrap();
@@ -1059,8 +1064,9 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = VisualizationConfig::default();
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: VisualizationConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: VisualizationConfig =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(
             config.max_display_elements,

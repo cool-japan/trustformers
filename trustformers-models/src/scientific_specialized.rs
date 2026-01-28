@@ -1305,7 +1305,7 @@ mod tests {
     fn test_domain_and_size_creation() {
         let config = ScientificConfig::from_domain_and_size(ScientificDomain::Chemistry, "7b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.scientific_domain, ScientificDomain::Chemistry);
     }
 

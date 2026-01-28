@@ -299,6 +299,12 @@ pub struct CircuitBreakerStats {
     pub created_at: u64, // Unix timestamp in seconds
 }
 
+impl Default for CircuitBreakerStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CircuitBreakerStats {
     pub fn new() -> Self {
         Self {

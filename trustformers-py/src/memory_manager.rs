@@ -1,9 +1,12 @@
-use crate::errors::{TrustformersPyError, TrustformersPyResult};
+// Allow result_large_err for internal functions - TrustformersError is intentionally detailed
+// Allow excessive_nesting for complex memory management algorithms
+#![allow(clippy::result_large_err, clippy::excessive_nesting)]
+
+use crate::errors::TrustformersPyResult;
 use parking_lot::RwLock;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 /// Memory statistics for monitoring
 #[derive(Debug, Clone, Default)]
@@ -17,7 +20,6 @@ pub struct MemoryStats {
 
 /// Custom memory allocator with tracking
 pub struct TrackingAllocator {
-    stats: Arc<RwLock<MemoryStats>>,
     current_usage: AtomicUsize,
     peak_usage: AtomicUsize,
     total_allocated: AtomicUsize,
@@ -25,16 +27,21 @@ pub struct TrackingAllocator {
     active_allocations: AtomicUsize,
 }
 
-impl TrackingAllocator {
-    pub fn new() -> Self {
+impl Default for TrackingAllocator {
+    fn default() -> Self {
         Self {
-            stats: Arc::new(RwLock::new(MemoryStats::default())),
             current_usage: AtomicUsize::new(0),
             peak_usage: AtomicUsize::new(0),
             total_allocated: AtomicUsize::new(0),
             total_deallocated: AtomicUsize::new(0),
             active_allocations: AtomicUsize::new(0),
         }
+    }
+}
+
+impl TrackingAllocator {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn get_stats(&self) -> MemoryStats {
@@ -131,7 +138,7 @@ impl<T: Default + Clone> MemoryPool<T> {
         }
 
         let mut pools = self.pools.write();
-        let pool = pools.entry(size).or_insert_with(Vec::new);
+        let pool = pools.entry(size).or_default();
 
         if pool.len() < self.max_pool_size {
             pool.push(buffer);
@@ -162,14 +169,20 @@ pub struct GlobalMemoryManager {
     tracking_allocator: TrackingAllocator,
 }
 
-impl GlobalMemoryManager {
-    pub fn new() -> Self {
+impl Default for GlobalMemoryManager {
+    fn default() -> Self {
         Self {
             f32_pool: MemoryPool::new(100), // Keep up to 100 buffers per size
             i32_pool: MemoryPool::new(50),
             f64_pool: MemoryPool::new(50),
-            tracking_allocator: TrackingAllocator::new(),
+            tracking_allocator: TrackingAllocator::default(),
         }
+    }
+}
+
+impl GlobalMemoryManager {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn get_f32_buffer(&self, size: usize) -> Box<[f32]> {
@@ -367,13 +380,13 @@ impl MemoryMonitor {
             // Trigger Python GC if available
             #[cfg(feature = "python-gc")]
             {
+                use pyo3::types::PyAnyMethods;
                 use pyo3::Python;
-                if let Ok(py) = Python::acquire_gil() {
-                    let py = py.python();
+                let _ = Python::try_attach(|py| {
                     if let Ok(gc) = py.import("gc") {
                         let _ = gc.call_method0("collect");
                     }
-                }
+                });
             }
         }
     }
@@ -423,7 +436,7 @@ impl MemoryPressureManager {
 
     /// Get current memory pressure as a percentage (0.0 to 1.0)
     fn get_memory_pressure(&self) -> TrustformersPyResult<f64> {
-        let used_memory = MemoryMonitor::get_process_memory_usage()?;
+        let _used_memory = MemoryMonitor::get_process_memory_usage()?;
 
         // Get available system memory (simplified approach)
         #[cfg(target_os = "linux")]
@@ -548,8 +561,8 @@ where
                     cache.iter().map(|(k, (_, timestamp))| (k.clone(), *timestamp)).collect();
                 items.sort_by_key(|(_, timestamp)| *timestamp);
 
-                for i in 0..items_to_remove.min(items.len()) {
-                    cache.remove(&items[i].0);
+                for (key, _) in items.iter().take(items_to_remove.min(items.len())) {
+                    cache.remove(key);
                 }
             },
             EvictionStrategy::TTL => {
@@ -563,8 +576,8 @@ where
                         cache.iter().map(|(k, (_, timestamp))| (k.clone(), *timestamp)).collect();
                     items.sort_by_key(|(_, timestamp)| *timestamp);
 
-                    for i in 0..items_to_remove.min(items.len()) {
-                        cache.remove(&items[i].0);
+                    for (key, _) in items.iter().take(items_to_remove.min(items.len())) {
+                        cache.remove(key);
                     }
                 }
             },
@@ -591,20 +604,18 @@ where
     }
 }
 
-/// Global memory pressure manager instance
-static mut GLOBAL_PRESSURE_MANAGER: Option<MemoryPressureManager> = None;
-static PRESSURE_MANAGER_INIT: std::sync::Once = std::sync::Once::new();
+/// Global memory pressure manager instance (using safe OnceLock pattern)
+static GLOBAL_PRESSURE_MANAGER: std::sync::OnceLock<RwLock<MemoryPressureManager>> =
+    std::sync::OnceLock::new();
 
 /// Initialize global memory pressure management
 pub fn init_memory_pressure_management(threshold: f64) {
-    PRESSURE_MANAGER_INIT.call_once(|| unsafe {
-        GLOBAL_PRESSURE_MANAGER = Some(MemoryPressureManager::new(threshold));
-    });
+    GLOBAL_PRESSURE_MANAGER.get_or_init(|| RwLock::new(MemoryPressureManager::new(threshold)));
 }
 
 /// Get global memory pressure manager
-pub fn get_pressure_manager() -> Option<&'static mut MemoryPressureManager> {
-    unsafe { GLOBAL_PRESSURE_MANAGER.as_mut() }
+pub fn get_pressure_manager() -> Option<&'static RwLock<MemoryPressureManager>> {
+    GLOBAL_PRESSURE_MANAGER.get()
 }
 
 #[cfg(test)]

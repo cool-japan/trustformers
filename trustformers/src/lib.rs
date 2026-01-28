@@ -22,6 +22,21 @@
 #![allow(clippy::type_complexity)]
 #![allow(clippy::excessive_nesting)]
 #![allow(clippy::large_enum_variant)]
+// Allow integration-specific patterns
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::manual_clamp)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::vec_init_then_push)]
+#![allow(clippy::match_single_binding)]
+#![allow(clippy::format_in_format_args)]
+#![allow(clippy::explicit_counter_loop)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::await_holding_lock)]
+#![allow(clippy::arc_with_non_send_sync)]
+#![allow(clippy::module_inception)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::manual_strip)]
+#![allow(clippy::empty_line_after_doc_comments)]
 
 pub mod auto;
 pub mod auto_classes;

@@ -655,10 +655,10 @@ impl GraphOptimizationService {
         let mut rec_stack = HashSet::new();
 
         for node_id in graph.nodes.keys() {
-            if !visited.contains(node_id) {
-                if self.has_cycles_util(node_id, graph, &mut visited, &mut rec_stack) {
-                    return true;
-                }
+            if !visited.contains(node_id)
+                && self.has_cycles_util(node_id, graph, &mut visited, &mut rec_stack)
+            {
+                return true;
             }
         }
 

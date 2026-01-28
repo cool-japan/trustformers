@@ -192,6 +192,14 @@ pub fn quantize_q5_0(tensor: &Tensor) -> Result<Vec<BlockQ5_0>> {
         Tensor::Torch(_) => return Err(anyhow!("Torch tensors not yet supported").into()),
         #[cfg(feature = "candle")]
         Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        Tensor::Metal(_) => {
+            return Err(anyhow!("Metal tensors not yet supported for quantization").into())
+        },
+        #[cfg(feature = "cuda")]
+        Tensor::CUDA(_) => {
+            return Err(anyhow!("CUDA tensors not yet supported for quantization").into())
+        },
     };
 
     let n = values.len();
@@ -315,6 +323,14 @@ pub fn quantize_q5_1(tensor: &Tensor) -> Result<Vec<BlockQ5_1>> {
         Tensor::Torch(_) => return Err(anyhow!("Torch tensors not yet supported").into()),
         #[cfg(feature = "candle")]
         Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        Tensor::Metal(_) => {
+            return Err(anyhow!("Metal tensors not yet supported for quantization").into())
+        },
+        #[cfg(feature = "cuda")]
+        Tensor::CUDA(_) => {
+            return Err(anyhow!("CUDA tensors not yet supported for quantization").into())
+        },
     };
 
     let n = values.len();
@@ -417,6 +433,14 @@ pub fn quantize_q6_k(tensor: &Tensor) -> Result<Vec<BlockQ6K>> {
         Tensor::Torch(_) => return Err(anyhow!("Torch tensors not yet supported").into()),
         #[cfg(feature = "candle")]
         Tensor::Candle(_) => return Err(anyhow!("Candle tensors not yet supported").into()),
+        #[cfg(all(target_os = "macos", feature = "metal"))]
+        Tensor::Metal(_) => {
+            return Err(anyhow!("Metal tensors not yet supported for quantization").into())
+        },
+        #[cfg(feature = "cuda")]
+        Tensor::CUDA(_) => {
+            return Err(anyhow!("CUDA tensors not yet supported for quantization").into())
+        },
     };
 
     let n = values.len();
@@ -634,14 +658,14 @@ mod tests {
 
         // Quantize
         let quantizer = AdvancedGGMLQuantizer::new(GGMLQuantType::Q5_0);
-        let quantized = quantizer.quantize(&tensor).unwrap();
+        let quantized = quantizer.quantize(&tensor).expect("Quantization failed");
 
         // Check compression
         let compression = quantizer.compression_ratio(64);
         assert!(compression > 5.0 && compression < 6.0);
 
         // Dequantize and check error
-        let dequantized = quantized.dequantize().unwrap();
+        let dequantized = quantized.dequantize().expect("Dequantization failed");
         match dequantized {
             Tensor::F32(data) => {
                 let deq_values = data.as_slice().unwrap();
@@ -665,14 +689,14 @@ mod tests {
 
         // Quantize
         let quantizer = AdvancedGGMLQuantizer::new(GGMLQuantType::Q6K);
-        let quantized = quantizer.quantize(&tensor).unwrap();
+        let quantized = quantizer.quantize(&tensor).expect("Quantization failed");
 
         // Check memory usage
         let memory = quantized.memory_usage();
         assert!(memory < values.len() * 4); // Should be compressed
 
         // Dequantize and check
-        let dequantized = quantized.dequantize().unwrap();
+        let dequantized = quantized.dequantize().expect("Dequantization failed");
         match dequantized {
             Tensor::F32(data) => {
                 let deq_values = data.as_slice().unwrap();
@@ -699,8 +723,8 @@ mod tests {
         let tensor_f64 = base_tensor_f64.to_dtype(DType::F64).unwrap();
 
         let quantizer = AdvancedGGMLQuantizer::new(GGMLQuantType::Q5_0);
-        let quantized_f64 = quantizer.quantize(&tensor_f64).unwrap();
-        let dequantized_f64 = quantized_f64.dequantize().unwrap();
+        let quantized_f64 = quantizer.quantize(&tensor_f64).expect("Quantization failed");
+        let dequantized_f64 = quantized_f64.dequantize().expect("Dequantization failed");
 
         match dequantized_f64 {
             Tensor::F32(data) => {
@@ -720,8 +744,8 @@ mod tests {
         let base_tensor_i64 = Tensor::from_vec(values_i32.clone(), &[64]).unwrap();
         let tensor_i64 = base_tensor_i64.to_dtype(DType::I64).unwrap();
 
-        let quantized_i64 = quantizer.quantize(&tensor_i64).unwrap();
-        let dequantized_i64 = quantized_i64.dequantize().unwrap();
+        let quantized_i64 = quantizer.quantize(&tensor_i64).expect("Quantization failed");
+        let dequantized_i64 = quantized_i64.dequantize().expect("Dequantization failed");
 
         match dequantized_i64 {
             Tensor::F32(data) => {

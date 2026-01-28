@@ -1,6 +1,6 @@
 use anyhow::Result;
-use ndarray_rand::RandomExt;
 use scirs2_core::ndarray::{s, Array1, Array2}; // SciRS2 Integration Policy
+use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -549,10 +549,10 @@ impl SharedEncoder {
 
             // Xavier initialization
             let bound = (6.0 / (input_dim + output_dim) as f32).sqrt();
-            let layer = Array2::random(
-                (input_dim, output_dim),
-                ndarray_rand::rand_distr::Uniform::new(-bound, bound),
-            );
+            let mut rng = thread_rng();
+            let uniform = Uniform::new(-bound, bound).expect("Invalid uniform distribution bounds");
+            let layer =
+                Array2::from_shape_fn((input_dim, output_dim), |_| uniform.sample(&mut rng));
             layers.push(layer);
         }
 

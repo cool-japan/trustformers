@@ -964,6 +964,7 @@ impl ErrorRecoverySystem {
     }
 
     /// Execute operation with comprehensive error handling and recovery
+    #[allow(clippy::result_large_err)]
     pub async fn execute_with_recovery<F, T, Fut>(
         &mut self,
         operation: F,
@@ -975,6 +976,7 @@ impl ErrorRecoverySystem {
         let circuit_breaker = &mut self.circuit_breaker;
         let operation_clone = operation.clone();
 
+        #[allow(clippy::result_large_err)]
         match circuit_breaker.execute(|| -> Result<(), TrustformersError> {
             // This is a sync wrapper for the async operation
             // In real implementation, this would need proper async handling

@@ -535,7 +535,7 @@ impl WasmTensor {
     /// Generate normal distribution using Box-Muller transform
     fn generate_normal_distribution(size: usize) -> Result<Vec<f32>, String> {
         let mut data = Vec::with_capacity(size);
-        let mut rng_bytes = vec![0u8; (size * 8 + 7) / 8 * 8]; // Ensure we have enough bytes, rounded up
+        let mut rng_bytes = vec![0u8; (size * 8).div_ceil(8) * 8]; // Ensure we have enough bytes, rounded up
         getrandom::fill(&mut rng_bytes)
             .map_err(|e| format!("Random generation failed: {:?}", e))?;
 

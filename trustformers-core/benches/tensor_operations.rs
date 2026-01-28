@@ -3,7 +3,10 @@
 //! This module contains comprehensive benchmarks for all tensor operations
 //! to track performance regressions and optimize critical paths.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+#![allow(clippy::result_large_err)]
+
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use trustformers_core::tensor::Tensor;
 
 // Helper function to create test tensors of various sizes

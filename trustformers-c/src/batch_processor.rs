@@ -3,7 +3,7 @@
 //! This module provides advanced batch processing capabilities for TrustformeRS model serving,
 //! including dynamic batching, request queuing, and performance optimization.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -502,12 +502,7 @@ impl BatchProcessor {
 
     /// Get current statistics
     pub fn get_stats(&self) -> BatchProcessorStats {
-        self.stats
-            .lock()
-            .unwrap_or_else(|_| {
-                std::panic::catch_unwind(|| BatchProcessorStats::default()).unwrap_or_default()
-            })
-            .clone()
+        self.stats.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// Shutdown the batch processor

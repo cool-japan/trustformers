@@ -5,9 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-debug"
 description = "Advanced debugging tools for TrustformeRS models"
 keywords = ["debugging", "tensor", "gradient", "ml", "diagnostics"]
 categories = ["development-tools", "science"]
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -60,7 +63,7 @@ web-sys = { version = "0.3", features = ["console"], optional = true }
 
 # Internal dependencies
 trustformers-core.workspace = true
-scirs2-core.workspace = true
+scirs2-core = { workspace = true }
 
 [dev-dependencies]
 tokio-test.workspace = true
@@ -69,7 +72,8 @@ tempfile.workspace = true
 
 [features]
 default = ["visual"]
-visual = ["plotters", "tui", "crossterm", "ratatui"]
+visual = ["plotters", "ratatui", "crossterm"]  # Using ratatui (maintained fork of tui)
+legacy-tui = ["tui", "crossterm"]  # Deprecated: use ratatui instead
 video = ["gif", "image", "ffmpeg-next"]
 gif = ["dep:gif", "image"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]

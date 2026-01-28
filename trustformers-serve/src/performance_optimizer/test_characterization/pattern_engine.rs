@@ -1335,7 +1335,7 @@ impl PatternClassificationEngine {
 
         // Create enhanced pattern with classification
         let mut enhanced_pattern = pattern.clone();
-        enhanced_pattern.confidence = enhanced_pattern.confidence * ensemble_confidence;
+        enhanced_pattern.confidence *= ensemble_confidence;
 
         // Add classification metadata
         enhanced_pattern.metadata.insert(
@@ -2353,6 +2353,12 @@ pub struct TrainingScheduler {
     training_in_progress: bool,
 }
 
+impl Default for TrainingScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrainingScheduler {
     pub fn new() -> Self {
         Self {
@@ -2415,6 +2421,12 @@ pub struct CorrelationMatrix {
     matrix: HashMap<(String, String), f64>,
     variable_names: Vec<String>,
     last_updated: Instant,
+}
+
+impl Default for CorrelationMatrix {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CorrelationMatrix {
@@ -2780,6 +2792,12 @@ impl ClassificationModel {
 // Feature extractors
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceFeatureExtractor;
+impl Default for ResourceFeatureExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceFeatureExtractor {
     pub fn new() -> Self {
         Self
@@ -2788,6 +2806,12 @@ impl ResourceFeatureExtractor {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PerformanceFeatureExtractor;
+impl Default for PerformanceFeatureExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceFeatureExtractor {
     pub fn new() -> Self {
         Self
@@ -2796,6 +2820,12 @@ impl PerformanceFeatureExtractor {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TemporalFeatureExtractor;
+impl Default for TemporalFeatureExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TemporalFeatureExtractor {
     pub fn new() -> Self {
         Self
@@ -2804,6 +2834,12 @@ impl TemporalFeatureExtractor {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ConcurrencyFeatureExtractor;
+impl Default for ConcurrencyFeatureExtractor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConcurrencyFeatureExtractor {
     pub fn new() -> Self {
         Self
@@ -2813,6 +2849,12 @@ impl ConcurrencyFeatureExtractor {
 // Statistical analyzers
 #[derive(Debug, Clone, Copy)]
 pub struct CorrelationAnalyzer;
+impl Default for CorrelationAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CorrelationAnalyzer {
     pub fn new() -> Self {
         Self
@@ -2821,6 +2863,12 @@ impl CorrelationAnalyzer {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TimeSeriesAnalyzer;
+impl Default for TimeSeriesAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeSeriesAnalyzer {
     pub fn new() -> Self {
         Self
@@ -2829,6 +2877,12 @@ impl TimeSeriesAnalyzer {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ClusteringAnalyzer;
+impl Default for ClusteringAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ClusteringAnalyzer {
     pub fn new() -> Self {
         Self
@@ -2837,6 +2891,12 @@ impl ClusteringAnalyzer {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AnomalyAnalyzer;
+impl Default for AnomalyAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AnomalyAnalyzer {
     pub fn new() -> Self {
         Self
@@ -2846,6 +2906,12 @@ impl AnomalyAnalyzer {
 // Classification implementations
 #[derive(Debug, Clone, Copy)]
 pub struct PerformanceImpactClassifier;
+impl Default for PerformanceImpactClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceImpactClassifier {
     pub fn new() -> Self {
         Self
@@ -2854,6 +2920,12 @@ impl PerformanceImpactClassifier {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceUsageClassifier;
+impl Default for ResourceUsageClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceUsageClassifier {
     pub fn new() -> Self {
         Self
@@ -2862,6 +2934,12 @@ impl ResourceUsageClassifier {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TemporalPatternClassifier;
+impl Default for TemporalPatternClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TemporalPatternClassifier {
     pub fn new() -> Self {
         Self
@@ -2870,6 +2948,12 @@ impl TemporalPatternClassifier {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AntiPatternClassifier;
+impl Default for AntiPatternClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AntiPatternClassifier {
     pub fn new() -> Self {
         Self
@@ -2879,6 +2963,12 @@ impl AntiPatternClassifier {
 // Confidence calculators
 #[derive(Debug, Clone, Copy)]
 pub struct StatisticalConfidenceCalculator;
+impl Default for StatisticalConfidenceCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StatisticalConfidenceCalculator {
     pub fn new() -> Self {
         Self
@@ -2887,6 +2977,12 @@ impl StatisticalConfidenceCalculator {
 
 #[derive(Debug, Clone, Copy)]
 pub struct HistoricalConfidenceCalculator;
+impl Default for HistoricalConfidenceCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HistoricalConfidenceCalculator {
     pub fn new() -> Self {
         Self
@@ -2895,6 +2991,12 @@ impl HistoricalConfidenceCalculator {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ConsistencyConfidenceCalculator;
+impl Default for ConsistencyConfidenceCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConsistencyConfidenceCalculator {
     pub fn new() -> Self {
         Self
@@ -2904,6 +3006,12 @@ impl ConsistencyConfidenceCalculator {
 // Evolution analysis algorithms
 #[derive(Debug, Clone, Copy)]
 pub struct TrendAnalysisAlgorithm;
+impl Default for TrendAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrendAnalysisAlgorithm {
     pub fn new() -> Self {
         Self
@@ -2912,6 +3020,12 @@ impl TrendAnalysisAlgorithm {
 
 #[derive(Debug, Clone, Copy)]
 pub struct SeasonalityAnalysisAlgorithm;
+impl Default for SeasonalityAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SeasonalityAnalysisAlgorithm {
     pub fn new() -> Self {
         Self
@@ -2920,6 +3034,12 @@ impl SeasonalityAnalysisAlgorithm {
 
 #[derive(Debug, Clone, Copy)]
 pub struct StabilityAnalysisAlgorithm;
+impl Default for StabilityAnalysisAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StabilityAnalysisAlgorithm {
     pub fn new() -> Self {
         Self
@@ -2929,6 +3049,12 @@ impl StabilityAnalysisAlgorithm {
 // Anti-pattern detectors
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceLeakDetector;
+impl Default for ResourceLeakDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceLeakDetector {
     pub fn new() -> Self {
         Self
@@ -2937,6 +3063,12 @@ impl ResourceLeakDetector {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PerformanceBottleneckDetector;
+impl Default for PerformanceBottleneckDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceBottleneckDetector {
     pub fn new() -> Self {
         Self
@@ -2946,6 +3078,12 @@ impl PerformanceBottleneckDetector {
 // Severity calculators
 #[derive(Debug, Clone, Copy)]
 pub struct ImpactBasedSeverityCalculator;
+impl Default for ImpactBasedSeverityCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImpactBasedSeverityCalculator {
     pub fn new() -> Self {
         Self
@@ -2954,6 +3092,12 @@ impl ImpactBasedSeverityCalculator {
 
 #[derive(Debug, Clone, Copy)]
 pub struct FrequencyBasedSeverityCalculator;
+impl Default for FrequencyBasedSeverityCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrequencyBasedSeverityCalculator {
     pub fn new() -> Self {
         Self
@@ -2963,6 +3107,12 @@ impl FrequencyBasedSeverityCalculator {
 // Recommendation generators
 #[derive(Debug, Clone, Copy)]
 pub struct PerformanceRecommendationGenerator;
+impl Default for PerformanceRecommendationGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PerformanceRecommendationGenerator {
     pub fn new() -> Self {
         Self
@@ -2971,6 +3121,12 @@ impl PerformanceRecommendationGenerator {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ResourceRecommendationGenerator;
+impl Default for ResourceRecommendationGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceRecommendationGenerator {
     pub fn new() -> Self {
         Self
@@ -2979,6 +3135,12 @@ impl ResourceRecommendationGenerator {
 
 #[derive(Debug, Clone, Copy)]
 pub struct ConcurrencyRecommendationGenerator;
+impl Default for ConcurrencyRecommendationGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConcurrencyRecommendationGenerator {
     pub fn new() -> Self {
         Self
@@ -2988,6 +3150,12 @@ impl ConcurrencyRecommendationGenerator {
 // Priority calculators
 #[derive(Debug, Clone, Copy)]
 pub struct ImpactBasedPriorityCalculator;
+impl Default for ImpactBasedPriorityCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImpactBasedPriorityCalculator {
     pub fn new() -> Self {
         Self
@@ -2996,6 +3164,12 @@ impl ImpactBasedPriorityCalculator {
 
 #[derive(Debug, Clone, Copy)]
 pub struct EffortBasedPriorityCalculator;
+impl Default for EffortBasedPriorityCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EffortBasedPriorityCalculator {
     pub fn new() -> Self {
         Self

@@ -1,0 +1,31 @@
+[
+  [
+    {
+      "operation": "Softmax",
+      "backend": "CPU",
+      "device_name": "Generic CPU",
+      "input_shape": [
+        1024,
+        512
+      ]
+    },
+    {
+      "operation": "Softmax",
+      "block_size": [
+        32,
+        32,
+        1
+      ],
+      "threads_per_block": 256,
+      "use_shared_memory": true,
+      "unroll_factor": 4,
+      "vector_width": 4,
+      "grid_size": [
+        1,
+        1,
+        1
+      ],
+      "estimated_time_us": 0.0
+    }
+  ]
+]

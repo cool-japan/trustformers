@@ -694,7 +694,7 @@ impl BitAllocator {
 
         // Sort layers by sensitivity (highest first)
         let mut sorted_layers: Vec<_> = sensitivity_results.layer_sensitivities.iter().collect();
-        sorted_layers.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        sorted_layers.sort_by(|a, b| b.1.partial_cmp(a.1).expect("operation failed"));
 
         for (layer_name, &sensitivity) in sorted_layers {
             // Allocate higher bits to more sensitive layers

@@ -101,3 +101,7 @@ trustformers-debug/modern_debug_plots
 
 # miscs
 trustformers-py/test_results
+
+# CLAUDE
+**/CLAUDE.md
+**/.claude/

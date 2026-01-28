@@ -425,11 +425,11 @@ impl Optimizer for AdaMaxPlus {
     }
 
     fn update(&mut self, parameter: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        let param_id = format!("{:p}", parameter.data()?.as_ptr());
+        // Get parameter data (bind to variable before taking pointer)
+        let param_data = parameter.data()?;
+        let param_id = format!("{:p}", param_data.as_ptr());
+        let param_size = param_data.len();
         self.state.step_count += 1;
-
-        // Get parameter size for initialization
-        let param_size = parameter.data()?.len();
 
         // Get or initialize momentum using OptimizerState methods
         let momentum_data = {

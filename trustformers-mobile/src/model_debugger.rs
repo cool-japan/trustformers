@@ -898,7 +898,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        let info = debugger.get_model_debug_info("test_model").unwrap();
+        let info = debugger.get_model_debug_info("test_model").expect("Operation failed");
         assert_eq!(info.model_id, "test_model");
         assert_eq!(info.model_type, "transformer");
         assert_eq!(info.parameter_count, 1000000);
@@ -911,9 +911,9 @@ mod tests {
 
         // Create test tensor with some problematic values
         let data = vec![1.0, 2.0, f32::NAN, 4.0, f32::INFINITY, 0.0];
-        let tensor = Tensor::from_vec(data, &[6]).unwrap();
+        let tensor = Tensor::from_vec(data, &[6]).expect("Operation failed");
 
-        let analysis = debugger.analyze_tensor(&tensor, "test_tensor").unwrap();
+        let analysis = debugger.analyze_tensor(&tensor, "test_tensor").expect("Operation failed");
 
         assert_eq!(analysis.name, "test_tensor");
         assert_eq!(analysis.nan_count, 1);
@@ -935,14 +935,14 @@ mod tests {
                 vec![vec![1, 1]],
                 100,
             )
-            .unwrap();
+            .expect("Operation failed");
 
         // Create tensors with anomalies
         let input_data = vec![1.0, 2.0, f32::NAN, 4.0];
         let output_data = vec![f32::INFINITY];
 
-        let input_tensor = Tensor::from_vec(input_data, &[1, 4]).unwrap();
-        let output_tensor = Tensor::from_vec(output_data, &[1, 1]).unwrap();
+        let input_tensor = Tensor::from_vec(input_data, &[1, 4]).expect("Operation failed");
+        let output_tensor = Tensor::from_vec(output_data, &[1, 1]).expect("Operation failed");
 
         let trace = debugger
             .debug_inference(
@@ -952,7 +952,7 @@ mod tests {
                 Duration::from_millis(50),
                 1024 * 1024,
             )
-            .unwrap();
+            .expect("Operation failed");
 
         // Should detect NaN in input and infinity in output
         assert!(!trace.anomalies.is_empty());
@@ -974,9 +974,9 @@ mod tests {
                 vec![vec![1, 10000]],
                 100_000_000, // 100M parameters
             )
-            .unwrap();
+            .expect("Operation failed");
 
-        let validation = debugger.validate_model("large_model").unwrap();
+        let validation = debugger.validate_model("large_model").expect("Operation failed");
 
         match validation {
             ValidationStatus::Warning(warnings) => {

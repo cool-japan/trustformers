@@ -98,6 +98,12 @@ pub struct WeightedAverageAggregation {
     name: String,
 }
 
+impl Default for WeightedAverageAggregation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WeightedAverageAggregation {
     pub fn new() -> Self {
         Self {
@@ -150,6 +156,12 @@ impl AggregationStrategy for WeightedAverageAggregation {
 /// Consensus aggregation strategy
 pub struct ConsensusAggregation {
     name: String,
+}
+
+impl Default for ConsensusAggregation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConsensusAggregation {
@@ -212,6 +224,12 @@ impl AggregationStrategy for ConsensusAggregation {
 /// Confidence weighted aggregation strategy
 pub struct ConfidenceWeightedAggregation {
     name: String,
+}
+
+impl Default for ConfidenceWeightedAggregation {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ConfidenceWeightedAggregation {

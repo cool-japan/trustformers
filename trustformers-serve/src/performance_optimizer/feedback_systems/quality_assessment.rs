@@ -24,6 +24,12 @@ pub struct FeedbackQualityAssessor {
     quality_history: Arc<Mutex<VecDeque<FeedbackQualityMetrics>>>,
 }
 
+impl Default for FeedbackQualityAssessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FeedbackQualityAssessor {
     /// Create new feedback quality assessor
     pub fn new() -> Self {

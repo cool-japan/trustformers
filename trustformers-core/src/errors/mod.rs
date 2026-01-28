@@ -301,10 +301,7 @@ impl TrustformersError {
     }
 
     pub fn io_error(message: String) -> Self {
-        TrustformersError::new(ErrorKind::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            message,
-        )))
+        TrustformersError::new(ErrorKind::IoError(std::io::Error::other(message)))
     }
 
     pub fn shape_error(message: String) -> Self {

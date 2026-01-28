@@ -1780,7 +1780,7 @@ pub struct ThresholdMonitoringState {
 impl ThresholdMonitoringState {
     /// Add alert to state
     pub fn add_alert(&mut self, alert: AlertEvent) {
-        *self.alert_counts.entry(alert.severity.clone()).or_insert(0) += 1;
+        *self.alert_counts.entry(alert.severity).or_insert(0) += 1;
         self.total_alerts += 1;
         self.active_alerts.insert(alert.alert_id.clone(), alert);
         self.update_health_status();

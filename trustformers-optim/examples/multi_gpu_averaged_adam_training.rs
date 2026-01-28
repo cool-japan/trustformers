@@ -12,7 +12,6 @@
 //! - Fault-tolerant distributed training
 //! - Performance profiling and optimization
 
-use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;

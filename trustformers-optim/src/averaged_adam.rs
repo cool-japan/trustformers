@@ -295,9 +295,9 @@ impl AveragedAdam {
 
 impl Optimizer for AveragedAdam {
     fn update(&mut self, param: &mut Tensor, gradient: &Tensor) -> Result<()> {
-        let param_name = format!("{:p}", param.data()?.as_ptr());
-        // Get parameter data
+        // Get parameter data (bind to variable before taking pointer)
         let param_data = param.data()?;
+        let param_name = format!("{:p}", param_data.as_ptr());
         let grad_data = gradient.data()?;
 
         if param_data.len() != grad_data.len() {
@@ -317,7 +317,12 @@ impl Optimizer for AveragedAdam {
             self.param_states.insert(param_name.to_string(), param_state);
         }
 
-        let param_state = self.param_states.get_mut(&param_name).unwrap();
+        let param_state = self.param_states.get_mut(&param_name).ok_or_else(|| {
+            TrustformersError::tensor_op_error(
+                "Parameter state not found after insertion",
+                "AveragedAdam::update",
+            )
+        })?;
 
         // Ensure state buffers have correct size
         if param_state.momentum.len() != param_size {
@@ -363,7 +368,12 @@ impl Optimizer for AveragedAdam {
         let final_params =
             if self.config.use_averaged && self.state.step >= self.config.averaging_warmup {
                 // Get fresh reference to param_state after update
-                let param_state = self.param_states.get(&param_name).unwrap();
+                let param_state = self.param_states.get(&param_name).ok_or_else(|| {
+                    TrustformersError::tensor_op_error(
+                        "Parameter state not found",
+                        "AveragedAdam::update",
+                    )
+                })?;
                 param_state.averaged_params.clone()
             } else {
                 updated_params.clone()

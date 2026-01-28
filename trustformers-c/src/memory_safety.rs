@@ -7,7 +7,6 @@ use crate::error::TrustformersResult;
 use crossbeam_utils::atomic::AtomicCell;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};

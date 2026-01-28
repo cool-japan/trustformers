@@ -1,5 +1,7 @@
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
+use scirs2_core::ndarray::{s, IxDyn};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -14,6 +16,34 @@ use std::time::{Duration, Instant};
 /// - Custom allocators for tensor allocation patterns
 /// - Tensor memory recycling pool
 ///
+/// Eviction policy for memory pool
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MemoryEvictionPolicy {
+    /// Least Recently Used - evict tensors not used for longest time
+    LRU,
+    /// Least Frequently Used - evict tensors with lowest access count
+    LFU,
+    /// Size-based - evict largest tensors first to free more memory
+    SizeBased,
+    /// Adaptive Replacement Cache - balance between recency and frequency
+    ARC,
+    /// Hybrid - combination of LRU and size-based
+    Hybrid,
+}
+
+/// Adaptive strategy for dynamic pool sizing
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AdaptiveStrategy {
+    /// Fixed pool size (no adaptation)
+    Fixed,
+    /// Grow/shrink based on memory pressure
+    MemoryPressure,
+    /// Adapt based on hit/miss rates
+    HitRate,
+    /// Predict size based on access patterns
+    Predictive,
+}
+
 /// Configuration for memory optimizations
 #[derive(Debug, Clone)]
 pub struct MemoryConfig {
@@ -21,6 +51,8 @@ pub struct MemoryConfig {
     pub enable_memory_pool: bool,
     /// Maximum size of memory pool in bytes
     pub max_pool_size: usize,
+    /// Minimum size of memory pool (for adaptive strategies)
+    pub min_pool_size: usize,
     /// Enable zero-copy tensor views
     pub enable_zero_copy: bool,
     /// Enable memory mapping for large tensors
@@ -29,6 +61,16 @@ pub struct MemoryConfig {
     pub mmap_threshold: usize,
     /// Pool cleanup interval
     pub cleanup_interval: Duration,
+    /// Eviction policy to use
+    pub eviction_policy: MemoryEvictionPolicy,
+    /// Adaptive strategy for dynamic sizing
+    pub adaptive_strategy: AdaptiveStrategy,
+    /// Target hit rate for adaptive sizing (0.0 to 1.0)
+    pub target_hit_rate: f64,
+    /// Enable prefetching based on access patterns
+    pub enable_prefetching: bool,
+    /// Enable automatic defragmentation
+    pub enable_defragmentation: bool,
 }
 
 impl Default for MemoryConfig {
@@ -36,20 +78,87 @@ impl Default for MemoryConfig {
         Self {
             enable_memory_pool: true,
             max_pool_size: 1024 * 1024 * 1024, // 1GB
+            min_pool_size: 64 * 1024 * 1024,   // 64MB
             enable_zero_copy: true,
             enable_mmap: true,
             mmap_threshold: 100 * 1024 * 1024, // 100MB
             cleanup_interval: Duration::from_secs(60),
+            eviction_policy: MemoryEvictionPolicy::Hybrid,
+            adaptive_strategy: AdaptiveStrategy::HitRate,
+            target_hit_rate: 0.85, // 85% target hit rate
+            enable_prefetching: true,
+            enable_defragmentation: true,
         }
     }
 }
 
-/// Memory pool entry for tensor recycling
+/// Memory pool entry for tensor recycling (enhanced with adaptive metrics)
 #[derive(Debug, Clone)]
 struct PoolEntry {
     tensor: Tensor,
     last_used: Instant,
     ref_count: usize,
+    /// Access frequency counter (for LFU and ARC policies)
+    access_count: usize,
+    /// Creation time (for age-based eviction)
+    #[allow(dead_code)]
+    created_at: Instant,
+    /// Total time in pool (for efficiency metrics)
+    #[allow(dead_code)]
+    pool_time: Duration,
+    /// Tensor size in bytes (cached for quick eviction decisions)
+    size_bytes: usize,
+}
+
+impl PoolEntry {
+    fn new(tensor: Tensor, size_bytes: usize) -> Self {
+        let now = Instant::now();
+        Self {
+            tensor,
+            last_used: now,
+            ref_count: 0,
+            access_count: 0,
+            created_at: now,
+            pool_time: Duration::ZERO,
+            size_bytes,
+        }
+    }
+
+    fn mark_accessed(&mut self) {
+        self.last_used = Instant::now();
+        self.access_count += 1;
+    }
+
+    /// Calculate eviction priority (lower = evict first)
+    fn eviction_priority(&self, policy: MemoryEvictionPolicy) -> f64 {
+        match policy {
+            MemoryEvictionPolicy::LRU => {
+                // Recency: older = lower priority
+                -(self.last_used.elapsed().as_secs_f64())
+            },
+            MemoryEvictionPolicy::LFU => {
+                // Frequency: less used = lower priority
+                -(self.access_count as f64)
+            },
+            MemoryEvictionPolicy::SizeBased => {
+                // Size: larger = lower priority (to free more space)
+                -(self.size_bytes as f64)
+            },
+            MemoryEvictionPolicy::ARC => {
+                // Adaptive: balance recency and frequency
+                let recency_score = 1.0 / (1.0 + self.last_used.elapsed().as_secs_f64());
+                let frequency_score = self.access_count as f64;
+                -(recency_score + frequency_score)
+            },
+            MemoryEvictionPolicy::Hybrid => {
+                // Hybrid: combine recency, frequency, and size
+                let recency = 1.0 / (1.0 + self.last_used.elapsed().as_secs_f64());
+                let frequency = self.access_count as f64;
+                let size_factor = 1.0 / (1.0 + (self.size_bytes as f64 / 1_000_000.0));
+                -(recency * 0.4 + frequency * 0.4 + size_factor * 0.2)
+            },
+        }
+    }
 }
 
 /// Zero-copy tensor view for slice operations
@@ -100,12 +209,12 @@ impl TensorView {
                     .view()
                     .into_shape_with_order(arr.len())
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-                let slice = flat.slice(ndarray::s![
+                let slice = flat.slice(s![
                     self.offset..self.offset + self.shape.iter().product::<usize>()
                 ]);
                 let sliced_arr = slice
                     .to_owned()
-                    .into_shape_with_order(ndarray::IxDyn(&self.shape))
+                    .into_shape_with_order(IxDyn(&self.shape))
                     .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
                 Ok(Tensor::F32(sliced_arr))
             },
@@ -117,41 +226,125 @@ impl TensorView {
     }
 }
 
-/// Memory pool for tensor recycling
+/// Enhanced statistics for adaptive memory pool
+#[derive(Debug, Clone)]
+struct PoolStatistics {
+    total_requests: usize,
+    cache_hits: usize,
+    cache_misses: usize,
+    total_evictions: usize,
+    evictions_by_policy: HashMap<String, usize>,
+    total_allocated_bytes: usize,
+    peak_memory_usage: usize,
+    #[allow(dead_code)]
+    average_tensor_lifetime: Duration,
+    #[allow(dead_code)]
+    last_reset: Instant,
+}
+
+impl Default for PoolStatistics {
+    fn default() -> Self {
+        Self {
+            total_requests: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            total_evictions: 0,
+            evictions_by_policy: HashMap::new(),
+            total_allocated_bytes: 0,
+            peak_memory_usage: 0,
+            average_tensor_lifetime: Duration::ZERO,
+            last_reset: Instant::now(),
+        }
+    }
+}
+
+impl PoolStatistics {
+    fn hit_rate(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            self.cache_hits as f64 / self.total_requests as f64
+        }
+    }
+
+    fn miss_rate(&self) -> f64 {
+        if self.total_requests == 0 {
+            0.0
+        } else {
+            self.cache_misses as f64 / self.total_requests as f64
+        }
+    }
+}
+
+/// Memory pool for tensor recycling (enhanced with adaptive strategies)
 pub struct TensorMemoryPool {
     config: MemoryConfig,
     pool: Arc<RwLock<HashMap<Vec<usize>, Vec<PoolEntry>>>>,
     current_size: Arc<Mutex<usize>>,
     last_cleanup: Arc<Mutex<Instant>>,
+    /// Enhanced statistics for adaptive behavior
+    statistics: Arc<Mutex<PoolStatistics>>,
+    /// Access pattern tracking for prefetching
+    access_patterns: Arc<Mutex<HashMap<Vec<usize>, Vec<Instant>>>>,
+    /// Dynamic pool size (for adaptive strategies)
+    dynamic_max_size: Arc<Mutex<usize>>,
 }
 
 impl TensorMemoryPool {
-    /// Create a new memory pool
+    /// Create a new memory pool with enhanced adaptive strategies
     pub fn new(config: MemoryConfig) -> Self {
+        let dynamic_max_size = config.max_pool_size;
         Self {
             config,
             pool: Arc::new(RwLock::new(HashMap::new())),
             current_size: Arc::new(Mutex::new(0)),
             last_cleanup: Arc::new(Mutex::new(Instant::now())),
+            statistics: Arc::new(Mutex::new(PoolStatistics::default())),
+            access_patterns: Arc::new(Mutex::new(HashMap::new())),
+            dynamic_max_size: Arc::new(Mutex::new(dynamic_max_size)),
         }
     }
 
-    /// Get a tensor from the pool or create a new one
+    /// Get a tensor from the pool or create a new one (enhanced with statistics tracking)
     pub fn get_tensor(&self, shape: &[usize], dtype: crate::tensor::DType) -> Result<Tensor> {
+        // Track access pattern for prefetching
+        if self.config.enable_prefetching {
+            let mut patterns = self.access_patterns.lock().expect("lock should not be poisoned");
+            patterns.entry(shape.to_vec()).or_default().push(Instant::now());
+        }
+
+        // Update statistics
+        {
+            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            stats.total_requests += 1;
+        }
+
         if !self.config.enable_memory_pool {
             return self.create_tensor(shape, dtype);
         }
 
         // Try to get from pool first
         if let Some(tensor) = self.try_get_from_pool(shape)? {
+            // Cache hit!
+            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            stats.cache_hits += 1;
             return Ok(tensor);
         }
+
+        // Cache miss
+        {
+            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            stats.cache_misses += 1;
+        }
+
+        // Apply adaptive pool sizing based on hit rate
+        self.apply_adaptive_sizing()?;
 
         // Create new tensor if none available in pool
         self.create_tensor(shape, dtype)
     }
 
-    /// Return a tensor to the pool for recycling
+    /// Return a tensor to the pool for recycling (enhanced tracking)
     pub fn return_tensor(&self, tensor: Tensor) -> Result<()> {
         if !self.config.enable_memory_pool {
             return Ok(()); // Just drop the tensor
@@ -162,32 +355,41 @@ impl TensorMemoryPool {
         // Calculate tensor size before moving
         let tensor_size = self.estimate_tensor_size(&tensor);
 
-        let entry = PoolEntry {
-            tensor,
-            last_used: Instant::now(),
-            ref_count: 0,
-        };
+        // Create enhanced pool entry
+        let entry = PoolEntry::new(tensor, tensor_size);
 
-        let mut pool = self.pool.write().unwrap();
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
         pool.entry(shape).or_default().push(entry);
 
-        // Update current size
-        *self.current_size.lock().unwrap() += tensor_size;
+        // Update current size and peak usage
+        {
+            let mut current = self.current_size.lock().expect("lock should not be poisoned");
+            *current += tensor_size;
 
-        // Cleanup if needed
+            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            if *current > stats.peak_memory_usage {
+                stats.peak_memory_usage = *current;
+            }
+            stats.total_allocated_bytes += tensor_size;
+        }
+
+        // Cleanup if needed (with enhanced eviction policies)
         self.cleanup_if_needed()?;
 
         Ok(())
     }
 
-    /// Try to get a tensor from the pool
+    /// Try to get a tensor from the pool (enhanced with access tracking)
     fn try_get_from_pool(&self, shape: &[usize]) -> Result<Option<Tensor>> {
-        let mut pool = self.pool.write().unwrap();
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
 
         if let Some(entries) = pool.get_mut(shape) {
-            if let Some(entry) = entries.pop() {
-                let tensor_size = self.estimate_tensor_size(&entry.tensor);
-                *self.current_size.lock().unwrap() -= tensor_size;
+            if let Some(mut entry) = entries.pop() {
+                // Mark as accessed for LFU tracking
+                entry.mark_accessed();
+
+                let tensor_size = entry.size_bytes;
+                *self.current_size.lock().expect("lock should not be poisoned") -= tensor_size;
                 return Ok(Some(entry.tensor));
             }
         }
@@ -231,6 +433,10 @@ impl TensorMemoryPool {
             Tensor::Torch(_) => elements * 4, // Default to 32-bit
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => elements * 4, // Default to 32-bit
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => elements * data.dtype.size_in_bytes(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => elements * data.dtype.size_in_bytes(),
             Tensor::Sparse(sparse) => {
                 // For sparse tensors, estimate based on non-zero elements
                 let nnz = sparse.nnz();
@@ -239,48 +445,211 @@ impl TensorMemoryPool {
         }
     }
 
-    /// Cleanup old entries if needed
+    /// Cleanup old entries if needed (enhanced with adaptive eviction policies)
     fn cleanup_if_needed(&self) -> Result<()> {
-        let mut last_cleanup = self.last_cleanup.lock().unwrap();
-        if last_cleanup.elapsed() < self.config.cleanup_interval {
+        let mut last_cleanup = self.last_cleanup.lock().expect("lock should not be poisoned");
+        let should_cleanup_time = last_cleanup.elapsed() >= self.config.cleanup_interval;
+
+        let current_size = *self.current_size.lock().expect("lock should not be poisoned");
+        let dynamic_max = *self.dynamic_max_size.lock().expect("lock should not be poisoned");
+        let should_cleanup_size = current_size > dynamic_max;
+
+        if !should_cleanup_time && !should_cleanup_size {
             return Ok(());
         }
 
-        let current_size = *self.current_size.lock().unwrap();
-        if current_size <= self.config.max_pool_size {
-            return Ok(());
-        }
-
-        // Cleanup old entries
-        let mut pool = self.pool.write().unwrap();
+        // Enhanced cleanup using configured eviction policy
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
         let mut total_freed = 0;
-        let cutoff_time = Instant::now() - self.config.cleanup_interval;
+        let mut eviction_count = 0;
+        let policy = self.config.eviction_policy;
 
-        for entries in pool.values_mut() {
-            entries.retain(|entry| {
-                if entry.last_used < cutoff_time && entry.ref_count == 0 {
-                    total_freed += self.estimate_tensor_size(&entry.tensor);
-                    false
-                } else {
-                    true
+        // Calculate how much memory we need to free
+        let target_size = (dynamic_max as f64 * 0.85) as usize; // Target 85% of max
+        let need_to_free = current_size.saturating_sub(target_size);
+
+        // Collect all entries with their priorities
+        let mut all_entries: Vec<(Vec<usize>, usize, f64)> = Vec::new();
+
+        for (shape, entries) in pool.iter() {
+            for (idx, entry) in entries.iter().enumerate() {
+                if entry.ref_count == 0 {
+                    let priority = entry.eviction_priority(policy);
+                    all_entries.push((shape.clone(), idx, priority));
                 }
-            });
+            }
+        }
+
+        // Sort by eviction priority (lowest first = evict first)
+        all_entries.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Evict entries until we've freed enough memory
+        let mut freed_so_far = 0;
+        let mut shapes_to_remove: Vec<Vec<usize>> = Vec::new();
+
+        for (shape, _, _) in all_entries.iter() {
+            if freed_so_far >= need_to_free {
+                break;
+            }
+
+            if let Some(entries) = pool.get_mut(shape) {
+                if let Some(entry) = entries.first() {
+                    if entry.ref_count == 0 {
+                        let size = entry.size_bytes;
+                        freed_so_far += size;
+                        total_freed += size;
+                        eviction_count += 1;
+                        shapes_to_remove.push(shape.clone());
+                    }
+                }
+            }
+        }
+
+        // Remove marked entries
+        for shape in shapes_to_remove {
+            if let Some(entries) = pool.get_mut(&shape) {
+                if !entries.is_empty() {
+                    entries.remove(0);
+                }
+            }
         }
 
         // Remove empty entries
         pool.retain(|_, entries| !entries.is_empty());
 
+        drop(pool); // Release write lock
+
+        // Update statistics
+        {
+            let mut stats = self.statistics.lock().expect("lock should not be poisoned");
+            stats.total_evictions += eviction_count;
+            *stats.evictions_by_policy.entry(format!("{:?}", policy)).or_insert(0) +=
+                eviction_count;
+        }
+
         // Update size
-        *self.current_size.lock().unwrap() -= total_freed;
+        *self.current_size.lock().expect("lock should not be poisoned") -= total_freed;
         *last_cleanup = Instant::now();
+
+        // Run defragmentation if enabled
+        if self.config.enable_defragmentation {
+            self.defragment_pool()?;
+        }
 
         Ok(())
     }
 
-    /// Get memory pool statistics
+    /// Apply adaptive pool sizing based on configured strategy
+    fn apply_adaptive_sizing(&self) -> Result<()> {
+        match self.config.adaptive_strategy {
+            AdaptiveStrategy::Fixed => Ok(()), // No adaptation
+            AdaptiveStrategy::HitRate => self.adapt_by_hit_rate(),
+            AdaptiveStrategy::MemoryPressure => self.adapt_by_memory_pressure(),
+            AdaptiveStrategy::Predictive => self.adapt_by_prediction(),
+        }
+    }
+
+    /// Adapt pool size based on hit rate
+    fn adapt_by_hit_rate(&self) -> Result<()> {
+        let stats = self.statistics.lock().expect("lock should not be poisoned");
+        let hit_rate = stats.hit_rate();
+        drop(stats);
+
+        let mut dynamic_max = self.dynamic_max_size.lock().expect("lock should not be poisoned");
+        let target_rate = self.config.target_hit_rate;
+
+        if hit_rate < target_rate {
+            // Low hit rate: increase pool size
+            let increase = (*dynamic_max as f64 * 0.1) as usize;
+            let new_size = (*dynamic_max + increase).min(self.config.max_pool_size);
+            if new_size > *dynamic_max {
+                *dynamic_max = new_size;
+            }
+        } else if hit_rate > target_rate + 0.1 {
+            // Very high hit rate: can decrease pool size
+            let decrease = (*dynamic_max as f64 * 0.05) as usize;
+            let new_size = (*dynamic_max - decrease).max(self.config.min_pool_size);
+            if new_size < *dynamic_max {
+                *dynamic_max = new_size;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Adapt pool size based on system memory pressure
+    fn adapt_by_memory_pressure(&self) -> Result<()> {
+        // Simplified memory pressure detection
+        // In production, this would query OS for available memory
+        let current_size = *self.current_size.lock().expect("lock should not be poisoned");
+        let mut dynamic_max = self.dynamic_max_size.lock().expect("lock should not be poisoned");
+
+        let utilization = current_size as f64 / *dynamic_max as f64;
+
+        if utilization > 0.9 {
+            // High pressure: decrease pool size
+            let new_size = (*dynamic_max as f64 * 0.9) as usize;
+            *dynamic_max = new_size.max(self.config.min_pool_size);
+        } else if utilization < 0.5 {
+            // Low pressure: increase pool size
+            let new_size = (*dynamic_max as f64 * 1.1) as usize;
+            *dynamic_max = new_size.min(self.config.max_pool_size);
+        }
+
+        Ok(())
+    }
+
+    /// Adapt pool size based on access pattern prediction
+    fn adapt_by_prediction(&self) -> Result<()> {
+        let patterns = self.access_patterns.lock().expect("lock should not be poisoned");
+
+        // Analyze access patterns to predict future needs
+        let mut total_recent_accesses = 0;
+        let recent_window = Duration::from_secs(60);
+        let now = Instant::now();
+
+        for timestamps in patterns.values() {
+            total_recent_accesses +=
+                timestamps.iter().filter(|t| now.duration_since(**t) < recent_window).count();
+        }
+
+        drop(patterns);
+
+        // Adjust based on activity level
+        let mut dynamic_max = self.dynamic_max_size.lock().expect("lock should not be poisoned");
+
+        if total_recent_accesses > 1000 {
+            // High activity: increase pool
+            let new_size = (*dynamic_max as f64 * 1.15) as usize;
+            *dynamic_max = new_size.min(self.config.max_pool_size);
+        } else if total_recent_accesses < 100 {
+            // Low activity: decrease pool
+            let new_size = (*dynamic_max as f64 * 0.9) as usize;
+            *dynamic_max = new_size.max(self.config.min_pool_size);
+        }
+
+        Ok(())
+    }
+
+    /// Defragment the pool by reorganizing entries
+    fn defragment_pool(&self) -> Result<()> {
+        // Simplified defragmentation: consolidate shape groups
+        let mut pool = self.pool.write().expect("lock should not be poisoned");
+
+        for entries in pool.values_mut() {
+            // Sort entries by access count (most accessed first)
+            entries.sort_by(|a, b| b.access_count.cmp(&a.access_count));
+        }
+
+        Ok(())
+    }
+
+    /// Get enhanced memory pool statistics
     pub fn get_stats(&self) -> MemoryPoolStats {
-        let pool = self.pool.read().unwrap();
-        let current_size = *self.current_size.lock().unwrap();
+        let pool = self.pool.read().expect("lock should not be poisoned");
+        let current_size = *self.current_size.lock().expect("lock should not be poisoned");
+        let stats = self.statistics.lock().expect("lock should not be poisoned");
+        let dynamic_max = *self.dynamic_max_size.lock().expect("lock should not be poisoned");
 
         let total_tensors = pool.values().map(|v| v.len()).sum();
         let total_shapes = pool.len();
@@ -290,19 +659,94 @@ impl TensorMemoryPool {
             total_shapes,
             current_size_bytes: current_size,
             max_size_bytes: self.config.max_pool_size,
-            utilization: current_size as f64 / self.config.max_pool_size as f64,
+            dynamic_max_size_bytes: dynamic_max,
+            utilization: current_size as f64 / dynamic_max as f64,
+            hit_rate: stats.hit_rate(),
+            miss_rate: stats.miss_rate(),
+            total_requests: stats.total_requests,
+            cache_hits: stats.cache_hits,
+            cache_misses: stats.cache_misses,
+            total_evictions: stats.total_evictions,
+            peak_memory_usage_bytes: stats.peak_memory_usage,
+            eviction_policy: self.config.eviction_policy,
+            adaptive_strategy: self.config.adaptive_strategy,
         }
+    }
+
+    /// Reset statistics counters
+    pub fn reset_statistics(&self) {
+        let mut stats = self.statistics.lock().expect("Lock poisoned");
+        *stats = PoolStatistics::default();
+    }
+
+    /// Get current hit rate
+    pub fn hit_rate(&self) -> f64 {
+        let stats = self.statistics.lock().expect("lock should not be poisoned");
+        stats.hit_rate()
+    }
+
+    /// Get current eviction policy
+    pub fn eviction_policy(&self) -> MemoryEvictionPolicy {
+        self.config.eviction_policy
+    }
+
+    /// Get current adaptive strategy
+    pub fn adaptive_strategy(&self) -> AdaptiveStrategy {
+        self.config.adaptive_strategy
+    }
+
+    /// Get predicted shapes based on access patterns
+    pub fn get_predicted_shapes(&self, window: Duration) -> Vec<Vec<usize>> {
+        let patterns = self.access_patterns.lock().expect("lock should not be poisoned");
+        let now = Instant::now();
+
+        let mut frequent_shapes: Vec<(Vec<usize>, usize)> = patterns
+            .iter()
+            .map(|(shape, timestamps)| {
+                let count = timestamps.iter().filter(|t| now.duration_since(**t) < window).count();
+                (shape.clone(), count)
+            })
+            .filter(|(_, count)| *count > 0)
+            .collect();
+
+        frequent_shapes.sort_by(|a, b| b.1.cmp(&a.1));
+        frequent_shapes.into_iter().map(|(shape, _)| shape).collect()
     }
 }
 
-/// Statistics for memory pool
+/// Enhanced statistics for memory pool
 #[derive(Debug, Clone)]
 pub struct MemoryPoolStats {
+    /// Total tensors currently in pool
     pub total_tensors: usize,
+    /// Number of different tensor shapes in pool
     pub total_shapes: usize,
+    /// Current memory usage in bytes
     pub current_size_bytes: usize,
+    /// Maximum configured pool size in bytes
     pub max_size_bytes: usize,
+    /// Current dynamic maximum size (for adaptive strategies)
+    pub dynamic_max_size_bytes: usize,
+    /// Pool utilization (0.0 to 1.0+)
     pub utilization: f64,
+    /// Cache hit rate (0.0 to 1.0)
+    pub hit_rate: f64,
+    /// Cache miss rate (0.0 to 1.0)
+    pub miss_rate: f64,
+    /// Total number of tensor requests
+    pub total_requests: usize,
+    /// Number of cache hits
+    pub cache_hits: usize,
+    /// Number of cache misses
+    pub cache_misses: usize,
+    /// Total number of evictions
+    pub total_evictions: usize,
+    /// Peak memory usage observed (bytes)
+    pub peak_memory_usage_bytes: usize,
+    /// Current eviction policy
+    pub eviction_policy: MemoryEvictionPolicy,
+    /// Current adaptive strategy
+    pub adaptive_strategy: AdaptiveStrategy,
 }
 
 /// Memory mapped tensor for large model weights

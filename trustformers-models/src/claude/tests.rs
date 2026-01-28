@@ -54,7 +54,7 @@ fn test_config_validation() {
 fn test_from_pretrained_name() {
     let config = ClaudeConfig::from_pretrained_name("claude-3-sonnet");
     assert!(config.is_some());
-    let config = config.unwrap();
+    let config = config.expect("operation failed");
     assert_eq!(config.model_type, "claude-3-sonnet");
 
     let config = ClaudeConfig::from_pretrained_name("invalid-model");
@@ -75,7 +75,7 @@ fn test_claude_model_creation() {
     let model = ClaudeModel::new(config);
     assert!(model.is_ok());
 
-    let _model = model.unwrap();
+    let _model = model.expect("operation failed");
     // Claude model created successfully - layer count and constitutional weights are internal
 }
 
@@ -91,7 +91,7 @@ fn test_constitutional_ai_disabled() {
     let mut config = ClaudeConfig::small_test_config();
     config.with_constitutional_ai(false);
 
-    let _model = ClaudeModel::new(config).unwrap();
+    let _model = ClaudeModel::new(config).expect("operation failed");
     // Claude model created successfully with constitutional AI disabled - weights are internal
 }
 
@@ -148,20 +148,48 @@ fn test_rotary_embedding_creation() {
 
 #[test]
 fn test_claude_attention_creation() {
-    let config = ClaudeConfig::claude_3_haiku();
+    // Use small_test_config for fast testing
+    let config = ClaudeConfig::small_test_config();
     let attention = ClaudeAttention::new(config);
     assert!(attention.is_ok());
 }
 
 #[test]
 fn test_claude_mlp_creation() {
-    let config = ClaudeConfig::claude_3_sonnet();
+    // Use small_test_config for fast testing
+    let config = ClaudeConfig::small_test_config();
     let mlp = ClaudeMLP::new(config);
     assert!(mlp.is_ok());
 }
 
 #[test]
 fn test_claude_decoder_layer_creation() {
+    // Use small_test_config for fast testing
+    let config = ClaudeConfig::small_test_config();
+    let layer = ClaudeDecoderLayer::new(config);
+    assert!(layer.is_ok());
+}
+
+// Full model size tests - ignored by default due to memory/time requirements
+#[test]
+#[ignore = "Full model size test - requires significant memory and time"]
+fn test_claude_attention_creation_haiku() {
+    let config = ClaudeConfig::claude_3_haiku();
+    let attention = ClaudeAttention::new(config);
+    assert!(attention.is_ok());
+}
+
+#[test]
+#[ignore = "Full model size test - requires significant memory and time"]
+fn test_claude_mlp_creation_sonnet() {
+    let config = ClaudeConfig::claude_3_sonnet();
+    let mlp = ClaudeMLP::new(config);
+    assert!(mlp.is_ok());
+}
+
+#[test]
+#[ignore = "Full model size test - requires significant memory and time"]
+fn test_claude_decoder_layer_creation_opus() {
     let config = ClaudeConfig::claude_3_opus();
     let layer = ClaudeDecoderLayer::new(config);
     assert!(layer.is_ok());

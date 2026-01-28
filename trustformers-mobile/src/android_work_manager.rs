@@ -581,13 +581,13 @@ impl AndroidWorkManager {
 
         // Add to queue
         {
-            let mut queue = self.work_queue.lock().unwrap();
+            let mut queue = self.work_queue.lock().expect("Operation failed");
             queue.enqueue_work(work_request.clone());
         }
 
         // Update statistics
         {
-            let mut stats = self.work_statistics.lock().unwrap();
+            let mut stats = self.work_statistics.lock().expect("Operation failed");
             stats.total_work_requests += 1;
         }
 
@@ -601,7 +601,7 @@ impl AndroidWorkManager {
     pub async fn cancel_work(&self, work_id: &str) -> Result<bool> {
         tracing::info!("Cancelling work: {}", work_id);
 
-        let mut queue = self.work_queue.lock().unwrap();
+        let mut queue = self.work_queue.lock().expect("Operation failed");
 
         // Remove from pending queue
         if queue.pending_work.remove(work_id).is_some() {
@@ -612,7 +612,7 @@ impl AndroidWorkManager {
         if let Some(execution) = queue.running_work.get(work_id) {
             if execution.can_cancel {
                 // Signal cancellation to executor
-                let mut executor = self.work_executor.lock().unwrap();
+                let mut executor = self.work_executor.lock().expect("Operation failed");
                 executor.cancel_work(work_id);
                 queue.running_work.remove(work_id);
                 return Ok(true);
@@ -624,7 +624,7 @@ impl AndroidWorkManager {
 
     /// Get work status
     pub fn get_work_status(&self, work_id: &str) -> Result<WorkStatus> {
-        let queue = self.work_queue.lock().unwrap();
+        let queue = self.work_queue.lock().expect("Operation failed");
 
         if queue.pending_work.contains_key(work_id) {
             Ok(WorkStatus::Pending)
@@ -643,13 +643,13 @@ impl AndroidWorkManager {
 
     /// Get work result
     pub fn get_work_result(&self, work_id: &str) -> Result<Option<WorkResult>> {
-        let queue = self.work_queue.lock().unwrap();
+        let queue = self.work_queue.lock().expect("Operation failed");
         Ok(queue.completed_work.get(work_id).cloned())
     }
 
     /// Get work statistics
     pub fn get_work_statistics(&self) -> Result<String> {
-        let stats = self.work_statistics.lock().unwrap();
+        let stats = self.work_statistics.lock().expect("Operation failed");
 
         let stats_json = serde_json::json!({
             "total_work_requests": stats.total_work_requests,
@@ -675,19 +675,19 @@ impl AndroidWorkManager {
 
     /// List all pending work
     pub fn list_pending_work(&self) -> Result<Vec<String>> {
-        let queue = self.work_queue.lock().unwrap();
+        let queue = self.work_queue.lock().expect("Operation failed");
         Ok(queue.pending_work.keys().cloned().collect())
     }
 
     /// List all running work
     pub fn list_running_work(&self) -> Result<Vec<String>> {
-        let queue = self.work_queue.lock().unwrap();
+        let queue = self.work_queue.lock().expect("Operation failed");
         Ok(queue.running_work.keys().cloned().collect())
     }
 
     /// Clean up completed work older than specified duration
     pub fn cleanup_completed_work(&self, older_than_hours: f64) -> Result<usize> {
-        let mut queue = self.work_queue.lock().unwrap();
+        let mut queue = self.work_queue.lock().expect("Operation failed");
         let cutoff_time = std::time::SystemTime::now()
             - std::time::Duration::from_secs_f64(older_than_hours * 3600.0);
 
@@ -701,8 +701,8 @@ impl AndroidWorkManager {
     // Private helper methods
 
     async fn try_schedule_work(&self) -> Result<()> {
-        let mut executor = self.work_executor.lock().unwrap();
-        let mut queue = self.work_queue.lock().unwrap();
+        let mut executor = self.work_executor.lock().expect("Operation failed");
+        let mut queue = self.work_queue.lock().expect("Operation failed");
 
         // Check if we can schedule more work
         if executor.can_accept_more_work() {
@@ -811,14 +811,14 @@ impl AndroidWorkManager {
     async fn complete_work(&self, work_id: &str, result: WorkResult) {
         // Move work from running to completed
         {
-            let mut queue = self.work_queue.lock().unwrap();
+            let mut queue = self.work_queue.lock().expect("Operation failed");
             queue.running_work.remove(work_id);
             queue.completed_work.insert(work_id.to_string(), result.clone());
         }
 
         // Update statistics
         {
-            let mut stats = self.work_statistics.lock().unwrap();
+            let mut stats = self.work_statistics.lock().expect("Operation failed");
             if result.success {
                 stats.completed_work_requests += 1;
             } else {
@@ -860,7 +860,7 @@ impl AndroidWorkManager {
                 let input_tensor = Tensor::from_vec(tensor_data.clone(), tensor_shape)?;
 
                 let result = {
-                    let mut engine = self.inference_engine.lock().unwrap();
+                    let mut engine = self.inference_engine.lock().expect("Operation failed");
                     engine.inference(model_id, &input_tensor)?
                 };
 
@@ -890,7 +890,7 @@ impl AndroidWorkManager {
         work_request: &WorkRequest,
     ) -> Result<WorkResultData> {
         if let Some(ref model_id) = work_request.input_data.model_id {
-            let mut model_manager = self.model_manager.lock().unwrap();
+            let mut model_manager = self.model_manager.lock().expect("Operation failed");
             // Simulate model download
             model_manager.download_model(model_id, None).await?;
 
@@ -912,7 +912,7 @@ impl AndroidWorkManager {
         work_request: &WorkRequest,
     ) -> Result<WorkResultData> {
         if let Some(ref model_id) = work_request.input_data.model_id {
-            let mut model_manager = self.model_manager.lock().unwrap();
+            let mut model_manager = self.model_manager.lock().expect("Operation failed");
             // Simulate model update
             model_manager.update_model(model_id).await?;
 
@@ -1382,7 +1382,8 @@ mod tests {
     fn test_work_request_validation() {
         let work_config = AndroidWorkManagerConfig::default();
         let mobile_config = MobileConfig::android_optimized();
-        let manager = AndroidWorkManager::new(work_config, mobile_config).unwrap();
+        let manager =
+            AndroidWorkManager::new(work_config, mobile_config).expect("Operation failed");
 
         let valid_request = WorkRequest {
             work_id: "test_inference".to_string(),

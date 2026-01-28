@@ -195,7 +195,7 @@ impl StreamingLoader {
 
         // Calculate chunk information
         let chunk_size = (self.config.chunk_size_kb as usize) * 1024;
-        let total_chunks = (total_size + chunk_size - 1) / chunk_size;
+        let total_chunks = total_size.div_ceil(chunk_size);
 
         web_sys::console::log_1(
             &format!(
@@ -226,7 +226,7 @@ impl StreamingLoader {
         self.loaded_size = 0;
 
         let chunk_size = (self.config.chunk_size_kb as usize) * 1024;
-        let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
+        let total_chunks = data.len().div_ceil(chunk_size);
 
         web_sys::console::log_1(
             &format!(
@@ -702,6 +702,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_feature_detection() {
         let _streaming_supported = is_streaming_compilation_supported();
         let _cache_supported = is_cache_api_available();

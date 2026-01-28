@@ -149,7 +149,7 @@ impl IntelImpl {
     pub fn matmul(&self, a: &Tensor, b: &Tensor, c: &mut Tensor) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let mut kernel_manager = self.kernel_manager.lock().unwrap();
+        let mut kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
         let precision = IntelUtils::get_recommended_precision(&self.device);
 
         // Execute GEMM operation
@@ -157,7 +157,7 @@ impl IntelImpl {
 
         // Update statistics
         let elapsed = start_time.elapsed();
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.total_operations += 1;
         stats.total_time_us += elapsed.as_micros() as u64;
         stats.kernel_launches += 1;
@@ -175,7 +175,7 @@ impl IntelImpl {
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let mut kernel_manager = self.kernel_manager.lock().unwrap();
+        let mut kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
         let precision = IntelUtils::get_recommended_precision(&self.device);
 
         // Calculate attention scale
@@ -187,7 +187,7 @@ impl IntelImpl {
 
         // Update statistics
         let elapsed = start_time.elapsed();
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.total_operations += 1;
         stats.total_time_us += elapsed.as_micros() as u64;
         stats.kernel_launches += 1;
@@ -206,7 +206,7 @@ impl IntelImpl {
     ) -> Result<()> {
         let start_time = std::time::Instant::now();
 
-        let mut kernel_manager = self.kernel_manager.lock().unwrap();
+        let mut kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
         let precision = IntelUtils::get_recommended_precision(&self.device);
 
         // Execute layer normalization
@@ -214,7 +214,7 @@ impl IntelImpl {
 
         // Update statistics
         let elapsed = start_time.elapsed();
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         stats.total_operations += 1;
         stats.total_time_us += elapsed.as_micros() as u64;
         stats.kernel_launches += 1;
@@ -237,7 +237,7 @@ impl IntelImpl {
 
     /// Get memory statistics
     pub fn memory_stats(&self) -> Result<(usize, usize)> {
-        let kernel_manager = self.kernel_manager.lock().unwrap();
+        let kernel_manager = self.kernel_manager.lock().expect("Lock poisoned");
         let memory_stats = kernel_manager.memory_stats()?;
 
         // Return (used_memory, total_memory)
@@ -246,12 +246,12 @@ impl IntelImpl {
 
     /// Get performance statistics
     pub fn get_stats(&self) -> IntelStats {
-        self.stats.lock().unwrap().clone()
+        self.stats.lock().expect("Lock poisoned").clone()
     }
 
     /// Reset performance statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("Lock poisoned");
         *stats = IntelStats::default();
     }
 
@@ -389,9 +389,9 @@ mod tests {
     fn test_intel_matmul() {
         let _ = api::init_intel();
 
-        let a = Tensor::ones(&[4, 4]).unwrap();
-        let b = Tensor::ones(&[4, 4]).unwrap();
-        let mut c = Tensor::zeros(&[4, 4]).unwrap();
+        let a = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+        let mut c = Tensor::zeros(&[4, 4]).expect("Failed to create zero tensor");
 
         let result = api::intel_matmul(&a, &b, &mut c);
         assert!(result.is_ok());
@@ -405,9 +405,9 @@ mod tests {
         let _ = api::intel_reset_stats();
 
         // Perform an operation
-        let a = Tensor::ones(&[2, 2]).unwrap();
-        let b = Tensor::ones(&[2, 2]).unwrap();
-        let mut c = Tensor::zeros(&[2, 2]).unwrap();
+        let a = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
+        let mut c = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
         let _ = api::intel_matmul(&a, &b, &mut c);
 
         // Check stats
@@ -453,10 +453,10 @@ mod tests {
     fn test_intel_flash_attention() {
         let _ = api::init_intel();
 
-        let query = Tensor::ones(&[1, 4, 64]).unwrap();
-        let key = Tensor::ones(&[1, 4, 64]).unwrap();
-        let value = Tensor::ones(&[1, 4, 64]).unwrap();
-        let mut output = Tensor::zeros(&[1, 4, 64]).unwrap();
+        let query = Tensor::ones(&[1, 4, 64]).expect("Failed to create ones tensor");
+        let key = Tensor::ones(&[1, 4, 64]).expect("Failed to create ones tensor");
+        let value = Tensor::ones(&[1, 4, 64]).expect("Failed to create ones tensor");
+        let mut output = Tensor::zeros(&[1, 4, 64]).expect("Failed to create zero tensor");
 
         let result = api::intel_flash_attention(&query, &key, &value, &mut output);
         assert!(result.is_ok());
@@ -466,10 +466,10 @@ mod tests {
     fn test_intel_layer_norm() {
         let _ = api::init_intel();
 
-        let input = Tensor::ones(&[2, 128]).unwrap();
-        let weight = Tensor::ones(&[128]).unwrap();
-        let bias = Tensor::zeros(&[128]).unwrap();
-        let mut output = Tensor::zeros(&[2, 128]).unwrap();
+        let input = Tensor::ones(&[2, 128]).expect("Failed to create ones tensor");
+        let weight = Tensor::ones(&[128]).expect("Failed to create ones tensor");
+        let bias = Tensor::zeros(&[128]).expect("Failed to create zero tensor");
+        let mut output = Tensor::zeros(&[2, 128]).expect("Failed to create zero tensor");
 
         let result = api::intel_layer_norm(&input, &weight, Some(&bias), &mut output, 1e-5);
         assert!(result.is_ok());

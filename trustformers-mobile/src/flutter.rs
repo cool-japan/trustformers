@@ -200,13 +200,13 @@ impl FlutterChannelManager {
 
         // Store configuration
         {
-            let mut configs = self.configurations.lock().unwrap();
+            let mut configs = self.configurations.lock().expect("Lock poisoned");
             configs.insert(config.engine_id.clone(), mobile_config.clone());
         }
 
         // Initialize statistics
         {
-            let mut stats = self.statistics.lock().unwrap();
+            let mut stats = self.statistics.lock().expect("Lock poisoned");
             stats.insert(config.engine_id.clone(), MobileStats::new(&mobile_config));
         }
 
@@ -253,7 +253,7 @@ impl FlutterChannelManager {
 
         // Get configuration
         let config = {
-            let configs = self.configurations.lock().unwrap();
+            let configs = self.configurations.lock().expect("Lock poisoned");
             match configs.get(&engine_id) {
                 Some(config) => config.clone(),
                 None => {
@@ -273,7 +273,7 @@ impl FlutterChannelManager {
                     Ok(_) => {
                         // Store the engine
                         {
-                            let mut engines = self.engines.lock().unwrap();
+                            let mut engines = self.engines.lock().expect("Lock poisoned");
                             engines.insert(engine_id.clone(), engine);
                         }
 
@@ -333,7 +333,7 @@ impl FlutterChannelManager {
         // Perform inference with mutex locked
         let start_time = std::time::Instant::now();
         let result = {
-            let mut engines = self.engines.lock().unwrap();
+            let mut engines = self.engines.lock().expect("Lock poisoned");
             match engines.get_mut(&request.engine_id) {
                 Some(engine) => self.perform_inference(engine, &request),
                 None => {
@@ -353,7 +353,7 @@ impl FlutterChannelManager {
 
                 // Update statistics
                 {
-                    let mut stats = self.statistics.lock().unwrap();
+                    let mut stats = self.statistics.lock().expect("Lock poisoned");
                     if let Some(stat) = stats.get_mut(&request.engine_id) {
                         stat.update_inference(inference_time);
                         stat.update_memory(response.memory_usage_mb as usize);
@@ -370,7 +370,9 @@ impl FlutterChannelManager {
                     sink(&event.to_string());
                 }
 
-                FlutterMethodResult::Success(serde_json::to_value(response).unwrap())
+                FlutterMethodResult::Success(
+                    serde_json::to_value(response).expect("JSON serialization failed"),
+                )
             },
             Err(e) => FlutterMethodResult::Error {
                 code: "INFERENCE_ERROR".to_string(),
@@ -394,7 +396,9 @@ impl FlutterChannelManager {
                     neural_engine_available: device_info.npu_info.is_some(),
                 };
 
-                FlutterMethodResult::Success(serde_json::to_value(flutter_device_info).unwrap())
+                FlutterMethodResult::Success(
+                    serde_json::to_value(flutter_device_info).expect("JSON serialization failed"),
+                )
             },
             Err(e) => FlutterMethodResult::Error {
                 code: "DEVICE_INFO_ERROR".to_string(),
@@ -430,7 +434,7 @@ impl FlutterChannelManager {
             },
         };
 
-        let stats = self.statistics.lock().unwrap();
+        let stats = self.statistics.lock().expect("Lock poisoned");
         match stats.get(&engine_id) {
             Some(stat) => {
                 let metrics = FlutterPerformanceMetrics {
@@ -446,7 +450,9 @@ impl FlutterChannelManager {
                     },
                 };
 
-                FlutterMethodResult::Success(serde_json::to_value(metrics).unwrap())
+                FlutterMethodResult::Success(
+                    serde_json::to_value(metrics).expect("JSON serialization failed"),
+                )
             },
             None => FlutterMethodResult::Error {
                 code: "ENGINE_NOT_FOUND".to_string(),
@@ -481,15 +487,15 @@ impl FlutterChannelManager {
 
         // Remove engine and associated data
         {
-            let mut engines = self.engines.lock().unwrap();
+            let mut engines = self.engines.lock().expect("Lock poisoned");
             engines.remove(&engine_id);
         }
         {
-            let mut configs = self.configurations.lock().unwrap();
+            let mut configs = self.configurations.lock().expect("Lock poisoned");
             configs.remove(&engine_id);
         }
         {
-            let mut stats = self.statistics.lock().unwrap();
+            let mut stats = self.statistics.lock().expect("Lock poisoned");
             stats.remove(&engine_id);
         }
 
@@ -552,7 +558,7 @@ impl FlutterChannelManager {
         // Process batch inference with mutex locked
         let start_time = std::time::Instant::now();
         let (results, total_memory) = {
-            let mut engines = self.engines.lock().unwrap();
+            let mut engines = self.engines.lock().expect("Lock poisoned");
             match engines.get_mut(&engine_id) {
                 Some(engine) => {
                     let mut results = Vec::new();
@@ -591,7 +597,7 @@ impl FlutterChannelManager {
 
         // Update statistics
         {
-            let mut stats = self.statistics.lock().unwrap();
+            let mut stats = self.statistics.lock().expect("Lock poisoned");
             if let Some(stat) = stats.get_mut(&engine_id) {
                 stat.update_inference(total_time);
                 stat.update_memory(total_memory as usize);
@@ -632,7 +638,7 @@ impl FlutterChannelManager {
 
         // Get configuration for the engine
         let config = {
-            let configs = self.configurations.lock().unwrap();
+            let configs = self.configurations.lock().expect("Lock poisoned");
             match configs.get(&engine_id) {
                 Some(config) => config.clone(),
                 None => {
@@ -647,7 +653,7 @@ impl FlutterChannelManager {
 
         // Get statistics for the engine
         let stats = {
-            let stats = self.statistics.lock().unwrap();
+            let stats = self.statistics.lock().expect("Lock poisoned");
             stats.get(&engine_id).cloned()
         };
 
@@ -661,7 +667,7 @@ impl FlutterChannelManager {
             "num_threads": config.num_threads,
             "enable_batching": config.enable_batching,
             "max_batch_size": config.max_batch_size,
-            "model_loaded": self.engines.lock().unwrap().contains_key(&engine_id),
+            "model_loaded": self.engines.lock().expect("Operation failed").contains_key(&engine_id),
         });
 
         // Add quantization info if available
@@ -820,7 +826,7 @@ impl FlutterChannelManager {
 
         // Store optimized configuration
         if let Ok(mobile_config) = self.convert_flutter_config_to_mobile(&optimized_config) {
-            let mut configs = self.configurations.lock().unwrap();
+            let mut configs = self.configurations.lock().expect("Lock poisoned");
             configs.insert(engine_id.clone(), mobile_config);
         }
 
@@ -832,7 +838,7 @@ impl FlutterChannelManager {
             "recommendations": [
                 format!("Backend optimized to: {}", optimized_config.backend),
                 format!("Memory limit optimized to: {}MB", optimized_config.max_memory_mb),
-                format!("Quantization scheme: {}", optimized_config.quantization.as_ref().unwrap().scheme),
+                format!("Quantization scheme: {}", optimized_config.quantization.as_ref().expect("Operation failed").scheme),
                 format!("Thread count: {}", optimized_config.num_threads),
                 format!("Batching enabled: {}", optimized_config.enable_batching),
             ]
@@ -1057,9 +1063,9 @@ mod tests {
     #[test]
     fn test_flutter_channel_manager_creation() {
         let manager = FlutterChannelManager::new();
-        assert!(manager.engines.lock().unwrap().is_empty());
-        assert!(manager.configurations.lock().unwrap().is_empty());
-        assert!(manager.statistics.lock().unwrap().is_empty());
+        assert!(manager.engines.lock().expect("Operation failed").is_empty());
+        assert!(manager.configurations.lock().expect("Operation failed").is_empty());
+        assert!(manager.statistics.lock().expect("Operation failed").is_empty());
     }
 
     #[test]
@@ -1083,7 +1089,9 @@ mod tests {
             max_batch_size: 4,
         };
 
-        let mobile_config = manager.convert_flutter_config_to_mobile(&flutter_config).unwrap();
+        let mobile_config = manager
+            .convert_flutter_config_to_mobile(&flutter_config)
+            .expect("Operation failed");
         assert_eq!(mobile_config.platform, MobilePlatform::Ios);
         assert_eq!(mobile_config.backend, MobileBackend::CoreML);
         assert!(mobile_config.use_fp16);
@@ -1143,7 +1151,7 @@ mod tests {
 
         let call = FlutterMethodCall {
             method: "initialize".to_string(),
-            arguments: Some(serde_json::to_value(config).unwrap()),
+            arguments: Some(serde_json::to_value(config).expect("Operation failed")),
         };
 
         let result = manager.handle_method_call(call);
@@ -1164,8 +1172,12 @@ mod tests {
         }
 
         // Verify configuration was stored
-        assert!(manager.configurations.lock().unwrap().contains_key("test_engine"));
-        assert!(manager.statistics.lock().unwrap().contains_key("test_engine"));
+        assert!(manager
+            .configurations
+            .lock()
+            .expect("Operation failed")
+            .contains_key("test_engine"));
+        assert!(manager.statistics.lock().expect("Operation failed").contains_key("test_engine"));
     }
 
     #[test]

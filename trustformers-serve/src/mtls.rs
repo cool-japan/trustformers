@@ -14,7 +14,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::sync::RwLock;
-use tokio_rustls::rustls::{Certificate, PrivateKey, ServerConfig};
+use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+use tokio_rustls::rustls::ServerConfig;
 use tokio_rustls::TlsAcceptor;
 
 /// mTLS configuration
@@ -373,7 +374,7 @@ impl MTlsService {
         acceptor
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("TLS acceptor not initialized"))
-            .map(|a| a.clone())
+            .cloned()
     }
 
     /// Validate client certificate
@@ -496,10 +497,8 @@ impl MTlsService {
         let key = self.parse_private_key(&key_pem)?;
 
         // Create TLS server configuration
+        // Note: rustls 0.23 includes safe defaults automatically
         let server_config = ServerConfig::builder()
-            .with_safe_default_cipher_suites()
-            .with_safe_default_kx_groups()
-            .with_safe_default_protocol_versions()?
             .with_client_cert_verifier(self.create_client_cert_verifier().await?)
             .with_single_cert(certs, key)?;
 
@@ -552,23 +551,24 @@ impl MTlsService {
         Ok(())
     }
 
-    fn parse_certificate_chain(&self, pem_data: &str) -> Result<Vec<Certificate>> {
+    fn parse_certificate_chain(&self, pem_data: &str) -> Result<Vec<CertificateDer<'static>>> {
         // Parse PEM certificate chain
         // This is simplified - in practice would use rustls-pemfile or similar
-        Ok(vec![Certificate(pem_data.as_bytes().to_vec())])
+        Ok(vec![CertificateDer::from(pem_data.as_bytes().to_vec())])
     }
 
-    fn parse_private_key(&self, pem_data: &str) -> Result<PrivateKey> {
+    fn parse_private_key(&self, pem_data: &str) -> Result<PrivateKeyDer<'static>> {
         // Parse PEM private key
         // This is simplified - in practice would use rustls-pemfile or similar
-        Ok(PrivateKey(pem_data.as_bytes().to_vec()))
+        PrivateKeyDer::try_from(pem_data.as_bytes().to_vec())
+            .map_err(|_| anyhow::anyhow!("Failed to parse private key"))
     }
 
     async fn create_client_cert_verifier(
         &self,
-    ) -> Result<Arc<dyn rustls::server::ClientCertVerifier>> {
+    ) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>> {
         // Create custom client certificate verifier
-        // This is simplified - would implement rustls::server::ClientCertVerifier trait
+        // This is simplified - would implement rustls::server::danger::ClientCertVerifier trait
         Err(anyhow::anyhow!(
             "Client cert verifier creation not implemented"
         ))
@@ -589,9 +589,9 @@ impl MTlsService {
         })
     }
 
-    fn extract_certificate_info(&self, cert: &Certificate) -> Result<CertificateInfo> {
-        // Extract certificate information from rustls Certificate
-        self.parse_certificate(&cert.0)
+    fn extract_certificate_info(&self, cert: &CertificateDer) -> Result<CertificateInfo> {
+        // Extract certificate information from rustls CertificateDer
+        self.parse_certificate(cert.as_ref())
     }
 
     fn parse_crl(&self, _crl_pem: &str) -> Result<CertificateRevocationList> {
@@ -667,15 +667,13 @@ impl MTlsService {
         }
 
         // Check certificate pinning
-        if self.config.enable_cert_pinning {
-            if !self.is_certificate_pinned(cert_info).await? {
-                return Ok(CertValidationResult {
-                    valid: false,
-                    status: CertValidationStatus::NotPinned,
-                    certificate_info: cert_info.clone(),
-                    validation_details,
-                });
-            }
+        if self.config.enable_cert_pinning && !self.is_certificate_pinned(cert_info).await? {
+            return Ok(CertValidationResult {
+                valid: false,
+                status: CertValidationStatus::NotPinned,
+                certificate_info: cert_info.clone(),
+                validation_details,
+            });
         }
 
         // Validate against client certificate policy

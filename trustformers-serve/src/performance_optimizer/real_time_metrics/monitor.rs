@@ -1943,7 +1943,7 @@ impl ParallelPerformanceMonitor {
             event_type: MonitoringEventType::AnomalyDetected,
             source: "anomaly_detector".to_string(),
             data: anomaly.to_event_data(),
-            severity: anomaly.severity.clone(),
+            severity: anomaly.severity,
             metadata: HashMap::new(),
             correlation_id: format!("anomaly_{}", Utc::now().timestamp_nanos_opt().unwrap_or(0)),
             sequence_number: self.monitoring_stats.events_processed.load(Ordering::Relaxed),
@@ -2511,6 +2511,12 @@ pub struct ThresholdAnomalyDetector {
     stats: AnomalyAlgorithmStats,
 }
 
+impl Default for ThresholdAnomalyDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThresholdAnomalyDetector {
     /// Create new threshold anomaly detector
     pub fn new() -> Self {
@@ -2968,7 +2974,7 @@ impl LinearRegressionTrendDetector {
             slope,
             r_squared,
             confidence: r_squared,
-            significance: if r_squared > 0.5 { true } else { false },
+            significance: r_squared > 0.5,
         })
     }
 }
@@ -3128,7 +3134,7 @@ impl MovingAverageTrendDetector {
         }
 
         let first = moving_averages[0];
-        let last = *moving_averages.last().unwrap();
+        let last = *moving_averages.last().unwrap_or(&0.0);
         let change_ratio = if first != 0.0 { (last - first) / first } else { 0.0 };
 
         let direction = if change_ratio > self.change_threshold {
@@ -3756,6 +3762,12 @@ pub struct BaselineStatistics {
 #[derive(Debug)]
 pub struct RegressionEngine;
 
+impl Default for RegressionEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RegressionEngine {
     pub fn new() -> Self {
         Self
@@ -3764,6 +3776,12 @@ impl RegressionEngine {
 
 #[derive(Debug)]
 pub struct PatternRecognitionEngine;
+
+impl Default for PatternRecognitionEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl PatternRecognitionEngine {
     pub fn new() -> Self {
@@ -3774,6 +3792,12 @@ impl PatternRecognitionEngine {
 #[derive(Debug)]
 pub struct ThreadLoadBalancer;
 
+impl Default for ThreadLoadBalancer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThreadLoadBalancer {
     pub fn new() -> Self {
         Self
@@ -3783,6 +3807,12 @@ impl ThreadLoadBalancer {
 #[derive(Debug)]
 pub struct BaselineValidationEngine;
 
+impl Default for BaselineValidationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BaselineValidationEngine {
     pub fn new() -> Self {
         Self
@@ -3791,6 +3821,12 @@ impl BaselineValidationEngine {
 
 #[derive(Debug)]
 pub struct DefaultScalingAlgorithm;
+
+impl Default for DefaultScalingAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl DefaultScalingAlgorithm {
     pub fn new() -> Self {
@@ -3822,6 +3858,12 @@ impl ThreadScalingAlgorithm for DefaultScalingAlgorithm {
 
 #[derive(Debug)]
 pub struct DefaultAdaptationAlgorithm;
+
+impl Default for DefaultAdaptationAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl DefaultAdaptationAlgorithm {
     pub fn new() -> Self {

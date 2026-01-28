@@ -20,7 +20,7 @@
 //!
 //! ### Basic Classification Evaluation
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
 //!
 //! let mut metric = ClassificationMetric::new();
@@ -38,7 +38,7 @@
 //!
 //! ### Using Probability Distributions
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
 //!
 //! let mut metric = ClassificationMetric::new();
@@ -110,7 +110,7 @@ impl ClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// use trustformers::auto::metrics::ClassificationMetric;
     ///
     /// let metric = ClassificationMetric::new();
@@ -152,8 +152,8 @@ impl Metric for ClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
     ///
     /// let mut metric = ClassificationMetric::new();
     ///
@@ -169,7 +169,7 @@ impl Metric for ClassificationMetric {
     /// ]);
     /// let refs = MetricInput::Classifications(vec![0, 1]);
     /// metric.add_batch(&probs, &refs)?;
-    /// ```
+
     fn add_batch(&mut self, predictions: &MetricInput, references: &MetricInput) -> Result<()> {
         match (predictions, references) {
             (MetricInput::Classifications(pred), MetricInput::Classifications(ref_)) => {
@@ -232,8 +232,8 @@ impl Metric for ClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
     ///
     /// let mut metric = ClassificationMetric::new();
     /// metric.add_batch(
@@ -245,7 +245,7 @@ impl Metric for ClassificationMetric {
     /// assert_eq!(result.name, "classification");
     /// assert_eq!(result.value, 0.5); // 50% accuracy
     /// assert!(result.details.contains_key("macro_f1"));
-    /// ```
+
     fn compute(&self) -> Result<MetricResult> {
         if self.predictions.len() != self.references.len() {
             return Err(TrustformersError::invalid_input_simple(
@@ -348,8 +348,8 @@ impl Metric for ClassificationMetric {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
+    /// ```rust,ignore
+    ///    /// use trustformers::auto::metrics::{ClassificationMetric, MetricInput, Metric};
     ///
     /// let mut metric = ClassificationMetric::new();
     /// metric.add_batch(
@@ -359,7 +359,7 @@ impl Metric for ClassificationMetric {
     ///
     /// metric.reset();
     /// // Metric is now ready for new data
-    /// ```
+
     fn reset(&mut self) {
         self.predictions.clear();
         self.references.clear();

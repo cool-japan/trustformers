@@ -1,6 +1,8 @@
 //! Demonstration of advanced quantization methods: SmoothQuant and GGML Q5/Q6 variants
 #![allow(unused_variables)]
 
+use scirs2_core::random::*;
+
 use anyhow::Result;
 use trustformers_core::quantization::{
     AdvancedGGMLQuantizer, GGMLQuantType, MigrationAnalyzer, SmoothQuantConfig, SmoothQuantizer,
@@ -219,7 +221,7 @@ fn demo_migration_analysis() -> Result<()> {
         // In practice, this would run actual model evaluation
         let test_input = Tensor::randn(&[1, 1024]).unwrap();
         match quantized.forward(&test_input) {
-            Ok(_) => 0.95 - rand::random::<f32>() * 0.1, // Simulated accuracy
+            Ok(_) => 0.95 - thread_rng().random::<f32>() * 0.1, // Simulated accuracy
             Err(_) => 0.0,
         }
     };

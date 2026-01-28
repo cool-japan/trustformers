@@ -873,7 +873,7 @@ mod tests {
 
     #[test]
     fn test_onnx_backend_config() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = ONNXBackendConfig::cpu_optimized(model_path.clone());
@@ -889,7 +889,7 @@ mod tests {
 
     #[test]
     fn test_onnx_backend_config_gpu() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = ONNXBackendConfig::gpu_optimized(model_path.clone(), Some(0));
@@ -902,7 +902,7 @@ mod tests {
 
     #[test]
     fn test_onnx_pipeline_options() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let options = ONNXPipelineOptions::cpu_optimized(model_path.clone());

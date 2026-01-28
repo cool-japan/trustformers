@@ -145,7 +145,7 @@ impl ModelTestSuite {
                 });
             }
 
-            let output = result.unwrap();
+            let output = result.expect("operation failed");
 
             // Validate output
             if !self.validate_output(&output) {

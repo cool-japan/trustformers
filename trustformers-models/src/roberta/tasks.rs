@@ -1,29 +1,47 @@
+#![allow(dead_code)]
+
 use crate::roberta::config::RobertaConfig;
 use crate::roberta::model::RobertaModel;
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::Linear;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RobertaForSequenceClassification {
     roberta: RobertaModel,
     classifier: RobertaClassificationHead,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl RobertaForSequenceClassification {
     pub fn new(config: RobertaConfig, num_labels: usize) -> Result<Self> {
-        let roberta = RobertaModel::new(config.clone())?;
-        let classifier = RobertaClassificationHead::new(&config, num_labels)?;
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: RobertaConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let roberta = RobertaModel::new_with_device(config.clone(), device)?;
+        let classifier = RobertaClassificationHead::new_with_device(&config, num_labels, device)?;
 
         Ok(Self {
             roberta,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -32,15 +50,25 @@ struct RobertaClassificationHead {
     dense: Linear,
     dropout: f32,
     out_proj: Linear,
+    device: Device,
 }
 
 impl RobertaClassificationHead {
     fn new(config: &RobertaConfig, num_labels: usize) -> Result<Self> {
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    fn new_with_device(config: &RobertaConfig, num_labels: usize, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
             dropout: config.classifier_dropout.unwrap_or(config.hidden_dropout_prob),
-            out_proj: Linear::new(config.hidden_size, num_labels, true),
+            out_proj: Linear::new_with_device(config.hidden_size, num_labels, true, device),
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, features: Tensor) -> Result<Tensor> {
@@ -88,17 +116,31 @@ impl Model for RobertaForSequenceClassification {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RobertaForMaskedLM {
     roberta: RobertaModel,
     lm_head: RobertaLMHead,
+    device: Device,
 }
 
 impl RobertaForMaskedLM {
     pub fn new(config: RobertaConfig) -> Result<Self> {
-        let roberta = RobertaModel::new(config.clone())?;
-        let lm_head = RobertaLMHead::new(&config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { roberta, lm_head })
+    pub fn new_with_device(config: RobertaConfig, device: Device) -> Result<Self> {
+        let roberta = RobertaModel::new_with_device(config.clone(), device)?;
+        let lm_head = RobertaLMHead::new_with_device(&config, device)?;
+
+        Ok(Self {
+            roberta,
+            lm_head,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -107,18 +149,29 @@ struct RobertaLMHead {
     dense: Linear,
     layer_norm: trustformers_core::layers::LayerNorm,
     decoder: Linear,
+    device: Device,
 }
 
 impl RobertaLMHead {
     fn new(config: &RobertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &RobertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
-            layer_norm: trustformers_core::layers::LayerNorm::new(
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: trustformers_core::layers::LayerNorm::new_with_device(
                 vec![config.hidden_size],
                 config.layer_norm_eps,
+                device,
             )?,
-            decoder: Linear::new(config.hidden_size, config.vocab_size, true),
+            decoder: Linear::new_with_device(config.hidden_size, config.vocab_size, true, device),
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, features: Tensor) -> Result<Tensor> {
@@ -170,18 +223,32 @@ pub struct RobertaForTokenClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl RobertaForTokenClassification {
     pub fn new(config: RobertaConfig, num_labels: usize) -> Result<Self> {
-        let roberta = RobertaModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: RobertaConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let roberta = RobertaModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             roberta,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -226,17 +293,27 @@ impl Model for RobertaForTokenClassification {
 pub struct RobertaForQuestionAnswering {
     roberta: RobertaModel,
     qa_outputs: Linear,
+    device: Device,
 }
 
 impl RobertaForQuestionAnswering {
     pub fn new(config: RobertaConfig) -> Result<Self> {
-        let roberta = RobertaModel::new(config.clone())?;
-        let qa_outputs = Linear::new(config.hidden_size, 2, true);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: RobertaConfig, device: Device) -> Result<Self> {
+        let roberta = RobertaModel::new_with_device(config.clone(), device)?;
+        let qa_outputs = Linear::new_with_device(config.hidden_size, 2, true, device);
 
         Ok(Self {
             roberta,
             qa_outputs,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

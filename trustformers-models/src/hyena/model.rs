@@ -1,6 +1,7 @@
 use crate::hyena::config::HyenaConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
@@ -23,17 +24,24 @@ pub struct HyenaFilter {
     use_fft: bool,
     w: f32,
     wd: f32,
+    device: Device,
 }
 
 impl HyenaFilter {
     pub fn new(config: &HyenaConfig, seq_len: usize) -> Result<Self> {
-        let filter_fn = Linear::new(config.filter_order, config.hidden_size, config.bias);
+        Self::new_with_device(config, seq_len, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, seq_len: usize, device: Device) -> Result<Self> {
+        let filter_fn =
+            Linear::new_with_device(config.filter_order, config.hidden_size, config.bias, device);
 
         let modulation = if config.modulate {
-            Some(Linear::new(
+            Some(Linear::new_with_device(
                 config.hidden_size,
                 config.hidden_size,
                 config.bias,
+                device,
             ))
         } else {
             None
@@ -48,7 +56,12 @@ impl HyenaFilter {
             use_fft: config.use_flashfft,
             w: config.w,
             wd: config.wd,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Generate implicit filter coefficients
@@ -155,7 +168,12 @@ impl Layer for HyenaFilter {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let seq_len = input.shape()[1];
+        // Handle both 2D [seq_len, hidden_size] and 3D [batch_size, seq_len, hidden_size]
+        let seq_len = if input.shape().len() == 2 {
+            input.shape()[0] // 2D: [seq_len, hidden_size]
+        } else {
+            input.shape()[1] // 3D: [batch_size, seq_len, hidden_size]
+        };
 
         // Generate filter for current sequence length
         let filter = self.generate_filter(seq_len)?;
@@ -193,31 +211,42 @@ pub struct HyenaOperator {
 
     // Local convolution for short-range dependencies
     local_conv: Option<LocalConvolution>,
+
+    device: Device,
 }
 
 impl HyenaOperator {
     pub fn new(config: &HyenaConfig, seq_len: usize) -> Result<Self> {
+        Self::new_with_device(config, seq_len, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, seq_len: usize, device: Device) -> Result<Self> {
         let mut projections = Vec::new();
         let mut filters = Vec::new();
 
         // Create projections and filters for each order
         for _ in 0..config.order {
-            projections.push(Linear::new(
+            projections.push(Linear::new_with_device(
                 config.hidden_size,
                 config.hidden_size,
                 config.bias,
+                device,
             ));
-            filters.push(HyenaFilter::new(config, seq_len)?);
+            filters.push(HyenaFilter::new_with_device(config, seq_len, device)?);
         }
 
-        let output_proj = Linear::new(
+        let output_proj = Linear::new_with_device(
             config.hidden_size * config.order,
             config.hidden_size,
             config.bias,
+            device,
         );
 
-        let local_conv =
-            if config.local_order > 0 { Some(LocalConvolution::new(config)?) } else { None };
+        let local_conv = if config.local_order > 0 {
+            Some(LocalConvolution::new_with_device(config, device)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             order: config.order,
@@ -226,7 +255,12 @@ impl HyenaOperator {
             filters,
             output_proj,
             local_conv,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -284,29 +318,50 @@ impl HyenaOperator {
             ));
         }
 
-        let batch_size = tensors[0].shape()[0];
-        let seq_len = tensors[0].shape()[1];
         let total_hidden = self.hidden_size * self.order;
 
-        let mut result = Tensor::zeros(&[batch_size, seq_len, total_hidden])?;
+        if tensors[0].shape().len() == 2 {
+            // Handle 2D tensors: [seq_len, hidden_size]
+            let seq_len = tensors[0].shape()[0];
 
-        for (i, tensor) in tensors.iter().enumerate() {
-            let start_idx = i * self.hidden_size;
-            let _end_idx = (i + 1) * self.hidden_size;
+            let mut result = Tensor::zeros(&[seq_len, total_hidden])?;
 
-            // Copy tensor data to the appropriate slice
-            // This is a simplified implementation
-            for b in 0..batch_size {
+            for (i, tensor) in tensors.iter().enumerate() {
+                let start_idx = i * self.hidden_size;
+
+                // Copy tensor data to the appropriate slice
                 for s in 0..seq_len {
                     for h in 0..self.hidden_size {
-                        let val = tensor.get_scalar(&[b, s, h])?;
-                        result = result.set_scalar(&[b, s, start_idx + h], val)?;
+                        let val = tensor.get_scalar(&[s, h])?;
+                        result = result.set_scalar(&[s, start_idx + h], val)?;
                     }
                 }
             }
-        }
 
-        Ok(result)
+            Ok(result)
+        } else {
+            // Handle 3D tensors: [batch_size, seq_len, hidden_size]
+            let batch_size = tensors[0].shape()[0];
+            let seq_len = tensors[0].shape()[1];
+
+            let mut result = Tensor::zeros(&[batch_size, seq_len, total_hidden])?;
+
+            for (i, tensor) in tensors.iter().enumerate() {
+                let start_idx = i * self.hidden_size;
+
+                // Copy tensor data to the appropriate slice
+                for b in 0..batch_size {
+                    for s in 0..seq_len {
+                        for h in 0..self.hidden_size {
+                            let val = tensor.get_scalar(&[b, s, h])?;
+                            result = result.set_scalar(&[b, s, start_idx + h], val)?;
+                        }
+                    }
+                }
+            }
+
+            Ok(result)
+        }
     }
 }
 
@@ -315,25 +370,36 @@ pub struct LocalConvolution {
     kernel_size: usize,
     conv: Linear,
     padding: usize,
+    device: Device,
 }
 
 impl LocalConvolution {
     pub fn new(config: &HyenaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, device: Device) -> Result<Self> {
         let kernel_size = config.conv_kernel_size;
         let padding = kernel_size / 2;
 
         // This would be a 1D convolution in practice
-        let conv = Linear::new(
+        let conv = Linear::new_with_device(
             config.hidden_size * kernel_size,
             config.hidden_size,
             config.bias,
+            device,
         );
 
         Ok(Self {
             kernel_size,
             conv,
             padding,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -448,14 +514,21 @@ pub struct HyenaBlock {
     norm2: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl HyenaBlock {
     pub fn new(config: &HyenaConfig, seq_len: usize) -> Result<Self> {
-        let hyena_op = HyenaOperator::new(config, seq_len)?;
-        let mlp = HyenaMLp::new(config)?;
-        let norm1 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
-        let norm2 = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        Self::new_with_device(config, seq_len, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, seq_len: usize, device: Device) -> Result<Self> {
+        let hyena_op = HyenaOperator::new_with_device(config, seq_len, device)?;
+        let mlp = HyenaMLp::new_with_device(config, device)?;
+        let norm1 =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
+        let norm2 =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             hyena_op,
@@ -463,7 +536,12 @@ impl HyenaBlock {
             norm1,
             norm2,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -500,19 +578,39 @@ pub struct HyenaMLp {
     activation: String,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl HyenaMLp {
     pub fn new(config: &HyenaConfig) -> Result<Self> {
-        let up_proj = Linear::new(config.hidden_size, config.intermediate_size, config.bias);
-        let down_proj = Linear::new(config.intermediate_size, config.hidden_size, config.bias);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, device: Device) -> Result<Self> {
+        let up_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.intermediate_size,
+            config.bias,
+            device,
+        );
+        let down_proj = Linear::new_with_device(
+            config.intermediate_size,
+            config.hidden_size,
+            config.bias,
+            device,
+        );
 
         Ok(Self {
             up_proj,
             down_proj,
             activation: config.hidden_act.clone(),
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -547,34 +645,47 @@ pub struct HyenaEmbeddings {
     layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl HyenaEmbeddings {
     pub fn new(config: &HyenaConfig) -> Result<Self> {
-        let word_embeddings = Embedding::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &HyenaConfig, device: Device) -> Result<Self> {
+        let word_embeddings = Embedding::new_with_device(
             config.vocab_size,
             config.hidden_size,
             Some(config.pad_token_id as usize),
+            device,
         )?;
 
         let position_embeddings = if config.use_positional_embeddings {
-            Some(Embedding::new(
+            Some(Embedding::new_with_device(
                 config.max_position_embeddings,
                 config.hidden_size,
                 None,
+                device,
             )?)
         } else {
             None
         };
 
-        let layer_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        let layer_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             word_embeddings,
             position_embeddings,
             layer_norm,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -618,27 +729,42 @@ pub struct HyenaModel {
     embeddings: HyenaEmbeddings,
     layers: Vec<HyenaBlock>,
     final_norm: LayerNorm,
+    device: Device,
 }
 
 impl HyenaModel {
     pub fn new(config: HyenaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: HyenaConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let embeddings = HyenaEmbeddings::new(&config)?;
+        let embeddings = HyenaEmbeddings::new_with_device(&config, device)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(HyenaBlock::new(&config, config.max_position_embeddings)?);
+            layers.push(HyenaBlock::new_with_device(
+                &config,
+                config.max_position_embeddings,
+                device,
+            )?);
         }
 
-        let final_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        let final_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             config,
             embeddings,
             layers,
             final_norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -648,13 +774,22 @@ impl Model for HyenaModel {
     type Output = Tensor;
 
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
+        let seq_len = input.len();
         let mut hidden_states = self.embeddings.forward(input)?;
+
+        // Embeddings return [seq_len, hidden_size], but layers expect [batch_size, seq_len, hidden_size]
+        // Add batch dimension
+        hidden_states = hidden_states.reshape(&[1, seq_len, self.config.hidden_size])?;
 
         for layer in &self.layers {
             hidden_states = layer.forward(hidden_states)?;
         }
 
-        self.final_norm.forward(hidden_states)
+        // Apply final norm
+        hidden_states = self.final_norm.forward(hidden_states)?;
+
+        // Remove batch dimension to return [seq_len, hidden_size]
+        hidden_states.reshape(&[seq_len, self.config.hidden_size])
     }
 
     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
@@ -687,14 +822,27 @@ impl Model for HyenaModel {
 pub struct HyenaForLanguageModeling {
     hyena: HyenaModel,
     lm_head: Linear,
+    device: Device,
 }
 
 impl HyenaForLanguageModeling {
     pub fn new(config: HyenaConfig) -> Result<Self> {
-        let hyena = HyenaModel::new(config.clone())?;
-        let lm_head = Linear::new(config.hidden_size, config.vocab_size, false);
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { hyena, lm_head })
+    pub fn new_with_device(config: HyenaConfig, device: Device) -> Result<Self> {
+        let hyena = HyenaModel::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.hidden_size, config.vocab_size, false, device);
+
+        Ok(Self {
+            hyena,
+            lm_head,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -727,18 +875,28 @@ pub struct HyenaForSequenceClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl HyenaForSequenceClassification {
     pub fn new(config: HyenaConfig, num_labels: usize) -> Result<Self> {
-        let hyena = HyenaModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(config: HyenaConfig, num_labels: usize, device: Device) -> Result<Self> {
+        let hyena = HyenaModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             hyena,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -752,7 +910,23 @@ impl Model for HyenaForSequenceClassification {
 
         // Use global average pooling for sequence classification
         let pooled = self.global_average_pool(&sequence_output)?;
-        self.classifier.forward(pooled)
+
+        // Handle 1D pooled output - reshape to 2D for classifier
+        let classifier_input = if pooled.shape().len() == 1 {
+            let hidden_size = pooled.shape()[0];
+            pooled.reshape(&[1, hidden_size])?
+        } else {
+            pooled
+        };
+
+        let logits = self.classifier.forward(classifier_input)?;
+
+        // If output is 2D [1, num_labels], squeeze to 1D [num_labels]
+        if logits.shape().len() == 2 && logits.shape()[0] == 1 {
+            logits.reshape(&[logits.shape()[1]])
+        } else {
+            Ok(logits)
+        }
     }
 
     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
@@ -927,7 +1101,7 @@ mod tests {
         let filter = HyenaFilter::new(&config, seq_len);
         assert!(filter.is_ok());
 
-        let filter = filter.unwrap();
+        let filter = filter.expect("operation failed");
         assert_eq!(filter.filter_order, config.filter_order);
         assert_eq!(filter.hidden_size, config.hidden_size);
         assert_eq!(filter.seq_len, seq_len);
@@ -943,39 +1117,39 @@ mod tests {
         let seq_len = 32;
         let batch_size = 2;
 
-        let filter = HyenaFilter::new(&config, seq_len).unwrap();
+        let filter = HyenaFilter::new(&config, seq_len).expect("operation failed");
 
         // Create test input
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = filter.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
     }
 
     #[test]
     fn test_local_convolution() {
         let config = create_test_config();
-        let local_conv = LocalConvolution::new(&config).unwrap();
+        let local_conv = LocalConvolution::new(&config).expect("operation failed");
 
         let batch_size = 2;
         let seq_len = 16;
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = local_conv.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
     }
 
@@ -985,18 +1159,18 @@ mod tests {
         let seq_len = 16;
         let batch_size = 1;
 
-        let hyena_op = HyenaOperator::new(&config, seq_len).unwrap();
+        let hyena_op = HyenaOperator::new(&config, seq_len).expect("operation failed");
 
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = hyena_op.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
 
         // Test parameter count
@@ -1007,20 +1181,20 @@ mod tests {
     #[test]
     fn test_hyena_mlp() {
         let config = create_test_config();
-        let mlp = HyenaMLp::new(&config).unwrap();
+        let mlp = HyenaMLp::new(&config).expect("operation failed");
 
         let batch_size = 2;
         let seq_len = 8;
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = mlp.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
 
         // Test parameter count
@@ -1031,13 +1205,13 @@ mod tests {
     #[test]
     fn test_hyena_embeddings() {
         let config = create_test_config();
-        let embeddings = HyenaEmbeddings::new(&config).unwrap();
+        let embeddings = HyenaEmbeddings::new(&config).expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25, 50, 100];
         let output = embeddings.forward(input_tokens.clone());
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // The embedding output shape should be [seq_len, hidden_size]
         assert_eq!(output.shape(), &[input_tokens.len(), config.hidden_size]);
 
@@ -1050,19 +1224,19 @@ mod tests {
     fn test_hyena_block() {
         let config = create_test_config();
         let seq_len = 16;
-        let block = HyenaBlock::new(&config, seq_len).unwrap();
+        let block = HyenaBlock::new(&config, seq_len).expect("operation failed");
 
         let batch_size = 1;
         let input_data: Vec<f32> = (0..batch_size * seq_len * config.hidden_size)
             .map(|i| (i as f32) * 0.01)
             .collect();
-        let input =
-            Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size]).unwrap();
+        let input = Tensor::from_vec(input_data, &[batch_size, seq_len, config.hidden_size])
+            .expect("operation failed");
 
         let output = block.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         assert_eq!(output.shape(), &[batch_size, seq_len, config.hidden_size]);
 
         // Test parameter count
@@ -1073,7 +1247,7 @@ mod tests {
     #[test]
     fn test_hyena_model() {
         let config = create_test_config();
-        let model = HyenaModel::new(config.clone()).unwrap();
+        let model = HyenaModel::new(config.clone()).expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25, 50];
         let output = model.forward(input_tokens.clone());
@@ -1083,7 +1257,7 @@ mod tests {
             Err(e) => panic!("Model forward failed: {}", e),
         }
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // Model output should be [seq_len, hidden_size] after processing
         assert_eq!(output.shape(), &[input_tokens.len(), config.hidden_size]);
 
@@ -1102,13 +1276,13 @@ mod tests {
     #[test]
     fn test_hyena_for_language_modeling() {
         let config = create_test_config();
-        let model = HyenaForLanguageModeling::new(config.clone()).unwrap();
+        let model = HyenaForLanguageModeling::new(config.clone()).expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25];
         let output = model.forward(input_tokens.clone());
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // Output should have vocab_size as last dimension for logits [seq_len, vocab_size]
         assert_eq!(output.shape(), &[input_tokens.len(), config.vocab_size]);
 
@@ -1121,13 +1295,14 @@ mod tests {
     fn test_hyena_for_sequence_classification() {
         let config = create_test_config();
         let num_labels = 10;
-        let model = HyenaForSequenceClassification::new(config.clone(), num_labels).unwrap();
+        let model = HyenaForSequenceClassification::new(config.clone(), num_labels)
+            .expect("operation failed");
 
         let input_tokens = vec![1, 5, 10, 25, 50, 100];
         let output = model.forward(input_tokens.clone());
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed");
         // Output should be [num_labels] for classification after pooling
         assert_eq!(output.shape(), &[num_labels]);
 

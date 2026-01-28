@@ -520,7 +520,7 @@ impl CpuModel {
                 target_parallelism
             } else {
                 // Distribute across NUMA nodes
-                let nodes_needed = (target_parallelism + cores_per_node - 1) / cores_per_node;
+                let nodes_needed = target_parallelism.div_ceil(cores_per_node);
                 nodes_needed.min(numa.node_count) * cores_per_node
             }
         } else {

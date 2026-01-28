@@ -96,7 +96,7 @@ impl ModelDiagnostics {
         let mut recommendations = Vec::new();
 
         // Collect recommendations from architecture analyzer
-        if let Some(arch_analysis) = self.architecture_analyzer.analyze_architecture().ok() {
+        if let Ok(arch_analysis) = self.architecture_analyzer.analyze_architecture() {
             for recommendation in arch_analysis.recommendations {
                 recommendations.push(format!("[Architecture] {}", recommendation));
             }
@@ -184,7 +184,7 @@ impl ModelDiagnostics {
         }
 
         // Collect recommendations from analytics engine
-        if let Some(analytics_report) = self.analytics_engine.generate_analytics_report().ok() {
+        if let Ok(analytics_report) = self.analytics_engine.generate_analytics_report() {
             for recommendation in analytics_report.recommendations {
                 recommendations.push(format!("[Analytics] {}", recommendation));
             }

@@ -8,8 +8,9 @@
 #![allow(unused_variables)]
 #![allow(unused_imports)]
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use scirs2_core::random::*; // Replaces rand - SciRS2 Integration Policy
+use std::hint::black_box;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use trustformers_serve::batching::aggregator::RequestInput;
@@ -26,10 +27,12 @@ use trustformers_serve::{
 
 /// Create a benchmark-optimized server configuration
 fn create_benchmark_config() -> ServerConfig {
-    let mut config = ServerConfig::default();
-    config.host = "127.0.0.1".to_string();
-    config.port = 0;
-    config.num_workers = 4;
+    let mut config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        num_workers: 4,
+        ..Default::default()
+    };
     config.model_config.model_name = "benchmark-model".to_string();
     config.model_config.model_version = Some("1.0.0".to_string());
     config.model_config.device = Device::Cpu;
@@ -113,9 +116,11 @@ fn bench_batching_service(c: &mut Criterion) {
             BenchmarkId::new("batch_processing", batch_size),
             batch_size,
             |b, &batch_size| {
-                let mut batching_config = BatchingConfig::default();
-                batching_config.max_batch_size = batch_size;
-                batching_config.max_wait_time = std::time::Duration::from_millis(5);
+                let batching_config = BatchingConfig {
+                    max_batch_size: batch_size,
+                    max_wait_time: std::time::Duration::from_millis(5),
+                    ..Default::default()
+                };
                 let service = DynamicBatchingService::new(batching_config);
 
                 b.to_async(&rt).iter(|| async {

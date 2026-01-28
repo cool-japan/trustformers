@@ -27,10 +27,36 @@ pub struct HuggingFaceMetadata {
 }
 
 /// SafeTensors header structure
-#[derive(Debug, Deserialize)]
+///
+/// Note: SafeTensors format has a FLAT structure where tensor names are keys at the root level,
+/// and __metadata__ is a special key (not nested under a "tensors" field).
+///
+/// Actual format: {"__metadata__": {...}, "tensor.name": {...}, "other.tensor": {...}}
+#[derive(Debug)]
 pub struct SafeTensorsHeader {
     pub metadata: Option<HashMap<String, String>>,
     pub tensors: HashMap<String, TensorInfo>,
+}
+
+impl<'de> serde::Deserialize<'de> for SafeTensorsHeader {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Deserialize as a flat HashMap
+        let mut map: HashMap<String, serde_json::Value> = HashMap::deserialize(deserializer)?;
+
+        // Extract __metadata__ if present (special key)
+        let metadata = map.remove("__metadata__").and_then(|v| serde_json::from_value(v).ok());
+
+        // All remaining keys are tensor names
+        let tensors: HashMap<String, TensorInfo> = map
+            .into_iter()
+            .filter_map(|(k, v)| serde_json::from_value(v).ok().map(|info| (k, info)))
+            .collect();
+
+        Ok(SafeTensorsHeader { metadata, tensors })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,31 +144,95 @@ impl HuggingFaceLoader {
     }
 
     fn create_single_file_index(model_dir: &Path) -> Result<HuggingFaceIndex> {
-        // Look for single weight file
+        // Look for single weight file (prefer SafeTensors over PyTorch)
         let bin_path = model_dir.join("pytorch_model.bin");
         let safetensors_path = model_dir.join("model.safetensors");
 
-        let weight_file = if bin_path.exists() {
-            "pytorch_model.bin"
-        } else if safetensors_path.exists() {
-            "model.safetensors"
+        let (weight_file, is_safetensors) = if safetensors_path.exists() {
+            ("model.safetensors", true)
+        } else if bin_path.exists() {
+            ("pytorch_model.bin", false)
         } else {
             return Err(TrustformersError::file_not_found(
                 "No weight files found in model directory".to_string(),
             ));
         };
 
-        // Create basic index
+        // Create index with proper tensor names
         let mut weight_map = HashMap::new();
-        weight_map.insert("*".to_string(), weight_file.to_string());
+
+        if is_safetensors {
+            // Read SafeTensors header to get actual tensor names
+            match Self::read_safetensors_tensor_names(&model_dir.join(weight_file)) {
+                Ok(tensor_names) => {
+                    // Map each tensor name to the weight file
+                    for name in tensor_names {
+                        weight_map.insert(name, weight_file.to_string());
+                    }
+                },
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Failed to read SafeTensors header: {}. Using fallback index.",
+                        e
+                    );
+                    // Fallback to old behavior
+                    weight_map.insert("*".to_string(), weight_file.to_string());
+                },
+            }
+        } else {
+            // For PyTorch files, use wildcard (we can't easily parse .bin files)
+            weight_map.insert("*".to_string(), weight_file.to_string());
+        }
 
         Ok(HuggingFaceIndex {
             metadata: HuggingFaceMetadata {
                 total_size: 0,
-                format: "pytorch".to_string(),
+                format: if is_safetensors { "safetensors" } else { "pytorch" }.to_string(),
             },
             weight_map,
         })
+    }
+
+    fn read_safetensors_tensor_names(path: &Path) -> Result<Vec<String>> {
+        use std::io::Read;
+
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+
+        // Read header length (first 8 bytes)
+        let mut header_len_bytes = [0u8; 8];
+        reader.read_exact(&mut header_len_bytes)?;
+        let header_len = u64::from_le_bytes(header_len_bytes);
+
+        // Read header JSON
+        let mut header_bytes = vec![0u8; header_len as usize];
+        reader.read_exact(&mut header_bytes)?;
+        let header_str = String::from_utf8(header_bytes).map_err(|e| {
+            TrustformersError::weight_load_error(format!(
+                "Invalid UTF-8 in SafeTensors header: {}",
+                e
+            ))
+        })?;
+
+        // Parse JSON and extract tensor names
+        let header: serde_json::Value = serde_json::from_str(&header_str).map_err(|e| {
+            TrustformersError::weight_load_error(format!(
+                "Failed to parse SafeTensors header: {}",
+                e
+            ))
+        })?;
+
+        let mut tensor_names = Vec::new();
+        if let Some(obj) = header.as_object() {
+            for (key, _value) in obj {
+                // Skip metadata entries
+                if key != "__metadata__" {
+                    tensor_names.push(key.clone());
+                }
+            }
+        }
+
+        Ok(tensor_names)
     }
 
     fn get_file_handle(&mut self, filename: &str) -> Result<&mut BufReader<File>> {
@@ -153,7 +243,12 @@ impl HuggingFaceLoader {
             self.file_handles.insert(filename.to_string(), reader);
         }
 
-        Ok(self.file_handles.get_mut(filename).unwrap())
+        self.file_handles.get_mut(filename).ok_or_else(|| {
+            TrustformersError::runtime_error(format!(
+                "File handle for {} not found after insertion",
+                filename
+            ))
+        })
     }
 
     /// Load tensor from PyTorch .bin file
@@ -477,12 +572,23 @@ impl HuggingFaceLoader {
     }
 
     fn load_safetensors_tensor_complete(&mut self, name: &str, filename: &str) -> Result<Tensor> {
-        let reader = self.get_file_handle(filename)?;
+        // CRITICAL FIX: Don't use cached file handles for SafeTensors
+        // BufReader's internal buffer causes issues when seeking - it doesn't flush the buffer
+        // after seek(), so we read stale buffered data instead of fresh file data.
+        // Solution: Open a fresh file for each tensor load.
+        let file_path = self.model_dir.join(filename);
+        eprintln!(
+            "[SAFETENSORS DEBUG] Loading tensor '{}' from file: {:?}",
+            name, file_path
+        );
+        let file = File::open(&file_path)?;
+        let mut reader = BufReader::new(file);
 
         // Read header length (first 8 bytes)
         let mut header_len_bytes = [0u8; 8];
         reader.read_exact(&mut header_len_bytes)?;
         let header_len = u64::from_le_bytes(header_len_bytes);
+        eprintln!("[SAFETENSORS DEBUG] Header length: {} bytes", header_len);
 
         // Read header JSON
         let mut header_bytes = vec![0u8; header_len as usize];
@@ -494,7 +600,16 @@ impl HuggingFaceLoader {
                 e
             ))
         })?;
+
+        // Debug: print first 500 chars of header
+        eprintln!(
+            "[SAFETENSORS DEBUG] Header preview (first 500 chars): {}",
+            &header_str[..header_str.len().min(500)]
+        );
+
         let header: SafeTensorsHeader = serde_json::from_str(header_str).map_err(|e| {
+            eprintln!("[SAFETENSORS DEBUG] Failed to parse header, printing full header:");
+            eprintln!("{}", header_str);
             TrustformersError::serialization_error(format!(
                 "Failed to parse SafeTensors header: {}",
                 e
@@ -502,8 +617,12 @@ impl HuggingFaceLoader {
         })?;
 
         if let Some(tensor_info) = header.tensors.get(name) {
-            // Seek to tensor data
-            reader.seek(SeekFrom::Start(tensor_info.data_offsets[0]))?;
+            // Seek to tensor data (offsets are relative to start of tensor data section)
+            // SafeTensors format: [8 bytes header_len][header_len bytes JSON][tensor data]
+            let tensor_data_start = 8 + header_len;
+            reader.seek(SeekFrom::Start(
+                tensor_data_start + tensor_info.data_offsets[0],
+            ))?;
 
             // Read tensor data
             let data_len = (tensor_info.data_offsets[1] - tensor_info.data_offsets[0]) as usize;

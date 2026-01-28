@@ -514,6 +514,12 @@ pub struct PriorityQueue<T> {
     config: QueueConfig,
 }
 
+impl<T> Default for PriorityQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T> PriorityQueue<T> {
     pub fn new() -> Self {
         Self {

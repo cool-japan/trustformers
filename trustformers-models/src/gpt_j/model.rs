@@ -1,5 +1,7 @@
 use crate::gpt_j::config::GptJConfig;
+use scirs2_core::ndarray::{s, ArrayD, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::{tensor_op_error, Result, TrustformersError};
 use trustformers_core::layers::{Embedding, LayerNorm, Linear};
 use trustformers_core::tensor::Tensor;
@@ -128,6 +130,48 @@ impl GptJModel {
             ln_f,
         })
     }
+
+    pub fn new_with_device(config: GptJConfig, device: Device) -> Result<Self> {
+        config.validate()?;
+
+        let wte = Embedding::new_with_device(config.vocab_size, config.n_embd, None, device)?;
+
+        let mut blocks = Vec::new();
+        for _ in 0..config.n_layer {
+            blocks.push(GptJBlock::new_with_device(&config, device)?);
+        }
+
+        let ln_f =
+            LayerNorm::new_with_device(vec![config.n_embd], config.layer_norm_epsilon, device)?;
+
+        Ok(Self {
+            config,
+            wte,
+            blocks,
+            ln_f,
+        })
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.wte.weights_to_gpu(device)?;
+        for block in &mut self.blocks {
+            block.weights_to_gpu(device)?;
+        }
+        self.ln_f.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.wte.weights_to_gpu_cuda(device)?;
+        for block in &mut self.blocks {
+            block.weights_to_gpu_cuda(device)?;
+        }
+        self.ln_f.weights_to_gpu_cuda(device)?;
+        println!("✓ GptJModel: All layer weights cached on CUDA GPU");
+        Ok(())
+    }
 }
 
 impl GptJBlock {
@@ -137,6 +181,35 @@ impl GptJBlock {
         let mlp = GptJMLP::new(config)?;
 
         Ok(Self { ln_1, attn, mlp })
+    }
+
+    fn new_with_device(config: &GptJConfig, device: Device) -> Result<Self> {
+        let ln_1 =
+            LayerNorm::new_with_device(vec![config.n_embd], config.layer_norm_epsilon, device)?;
+        let attn = GptJAttention::new_with_device(config, device)?;
+        let mlp = GptJMLP::new_with_device(config, device)?;
+
+        Ok(Self { ln_1, attn, mlp })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.ln_1.parameter_count() + self.attn.parameter_count() + self.mlp.parameter_count()
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.ln_1.weights_to_gpu(device)?;
+        self.attn.weights_to_gpu(device)?;
+        self.mlp.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.ln_1.weights_to_gpu_cuda(device)?;
+        self.attn.weights_to_gpu_cuda(device)?;
+        self.mlp.weights_to_gpu_cuda(device)?;
+        Ok(())
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -175,6 +248,52 @@ impl GptJAttention {
             dropout: config.attn_pdrop,
             rotary_emb,
         })
+    }
+
+    fn new_with_device(config: &GptJConfig, device: Device) -> Result<Self> {
+        let head_dim = config.head_dim();
+        let rotary_emb = GptJRotaryEmbedding::new(
+            config.rotary_dim,
+            config.n_positions,
+            10000.0, // Standard RoPE theta value
+        );
+
+        Ok(Self {
+            q_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            k_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            v_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            out_proj: Linear::new_with_device(config.n_embd, config.n_embd, false, device),
+            num_heads: config.n_head,
+            head_dim,
+            rotary_dim: config.rotary_dim,
+            dropout: config.attn_pdrop,
+            rotary_emb,
+        })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.q_proj.parameter_count()
+            + self.k_proj.parameter_count()
+            + self.v_proj.parameter_count()
+            + self.out_proj.parameter_count()
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.q_proj.weights_to_gpu(device)?;
+        self.k_proj.weights_to_gpu(device)?;
+        self.v_proj.weights_to_gpu(device)?;
+        self.out_proj.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.q_proj.weights_to_gpu_cuda(device)?;
+        self.k_proj.weights_to_gpu_cuda(device)?;
+        self.v_proj.weights_to_gpu_cuda(device)?;
+        self.out_proj.weights_to_gpu_cuda(device)?;
+        Ok(())
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -223,6 +342,35 @@ impl GptJMLP {
             activation: config.activation_function.clone(),
             dropout: config.resid_pdrop,
         })
+    }
+
+    fn new_with_device(config: &GptJConfig, device: Device) -> Result<Self> {
+        let intermediate_size = 4 * config.n_embd; // GPT-J uses 4x hidden size for MLP
+
+        Ok(Self {
+            fc_in: Linear::new_with_device(config.n_embd, intermediate_size, true, device),
+            fc_out: Linear::new_with_device(intermediate_size, config.n_embd, true, device),
+            activation: config.activation_function.clone(),
+            dropout: config.resid_pdrop,
+        })
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.fc_in.parameter_count() + self.fc_out.parameter_count()
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.fc_in.weights_to_gpu(device)?;
+        self.fc_out.weights_to_gpu(device)?;
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.fc_in.weights_to_gpu_cuda(device)?;
+        self.fc_out.weights_to_gpu_cuda(device)?;
+        Ok(())
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -316,6 +464,32 @@ impl GptJLMHeadModel {
             transformer,
             lm_head,
         })
+    }
+
+    pub fn new_with_device(config: GptJConfig, device: Device) -> Result<Self> {
+        let transformer = GptJModel::new_with_device(config.clone(), device)?;
+        let lm_head = Linear::new_with_device(config.n_embd, config.vocab_size, false, device);
+
+        Ok(Self {
+            transformer,
+            lm_head,
+        })
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    pub fn weights_to_gpu(&mut self, device: &Device) -> Result<()> {
+        self.transformer.weights_to_gpu(device)?;
+        self.lm_head.weights_to_gpu(device)?;
+        println!("✓ GptJLMHeadModel: All model weights uploaded to Metal GPU");
+        Ok(())
+    }
+
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    pub fn weights_to_gpu_cuda(&mut self, device: &Device) -> Result<()> {
+        self.transformer.weights_to_gpu_cuda(device)?;
+        self.lm_head.weights_to_gpu_cuda(device)?;
+        println!("✓ GptJLMHeadModel: All model weights uploaded to CUDA GPU");
+        Ok(())
     }
 }
 
@@ -484,12 +658,15 @@ impl GptJLMHeadModel {
             println!("Attempting to download {}", file_url);
 
             // Try using curl first
+            let file_path_str = file_path.to_str().ok_or_else(|| {
+                TrustformersError::io_error("Invalid file path encoding".to_string())
+            })?;
             let curl_result = Command::new("curl")
                 .args([
                     "-L", // Follow redirects
                     "-f", // Fail on HTTP errors
                     "-o",
-                    file_path.to_str().unwrap(),
+                    file_path_str,
                     &file_url,
                 ])
                 .output();
@@ -512,9 +689,7 @@ impl GptJLMHeadModel {
             }
 
             // Try using wget as fallback
-            let wget_result = Command::new("wget")
-                .args(["-O", file_path.to_str().unwrap(), &file_url])
-                .output();
+            let wget_result = Command::new("wget").args(["-O", file_path_str, &file_url]).output();
 
             match wget_result {
                 Ok(output) if output.status.success() => {
@@ -663,8 +838,8 @@ impl GptJLMHeadModel {
                     }
                     let seq_len = shape[1];
                     let vocab_size = shape[2];
-                    let slice = arr.slice(ndarray::s![0, seq_len - 1, ..]);
-                    use ndarray::{ArrayD, IxDyn};
+                    let slice = arr.slice(s![0, seq_len - 1, ..]);
+                    // ArrayD and IxDyn already imported via scirs2_core at top
                     ArrayD::from_shape_vec(IxDyn(&[vocab_size]), slice.iter().cloned().collect())
                         .map_err(|e| {
                             TrustformersError::tensor_op_error(
@@ -722,15 +897,13 @@ impl GptJLMHeadModel {
 }
 
 // Helper functions for GPT-J text generation
-use scirs2_core::ndarray::ArrayD; // SciRS2 Integration Policy
-
 fn apply_top_k_filtering_gpt_j(logits: ArrayD<f32>, k: usize) -> Result<ArrayD<f32>> {
     let mut result = logits.clone();
     let mut indices_and_values: Vec<(usize, f32)> =
         logits.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
 
     // Sort by value in descending order
-    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indices_and_values.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Set all values outside top-k to -inf
     for (idx, _) in indices_and_values.iter().skip(k) {
@@ -747,7 +920,7 @@ fn apply_top_p_filtering_gpt_j(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32
         probs.iter().enumerate().map(|(idx, &prob)| (idx, prob)).collect();
 
     // Sort by probability in descending order
-    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indices_and_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     // Find the smallest set of tokens with cumulative probability > p
     let mut cumsum = 0.0;
@@ -770,15 +943,14 @@ fn apply_top_p_filtering_gpt_j(logits: ArrayD<f32>, p: f32) -> Result<ArrayD<f32
 }
 
 fn sample_from_logits_gpt_j(logits: ArrayD<f32>) -> Result<u32> {
-    use rand_distr::weighted::WeightedAliasIndex;
-    use scirs2_core::random::*; // SciRS2 Integration Policy
+    use scirs2_core::random::*; // SciRS2 Integration Policy (includes WeightedIndex)
 
     // Convert to probabilities
     let probs = softmax_gpt_j(logits)?;
 
     // Create weighted distribution
     let weights: Vec<f32> = probs.iter().copied().collect();
-    let dist = WeightedAliasIndex::new(weights).map_err(|e| {
+    let dist = WeightedIndex::new(weights).map_err(|e| {
         TrustformersError::model_error(format!("Failed to create distribution: {}", e))
     })?;
 

@@ -177,12 +177,12 @@ fn test_config_validation() {
 fn test_from_pretrained_name() {
     let config = LlavaConfig::from_pretrained_name("llava-v1.5-7b");
     assert!(config.is_some());
-    let config = config.unwrap();
+    let config = config.expect("operation failed");
     assert_eq!(config.model_type, "llava-v1.5-7b");
 
     let config = LlavaConfig::from_pretrained_name("liuhaotian/llava-v1.6-mistral-7b");
     assert!(config.is_some());
-    let config = config.unwrap();
+    let config = config.expect("operation failed");
     assert_eq!(config.model_type, "llava-v1.6-7b");
 
     let config = LlavaConfig::from_pretrained_name("invalid-model");
@@ -291,7 +291,7 @@ fn test_vision_encoder_creation() {
     let encoder = LlavaVisionEncoder::new(vision_config);
     assert!(encoder.is_ok());
 
-    let encoder = encoder.unwrap();
+    let encoder = encoder.expect("operation failed");
     assert_eq!(encoder.layers.len(), 24); // Default num_hidden_layers
 }
 
@@ -301,7 +301,7 @@ fn test_vision_attention_creation() {
     let attention = LlavaVisionAttention::new(vision_config);
     assert!(attention.is_ok());
 
-    let attention = attention.unwrap();
+    let attention = attention.expect("operation failed");
     assert_eq!(attention.head_dim, 64); // 1024 / 16
 }
 
@@ -334,7 +334,7 @@ fn test_language_model_creation() {
     let language_model = LlavaLanguageModel::new(config);
     assert!(language_model.is_ok());
 
-    let language_model = language_model.unwrap();
+    let language_model = language_model.expect("operation failed");
     assert_eq!(language_model.layers.len(), 2); // Minimal has 2 layers
 
     // Explicit cleanup
@@ -422,7 +422,7 @@ fn test_llava_attention_creation() {
     let attention = LlavaAttention::new(config);
     assert!(attention.is_ok());
 
-    let attention = attention.unwrap();
+    let attention = attention.expect("operation failed");
     assert_eq!(attention.head_dim, 8); // 64 / 8
     assert_eq!(attention.num_heads, 8);
 

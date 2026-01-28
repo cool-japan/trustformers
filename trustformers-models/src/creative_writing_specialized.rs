@@ -1449,7 +1449,7 @@ mod tests {
     fn test_genre_and_size_creation() {
         let config = CreativeWritingConfig::from_genre_and_size(WritingGenre::Mystery, "7b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.genre, WritingGenre::Mystery);
     }
 

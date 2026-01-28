@@ -4,7 +4,7 @@ use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use ndarray::{s, Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn};
 use std::collections::HashMap;
 use std::sync::RwLock;
 
@@ -151,16 +151,26 @@ impl PagedAttention {
 
     /// Allocate pages for a new sequence
     pub fn allocate_sequence(&self, sequence_id: usize, estimated_length: usize) -> Result<()> {
-        let pages_needed = (estimated_length + self.page_size - 1) / self.page_size;
+        let pages_needed = estimated_length.div_ceil(self.page_size);
         let mut allocated_pages = Vec::new();
 
         for _ in 0..pages_needed {
-            if let Some(page_id) = self.kv_cache.write().unwrap().allocate_page() {
+            if let Some(page_id) = self
+                .kv_cache
+                .write()
+                .map_err(|e| TrustformersError::runtime_error(format!("Lock poisoned: {}", e)))?
+                .allocate_page()
+            {
                 allocated_pages.push(page_id);
             } else {
                 // Free allocated pages if we can't allocate all needed
                 for &page_id in &allocated_pages {
-                    self.kv_cache.write().unwrap().free_page(page_id);
+                    self.kv_cache
+                        .write()
+                        .map_err(|e| {
+                            TrustformersError::runtime_error(format!("Lock poisoned: {}", e))
+                        })?
+                        .free_page(page_id);
                 }
                 return Err(TrustformersError::resource_exhausted(
                     "Not enough pages available".into(),
@@ -168,15 +178,20 @@ impl PagedAttention {
             }
         }
 
-        self.block_tables.write().unwrap().insert(sequence_id, allocated_pages);
+        self.block_tables
+            .write()
+            .map_err(|e| TrustformersError::runtime_error(format!("Lock poisoned: {}", e)))?
+            .insert(sequence_id, allocated_pages);
         Ok(())
     }
 
     /// Free all pages for a sequence
     pub fn free_sequence(&self, sequence_id: usize) {
-        if let Some(page_ids) = self.block_tables.write().unwrap().remove(&sequence_id) {
+        if let Some(page_ids) =
+            self.block_tables.write().expect("Lock poisoned").remove(&sequence_id)
+        {
             for page_id in page_ids {
-                self.kv_cache.write().unwrap().free_page(page_id);
+                self.kv_cache.write().expect("Lock poisoned").free_page(page_id);
             }
         }
     }
@@ -266,7 +281,12 @@ impl PagedAttention {
         let scale = 1.0 / (head_dim as f32).sqrt();
 
         // Get or allocate pages for this sequence
-        if !self.block_tables.read().unwrap().contains_key(&sequence_id) {
+        if !self
+            .block_tables
+            .read()
+            .map_err(|e| TrustformersError::runtime_error(format!("Lock poisoned: {}", e)))?
+            .contains_key(&sequence_id)
+        {
             self.allocate_sequence(sequence_id, seq_len * 2)?; // Allocate for some growth
         }
 
@@ -286,8 +306,15 @@ impl PagedAttention {
                         let v_head = v_batch.index_axis(Axis(0), h);
 
                         // Store new K, V in pages
-                        let page_ids =
-                            self.block_tables.read().unwrap().get(&sequence_id).cloned().unwrap();
+                        let page_ids = self
+                            .block_tables
+                            .read()
+                            .map_err(|e| {
+                                TrustformersError::runtime_error(format!("Lock poisoned: {}", e))
+                            })?
+                            .get(&sequence_id)
+                            .cloned()
+                            .unwrap();
 
                         // For simplicity, use full attention for now
                         // In practice, this would manage KV cache pages more efficiently
@@ -350,8 +377,8 @@ impl PagedAttention {
 
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> MemoryStats {
-        let kv_cache = self.kv_cache.read().unwrap();
-        let block_tables = self.block_tables.read().unwrap();
+        let kv_cache = self.kv_cache.read().expect("Lock poisoned");
+        let block_tables = self.block_tables.read().expect("Lock poisoned");
         MemoryStats {
             total_pages: self.max_pages,
             used_pages: self.max_pages - kv_cache.available_pages(),
@@ -468,7 +495,7 @@ mod tests {
         let paged_attn = PagedAttention::new(768, 12, 0.1, true, 64, 1000);
         assert!(paged_attn.is_ok());
 
-        let paged_attn = paged_attn.unwrap();
+        let paged_attn = paged_attn.expect("Failed to create PagedAttention");
         assert_eq!(paged_attn.num_heads, 12);
         assert_eq!(paged_attn.hidden_size, 768);
         assert_eq!(paged_attn.head_dim, 64);
@@ -483,18 +510,18 @@ mod tests {
         // Test allocation
         let page1 = cache.allocate_page();
         assert!(page1.is_some());
-        let page1 = page1.unwrap();
+        let page1 = page1.expect("Failed to allocate page1");
 
         let page2 = cache.allocate_page();
         assert!(page2.is_some());
-        let page2 = page2.unwrap();
+        let page2 = page2.expect("Failed to allocate page2");
 
         assert_ne!(page1, page2);
         assert_eq!(cache.available_pages(), 8);
 
         // Test storage and retrieval
         let test_data = ArrayD::from_elem(IxDyn(&[8, 64, 64]), 1.0f32);
-        cache.store_key(page1, test_data.clone()).unwrap();
+        cache.store_key(page1, test_data.clone()).expect("Failed to store key");
 
         let retrieved = cache.get_key(page1);
         assert!(retrieved.is_some());
@@ -514,20 +541,27 @@ mod tests {
         assert!(result.is_ok());
 
         // Check block table
-        assert!(paged_attn.block_tables.read().unwrap().contains_key(&1));
-        let pages = paged_attn.block_tables.read().unwrap().get(&1).cloned().unwrap();
+        assert!(paged_attn.block_tables.read().expect("Lock poisoned").contains_key(&1));
+        let pages = paged_attn
+            .block_tables
+            .read()
+            .expect("Lock poisoned")
+            .get(&1)
+            .cloned()
+            .expect("Sequence not found");
         assert_eq!(pages.len(), 4); // 128 / 32 = 4 pages
 
         // Free sequence
         paged_attn.free_sequence(1);
-        assert!(!paged_attn.block_tables.read().unwrap().contains_key(&1));
+        assert!(!paged_attn.block_tables.read().expect("Lock poisoned").contains_key(&1));
     }
 
     #[test]
     fn test_paged_attention_forward() {
-        let paged_attn = PagedAttention::new(256, 8, 0.0, true, 32, 100).unwrap();
+        let paged_attn = PagedAttention::new(256, 8, 0.0, true, 32, 100)
+            .expect("Failed to create PagedAttention");
 
-        let hidden_states = Tensor::randn(&[1, 64, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[1, 64, 256]).expect("Failed to create random tensor");
         let input = PagedAttentionInput {
             hidden_states,
             sequence_id: 1,
@@ -538,13 +572,14 @@ mod tests {
         let output = paged_attn.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
     }
 
     #[test]
     fn test_memory_stats() {
-        let paged_attn = PagedAttention::new(256, 8, 0.0, true, 32, 100).unwrap();
+        let paged_attn = PagedAttention::new(256, 8, 0.0, true, 32, 100)
+            .expect("Failed to create PagedAttention");
 
         let stats = paged_attn.memory_stats();
         assert_eq!(stats.total_pages, 100);
@@ -554,7 +589,7 @@ mod tests {
         assert_eq!(stats.active_sequences, 0);
 
         // Allocate a sequence
-        paged_attn.allocate_sequence(1, 128).unwrap();
+        paged_attn.allocate_sequence(1, 128).expect("Failed to allocate sequence");
 
         let stats = paged_attn.memory_stats();
         assert_eq!(stats.used_pages, 4);

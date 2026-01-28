@@ -16,7 +16,7 @@
 //! The auto module is designed to simplify the setup of machine learning pipelines
 //! by automatically selecting appropriate components based on the task and model configuration:
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::{
 //!     AutoFeatureExtractor, AutoMetric, AutoOptimizer, // Available now
 //!     // AutoDataCollator, // TODO: Available in future

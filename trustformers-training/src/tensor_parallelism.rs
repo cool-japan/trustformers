@@ -344,7 +344,7 @@ impl TensorParallelism {
 
         let num_partitions = self.config.tensor_parallel_size;
         let columns = tensor_shape[tensor_shape.len() - 1];
-        let columns_per_partition = (columns + num_partitions - 1) / num_partitions;
+        let columns_per_partition = columns.div_ceil(num_partitions);
 
         let mut partitions = Vec::new();
 
@@ -388,7 +388,7 @@ impl TensorParallelism {
 
         let num_partitions = self.config.tensor_parallel_size;
         let rows = tensor_shape[tensor_shape.len() - 2];
-        let rows_per_partition = (rows + num_partitions - 1) / num_partitions;
+        let rows_per_partition = rows.div_ceil(num_partitions);
 
         let mut partitions = Vec::new();
 
@@ -434,7 +434,7 @@ impl TensorParallelism {
 
         let num_partitions = self.config.tensor_parallel_size;
         let batch_size = tensor_shape[0];
-        let batch_per_partition = (batch_size + num_partitions - 1) / num_partitions;
+        let batch_per_partition = batch_size.div_ceil(num_partitions);
 
         let mut partitions = Vec::new();
 
@@ -481,7 +481,7 @@ impl TensorParallelism {
         // Assume sequence dimension is the second dimension
         let num_partitions = self.config.tensor_parallel_size;
         let sequence_length = tensor_shape[1];
-        let seq_per_partition = (sequence_length + num_partitions - 1) / num_partitions;
+        let seq_per_partition = sequence_length.div_ceil(num_partitions);
 
         let mut partitions = Vec::new();
 
@@ -557,8 +557,8 @@ impl TensorParallelism {
 
         let rows = tensor_shape[0];
         let cols = tensor_shape[1];
-        let rows_per_block = (rows + grid_size - 1) / grid_size;
-        let cols_per_block = (cols + grid_size - 1) / grid_size;
+        let rows_per_block = rows.div_ceil(grid_size);
+        let cols_per_block = cols.div_ceil(grid_size);
 
         let mut partitions = Vec::new();
         let mut partition_id = 0;
@@ -1131,7 +1131,7 @@ pub mod utils {
         let memory_per_param = 4; // 4 bytes per float32 parameter
         let model_memory_size = model_size_params * memory_per_param;
 
-        let required_devices = (model_memory_size + memory_per_device - 1) / memory_per_device;
+        let required_devices = model_memory_size.div_ceil(memory_per_device);
         let tensor_parallel_size = std::cmp::min(required_devices as usize, world_size);
 
         Ok(TensorParallelismConfig {
@@ -1275,14 +1275,20 @@ mod tests {
 
     #[test]
     fn test_optimal_tensor_config_calculation() {
+        // Use 10B parameters (40GB memory) with 8GB per device
+        // This requires at least 5 devices, so tensor_parallel_size > 1
         let config = utils::calculate_optimal_tensor_config(
-            1_000_000_000,          // 1B parameters
+            10_000_000_000,         // 10B parameters (40GB memory)
             8 * 1024 * 1024 * 1024, // 8GB memory per device
             8,                      // world size
         )
         .unwrap();
 
-        assert!(config.tensor_parallel_size > 1);
+        assert!(
+            config.tensor_parallel_size > 1,
+            "Expected tensor_parallel_size > 1, got {}",
+            config.tensor_parallel_size
+        );
     }
 
     #[test]

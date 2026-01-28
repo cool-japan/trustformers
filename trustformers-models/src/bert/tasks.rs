@@ -1,29 +1,43 @@
+#![allow(dead_code)]
+
 use crate::bert::config::BertConfig;
 use crate::bert::model::BertModel;
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::Linear;
 use trustformers_core::tensor::Tensor;
 use trustformers_core::traits::{Layer, Model, TokenizedInput};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct BertForSequenceClassification {
     bert: BertModel,
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl BertForSequenceClassification {
     pub fn new(config: BertConfig, num_labels: usize) -> Result<Self> {
-        let bert = BertModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(config: BertConfig, num_labels: usize, device: Device) -> Result<Self> {
+        let bert = BertModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             bert,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -72,14 +86,23 @@ impl Model for BertForSequenceClassification {
 pub struct BertForMaskedLM {
     bert: BertModel,
     cls: BertLMHead,
+    device: Device,
 }
 
 impl BertForMaskedLM {
     pub fn new(config: BertConfig) -> Result<Self> {
-        let bert = BertModel::new(config.clone())?;
-        let cls = BertLMHead::new(&config)?;
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { bert, cls })
+    pub fn new_with_device(config: BertConfig, device: Device) -> Result<Self> {
+        let bert = BertModel::new_with_device(config.clone(), device)?;
+        let cls = BertLMHead::new_with_device(&config, device)?;
+
+        Ok(Self { bert, cls, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -88,18 +111,29 @@ struct BertLMHead {
     dense: Linear,
     layer_norm: trustformers_core::layers::LayerNorm,
     decoder: Linear,
+    device: Device,
 }
 
 impl BertLMHead {
     fn new(config: &BertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &BertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
-            layer_norm: trustformers_core::layers::LayerNorm::new(
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: trustformers_core::layers::LayerNorm::new_with_device(
                 vec![config.hidden_size],
                 config.layer_norm_eps,
+                device,
             )?,
-            decoder: Linear::new(config.hidden_size, config.vocab_size, true),
+            decoder: Linear::new_with_device(config.hidden_size, config.vocab_size, true, device),
+            device,
         })
+    }
+
+    fn device(&self) -> Device {
+        self.device
     }
 
     fn forward(&self, hidden_states: Tensor) -> Result<Tensor> {
@@ -156,18 +190,28 @@ pub struct BertForTokenClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl BertForTokenClassification {
     pub fn new(config: BertConfig, num_labels: usize) -> Result<Self> {
-        let bert = BertModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(config: BertConfig, num_labels: usize, device: Device) -> Result<Self> {
+        let bert = BertModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             bert,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -211,15 +255,28 @@ impl Model for BertForTokenClassification {
 pub struct BertForQuestionAnswering {
     bert: BertModel,
     qa_outputs: Linear,
+    device: Device,
 }
 
 impl BertForQuestionAnswering {
     pub fn new(config: BertConfig) -> Result<Self> {
-        let bert = BertModel::new(config.clone())?;
-        // QA outputs has 2 classes: start and end positions
-        let qa_outputs = Linear::new(config.hidden_size, 2, true);
+        Self::new_with_device(config, Device::CPU)
+    }
 
-        Ok(Self { bert, qa_outputs })
+    pub fn new_with_device(config: BertConfig, device: Device) -> Result<Self> {
+        let bert = BertModel::new_with_device(config.clone(), device)?;
+        // QA outputs has 2 classes: start and end positions
+        let qa_outputs = Linear::new_with_device(config.hidden_size, 2, true, device);
+
+        Ok(Self {
+            bert,
+            qa_outputs,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

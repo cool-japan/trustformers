@@ -459,14 +459,22 @@ impl ActiveSpan {
         span.end_time = Some(Utc::now());
 
         // Calculate duration
-        let duration =
-            span.end_time.unwrap().signed_duration_since(span.start_time).num_milliseconds() as f64;
+        let duration = span
+            .end_time
+            .expect("Span should have end time")
+            .signed_duration_since(span.start_time)
+            .num_milliseconds() as f64;
 
         // Emit event
-        if let Ok(_) = self.manager.event_sender.send(TracingEvent::SpanFinished {
-            span_id: span.span_id.clone(),
-            duration_ms: duration,
-        }) {
+        if self
+            .manager
+            .event_sender
+            .send(TracingEvent::SpanFinished {
+                span_id: span.span_id.clone(),
+                duration_ms: duration,
+            })
+            .is_ok()
+        {
             debug!("Span finished: {} ({}ms)", span.span_id, duration);
         }
 
@@ -677,7 +685,7 @@ impl TracingManager {
             parent_span_id: builder.parent_context.as_ref().map(|c| c.span_id.clone()),
             operation_name: builder.operation_name,
             kind: builder.kind,
-            start_time: builder.start_time.unwrap_or_else(|| Utc::now()),
+            start_time: builder.start_time.unwrap_or_else(Utc::now),
             end_time: None,
             status: SpanStatus::Unset,
             attributes: builder.attributes,
@@ -707,10 +715,14 @@ impl TracingManager {
         }
 
         // Emit event
-        if let Ok(_) = self.event_sender.send(TracingEvent::SpanStarted {
-            span_id: span_id.clone(),
-            trace_id: trace_id.clone(),
-        }) {
+        if self
+            .event_sender
+            .send(TracingEvent::SpanStarted {
+                span_id: span_id.clone(),
+                trace_id: trace_id.clone(),
+            })
+            .is_ok()
+        {
             debug!("Span started: {} (trace: {})", span_id, trace_id);
         }
 
@@ -1265,7 +1277,9 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_manager_creation() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
         let stats = manager.get_stats();
         assert_eq!(stats.spans_created, 0);
@@ -1275,9 +1289,11 @@ mod tests {
     #[tokio::test]
     async fn test_span_creation_and_attributes() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
-        let span = manager.start_span("test_operation").unwrap();
+        let span = manager.start_span("test_operation").expect("Start span should succeed");
         span.set_attribute("test.key", "test.value");
         span.add_event("test_event", vec![("event.key", "event.value")]);
         span.finish();
@@ -1289,15 +1305,19 @@ mod tests {
     #[tokio::test]
     async fn test_trace_context_propagation() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
-        let parent_span = manager.start_span("parent_operation").unwrap();
+        let parent_span = manager
+            .start_span("parent_operation")
+            .expect("Start parent span should succeed");
         let parent_context = parent_span.get_context();
 
         let child_span = SpanBuilder::new("child_operation")
             .with_parent_context(parent_context.clone())
             .start(&manager)
-            .unwrap();
+            .expect("Start child span should succeed");
 
         let child_context = child_span.get_context();
         assert_eq!(child_context.trace_id, parent_context.trace_id);
@@ -1311,7 +1331,9 @@ mod tests {
     async fn test_sampling_strategies() {
         // Test probabilistic sampling
         let config = TracingConfig::default().with_sampling(SamplingStrategy::Probabilistic(0.5));
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
         // Create multiple spans to test sampling
         for i in 0..100 {
@@ -1329,9 +1351,13 @@ mod tests {
     #[tokio::test]
     async fn test_inference_span() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
-        let span = manager.start_inference_span("llama-7b", "req-123").unwrap();
+        let span = manager
+            .start_inference_span("llama-7b", "req-123")
+            .expect("Start inference span should succeed");
 
         let span_guard = span.span.lock();
         assert_eq!(span_guard.operation_name, "inference");
@@ -1345,7 +1371,9 @@ mod tests {
     #[tokio::test]
     async fn test_context_extraction() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
         let mut headers = HashMap::new();
         headers.insert(
@@ -1353,7 +1381,7 @@ mod tests {
             "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01".to_string(),
         );
 
-        let context = manager.extract_context(&headers).unwrap();
+        let context = manager.extract_context(&headers).expect("Extract context should succeed");
         assert_eq!(context.trace_id, "0af7651916cd43dd8448eb211c80319c");
         assert_eq!(context.span_id, "b7ad6b7169203331");
         assert_eq!(context.flags, 1);
@@ -1362,7 +1390,9 @@ mod tests {
     #[tokio::test]
     async fn test_context_injection() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
         let context = TraceContext {
             trace_id: "0af7651916cd43dd8448eb211c80319c".to_string(),
@@ -1385,17 +1415,19 @@ mod tests {
     #[tokio::test]
     async fn test_event_subscription() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
         let mut event_receiver = manager.subscribe_events();
 
-        let span = manager.start_span("test_operation").unwrap();
+        let span = manager.start_span("test_operation").expect("Start span should succeed");
 
         // Check if we receive span started event
         if let Ok(event) =
             tokio::time::timeout(Duration::from_millis(100), event_receiver.recv()).await
         {
-            match event.unwrap() {
+            match event.expect("Event should be received") {
                 TracingEvent::SpanStarted { span_id, trace_id } => {
                     assert!(!span_id.is_empty());
                     assert!(!trace_id.is_empty());
@@ -1421,15 +1453,17 @@ mod tests {
     #[tokio::test]
     async fn test_flush_and_shutdown() {
         let config = TracingConfig::default();
-        let manager = TracingManager::new(config).await.unwrap();
+        let manager = TracingManager::new(config)
+            .await
+            .expect("TracingManager creation should succeed");
 
-        let span = manager.start_span("test_operation").unwrap();
+        let span = manager.start_span("test_operation").expect("Start span should succeed");
         span.finish();
 
         // Test flush
-        manager.flush().await.unwrap();
+        manager.flush().await.expect("Flush should succeed");
 
         // Test shutdown
-        manager.shutdown().await.unwrap();
+        manager.shutdown().await.expect("Shutdown should succeed");
     }
 }

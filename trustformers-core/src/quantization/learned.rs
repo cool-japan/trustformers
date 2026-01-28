@@ -246,13 +246,13 @@ impl LearnedQuantParams {
 
         // Extract scalar values and sum the losses
         let scales_mean_val = match scales_mean {
-            Tensor::F32(ref arr) => arr.iter().next().cloned().unwrap_or(0.0),
-            Tensor::F64(ref arr) => arr.iter().next().cloned().unwrap_or(0.0) as f32,
+            Tensor::F32(ref arr) => arr.iter().next().copied().unwrap_or(0.0),
+            Tensor::F64(ref arr) => arr.iter().next().copied().unwrap_or(0.0) as f32,
             _ => 0.0,
         };
         let zero_points_mean_val = match zero_points_mean {
-            Tensor::F32(ref arr) => arr.iter().next().cloned().unwrap_or(0.0),
-            Tensor::F64(ref arr) => arr.iter().next().cloned().unwrap_or(0.0) as f32,
+            Tensor::F32(ref arr) => arr.iter().next().copied().unwrap_or(0.0),
+            Tensor::F64(ref arr) => arr.iter().next().copied().unwrap_or(0.0) as f32,
             _ => 0.0,
         };
 
@@ -479,7 +479,13 @@ impl LearnedQuantOptimizer {
 
         // Set updated values
         parameter.set_data(new_param)?;
-        momentum_dict.get_mut(param_name).unwrap().set_data(new_momentum)?;
+        if let Some(momentum_var) = momentum_dict.get_mut(param_name) {
+            momentum_var.set_data(new_momentum)?;
+        } else {
+            return Err(TrustformersError::runtime_error(
+                "Momentum variable not found after insertion".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -513,7 +519,13 @@ impl LearnedQuantOptimizer {
 
         // Set updated values
         parameter.set_data(new_param)?;
-        self.scale_momentum.get_mut(param_name).unwrap().set_data(new_momentum)?;
+        if let Some(momentum_var) = self.scale_momentum.get_mut(param_name) {
+            momentum_var.set_data(new_momentum)?;
+        } else {
+            return Err(TrustformersError::runtime_error(
+                "Scale momentum variable not found after insertion".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -547,7 +559,13 @@ impl LearnedQuantOptimizer {
 
         // Set updated values
         parameter.set_data(new_param)?;
-        self.zero_point_momentum.get_mut(param_name).unwrap().set_data(new_momentum)?;
+        if let Some(momentum_var) = self.zero_point_momentum.get_mut(param_name) {
+            momentum_var.set_data(new_momentum)?;
+        } else {
+            return Err(TrustformersError::runtime_error(
+                "Zero point momentum variable not found after insertion".into(),
+            ));
+        }
 
         Ok(())
     }
@@ -793,25 +811,38 @@ mod tests {
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![10, 20];
 
-        let params = LearnedQuantParams::new(config, &shape, &engine).unwrap();
-        assert_eq!(params.scales.shape().unwrap(), vec![10]);
-        assert_eq!(params.zero_points.shape().unwrap(), vec![10]);
+        let params = LearnedQuantParams::new(config, &shape, &engine)
+            .expect("Failed to create LearnedQuantParams");
+        assert_eq!(
+            params.scales.shape().expect("Failed to get scales shape"),
+            vec![10]
+        );
+        assert_eq!(
+            params.zero_points.shape().expect("Failed to get zero_points shape"),
+            vec![10]
+        );
     }
 
     #[test]
     fn test_learned_fake_quantize() {
-        let mut config = LearnedQuantConfig::default();
-        config.per_channel_learned = false; // Use per-tensor quantization to avoid shape issues
+        let config = LearnedQuantConfig {
+            per_channel_learned: false, // Use per-tensor quantization to avoid shape issues
+            ..Default::default()
+        };
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![5, 10];
 
-        let mut fake_quant = LearnedFakeQuantize::new(config, &shape, 8, engine.clone()).unwrap();
+        let mut fake_quant = LearnedFakeQuantize::new(config, &shape, 8, engine.clone())
+            .expect("Failed to create LearnedFakeQuantize");
 
-        let input_tensor = Tensor::randn(&[2, 5, 10]).unwrap();
+        let input_tensor = Tensor::randn(&[2, 5, 10]).expect("Failed to create random tensor");
         let input_var = engine.variable(input_tensor, true);
 
-        let result = fake_quant.forward_fake_quantize(&input_var).unwrap();
-        assert_eq!(result.shape().unwrap(), vec![2, 5, 10]);
+        let result = fake_quant.forward_fake_quantize(&input_var).expect("Forward pass failed");
+        assert_eq!(
+            result.shape().expect("Failed to get result shape"),
+            vec![2, 5, 10]
+        );
     }
 
     #[test]
@@ -836,22 +867,31 @@ mod tests {
 
     #[test]
     fn test_parameter_constraints() {
-        let mut config = LearnedQuantConfig::default();
-        config.scale_min = 0.1;
-        config.scale_max = 10.0;
+        let config = LearnedQuantConfig {
+            scale_min: 0.1,
+            scale_max: 10.0,
+            ..Default::default()
+        };
 
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![5];
 
-        let mut params = LearnedQuantParams::new(config, &shape, &engine).unwrap();
+        let mut params = LearnedQuantParams::new(config, &shape, &engine)
+            .expect("Failed to create LearnedQuantParams");
 
         // Set scales outside bounds
-        let bad_scales = Tensor::from_vec(vec![0.01, 100.0, 1.0, 0.05, 50.0], &[5]).unwrap();
-        params.scales.set_data(bad_scales).unwrap();
+        let bad_scales = Tensor::from_vec(vec![0.01, 100.0, 1.0, 0.05, 50.0], &[5])
+            .expect("Tensor from_vec failed");
+        params.scales.set_data(bad_scales).expect("Failed to set scales data");
 
-        params.apply_constraints().unwrap();
+        params.apply_constraints().expect("Failed to apply constraints");
 
-        let constrained_scales = params.scales.data().unwrap().to_vec_f32().unwrap();
+        let constrained_scales = params
+            .scales
+            .data()
+            .expect("Failed to get scales data")
+            .to_vec_f32()
+            .expect("Failed to convert to vec_f32");
         for &scale in &constrained_scales {
             assert!((0.1..=10.0).contains(&scale));
         }
@@ -859,58 +899,86 @@ mod tests {
 
     #[test]
     fn test_ema_updates() {
-        let mut config = LearnedQuantConfig::default();
-        config.use_ema = true;
-        config.ema_momentum = 0.9;
+        let config = LearnedQuantConfig {
+            use_ema: true,
+            ema_momentum: 0.9,
+            ..Default::default()
+        };
 
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![3];
 
-        let mut params = LearnedQuantParams::new(config, &shape, &engine).unwrap();
+        let mut params = LearnedQuantParams::new(config, &shape, &engine)
+            .expect("Failed to create LearnedQuantParams");
 
         // Set initial values
-        let new_scales = Tensor::from_vec(vec![2.0, 3.0, 4.0], &[3]).unwrap();
-        params.scales.set_data(new_scales).unwrap();
+        let new_scales =
+            Tensor::from_vec(vec![2.0, 3.0, 4.0], &[3]).expect("Tensor from_vec failed");
+        params.scales.set_data(new_scales).expect("Failed to set scales data");
 
-        params.update_ema().unwrap();
+        params.update_ema().expect("Failed to update EMA");
 
         // Check that EMA was updated
-        let ema_scales = params.ema_scales.as_ref().unwrap().data().unwrap().to_vec_f32().unwrap();
+        let ema_scales = params
+            .ema_scales
+            .as_ref()
+            .expect("EMA scales not found")
+            .data()
+            .expect("Failed to get EMA data")
+            .to_vec_f32()
+            .expect("Failed to convert to vec_f32");
         assert!(ema_scales[0] > 1.0 && ema_scales[0] < 2.0); // Should be between initial and current
     }
 
     #[test]
     fn test_regularization_loss() {
-        let mut config = LearnedQuantConfig::default();
-        config.use_ema = false; // Disable EMA to avoid computation graph issues
-        config.regularization_weight = 0.0; // Test zero weight case first
+        let config = LearnedQuantConfig {
+            use_ema: false,             // Disable EMA to avoid computation graph issues
+            regularization_weight: 0.0, // Test zero weight case first
+            ..Default::default()
+        };
         let engine = Arc::new(AutodiffEngine::default());
         let shape = vec![2];
 
-        let params = LearnedQuantParams::new(config, &shape, &engine).unwrap();
+        let params = LearnedQuantParams::new(config, &shape, &engine)
+            .expect("Failed to create LearnedQuantParams");
 
-        let reg_loss = params.regularization_loss().unwrap();
-        assert_eq!(reg_loss.item().unwrap(), 0.0);
+        let reg_loss = params.regularization_loss().expect("Failed to compute regularization loss");
+        assert_eq!(reg_loss.item().expect("Failed to get item value"), 0.0);
 
         // Now test non-zero weight
-        let mut config2 = LearnedQuantConfig::default();
-        config2.use_ema = false;
-        config2.regularization_weight = 1e-6;
-        let params2 = LearnedQuantParams::new(config2, &shape, &engine).unwrap();
+        let config2 = LearnedQuantConfig {
+            use_ema: false,
+            regularization_weight: 1e-6,
+            ..Default::default()
+        };
+        let params2 = LearnedQuantParams::new(config2, &shape, &engine)
+            .expect("Failed to create LearnedQuantParams");
 
         // Test scales and zero_points separately first
-        let scales_loss = params2.scales.square().unwrap().mean(None).unwrap();
-        assert!(scales_loss.item().unwrap() >= 0.0);
+        let scales_loss = params2
+            .scales
+            .square()
+            .expect("Failed to square")
+            .mean(None)
+            .expect("Mean calculation failed");
+        assert!(scales_loss.item().expect("Failed to get item value") >= 0.0);
 
-        let zero_points_loss = params2.zero_points.square().unwrap().mean(None).unwrap();
-        assert!(zero_points_loss.item().unwrap() >= 0.0);
+        let zero_points_loss = params2
+            .zero_points
+            .square()
+            .expect("Failed to square")
+            .mean(None)
+            .expect("Mean calculation failed");
+        assert!(zero_points_loss.item().expect("Failed to get item value") >= 0.0);
 
         // Test the add operation directly
-        let total_loss = scales_loss.add(&zero_points_loss).unwrap();
-        assert!(total_loss.item().unwrap() >= 0.0);
+        let total_loss = scales_loss.add(&zero_points_loss).expect("Addition failed");
+        assert!(total_loss.item().expect("Failed to get item value") >= 0.0);
 
         // Now test the full regularization loss
-        let reg_loss2 = params2.regularization_loss().unwrap();
-        assert!(reg_loss2.item().unwrap() >= 0.0);
+        let reg_loss2 =
+            params2.regularization_loss().expect("Failed to compute regularization loss");
+        assert!(reg_loss2.item().expect("Failed to get item value") >= 0.0);
     }
 }

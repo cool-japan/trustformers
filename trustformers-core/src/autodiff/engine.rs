@@ -187,7 +187,7 @@ impl AutodiffEngine {
         Variable::from_graph(
             self.graph.clone(),
             {
-                let mut graph = self.graph.lock().unwrap();
+                let mut graph = self.graph.lock().expect("lock should not be poisoned");
                 graph.add_node(tensor, requires_grad, None)
             },
             requires_grad,
@@ -204,7 +204,7 @@ impl AutodiffEngine {
         Variable::from_graph(
             self.graph.clone(),
             {
-                let mut graph = self.graph.lock().unwrap();
+                let mut graph = self.graph.lock().expect("lock should not be poisoned");
                 graph.add_node(tensor, requires_grad, Some(name))
             },
             requires_grad,
@@ -222,7 +222,7 @@ impl AutodiffEngine {
         }?;
 
         // Update statistics
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("lock should not be poisoned");
         stats.backward_passes += 1;
         stats.backward_time_us += start_time.elapsed().as_micros() as u64;
 
@@ -233,20 +233,20 @@ impl AutodiffEngine {
     fn forward_mode_backward(&self, output: &Variable, grad_output: Option<Tensor>) -> Result<()> {
         // Forward-mode AD is typically used for computing derivatives with respect to few inputs
         // This is a simplified implementation
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(output.node_id(), grad_output)
     }
 
     /// Reverse-mode automatic differentiation (standard backpropagation)
     fn reverse_mode_backward(&self, output: &Variable, grad_output: Option<Tensor>) -> Result<()> {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.backward(output.node_id(), grad_output)
     }
 
     /// Mixed-mode automatic differentiation
     fn mixed_mode_backward(&self, output: &Variable, grad_output: Option<Tensor>) -> Result<()> {
         // Decide between forward and reverse mode based on graph characteristics
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         let num_nodes = graph.num_nodes();
 
         // Use forward mode for small graphs, reverse mode for large graphs
@@ -261,34 +261,34 @@ impl AutodiffEngine {
 
     /// Zero all gradients in the computation graph
     pub fn zero_grad(&self) {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         graph.zero_grad();
     }
 
     /// Get gradient for a variable
     pub fn get_grad(&self, variable: &Variable) -> Result<Option<Tensor>> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         Ok(graph.get_gradient(variable.node_id()).cloned())
     }
 
     /// Clear the computation graph
     pub fn clear_graph(&self) {
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
         *graph = ComputationGraph::new();
 
-        let mut tape = self.tape.lock().unwrap();
+        let mut tape = self.tape.lock().expect("lock should not be poisoned");
         tape.clear();
     }
 
     /// Get engine statistics
     pub fn stats(&self) -> AutodiffStats {
-        let stats = self.stats.lock().unwrap();
+        let stats = self.stats.lock().expect("lock should not be poisoned");
         stats.clone()
     }
 
     /// Reset statistics
     pub fn reset_stats(&self) {
-        let mut stats = self.stats.lock().unwrap();
+        let mut stats = self.stats.lock().expect("lock should not be poisoned");
         *stats = AutodiffStats::default();
     }
 
@@ -303,7 +303,7 @@ impl AutodiffEngine {
             return Ok(());
         }
 
-        let mut graph = self.graph.lock().unwrap();
+        let mut graph = self.graph.lock().expect("lock should not be poisoned");
 
         // Perform various graph optimizations
         self.eliminate_dead_nodes(&mut graph)?;
@@ -411,7 +411,7 @@ impl AutodiffEngine {
 
     /// Export computation graph for visualization
     pub fn export_graph(&self) -> Result<String> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         let graph_export = graph.export_graph();
 
         // Convert to DOT format for visualization
@@ -447,7 +447,7 @@ impl AutodiffEngine {
 
     /// Get memory usage information
     pub fn memory_info(&self) -> Result<MemoryInfo> {
-        let graph = self.graph.lock().unwrap();
+        let graph = self.graph.lock().expect("lock should not be poisoned");
         let mut total_memory = 0;
         let mut num_tensors = 0;
 
@@ -504,8 +504,8 @@ impl GradContext {
     /// Create a new context with gradients enabled
     pub fn enable() -> Self {
         let engine = get_engine();
-        let previous_state = engine.lock().unwrap().is_grad_enabled();
-        engine.lock().unwrap().enable_grad();
+        let previous_state = engine.lock().expect("Lock poisoned").is_grad_enabled();
+        engine.lock().expect("Lock poisoned").enable_grad();
 
         Self { previous_state }
     }
@@ -513,8 +513,8 @@ impl GradContext {
     /// Create a new context with gradients disabled
     pub fn disable() -> Self {
         let engine = get_engine();
-        let previous_state = engine.lock().unwrap().is_grad_enabled();
-        engine.lock().unwrap().disable_grad();
+        let previous_state = engine.lock().expect("Lock poisoned").is_grad_enabled();
+        engine.lock().expect("Lock poisoned").disable_grad();
 
         Self { previous_state }
     }
@@ -524,9 +524,9 @@ impl Drop for GradContext {
     fn drop(&mut self) {
         let engine = get_engine();
         if self.previous_state {
-            engine.lock().unwrap().enable_grad();
+            engine.lock().expect("Lock poisoned").enable_grad();
         } else {
-            engine.lock().unwrap().disable_grad();
+            engine.lock().expect("Lock poisoned").disable_grad();
         }
     }
 }
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn test_variable_creation() {
         let engine = AutodiffEngine::default();
-        let tensor = Tensor::ones(&[2, 3]).unwrap();
+        let tensor = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
         let var = engine.variable(tensor, true);
 
         assert!(var.requires_grad());
@@ -582,7 +582,7 @@ mod tests {
 
         let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
         let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
-        let c = a.mul(&b).unwrap();
+        let c = a.mul(&b).expect("Multiplication failed");
 
         engine.backward(&c, None).unwrap();
 
@@ -600,11 +600,11 @@ mod tests {
 
         {
             let _ctx = GradContext::disable();
-            assert!(!get_engine().lock().unwrap().is_grad_enabled());
+            assert!(!get_engine().lock().expect("Lock poisoned").is_grad_enabled());
         }
 
         // Should be restored after context ends
-        assert!(get_engine().lock().unwrap().is_grad_enabled());
+        assert!(get_engine().lock().expect("Lock poisoned").is_grad_enabled());
     }
 
     #[test]
@@ -619,7 +619,7 @@ mod tests {
     #[test]
     fn test_memory_info() {
         let engine = AutodiffEngine::default();
-        let tensor = Tensor::ones(&[100, 100]).unwrap();
+        let tensor = Tensor::ones(&[100, 100]).expect("Failed to create ones tensor");
         let _var = engine.variable(tensor, true);
 
         let memory_info = engine.memory_info().unwrap();
@@ -630,8 +630,10 @@ mod tests {
 
     #[test]
     fn test_anomaly_detection() {
-        let mut config = AutodiffConfig::default();
-        config.detect_anomalies = true;
+        let config = AutodiffConfig {
+            detect_anomalies: true,
+            ..Default::default()
+        };
         let engine = AutodiffEngine::new(config);
 
         let var = engine.variable(Tensor::scalar(1.0).unwrap(), true);
@@ -645,7 +647,7 @@ mod tests {
         let engine = AutodiffEngine::default();
         let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
         let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
-        let _c = a.mul(&b).unwrap();
+        let _c = a.mul(&b).expect("Multiplication failed");
 
         let dot_graph = engine.export_graph().unwrap();
         assert!(dot_graph.contains("digraph G"));

@@ -1,3 +1,4 @@
+use scirs2_core::ndarray::ShapeError;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -631,8 +632,8 @@ impl From<std::fmt::Error> for CoreError {
 }
 
 #[allow(deprecated)] // Backward compatibility implementation for CoreError
-impl From<ndarray::ShapeError> for CoreError {
-    fn from(err: ndarray::ShapeError) -> Self {
+impl From<ShapeError> for CoreError {
+    fn from(err: ShapeError) -> Self {
         CoreError::ShapeError(err.to_string())
     }
 }

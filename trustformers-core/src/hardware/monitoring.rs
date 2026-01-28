@@ -259,7 +259,7 @@ impl PerformanceMonitor {
         let mut performers: Vec<_> =
             self.efficiency_scores.iter().map(|(id, score)| (id.clone(), *score)).collect();
 
-        performers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        performers.sort_by(|a, b| b.1.partial_cmp(&a.1).expect("Partial comparison failed"));
         performers.truncate(count);
         performers
     }

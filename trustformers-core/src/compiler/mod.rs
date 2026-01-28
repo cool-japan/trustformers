@@ -60,24 +60,19 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Optimization level for compiler optimizations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OptimizationLevel {
     /// No optimizations (debug mode)
     None,
     /// Basic optimizations with minimal compilation time
     Basic,
     /// Standard optimizations with balanced compilation time/performance
+    #[default]
     Standard,
     /// Aggressive optimizations with longer compilation time
     Aggressive,
     /// Maximum optimizations (may significantly increase compilation time)
     Maximum,
-}
-
-impl Default for OptimizationLevel {
-    fn default() -> Self {
-        Self::Standard
-    }
 }
 
 /// Configuration for compiler optimizations

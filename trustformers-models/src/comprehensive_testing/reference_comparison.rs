@@ -16,6 +16,11 @@ impl ReferenceComparator {
         Self { tolerance }
     }
 
+    /// Get the tolerance value
+    pub fn tolerance(&self) -> f32 {
+        self.tolerance
+    }
+
     /// Compare model output with reference values
     pub fn compare_with_reference(
         &self,

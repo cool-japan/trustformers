@@ -2266,7 +2266,7 @@ mod tests {
     #[test]
     async fn test_resource_modeling_manager_creation() {
         let config = ResourceModelingConfig::default();
-        let manager = ResourceModelingManager::new(config).await.unwrap();
+        let manager = ResourceModelingManager::new(config).await.expect("Failed to create manager");
 
         let resource_model = manager.get_resource_model();
         assert!(resource_model.cpu_model.core_count > 0);
@@ -2276,13 +2276,20 @@ mod tests {
     #[test]
     async fn test_component_coordinator() {
         let config = ResourceModelingConfig::default();
-        let cache_coordinator = Arc::new(CacheCoordinator::new(512).await.unwrap());
-        let error_recovery_manager = Arc::new(ErrorRecoveryManager::new(true).await.unwrap());
+        let cache_coordinator =
+            Arc::new(CacheCoordinator::new(512).await.expect("Failed to create cache coordinator"));
+        let error_recovery_manager = Arc::new(
+            ErrorRecoveryManager::new(true)
+                .await
+                .expect("Failed to create error recovery manager"),
+        );
 
         let coordinator =
             ComponentCoordinator::new(config, cache_coordinator, error_recovery_manager)
                 .await
-                .unwrap();
+                .expect("Failed to create component coordinator");
+
+        coordinator.start().await.expect("Failed to start component coordinator");
 
         let health = coordinator.get_all_component_health().await;
         assert!(!health.is_empty());
@@ -2291,19 +2298,31 @@ mod tests {
     #[test]
     async fn test_modeling_orchestrator() {
         let config = ResourceModelingConfig::default();
-        let cache_coordinator = Arc::new(CacheCoordinator::new(512).await.unwrap());
-        let error_recovery_manager = Arc::new(ErrorRecoveryManager::new(true).await.unwrap());
+        let cache_coordinator =
+            Arc::new(CacheCoordinator::new(512).await.expect("Failed to create cache coordinator"));
+        let error_recovery_manager = Arc::new(
+            ErrorRecoveryManager::new(true)
+                .await
+                .expect("Failed to create error recovery manager"),
+        );
 
         let component_coordinator = Arc::new(
             ComponentCoordinator::new(config, cache_coordinator, error_recovery_manager)
                 .await
-                .unwrap(),
+                .expect("Failed to create component coordinator"),
         );
 
-        let analysis_scheduler =
-            Arc::new(AnalysisScheduler::new(8, Duration::from_secs(300)).await.unwrap());
+        let analysis_scheduler = Arc::new(
+            AnalysisScheduler::new(8, Duration::from_secs(300))
+                .await
+                .expect("Failed to create analysis scheduler"),
+        );
 
-        let performance_coordinator = Arc::new(PerformanceCoordinator::new().await.unwrap());
+        let performance_coordinator = Arc::new(
+            PerformanceCoordinator::new()
+                .await
+                .expect("Failed to create performance coordinator"),
+        );
 
         let orchestrator = ModelingOrchestrator::new(
             component_coordinator,
@@ -2311,9 +2330,12 @@ mod tests {
             performance_coordinator,
         )
         .await
-        .unwrap();
+        .expect("Failed to create orchestrator");
 
-        let execution = orchestrator.execute_workflow("comprehensive_analysis").await.unwrap();
+        let execution = orchestrator
+            .execute_workflow("comprehensive_analysis")
+            .await
+            .expect("Failed to execute workflow");
         assert_eq!(execution.workflow_name, "comprehensive_analysis");
     }
 

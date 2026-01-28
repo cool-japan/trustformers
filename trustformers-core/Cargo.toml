@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-core"
 description = "Core traits and utilities for TrustformeRS"
+keywords = ["transformers", "machine-learning", "nlp", "deep-learning", "rust"]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -18,16 +23,13 @@ serde_json.workspace = true
 semver.workspace = true
 tracing.workspace = true
 log.workspace = true
-# Transitioning from ndarray to SciRS2
-ndarray.workspace = true  # Keep for gradual migration
-num-traits.workspace = true
-num-complex.workspace = true
-rand.workspace = true
-rand_distr.workspace = true
-# rayon removed - using scirs2_core::parallel_ops per SciRS2 Core Usage Policy
-rayon.workspace = true  # Re-added for checkpoint conversion parallelization
+# SciRS2 Integration Policy - using scirs2-core for all scientific computing
+# Direct ndarray, rand, rand_distr, rayon dependencies removed per SciRS2 Policy
+# Use scirs2_core::ndarray, scirs2_core::random, scirs2_core::parallel_ops instead
+num-traits.workspace = true  # Still needed for trait bounds
+# num-complex removed - use scirs2_core::Complex instead
 half.workspace = true
-bincode.workspace = true
+oxicode.workspace = true
 safetensors.workspace = true
 byteorder.workspace = true
 chrono.workspace = true
@@ -45,9 +47,14 @@ reqwest.workspace = true
 num_cpus.workspace = true
 approx.workspace = true
 tempfile.workspace = true
+tokenizers.workspace = true  # Re-exported for trustformers-tokenizers per SciRS2 Integration Policy
 
 # SciRS2 dependencies - required for SciRS2 Integration Policy
-scirs2-core = { workspace = true, features = ["random"] }
+# Includes: array ops (ndarray), random (rand/rand_distr), parallel (rayon), simd, complex numbers
+# Note: ndarray support provided by scirs2-core
+# Note: linalg feature is optional to support Python bindings (ndarray-linalg requires ndarray 0.17)
+# Note: GPU backends (metal, cuda, opencl, wgpu) should be enabled via scirs2-core for policy compliance
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu"] }
 
 # Optional backends
 tch = { workspace = true, optional = true }
@@ -61,9 +68,17 @@ mpi = { version = "0.8", optional = true, default-features = false }
 vulkano = { workspace = true, optional = true }
 vulkano-shaders = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
-metal = { version = "0.32", optional = true }
-mpsgraph = { version = "0.2", optional = true }
-objc2 = { version = "0.5", optional = true }
+# Metal-specific dependencies moved to target-specific section for macOS only
+
+# WebGPU backend (cross-platform)
+wgpu = { version = "28.0", optional = true }
+pollster = { version = "0.4", optional = true }
+
+# OpenCL backend (universal GPU support)
+opencl3 = { version = "0.12", optional = true }
+
+# Dynamic loading for optional GPU backends (ROCm)
+libloading = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest.workspace = true
@@ -74,25 +89,32 @@ tempfile.workspace = true
 criterion.workspace = true
 
 [features]
-default = []
+default = ["linalg"]
+linalg = ["scirs2-core/linalg"]  # Linear algebra operations
+# torch feature disabled - requires matching libtorch version at runtime
+# Enable only when you have a properly configured libtorch environment
 torch = ["dep:tch"]
 candle = ["dep:candle-core"]
 parallel = []
 mpi = ["dep:mpi"]
 cuda = ["dep:cudarc"]
-rocm = []
+rocm = ["dep:libloading"]
 intel = []
 llvm = []
 cranelift = []
 vulkan = ["dep:vulkano", "dep:vulkano-shaders", "dep:bytemuck"]
-metal = ["dep:metal", "dep:mpsgraph", "dep:objc2"]
-opencl = []
+# Note: OxiBLAS is now used for all BLAS/LAPACK operations (pure Rust implementation)
+metal = ["dep:metal", "dep:mpsgraph", "dep:objc2", "dep:objc2-metal"]
+wgpu_backend = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+opencl = ["dep:opencl3"]
 xla = []
 tpu = []
 oneapi = []
 riscv = []
 nccl = []
 backtrace = []
+# Full feature set for testing (excludes torch due to libtorch version requirements)
+full = ["linalg", "candle", "parallel", "vulkan", "metal", "wgpu_backend", "opencl", "backtrace"]
 
 [[bench]]
 name = "tensor_operations"
@@ -109,4 +131,16 @@ path = "src/bin/naming_checker.rs"
 # Platform-specific dependencies
 # CUDA is only supported on Linux and Windows (not macOS)
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
-cudarc = { version = "0.12", optional = true, features = ["nvrtc", "cuda-12060"] }
+cudarc = { version = "0.19", optional = true, features = ["nvrtc", "cuda-12000"] }
+
+# Metal is only supported on macOS
+[target.'cfg(target_os = "macos")'.dependencies]
+scirs2-core = { workspace = true, features = ["array", "random", "parallel", "simd", "gpu", "metal", "mpsgraph"] }
+metal = { version = "0.33", optional = true }
+mpsgraph = { version = "0.2", optional = true }
+objc2 = { version = "0.6", optional = true }
+objc2-metal = { version = "0.3", optional = true }
+# OxiBLAS - Pure Rust BLAS/LAPACK implementation (replaces Accelerate framework)
+oxiblas = { workspace = true }
+oxiblas-blas = { workspace = true }
+oxiblas-matrix = { workspace = true }

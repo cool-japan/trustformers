@@ -50,11 +50,24 @@ impl SseHandler {
         self.connections.write().await.insert(connection_id, connection);
         self.metrics.record_connection_opened().await;
 
-        // Create SSE stream
-        let stream = self.create_event_stream(rx).await;
+        // Create SSE stream with timeout
+        let stream = self.create_event_stream(rx, connection_id).await;
 
         // Start heartbeat task
         self.start_heartbeat_task(connection_id).await;
+
+        // Schedule connection cleanup after timeout
+        let connections = self.connections.clone();
+        let timeout = self.config.connection_timeout;
+        tokio::spawn(async move {
+            tokio::time::sleep(timeout).await;
+            if let Some(_conn) = connections.write().await.remove(&connection_id) {
+                tracing::debug!(
+                    "SSE connection {} timed out and was cleaned up",
+                    connection_id
+                );
+            }
+        });
 
         Ok(Sse::new(stream)
             .keep_alive(
@@ -164,18 +177,46 @@ impl SseHandler {
     async fn create_event_stream(
         &self,
         rx: mpsc::Receiver<SseEvent>,
+        connection_id: Uuid,
     ) -> impl Stream<Item = Result<axum::response::sse::Event, Infallible>> {
-        stream::unfold(rx, |mut rx| async {
-            match rx.recv().await {
-                Some(event) => {
+        let timeout = self.config.connection_timeout;
+        let start_time = Instant::now();
+
+        stream::unfold((rx, start_time), move |(mut rx, start_time)| async move {
+            // Check timeout
+            if start_time.elapsed() > timeout {
+                tracing::debug!(
+                    "SSE stream for connection {} reached timeout",
+                    connection_id
+                );
+                return None;
+            }
+
+            // Wait for next event with timeout
+            match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+                Ok(Some(event)) => {
                     let sse_event = axum::response::sse::Event::default()
                         .event(event.event_type.to_string())
                         .data(event.data)
                         .id(event.id.to_string());
 
-                    Some((Ok(sse_event), rx))
+                    Some((Ok(sse_event), (rx, start_time)))
                 },
-                None => None,
+                Ok(None) => {
+                    tracing::debug!("SSE stream for connection {} channel closed", connection_id);
+                    None
+                },
+                Err(_) => {
+                    // Timeout waiting for event, continue if overall timeout not reached
+                    if start_time.elapsed() > timeout {
+                        None
+                    } else {
+                        // Send heartbeat on idle timeout
+                        let heartbeat_event =
+                            axum::response::sse::Event::default().event("heartbeat").data("ping");
+                        Some((Ok(heartbeat_event), (rx, start_time)))
+                    }
+                },
             }
         })
     }
@@ -184,12 +225,23 @@ impl SseHandler {
     async fn start_heartbeat_task(&self, connection_id: Uuid) {
         let connections = self.connections.clone();
         let interval = self.config.heartbeat_interval;
+        let timeout = self.config.connection_timeout;
 
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(interval);
+            let start_time = Instant::now();
 
             loop {
                 interval.tick().await;
+
+                // Check if we've exceeded the connection timeout
+                if start_time.elapsed() > timeout {
+                    tracing::debug!(
+                        "SSE heartbeat task timeout for connection {}",
+                        connection_id
+                    );
+                    break;
+                }
 
                 // Update last ping time
                 if let Some(connection) = connections.write().await.get_mut(&connection_id) {
@@ -204,9 +256,17 @@ impl SseHandler {
                     };
 
                     if connection.sender.send(heartbeat).await.is_err() {
+                        tracing::debug!(
+                            "SSE heartbeat send failed for connection {}, closing",
+                            connection_id
+                        );
                         break; // Connection closed
                     }
                 } else {
+                    tracing::debug!(
+                        "SSE connection {} no longer exists, stopping heartbeat",
+                        connection_id
+                    );
                     break; // Connection no longer exists
                 }
             }
@@ -354,6 +414,12 @@ pub struct SseMetrics {
     events_sent: Arc<RwLock<u64>>,
     broadcasts: Arc<RwLock<u64>>,
     connection_durations: Arc<RwLock<Vec<Duration>>>,
+}
+
+impl Default for SseMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SseMetrics {

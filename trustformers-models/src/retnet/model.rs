@@ -1,6 +1,7 @@
 use crate::retnet::config::RetNetConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
     tensor::Tensor,
@@ -15,24 +16,39 @@ pub struct RotaryPositionEmbedding {
     #[allow(dead_code)]
     base: f32,
     inv_freq: Tensor,
+    device: Device,
 }
 
 impl RotaryPositionEmbedding {
     pub fn new(dim: usize, max_seq_len: usize, base: f32) -> Result<Self> {
+        Self::new_with_device(dim, max_seq_len, base, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        dim: usize,
+        max_seq_len: usize,
+        base: f32,
+        device: Device,
+    ) -> Result<Self> {
         let mut inv_freq_vec = Vec::new();
         for i in (0..dim).step_by(2) {
             let freq = 1.0 / base.powf(i as f32 / dim as f32);
             inv_freq_vec.push(freq);
         }
 
-        let inv_freq = Tensor::from_vec(inv_freq_vec, &[dim / 2])?;
+        let inv_freq = Tensor::from_vec(inv_freq_vec, &[dim / 2])?.to_device_enum(&device)?;
 
         Ok(Self {
             dim,
             max_seq_len,
             base,
             inv_freq,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Apply rotary position embedding to query and key tensors
@@ -69,8 +85,8 @@ impl RotaryPositionEmbedding {
             sin_vals.push(angle.sin()); // Duplicate for even/odd pairing
         }
 
-        let cos_emb = Tensor::from_vec(cos_vals, &[self.dim])?;
-        let sin_emb = Tensor::from_vec(sin_vals, &[self.dim])?;
+        let cos_emb = Tensor::from_vec(cos_vals, &[self.dim])?.to_device_enum(&self.device)?;
+        let sin_emb = Tensor::from_vec(sin_vals, &[self.dim])?.to_device_enum(&self.device)?;
 
         Ok((cos_emb, sin_emb))
     }
@@ -203,7 +219,10 @@ impl AdvancedChunkProcessor {
         let hidden_size = chunks[0].shape()[2];
         let total_seq_len: usize = chunks.iter().map(|c| c.shape()[1]).sum();
 
-        let mut result = Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?;
+        // Infer device from first chunk
+        let device = chunks[0].device();
+        let mut result =
+            Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?.to_device(&device)?;
         let mut offset = 0;
 
         for chunk in chunks {
@@ -248,7 +267,7 @@ impl RetNetStateCache {
     pub fn set_state(&mut self, layer_idx: usize, state: Tensor) -> Result<()> {
         // Simple eviction policy - remove oldest entries
         while self.current_size >= self.max_cache_size && !self.states.is_empty() {
-            let oldest_key = *self.states.keys().next().unwrap();
+            let oldest_key = *self.states.keys().next().expect("operation failed");
             self.states.remove(&oldest_key);
             self.current_size -= 1;
         }
@@ -296,18 +315,40 @@ pub struct MultiScaleRetention {
     state_cache: Option<RetNetStateCache>,
     #[allow(dead_code)]
     use_memory_efficient_attention: bool,
+    device: Device,
 }
 
 impl MultiScaleRetention {
     pub fn new(config: &RetNetConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RetNetConfig, device: Device) -> Result<Self> {
         let head_dim = config.retention_head_dim();
         let retention_dim = config.retention_dim();
 
-        let q_proj = Linear::new(config.hidden_size, retention_dim, config.use_bias);
-        let k_proj = Linear::new(config.hidden_size, retention_dim, config.use_bias);
-        let v_proj = Linear::new(config.hidden_size, config.hidden_size, config.use_bias);
-        let g_proj = Linear::new(config.hidden_size, config.hidden_size, config.use_bias);
-        let out_proj = Linear::new(config.hidden_size, config.hidden_size, config.use_bias);
+        let q_proj =
+            Linear::new_with_device(config.hidden_size, retention_dim, config.use_bias, device);
+        let k_proj =
+            Linear::new_with_device(config.hidden_size, retention_dim, config.use_bias, device);
+        let v_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.hidden_size,
+            config.use_bias,
+            device,
+        );
+        let g_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.hidden_size,
+            config.use_bias,
+            device,
+        );
+        let out_proj = Linear::new_with_device(
+            config.hidden_size,
+            config.hidden_size,
+            config.use_bias,
+            device,
+        );
 
         // Initialize decay factors for multi-scale retention
         let mut gamma = Vec::new();
@@ -319,10 +360,11 @@ impl MultiScaleRetention {
 
         // Initialize advanced features
         let pos_emb = if config.max_position_embeddings > 0 {
-            Some(RotaryPositionEmbedding::new(
+            Some(RotaryPositionEmbedding::new_with_device(
                 head_dim,
                 config.max_position_embeddings,
                 10000.0,
+                device,
             )?)
         } else {
             None
@@ -356,7 +398,12 @@ impl MultiScaleRetention {
             chunk_processor,
             state_cache,
             use_memory_efficient_attention: config.sequence_parallel,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Set inference mode for recurrent processing
@@ -390,7 +437,8 @@ impl MultiScaleRetention {
                 let output = self.out_proj.forward(gated_output)?;
 
                 // Create dummy state for compatibility
-                let state = Tensor::zeros(&[1, self.num_heads, self.head_dim, self.head_dim])?;
+                let state = Tensor::zeros(&[1, self.num_heads, self.head_dim, self.head_dim])?
+                    .to_device_enum(&self.device)?;
                 Ok((output, state))
             })
         } else {
@@ -411,7 +459,8 @@ impl MultiScaleRetention {
         let k_heads = self.reshape_for_heads(k)?;
         let v_heads = self.reshape_for_heads(v)?;
 
-        let mut output = Tensor::zeros(&[batch_size, num_heads, seq_len, head_dim])?;
+        let mut output = Tensor::zeros(&[batch_size, num_heads, seq_len, head_dim])?
+            .to_device_enum(&self.device)?;
 
         // Apply retention for each head
         for h in 0..num_heads {
@@ -458,11 +507,12 @@ impl MultiScaleRetention {
         let seq_len = q.shape()[2];
         let head_dim = q.shape()[3];
 
-        let mut output = Tensor::zeros(&[batch_size, 1, seq_len, head_dim])?;
+        let mut output =
+            Tensor::zeros(&[batch_size, 1, seq_len, head_dim])?.to_device_enum(&self.device)?;
 
         // Retention computation: O(n) complexity
         for b in 0..batch_size {
-            let mut state = Tensor::zeros(&[head_dim, head_dim])?;
+            let mut state = Tensor::zeros(&[head_dim, head_dim])?.to_device_enum(&self.device)?;
 
             for i in 0..seq_len {
                 // Get query, key, value for position i
@@ -509,7 +559,8 @@ impl MultiScaleRetention {
         if seq_len != 1 {
             return self.parallel_retention(q, k, v).map(|out| {
                 let state =
-                    Tensor::zeros(&[batch_size, self.num_heads, self.head_dim, self.head_dim])?;
+                    Tensor::zeros(&[batch_size, self.num_heads, self.head_dim, self.head_dim])?
+                        .to_device_enum(&self.device)?;
                 Ok((out, state))
             })?;
         }
@@ -518,7 +569,8 @@ impl MultiScaleRetention {
         let k_heads = self.reshape_for_heads(k)?;
         let v_heads = self.reshape_for_heads(v)?;
 
-        let mut output = Tensor::zeros(&[batch_size, self.num_heads, 1, self.head_dim])?;
+        let mut output = Tensor::zeros(&[batch_size, self.num_heads, 1, self.head_dim])?
+            .to_device_enum(&self.device)?;
         let mut new_states = Vec::new();
 
         for h in 0..self.num_heads {
@@ -546,6 +598,7 @@ impl MultiScaleRetention {
                 ])?
             } else {
                 Tensor::zeros(&[batch_size, 1, self.head_dim, self.head_dim])?
+                    .to_device_enum(&self.device)?
             };
 
             // Update state: S_t = gamma * S_{t-1} + k_t^T @ v_t
@@ -600,7 +653,8 @@ impl MultiScaleRetention {
     fn concatenate_states(&self, states: Vec<Tensor>) -> Result<Tensor> {
         let batch_size = states[0].shape()[0];
         let mut result =
-            Tensor::zeros(&[batch_size, self.num_heads, self.head_dim, self.head_dim])?;
+            Tensor::zeros(&[batch_size, self.num_heads, self.head_dim, self.head_dim])?
+                .to_device_enum(&self.device)?;
 
         for (h, state) in states.iter().enumerate() {
             for b in 0..batch_size {
@@ -682,7 +736,8 @@ impl MultiScaleRetention {
         let hidden_size = chunks[0].shape()[2];
         let total_seq_len: usize = chunks.iter().map(|c| c.shape()[1]).sum();
 
-        let mut result = Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?;
+        let mut result = Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?
+            .to_device_enum(&self.device)?;
         let mut offset = 0;
 
         for chunk in chunks {
@@ -753,45 +808,59 @@ pub struct RetNetFFN {
     use_glu: bool,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl RetNetFFN {
     pub fn new(config: &RetNetConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RetNetConfig, device: Device) -> Result<Self> {
         let gate_proj = if config.use_glu {
-            Some(Linear::new(
+            Some(Linear::new_with_device(
                 config.hidden_size,
                 config.intermediate_size,
                 config.use_bias,
+                device,
             ))
         } else {
             None
         };
 
-        let up_proj = Linear::new(
+        let up_proj = Linear::new_with_device(
             config.hidden_size,
             config.intermediate_size,
             config.use_bias,
+            device,
         );
-        let down_proj = Linear::new(
+        let down_proj = Linear::new_with_device(
             config.intermediate_size,
             config.hidden_size,
             config.use_bias,
+            device,
         );
 
         Ok(Self {
             gate_proj: gate_proj.unwrap_or_else(|| {
-                Linear::new(
+                Linear::new_with_device(
                     config.hidden_size,
                     config.intermediate_size,
                     config.use_bias,
-                )
+                    device,
+                ) // Safe since we just created similar ones above
             }),
             up_proj,
             down_proj,
             activation: config.hidden_act.clone(),
             use_glu: config.use_glu,
             dropout: config.activation_dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     fn apply_activation(&self, x: &Tensor) -> Result<Tensor> {
@@ -842,14 +911,21 @@ pub struct RetNetDecoderLayer {
     deepnorm: bool,
     alpha: f32,
     beta: f32,
+    device: Device,
 }
 
 impl RetNetDecoderLayer {
     pub fn new(config: &RetNetConfig) -> Result<Self> {
-        let retention = MultiScaleRetention::new(config)?;
-        let ffn = RetNetFFN::new(config)?;
-        let retention_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
-        let ffn_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RetNetConfig, device: Device) -> Result<Self> {
+        let retention = MultiScaleRetention::new_with_device(config, device)?;
+        let ffn = RetNetFFN::new_with_device(config, device)?;
+        let retention_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
+        let ffn_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         let (alpha, beta) = if config.deepnorm {
             (config.deepnorm_alpha(), config.deepnorm_beta())
@@ -866,7 +942,12 @@ impl RetNetDecoderLayer {
             deepnorm: config.deepnorm,
             alpha,
             beta,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -917,20 +998,27 @@ pub struct RetNetEmbeddings {
     layer_norm: Option<LayerNorm>,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl RetNetEmbeddings {
     pub fn new(config: &RetNetConfig) -> Result<Self> {
-        let word_embeddings = Embedding::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RetNetConfig, device: Device) -> Result<Self> {
+        let word_embeddings = Embedding::new_with_device(
             config.vocab_size,
             config.hidden_size,
             Some(config.pad_token_id as usize),
+            device,
         )?;
 
         let layer_norm = if config.layernorm_embedding {
-            Some(LayerNorm::new(
+            Some(LayerNorm::new_with_device(
                 vec![config.hidden_size],
                 config.layer_norm_eps,
+                device,
             )?)
         } else {
             None
@@ -940,7 +1028,12 @@ impl RetNetEmbeddings {
             word_embeddings,
             layer_norm,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -975,27 +1068,38 @@ pub struct RetNetModel {
     embeddings: RetNetEmbeddings,
     layers: Vec<RetNetDecoderLayer>,
     final_norm: LayerNorm,
+    device: Device,
 }
 
 impl RetNetModel {
     pub fn new(config: RetNetConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: RetNetConfig, device: Device) -> Result<Self> {
         config.validate()?;
 
-        let embeddings = RetNetEmbeddings::new(&config)?;
+        let embeddings = RetNetEmbeddings::new_with_device(&config, device)?;
 
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(RetNetDecoderLayer::new(&config)?);
+            layers.push(RetNetDecoderLayer::new_with_device(&config, device)?);
         }
 
-        let final_norm = LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?;
+        let final_norm =
+            LayerNorm::new_with_device(vec![config.hidden_size], config.layer_norm_eps, device)?;
 
         Ok(Self {
             config,
             embeddings,
             layers,
             final_norm,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -1073,11 +1177,20 @@ pub struct RetNetLongSequence {
     chunk_size: usize,
     overlap_size: usize,
     state_cache: RetNetStateCache,
+    device: Device,
 }
 
 impl RetNetLongSequence {
     pub fn new(config: RetNetConfig, chunk_size: usize) -> Result<Self> {
-        let model = RetNetModel::new(config.clone())?;
+        Self::new_with_device(config, chunk_size, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: RetNetConfig,
+        chunk_size: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let model = RetNetModel::new_with_device(config.clone(), device)?;
         let overlap_size = chunk_size / 4; // 25% overlap
         let state_cache = RetNetStateCache::new(config.num_hidden_layers * 4);
 
@@ -1086,7 +1199,12 @@ impl RetNetLongSequence {
             chunk_size,
             overlap_size,
             state_cache,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Process very long sequences efficiently
@@ -1135,7 +1253,8 @@ impl RetNetLongSequence {
         let hidden_size = outputs[0].shape()[2];
         let total_seq_len: usize = outputs.iter().map(|o| o.shape()[1]).sum();
 
-        let mut result = Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?;
+        let mut result = Tensor::zeros(&[batch_size, total_seq_len, hidden_size])?
+            .to_device_enum(&self.device)?;
         let mut offset = 0;
 
         for output in outputs {
@@ -1192,19 +1311,37 @@ pub struct RetNetMemoryStats {
 pub struct RetNetForLanguageModeling {
     retnet: RetNetModel,
     lm_head: Option<Linear>,
+    device: Device,
 }
 
 impl RetNetForLanguageModeling {
     pub fn new(config: RetNetConfig) -> Result<Self> {
-        let retnet = RetNetModel::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: RetNetConfig, device: Device) -> Result<Self> {
+        let retnet = RetNetModel::new_with_device(config.clone(), device)?;
 
         let lm_head = if !config.no_output_layer {
-            Some(Linear::new(config.hidden_size, config.vocab_size, false))
+            Some(Linear::new_with_device(
+                config.hidden_size,
+                config.vocab_size,
+                false,
+                device,
+            ))
         } else {
             None
         };
 
-        Ok(Self { retnet, lm_head })
+        Ok(Self {
+            retnet,
+            lm_head,
+            device,
+        })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -1246,18 +1383,32 @@ pub struct RetNetForSequenceClassification {
     classifier: Linear,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl RetNetForSequenceClassification {
     pub fn new(config: RetNetConfig, num_labels: usize) -> Result<Self> {
-        let retnet = RetNetModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: RetNetConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let retnet = RetNetModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
 
         Ok(Self {
             retnet,
             classifier,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -1294,7 +1445,8 @@ impl RetNetForSequenceClassification {
         let hidden_size = x.shape()[2];
 
         // Extract last token embeddings
-        let mut last_tokens = Tensor::zeros(&[batch_size, hidden_size])?;
+        let mut last_tokens =
+            Tensor::zeros(&[batch_size, hidden_size])?.to_device_enum(&self.device)?;
 
         for b in 0..batch_size {
             for h in 0..hidden_size {

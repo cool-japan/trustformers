@@ -1,6 +1,6 @@
 //! C API functions for tokenizer operations
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_ulong};
 use std::ptr;

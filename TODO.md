@@ -7,7 +7,7 @@ The project provides a comprehensive ecosystem for transformer model development
 with support for 21+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.1.0-alpha.1
+- **Current Version:** 0.1.0-alpha.2
 - **Status:** Production-Ready for Alpha Release
 - **License:** Apache 2.0 / MIT dual license
 - **Repository:** https://github.com/cool-japan/trustformers
@@ -232,7 +232,9 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
   - Dual encoder architecture (text + vision)
   - Contrastive learning objective
   - Zero-shot image classification
-  - Note: Weight loading placeholder for encoders
+  - ✅ Complete weight loading for text and vision encoders
+  - ✅ HuggingFace model loading support
+  - ✅ Load from path, lazy loading, memory-mapped modes
 
 - ✅ **CogVLM** - Visual language model with temporal processing
   - Temporal encoder for video understanding
@@ -413,12 +415,6 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 
 ## Known Limitations
 
-### Model-Specific Limitations
-- **CLIP Weight Loading:** Currently placeholder (logit_scale only)
-  - Text encoder weight loading requires additional work
-  - Vision encoder weight loading requires additional work
-  - Complex multimodal architecture integration needed
-
 ### Platform Limitations
 - **Metal Flash Attention:** Requires macOS 10.15+ or iOS 13+
 - **TPU Backend:** Requires Google Cloud TPU access
@@ -428,11 +424,74 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 
 ## Future Enhancements
 
+### 🚨 CRITICAL PRIORITY: SciRS2 Policy Compliance & Performance (2025-12-19)
+
+**Status**: ✅ **100% Policy Compliant** - 🔴 **Performance Blocked on SciRS2-Core MPSGraph**
+
+**Performance Status**: ~1 tok/sec vs 50-200 tok/sec target (PyTorch+MPS parity)
+
+**Root Cause Analysis** (Audit completed 2025-12-19):
+- ✅ **NOT** due to policy violations - TrustformeRS is 100% compliant
+- ✅ Basic MPS working - 100-500x matmul speedup via `scirs2_core::gpu::backends::MPSOperations`
+- ❌ **BLOCKER**: MPSGraph not implemented in scirs2-core (all methods return "not yet implemented")
+- ❌ Missing automatic kernel fusion (attention, GeLU, LayerNorm) - additional 10-50x speedup
+
+**Audit Results** (145,823 lines audited):
+- ✅ ndarray: 0 direct imports, 54 qualified paths ALL via `scirs2_core::ndarray::*`
+- ✅ rand: 0 direct imports, all via `scirs2_core::random`
+- ✅ rayon: 0 direct imports, all via `scirs2_core::parallel_ops`
+- ✅ Tests: 100% compliant
+- ✅ Features: All required features enabled (gpu, metal, mpsgraph, linalg, parallel, simd)
+- ✅ BLAS: Accelerate framework configured via scirs2-core
+
+#### Parallel Tracks
+
+**Track A: SciRS2-Core MPSGraph Implementation** ⏳ **BLOCKING ITEM** (scirs2-core team)
+- [ ] Implement MPSGraph in `~/work/scirs/scirs2-core/src/gpu/backends/metal_mpsgraph.rs`
+  - Priority 1: `scaled_dot_product_attention()` (10-50x speedup, most critical)
+  - Priority 1: `matmul()` (5-10x vs basic MPS)
+  - Priority 1: `softmax()` (10-20x)
+  - Priority 2: `gelu()`, `silu()` with operator stitching
+  - Priority 2: `layer_norm()`, `rms_norm()` with fusion
+  - Priority 3: `rope()` (rotary position embeddings)
+- [ ] Release scirs2-core 0.1.0 (full release, graduation from rc.3)
+- [ ] Benchmark and verify 50+ tok/sec performance target
+
+**Implementation Request**: `~/work/requests/MPSGRAPH.md` (978 lines, ready for SciRS2 team)
+- Comprehensive technical requirements
+- PyTorch MPS reference implementation locations
+- 3-week implementation plan (target: 2026-01-09)
+- Quality gate: 50+ tok/sec verified before release
+
+**Track B: TrustformeRS Policy Compliance** ✅ **COMPLETE**
+- ✅ trustformers-core uses `scirs2_core::ndarray`, `scirs2_core::random`, `scirs2_core::parallel_ops`
+- ✅ Inline qualified paths verified (all 54 instances compliant)
+- ✅ scirs2-core features enabled: `gpu`, `metal`, `mpsgraph`, `linalg`, `parallel`, `simd`
+- ✅ BLAS backend verified (Accelerate framework via scirs2-core)
+- ✅ Compliance audit complete (zero violations found)
+- ✅ Cargo.toml updated (mpsgraph feature enabled for macOS)
+
+**Next Actions**:
+1. **Blocked**: Await scirs2-core 0.1.0 release with MPSGraph implementation (Track A)
+2. **Then**: Update TrustformeRS to scirs2-core 0.1.0
+3. **Then**: Verify 50+ tok/sec performance on rinna-1b model
+4. **Then**: Release TrustformeRS 0.1.0-beta.1 (graduation from alpha)
+
+**Performance Roadmap**:
+- Current: ~1 tok/sec (basic MPS working)
+- Target: 50-200 tok/sec (requires MPSGraph from scirs2-core)
+- Quality Gate: Beta.1 requires verified 50+ tok/sec
+
+**See**: `SCIRS2_INTEGRATION_POLICY.md` for policy details
+
+---
+
 ### High Priority
-- Complete CLIP text/vision encoder weight loading
-- Enhanced multimodal model support
-- Additional vision transformer variants
+- ✅ Complete CLIP text/vision encoder weight loading (COMPLETED - see trustformers-models/src/clip/)
+- Enhanced multimodal model support and integration examples
+- Additional vision transformer variants (ViT-Tiny, ViT-Huge, DeiT, Swin)
 - Latest research architectures (as they emerge)
+- Advanced generation examples and tutorials
 
 ### Performance Optimizations
 - Further SIMD optimizations via SciRS2
@@ -522,6 +581,37 @@ cargo doc --all-features --no-deps
 cargo build --release --all-features
 ```
 
+### Example Applications
+TrustformeRS includes comprehensive examples demonstrating real-world usage:
+
+#### Workspace Examples (examples/)
+- **adaptive_inference_demo.rs** - Adaptive inference strategies
+- **advanced_composition.rs** - Model composition techniques
+- **basic_pipeline.rs** - Simple pipeline usage
+- **batch_inference_example.rs** - Efficient batch processing with batch utilities
+- **custom_backend_examples.rs** - Custom hardware backend integration
+- **dynamic_batching.rs** - Dynamic batch sizing
+- **ensemble_models.rs** - Model ensemble techniques
+- **generation_advanced_example.rs** - Advanced text generation strategies
+- **interactive_cli.rs** - Interactive command-line interface
+- **realtime_streaming.rs** - Real-time streaming inference
+- **tensorrt_demo.rs** - TensorRT integration
+- **web_demo.rs** - Web-based demo applications
+
+#### Trustformers Crate Examples (trustformers/examples/)
+- **batch_inference_example.rs** - Batch inference patterns and optimization strategies
+- **generation_advanced_example.rs** - Comprehensive text generation showcase
+- **clip_multimodal_example.rs** - CLIP multimodal vision-language capabilities
+
+Run examples with:
+```bash
+# Workspace examples
+cargo run --example batch_inference_example --features "bert,gpt2"
+
+# Trustformers crate examples
+cargo run -p trustformers --example clip_multimodal_example --features "clip,vit"
+```
+
 ### Community
 - **Issues:** https://github.com/cool-japan/trustformers/issues
 - **Discussions:** https://github.com/cool-japan/trustformers/discussions
@@ -529,6 +619,13 @@ cargo build --release --all-features
 
 ---
 
-**Last Updated:** Refactored for alpha.1 release (removed date-based tracking)
-**Next Milestone:** Alpha 1.0 Release
+**Last Updated:** 2025-12-19 - SciRS2 Policy Compliance Audit Complete, MPSGraph Implementation Request Ready
+**Next Milestone:** Beta 1.0 Release (blocked on scirs2-core 0.1.0 with MPSGraph)
 **Target Audience:** ML engineers, researchers, and production deployment teams
+**Recent Updates:**
+- ✅ Comprehensive SciRS2 policy compliance audit (145,823 lines) - 100% compliant, zero violations
+- ✅ Root cause analysis: Performance bottleneck NOT due to TrustformeRS (MPSGraph missing in scirs2-core)
+- ✅ MPSGraph implementation request document created (`~/work/requests/MPSGRAPH.md`)
+- ✅ Feature configuration: mpsgraph enabled for macOS in trustformers-core
+- ✅ BLAS integration verified: Accelerate framework via scirs2-core
+- 🔄 Awaiting scirs2-core 0.1.0 release for 50-200x performance improvement

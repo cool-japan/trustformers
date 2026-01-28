@@ -422,6 +422,12 @@ pub struct HealthStats {
     pub last_check_time: Option<u64>, // Unix timestamp in seconds
 }
 
+impl Default for HealthStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HealthStats {
     pub fn new() -> Self {
         Self {

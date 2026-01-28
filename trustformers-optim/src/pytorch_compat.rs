@@ -9,7 +9,7 @@ use crate::{Adam, AdamW, LRScheduler, OptimizerState, SGD};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use trustformers_core::errors::Result;
+use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::traits::Optimizer;
 use trustformers_core::Tensor;
 
@@ -228,14 +228,20 @@ impl PyTorchAdam {
 
     /// Register parameter
     pub fn register_param(&mut self, name: String, param: Tensor) -> Result<()> {
-        let mut params = self.parameters.lock().unwrap();
+        let mut params = self
+            .parameters
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         params.insert(name, param);
         Ok(())
     }
 
     /// Set gradient for parameter
     pub fn set_grad(&mut self, name: String, grad: Tensor) -> Result<()> {
-        let mut grads = self.gradients.lock().unwrap();
+        let mut grads = self
+            .gradients
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         grads.insert(name, grad);
         Ok(())
     }
@@ -253,7 +259,10 @@ impl PyTorchAdam {
 
             // The inner optimizer would typically have its own state management
             // Here we just ensure the data is available for parameter updates
-            let mut params = self.parameters.lock().unwrap();
+            let mut params = self
+                .parameters
+                .lock()
+                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
             if !params.contains_key(&param_name) {
                 // Create placeholder parameter if it doesn't exist
                 params.insert(param_name.clone(), momentum_tensor.clone());
@@ -267,7 +276,10 @@ impl PyTorchAdam {
             // The inner Adam optimizer would use this for second moment estimation
 
             // For now, we ensure the parameter exists in our registry
-            let mut params = self.parameters.lock().unwrap();
+            let mut params = self
+                .parameters
+                .lock()
+                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
             if !params.contains_key(&param_name) {
                 params.insert(param_name.clone(), variance_tensor.clone());
             }
@@ -323,11 +335,15 @@ impl PyTorchOptimizer for PyTorchAdam {
             for param_name in &group.params {
                 // Get copies of parameter and gradient to avoid borrow conflicts
                 let param_copy = {
-                    let params = self.parameters.lock().unwrap();
+                    let params = self.parameters.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     params.get(param_name).cloned()
                 };
                 let grad_copy = {
-                    let grads = self.gradients.lock().unwrap();
+                    let grads = self.gradients.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     grads.get(param_name).cloned()
                 };
 
@@ -336,7 +352,9 @@ impl PyTorchOptimizer for PyTorchAdam {
                     self.inner.update(&mut param, &grad)?;
 
                     // Store updated parameter back
-                    let mut params = self.parameters.lock().unwrap();
+                    let mut params = self.parameters.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     params.insert(param_name.clone(), param);
                 }
             }
@@ -346,7 +364,10 @@ impl PyTorchOptimizer for PyTorchAdam {
     }
 
     fn zero_grad(&mut self, _set_to_none: bool) -> Result<()> {
-        let mut grads = self.gradients.lock().unwrap();
+        let mut grads = self
+            .gradients
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         grads.clear();
         Ok(())
     }
@@ -414,14 +435,20 @@ impl PyTorchAdamW {
 
     /// Register parameter
     pub fn register_param(&mut self, name: String, param: Tensor) -> Result<()> {
-        let mut params = self.parameters.lock().unwrap();
+        let mut params = self
+            .parameters
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         params.insert(name, param);
         Ok(())
     }
 
     /// Set gradient for parameter
     pub fn set_grad(&mut self, name: String, grad: Tensor) -> Result<()> {
-        let mut grads = self.gradients.lock().unwrap();
+        let mut grads = self
+            .gradients
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         grads.insert(name, grad);
         Ok(())
     }
@@ -433,7 +460,10 @@ impl PyTorchAdamW {
         // Convert momentum buffers from Vec<f32> to Tensor format
         for (param_name, momentum_data) in optimizer_state.momentum {
             let momentum_tensor = Tensor::new(momentum_data)?;
-            let mut params = self.parameters.lock().unwrap();
+            let mut params = self
+                .parameters
+                .lock()
+                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
             if !params.contains_key(&param_name) {
                 params.insert(param_name.clone(), momentum_tensor.clone());
             }
@@ -442,7 +472,10 @@ impl PyTorchAdamW {
         // Convert variance buffers from Vec<f32> to Tensor format (for AdamW)
         for (param_name, variance_data) in optimizer_state.variance {
             let variance_tensor = Tensor::new(variance_data)?;
-            let mut params = self.parameters.lock().unwrap();
+            let mut params = self
+                .parameters
+                .lock()
+                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
             if !params.contains_key(&param_name) {
                 params.insert(param_name.clone(), variance_tensor.clone());
             }
@@ -493,11 +526,15 @@ impl PyTorchOptimizer for PyTorchAdamW {
             for param_name in &group.params {
                 // Get copies of parameter and gradient to avoid borrow conflicts
                 let param_copy = {
-                    let params = self.parameters.lock().unwrap();
+                    let params = self.parameters.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     params.get(param_name).cloned()
                 };
                 let grad_copy = {
-                    let grads = self.gradients.lock().unwrap();
+                    let grads = self.gradients.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     grads.get(param_name).cloned()
                 };
 
@@ -506,7 +543,9 @@ impl PyTorchOptimizer for PyTorchAdamW {
                     self.inner.update(&mut param, &grad)?;
 
                     // Store updated parameter back
-                    let mut params = self.parameters.lock().unwrap();
+                    let mut params = self.parameters.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     params.insert(param_name.clone(), param);
                 }
             }
@@ -516,7 +555,10 @@ impl PyTorchOptimizer for PyTorchAdamW {
     }
 
     fn zero_grad(&mut self, _set_to_none: bool) -> Result<()> {
-        let mut grads = self.gradients.lock().unwrap();
+        let mut grads = self
+            .gradients
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         grads.clear();
         Ok(())
     }
@@ -591,14 +633,20 @@ impl PyTorchSGD {
 
     /// Register parameter
     pub fn register_param(&mut self, name: String, param: Tensor) -> Result<()> {
-        let mut params = self.parameters.lock().unwrap();
+        let mut params = self
+            .parameters
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         params.insert(name, param);
         Ok(())
     }
 
     /// Set gradient for parameter
     pub fn set_grad(&mut self, name: String, grad: Tensor) -> Result<()> {
-        let mut grads = self.gradients.lock().unwrap();
+        let mut grads = self
+            .gradients
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         grads.insert(name, grad);
         Ok(())
     }
@@ -610,7 +658,10 @@ impl PyTorchSGD {
         // Convert momentum buffers from Vec<f32> to Tensor format (SGD momentum)
         for (param_name, momentum_data) in optimizer_state.momentum {
             let momentum_tensor = Tensor::new(momentum_data)?;
-            let mut params = self.parameters.lock().unwrap();
+            let mut params = self
+                .parameters
+                .lock()
+                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
             if !params.contains_key(&param_name) {
                 params.insert(param_name.clone(), momentum_tensor.clone());
             }
@@ -619,7 +670,10 @@ impl PyTorchSGD {
         // SGD typically doesn't use variance buffers, but handle them if present
         for (param_name, variance_data) in optimizer_state.variance {
             let variance_tensor = Tensor::new(variance_data)?;
-            let mut params = self.parameters.lock().unwrap();
+            let mut params = self
+                .parameters
+                .lock()
+                .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
             if !params.contains_key(&param_name) {
                 params.insert(param_name.clone(), variance_tensor.clone());
             }
@@ -669,11 +723,15 @@ impl PyTorchOptimizer for PyTorchSGD {
             for param_name in &group.params {
                 // Get copies of parameter and gradient to avoid borrow conflicts
                 let param_copy = {
-                    let params = self.parameters.lock().unwrap();
+                    let params = self.parameters.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     params.get(param_name).cloned()
                 };
                 let grad_copy = {
-                    let grads = self.gradients.lock().unwrap();
+                    let grads = self.gradients.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     grads.get(param_name).cloned()
                 };
 
@@ -682,7 +740,9 @@ impl PyTorchOptimizer for PyTorchSGD {
                     self.inner.update(&mut param, &grad)?;
 
                     // Store updated parameter back
-                    let mut params = self.parameters.lock().unwrap();
+                    let mut params = self.parameters.lock().map_err(|_| {
+                        TrustformersError::runtime_error("Mutex lock poisoned".into())
+                    })?;
                     params.insert(param_name.clone(), param);
                 }
             }
@@ -692,7 +752,10 @@ impl PyTorchOptimizer for PyTorchSGD {
     }
 
     fn zero_grad(&mut self, _set_to_none: bool) -> Result<()> {
-        let mut grads = self.gradients.lock().unwrap();
+        let mut grads = self
+            .gradients
+            .lock()
+            .map_err(|_| TrustformersError::runtime_error("Mutex lock poisoned".into()))?;
         grads.clear();
         Ok(())
     }
@@ -935,10 +998,16 @@ mod tests {
             .unwrap();
 
         // Check that gradient is set
-        assert_eq!(optimizer.gradients.lock().unwrap().len(), 1);
+        assert_eq!(
+            optimizer.gradients.lock().expect("Mutex lock poisoned").len(),
+            1
+        );
 
         // Zero gradients
         optimizer.zero_grad(false).unwrap();
-        assert_eq!(optimizer.gradients.lock().unwrap().len(), 0);
+        assert_eq!(
+            optimizer.gradients.lock().expect("Mutex lock poisoned").len(),
+            0
+        );
     }
 }

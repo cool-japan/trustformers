@@ -1,6 +1,6 @@
 use anyhow::Result;
-use ndarray_rand::RandomExt;
 use scirs2_core::ndarray::{s, Array2, Array3}; // SciRS2 Integration Policy
+use scirs2_core::random::*; // SciRS2 Integration Policy (for Normal, Uniform distributions)
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -88,25 +88,35 @@ impl SoftPrompt {
         let embeddings = match &config.init_strategy {
             InitStrategy::Random => {
                 let std = 0.02; // Standard initialization for prompts
-                Array2::random(shape, ndarray_rand::rand_distr::Normal::new(0.0, std)?)
+                let mut rng = thread_rng();
+                let normal = Normal::new(0.0, std)?;
+                Array2::from_shape_fn(shape, |_| normal.sample(&mut rng) as f32)
             },
             InitStrategy::Vocabulary(_tokens) => {
                 // In practice, would use actual vocabulary embeddings
                 let std = 0.02;
-                Array2::random(shape, ndarray_rand::rand_distr::Normal::new(0.0, std)?)
+                let mut rng = thread_rng();
+                let normal = Normal::new(0.0, std)?;
+                Array2::from_shape_fn(shape, |_| normal.sample(&mut rng) as f32)
             },
             InitStrategy::TaskSpecific => {
                 // Initialize based on task examples (simplified)
                 let std = 0.01;
-                Array2::random(shape, ndarray_rand::rand_distr::Normal::new(0.0, std)?)
+                let mut rng = thread_rng();
+                let normal = Normal::new(0.0, std)?;
+                Array2::from_shape_fn(shape, |_| normal.sample(&mut rng) as f32)
             },
             InitStrategy::Xavier => {
                 let bound = (6.0 / (config.prompt_length + config.embedding_dim) as f32).sqrt();
-                Array2::random(shape, ndarray_rand::rand_distr::Uniform::new(-bound, bound))
+                let mut rng = thread_rng();
+                let uniform = Uniform::new(-bound, bound)?;
+                Array2::from_shape_fn(shape, |_| uniform.sample(&mut rng))
             },
             InitStrategy::He => {
                 let std = (2.0 / config.prompt_length as f32).sqrt();
-                Array2::random(shape, ndarray_rand::rand_distr::Normal::new(0.0, std)?)
+                let mut rng = thread_rng();
+                let normal = Normal::new(0.0, std)?;
+                Array2::from_shape_fn(shape, |_| normal.sample(&mut rng) as f32)
             },
         };
 
@@ -166,13 +176,14 @@ impl SoftPrompt {
 
     /// Save prompt to file
     pub fn save(&self, path: &str) -> Result<()> {
-        let serialized = bincode::serialize(&(
-            &self.embeddings.as_slice().unwrap(),
+        let data_to_serialize = (
+            self.embeddings.as_slice().unwrap(),
             self.embeddings.shape(),
             &self.config,
             &self.task_id,
             self.step,
-        ))?;
+        );
+        let serialized = rmp_serde::to_vec(&data_to_serialize)?;
         std::fs::write(path, serialized)?;
         Ok(())
     }
@@ -186,7 +197,7 @@ impl SoftPrompt {
             PromptConfig,
             String,
             usize,
-        ) = bincode::deserialize(&data)?;
+        ) = rmp_serde::from_slice(&data)?;
 
         let embeddings = Array2::from_shape_vec((shape[0], shape[1]), embeddings_data)?;
         let gradients = Array2::zeros((config.prompt_length, config.embedding_dim));

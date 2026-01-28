@@ -166,7 +166,7 @@ impl ExperienceBuffer {
             return samples;
         }
 
-        let samples_per_task = (num_samples + num_tasks - 1) / num_tasks;
+        let samples_per_task = num_samples.div_ceil(num_tasks);
 
         let task_ids: Vec<_> = self.tasks.keys().cloned().collect();
         for task_id in task_ids {

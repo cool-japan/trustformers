@@ -240,7 +240,7 @@ impl PerformanceBenchmark {
             overall_score
         );
 
-        Ok(self.results.as_ref().unwrap())
+        Ok(self.results.as_ref().expect("Operation failed"))
     }
 
     /// Benchmark inference latency across different scenarios
@@ -681,7 +681,7 @@ mod tests {
         config.model_sizes = vec!["small".to_string()];
 
         let mut benchmark = PerformanceBenchmark::new(config);
-        let results = benchmark.run_benchmarks().unwrap();
+        let results = benchmark.run_benchmarks().expect("Operation failed");
 
         assert!(!results.latency_measurements.is_empty());
         assert!(!results.battery_measurements.is_empty());
@@ -699,7 +699,7 @@ mod tests {
         config.model_sizes = vec!["small".to_string()];
 
         let mut benchmark = PerformanceBenchmark::new(config);
-        let results = benchmark.run_benchmarks().unwrap();
+        let results = benchmark.run_benchmarks().expect("Operation failed");
 
         // Should achieve most targets with optimistic simulation
         assert!(results.targets_achieved.device_coverage);
@@ -715,9 +715,9 @@ mod tests {
         config.model_sizes = vec!["small".to_string()];
 
         let mut benchmark = PerformanceBenchmark::new(config);
-        benchmark.run_benchmarks().unwrap();
+        benchmark.run_benchmarks().expect("Operation failed");
 
-        let report = benchmark.export_performance_report().unwrap();
+        let report = benchmark.export_performance_report().expect("Operation failed");
         assert!(report.contains("performance_targets_validation"));
         assert!(report.contains("overall_score"));
     }

@@ -11,7 +11,7 @@
 //! - Various model sizes: 1.6B, 3B, 7B, 12B parameters
 //!
 //! References:
-//! - StableLM models: https://github.com/Stability-AI/StableLM
+//! - StableLM models: <https://github.com/Stability-AI/StableLM>
 //! - Based on LLaMA architecture innovations
 
 pub mod config;
@@ -91,10 +91,21 @@ impl StableLMVariant {
     }
 }
 
+use trustformers_core::device::Device;
+
 /// Helper function to create a StableLM model from a variant
 pub fn create_model(variant: StableLMVariant) -> Result<StableLMForCausalLM, TrustformersError> {
     let config = variant.config();
     StableLMForCausalLM::new(config)
+}
+
+/// Helper function to create a StableLM model from a variant with device support
+pub fn create_model_with_device(
+    variant: StableLMVariant,
+    device: Device,
+) -> Result<StableLMForCausalLM, TrustformersError> {
+    let config = variant.config();
+    StableLMForCausalLM::new_with_device(config, device)
 }
 
 /// Helper function to create a StableLM model from a HuggingFace model name
@@ -102,6 +113,15 @@ pub fn from_pretrained_name(
     model_name: &str,
 ) -> Option<Result<StableLMForCausalLM, TrustformersError>> {
     StableLMConfig::from_pretrained_name(model_name).map(StableLMForCausalLM::new)
+}
+
+/// Helper function to create a StableLM model from a HuggingFace model name with device support
+pub fn from_pretrained_name_with_device(
+    model_name: &str,
+    device: Device,
+) -> Option<Result<StableLMForCausalLM, TrustformersError>> {
+    StableLMConfig::from_pretrained_name(model_name)
+        .map(|config| StableLMForCausalLM::new_with_device(config, device))
 }
 
 #[cfg(test)]
@@ -123,12 +143,15 @@ mod tests {
     }
 
     #[test]
-    fn test_create_model() {
-        let model = create_model(StableLMVariant::Base3B);
-        assert_eq!(model.unwrap().model.config.hidden_size, 2560);
+    #[ignore] // Heavy test - creates StableLM 3B model, run with --ignored
+    fn test_create_model() -> Result<(), TrustformersError> {
+        let model = create_model(StableLMVariant::Base3B)?;
+        assert_eq!(model.model.config.hidden_size, 2560);
+        Ok(())
     }
 
     #[test]
+    #[ignore] // Heavy test - creates StableLM 3B model, run with --ignored
     fn test_from_pretrained_name() {
         let model = from_pretrained_name("stabilityai/stablelm-3b-4e1t");
         assert!(model.is_some());

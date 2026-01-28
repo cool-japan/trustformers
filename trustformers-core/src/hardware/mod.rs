@@ -401,8 +401,7 @@ mod tests {
 
         match params.get("learning_rate").unwrap() {
             OperationParameter::Float(val) => assert_eq!(*val, 0.001),
-            _ => assert!(
-                false,
+            _ => panic!(
                 "Expected Float parameter but got {:?}",
                 params.get("learning_rate")
             ),
@@ -410,8 +409,7 @@ mod tests {
 
         match params.get("batch_size").unwrap() {
             OperationParameter::Integer(val) => assert_eq!(*val, 32),
-            _ => assert!(
-                false,
+            _ => panic!(
                 "Expected Integer parameter but got {:?}",
                 params.get("batch_size")
             ),
@@ -506,38 +504,42 @@ mod tests {
     fn test_hardware_serialization() {
         // Test HardwareType serialization
         let hardware_type = HardwareType::Custom("TestAccelerator".to_string());
-        let serialized = serde_json::to_string(&hardware_type).unwrap();
-        let deserialized: HardwareType = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&hardware_type).expect("JSON serialization failed");
+        let deserialized: HardwareType =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(hardware_type, deserialized);
 
         // Test DataType serialization
         let data_type = DataType::Custom(12);
-        let serialized = serde_json::to_string(&data_type).unwrap();
-        let deserialized: DataType = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&data_type).expect("JSON serialization failed");
+        let deserialized: DataType =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(data_type, deserialized);
 
         // Test OperationMode serialization
         let operation_mode = OperationMode::Performance;
-        let serialized = serde_json::to_string(&operation_mode).unwrap();
-        let deserialized: OperationMode = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&operation_mode).expect("JSON serialization failed");
+        let deserialized: OperationMode =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(operation_mode, deserialized);
     }
 
     #[test]
     fn test_hardware_capabilities_custom() {
-        let mut caps = HardwareCapabilities::default();
-        caps.data_types = vec![DataType::F32, DataType::F16, DataType::I8];
-        caps.max_dimensions = 16;
-        caps.memory_size = Some(8 * 1024 * 1024 * 1024); // 8GB
-        caps.clock_frequency = Some(2_500_000_000); // 2.5 GHz
-        caps.compute_units = Some(64);
-        caps.operations = vec![
-            "matmul".to_string(),
-            "conv2d".to_string(),
-            "attention".to_string(),
-        ];
-        caps.power_consumption = Some(250.0);
-        caps.thermal_design_power = Some(300.0);
+        let caps = HardwareCapabilities {
+            data_types: vec![DataType::F32, DataType::F16, DataType::I8],
+            max_dimensions: 16,
+            memory_size: Some(8 * 1024 * 1024 * 1024), // 8GB
+            clock_frequency: Some(2_500_000_000),      // 2.5 GHz
+            compute_units: Some(64),
+            operations: vec![
+                "matmul".to_string(),
+                "conv2d".to_string(),
+                "attention".to_string(),
+            ],
+            power_consumption: Some(250.0),
+            thermal_design_power: Some(300.0),
+        };
 
         assert_eq!(caps.data_types.len(), 3);
         assert_eq!(caps.max_dimensions, 16);

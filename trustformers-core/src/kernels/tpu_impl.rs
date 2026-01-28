@@ -385,7 +385,7 @@ impl TpuBackend {
 
         let start_time = Instant::now();
 
-        let device = self.device.lock().unwrap();
+        let device = self.device.lock().expect("Lock poisoned");
         let compile_config = TpuCompileConfig {
             optimization_level: if self.config.enable_xla { 3 } else { 2 },
             enable_xla: if self.config.enable_xla { 1 } else { 0 },
@@ -555,7 +555,7 @@ impl TpuBackend {
 
     /// Get current performance metrics
     pub fn get_metrics(&self) -> HardwareMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock().expect("Lock poisoned").clone()
     }
 
     /// Optimize program for TPU systolic arrays
@@ -733,7 +733,7 @@ impl TpuBackend {
         execution_time: Duration,
         metadata: &TpuCompilationMetadata,
     ) {
-        let mut metrics = self.metrics.lock().unwrap();
+        let mut metrics = self.metrics.lock().expect("Lock poisoned");
         let execution_ms = execution_time.as_millis() as f64;
 
         metrics.ops_per_second = metadata.estimated_flops as f64 / (execution_ms / 1000.0);
@@ -921,8 +921,9 @@ mod tests {
     #[test]
     fn test_tpu_generation_serialization() {
         let generation = TpuGeneration::V5;
-        let serialized = serde_json::to_string(&generation).unwrap();
-        let deserialized: TpuGeneration = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&generation).expect("JSON serialization failed");
+        let deserialized: TpuGeneration =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(generation, deserialized);
     }
 

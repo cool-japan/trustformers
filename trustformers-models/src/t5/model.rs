@@ -1,6 +1,9 @@
-use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Integration Policy
+#![allow(dead_code)]
+
+use scirs2_core::ndarray::{s, Array2, ArrayD, Axis, IxDyn}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{Result, TrustformersError},
     layers::{Embedding, Linear},
     tensor::Tensor,
@@ -16,14 +19,19 @@ pub struct T5Model {
     shared: Embedding,
     encoder: T5Stack,
     decoder: T5Stack,
+    device: Device,
 }
 
 impl T5Model {
     pub fn new(config: T5Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: T5Config, device: Device) -> Result<Self> {
         config.validate()?;
 
         // Shared embeddings between encoder and decoder
-        let shared = Embedding::new(config.vocab_size, config.d_model, None)?;
+        let shared = Embedding::new_with_device(config.vocab_size, config.d_model, None, device)?;
 
         let encoder_config = config.clone();
         let decoder_config = config.clone();
@@ -31,9 +39,14 @@ impl T5Model {
         Ok(Self {
             config,
             shared,
-            encoder: T5Stack::new(encoder_config, true)?,
-            decoder: T5Stack::new(decoder_config, false)?,
+            encoder: T5Stack::new_with_device(encoder_config, true, device)?,
+            decoder: T5Stack::new_with_device(decoder_config, false, device)?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Load weights from a WeightReader (e.g., SafeTensors)
@@ -101,21 +114,32 @@ impl Model for T5Model {
 
 /// T5 for conditional generation (seq2seq tasks)
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct T5ForConditionalGeneration {
     transformer: T5Model,
     lm_head: Linear,
+    device: Device,
 }
 
 impl T5ForConditionalGeneration {
     pub fn new(config: T5Config) -> Result<Self> {
-        let transformer = T5Model::new(config.clone())?;
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: T5Config, device: Device) -> Result<Self> {
+        let transformer = T5Model::new_with_device(config.clone(), device)?;
         // T5 uses shared embeddings as lm_head
-        let lm_head = Linear::new(config.d_model, config.vocab_size, false);
+        let lm_head = Linear::new_with_device(config.d_model, config.vocab_size, false, device);
 
         Ok(Self {
             transformer,
             lm_head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
     }
 
     /// Load weights from a WeightReader (e.g., SafeTensors)
@@ -210,9 +234,9 @@ impl T5ForConditionalGeneration {
 
                     // Get last token logits
                     let last_token_slice = if shape.len() == 3 {
-                        arr.slice(ndarray::s![0, seq_len - 1, ..])
+                        arr.slice(s![0, seq_len - 1, ..])
                     } else {
-                        arr.slice(ndarray::s![seq_len - 1, ..])
+                        arr.slice(s![seq_len - 1, ..])
                     };
                     last_token_slice.to_owned()
                 },
@@ -304,9 +328,9 @@ impl T5ForConditionalGeneration {
                         let seq_len = shape[shape.len() - 2];
 
                         let last_token_slice = if shape.len() == 3 {
-                            arr.slice(ndarray::s![0, seq_len - 1, ..])
+                            arr.slice(s![0, seq_len - 1, ..])
                         } else {
-                            arr.slice(ndarray::s![seq_len - 1, ..])
+                            arr.slice(s![seq_len - 1, ..])
                         };
                         last_token_slice.to_owned()
                     },
@@ -433,10 +457,15 @@ struct T5Stack {
     block: Vec<T5Block>,
     final_layer_norm: T5LayerNorm,
     dropout: f32,
+    device: Device,
 }
 
 impl T5Stack {
     fn new(config: T5Config, is_encoder: bool) -> Result<Self> {
+        Self::new_with_device(config, is_encoder, Device::CPU)
+    }
+
+    fn new_with_device(config: T5Config, is_encoder: bool, device: Device) -> Result<Self> {
         let num_layers = if is_encoder {
             config.num_layers
         } else {
@@ -445,7 +474,7 @@ impl T5Stack {
 
         let mut block = Vec::with_capacity(num_layers);
         for _ in 0..num_layers {
-            block.push(T5Block::new(&config, is_encoder)?);
+            block.push(T5Block::new_with_device(&config, is_encoder, device)?);
         }
 
         Ok(Self {
@@ -453,9 +482,18 @@ impl T5Stack {
             is_encoder,
             embed_tokens: None,
             block,
-            final_layer_norm: T5LayerNorm::new(config.d_model, config.layer_norm_epsilon),
+            final_layer_norm: T5LayerNorm::new_with_device(
+                config.d_model,
+                config.layer_norm_epsilon,
+                device,
+            ),
             dropout: config.dropout_rate,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -522,19 +560,32 @@ struct T5Block {
     self_attention: T5Attention,
     cross_attention: Option<T5Attention>,
     feed_forward: T5DenseReluDense,
+    device: Device,
 }
 
 impl T5Block {
     fn new(config: &T5Config, is_encoder: bool) -> Result<Self> {
-        let cross_attention =
-            if !is_encoder { Some(T5Attention::new(config, true)?) } else { None };
+        Self::new_with_device(config, is_encoder, Device::CPU)
+    }
+
+    fn new_with_device(config: &T5Config, is_encoder: bool, device: Device) -> Result<Self> {
+        let cross_attention = if !is_encoder {
+            Some(T5Attention::new_with_device(config, true, device)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             is_encoder,
-            self_attention: T5Attention::new(config, false)?,
+            self_attention: T5Attention::new_with_device(config, false, device)?,
             cross_attention,
-            feed_forward: T5DenseReluDense::new(config)?,
+            feed_forward: T5DenseReluDense::new_with_device(config, device)?,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -611,16 +662,26 @@ struct T5Attention {
     relative_attention_num_buckets: usize,
     relative_attention_max_distance: usize,
     relative_attention_bias: Option<Embedding>, // For storing learned relative position biases
+    device: Device,
 }
 
 impl T5Attention {
     fn new(config: &T5Config, is_cross_attention: bool) -> Result<Self> {
+        Self::new_with_device(config, is_cross_attention, Device::CPU)
+    }
+
+    fn new_with_device(
+        config: &T5Config,
+        is_cross_attention: bool,
+        device: Device,
+    ) -> Result<Self> {
         let has_relative_bias = !is_cross_attention;
         let relative_attention_bias = if has_relative_bias {
-            Some(Embedding::new(
+            Some(Embedding::new_with_device(
                 config.relative_attention_num_buckets,
                 config.num_heads,
                 None,
+                device,
             )?)
         } else {
             None
@@ -628,11 +689,35 @@ impl T5Attention {
 
         Ok(Self {
             is_cross_attention,
-            layer_norm: T5LayerNorm::new(config.d_model, config.layer_norm_epsilon),
-            q: Linear::new(config.d_model, config.num_heads * config.d_kv, false),
-            k: Linear::new(config.d_model, config.num_heads * config.d_kv, false),
-            v: Linear::new(config.d_model, config.num_heads * config.d_kv, false),
-            o: Linear::new(config.num_heads * config.d_kv, config.d_model, false),
+            layer_norm: T5LayerNorm::new_with_device(
+                config.d_model,
+                config.layer_norm_epsilon,
+                device,
+            ),
+            q: Linear::new_with_device(
+                config.d_model,
+                config.num_heads * config.d_kv,
+                false,
+                device,
+            ),
+            k: Linear::new_with_device(
+                config.d_model,
+                config.num_heads * config.d_kv,
+                false,
+                device,
+            ),
+            v: Linear::new_with_device(
+                config.d_model,
+                config.num_heads * config.d_kv,
+                false,
+                device,
+            ),
+            o: Linear::new_with_device(
+                config.num_heads * config.d_kv,
+                config.d_model,
+                false,
+                device,
+            ),
             n_heads: config.num_heads,
             d_kv: config.d_kv,
             dropout: config.dropout_rate,
@@ -640,7 +725,12 @@ impl T5Attention {
             relative_attention_num_buckets: config.relative_attention_num_buckets,
             relative_attention_max_distance: config.relative_attention_max_distance,
             relative_attention_bias,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -685,7 +775,7 @@ impl T5Attention {
         let normed_hidden = match &normed_hidden {
             Tensor::F32(arr) => {
                 if arr.ndim() == 2 {
-                    Tensor::F32(arr.clone().insert_axis(ndarray::Axis(0)).to_owned())
+                    Tensor::F32(arr.clone().insert_axis(Axis(0)).to_owned())
                 } else {
                     normed_hidden
                 }
@@ -723,29 +813,24 @@ impl T5Attention {
 
                 // Ensure tensors are 3D
                 let q_arr = if q_arr.ndim() == 2 {
-                    q_arr.clone().insert_axis(ndarray::Axis(0)).to_owned()
+                    q_arr.clone().insert_axis(Axis(0)).to_owned()
                 } else {
                     q_arr.clone()
                 };
                 let k_arr = if k_arr.ndim() == 2 {
-                    k_arr.clone().insert_axis(ndarray::Axis(0)).to_owned()
+                    k_arr.clone().insert_axis(Axis(0)).to_owned()
                 } else {
                     k_arr.clone()
                 };
                 let v_arr = if v_arr.ndim() == 2 {
-                    v_arr.clone().insert_axis(ndarray::Axis(0)).to_owned()
+                    v_arr.clone().insert_axis(Axis(0)).to_owned()
                 } else {
                     v_arr.clone()
                 };
 
                 // Reshape to [batch, seq_len, n_heads, d_kv]
                 let q = q_arr
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        q_seq_len,
-                        self.n_heads,
-                        self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, q_seq_len, self.n_heads, self.d_kv]))
                     .map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to reshape Q from {:?} to [{}, {}, {}, {}]: {}",
@@ -759,12 +844,7 @@ impl T5Attention {
                     })?
                     .to_owned();
                 let k = k_arr
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        k_seq_len,
-                        self.n_heads,
-                        self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, k_seq_len, self.n_heads, self.d_kv]))
                     .map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to reshape K from {:?} to [{}, {}, {}, {}]: {}",
@@ -778,12 +858,7 @@ impl T5Attention {
                     })?
                     .to_owned();
                 let v = v_arr
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        v_seq_len,
-                        self.n_heads,
-                        self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, v_seq_len, self.n_heads, self.d_kv]))
                     .map_err(|e| {
                         TrustformersError::shape_error(format!(
                             "Failed to reshape V from {:?} to [{}, {}, {}, {}]: {}",
@@ -808,7 +883,7 @@ impl T5Attention {
                 let k_t = k.permuted_axes(vec![0, 1, 3, 2]);
 
                 // Compute Q * K^T
-                let mut scores = ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[
+                let mut scores = ArrayD::<f32>::zeros(IxDyn(&[
                     batch_size,
                     self.n_heads,
                     q_seq_len,
@@ -816,10 +891,10 @@ impl T5Attention {
                 ]));
                 for b in 0..batch_size {
                     for h in 0..self.n_heads {
-                        let q_head = q.slice(ndarray::s![b, h, .., ..]);
-                        let k_head_t = k_t.slice(ndarray::s![b, h, .., ..]);
+                        let q_head = q.slice(s![b, h, .., ..]);
+                        let k_head_t = k_t.slice(s![b, h, .., ..]);
                         let score = q_head.dot(&k_head_t);
-                        scores.slice_mut(ndarray::s![b, h, .., ..]).assign(&score);
+                        scores.slice_mut(s![b, h, .., ..]).assign(&score);
                     }
                 }
                 scores *= scale;
@@ -832,7 +907,7 @@ impl T5Attention {
                         Tensor::F32(bias_arr) => {
                             // Add bias to scores
                             for b in 0..batch_size {
-                                let mut slice = scores.slice_mut(ndarray::s![b, .., .., ..]);
+                                let mut slice = scores.slice_mut(s![b, .., .., ..]);
                                 slice += &bias_arr;
                             }
                         },
@@ -865,7 +940,7 @@ impl T5Attention {
                 for b in 0..batch_size {
                     for h in 0..self.n_heads {
                         for i in 0..q_seq_len {
-                            let mut row = attention_probs.slice_mut(ndarray::s![b, h, i, ..]);
+                            let mut row = attention_probs.slice_mut(s![b, h, i, ..]);
                             let max_val = row.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
                             row.mapv_inplace(|x| (x - max_val).exp());
                             let sum: f32 = row.iter().sum();
@@ -877,29 +952,21 @@ impl T5Attention {
                 }
 
                 // Apply attention to values
-                let mut output = ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[
-                    batch_size,
-                    self.n_heads,
-                    q_seq_len,
-                    self.d_kv,
-                ]));
+                let mut output =
+                    ArrayD::<f32>::zeros(IxDyn(&[batch_size, self.n_heads, q_seq_len, self.d_kv]));
                 for b in 0..batch_size {
                     for h in 0..self.n_heads {
-                        let attn_probs_head = attention_probs.slice(ndarray::s![b, h, .., ..]);
-                        let v_head = v.slice(ndarray::s![b, h, .., ..]);
+                        let attn_probs_head = attention_probs.slice(s![b, h, .., ..]);
+                        let v_head = v.slice(s![b, h, .., ..]);
                         let out = attn_probs_head.dot(&v_head);
-                        output.slice_mut(ndarray::s![b, h, .., ..]).assign(&out);
+                        output.slice_mut(s![b, h, .., ..]).assign(&out);
                     }
                 }
 
                 // Transpose back and reshape
                 let output = output.permuted_axes(vec![0, 2, 1, 3]);
                 let output = output
-                    .to_shape(ndarray::IxDyn(&[
-                        batch_size,
-                        q_seq_len,
-                        self.n_heads * self.d_kv,
-                    ]))
+                    .to_shape(IxDyn(&[batch_size, q_seq_len, self.n_heads * self.d_kv]))
                     .map_err(|_| {
                         TrustformersError::shape_error("Failed to reshape output".to_string())
                     })?
@@ -921,7 +988,7 @@ impl T5Attention {
         // Remove batch dimension if input was 2D
         let output = if shape.len() == 2 {
             match output {
-                Tensor::F32(arr) => Tensor::F32(arr.remove_axis(ndarray::Axis(0))),
+                Tensor::F32(arr) => Tensor::F32(arr.remove_axis(Axis(0))),
                 _ => output,
             }
         } else {
@@ -935,7 +1002,7 @@ impl T5Attention {
     /// Compute relative position bias for T5
     fn compute_relative_position_bias(&self, query_len: usize, key_len: usize) -> Result<Tensor> {
         // Compute relative positions
-        let mut relative_positions = ndarray::Array2::<i32>::zeros((query_len, key_len));
+        let mut relative_positions = Array2::<i32>::zeros((query_len, key_len));
         for i in 0..query_len {
             for j in 0..key_len {
                 relative_positions[[i, j]] = j as i32 - i as i32;
@@ -954,7 +1021,7 @@ impl T5Attention {
             match bias {
                 Tensor::F32(bias_arr) => {
                     let reshaped = bias_arr
-                        .to_shape(ndarray::IxDyn(&[query_len, key_len, self.n_heads]))
+                        .to_shape(IxDyn(&[query_len, key_len, self.n_heads]))
                         .map_err(|_| {
                             TrustformersError::shape_error("Failed to reshape bias".to_string())
                         })?
@@ -970,17 +1037,13 @@ impl T5Attention {
             }
         } else {
             // No relative bias, return zeros
-            let zeros =
-                ndarray::ArrayD::<f32>::zeros(ndarray::IxDyn(&[self.n_heads, query_len, key_len]));
+            let zeros = ArrayD::<f32>::zeros(IxDyn(&[self.n_heads, query_len, key_len]));
             Ok(Tensor::F32(zeros))
         }
     }
 
     /// Convert relative positions to bucket indices
-    fn relative_position_bucket(
-        &self,
-        relative_positions: ndarray::Array2<i32>,
-    ) -> ndarray::Array2<i32> {
+    fn relative_position_bucket(&self, relative_positions: Array2<i32>) -> Array2<i32> {
         let num_buckets = self.relative_attention_num_buckets;
         let max_distance = self.relative_attention_max_distance;
         let mut buckets = relative_positions.mapv(|_x| 0);
@@ -1036,16 +1099,30 @@ struct T5DenseReluDense {
     wo: Linear,
     #[allow(dead_code)]
     dropout: f32,
+    device: Device,
 }
 
 impl T5DenseReluDense {
     fn new(config: &T5Config) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    fn new_with_device(config: &T5Config, device: Device) -> Result<Self> {
         Ok(Self {
-            layer_norm: T5LayerNorm::new(config.d_model, config.layer_norm_epsilon),
-            wi: Linear::new(config.d_model, config.d_ff, false),
-            wo: Linear::new(config.d_ff, config.d_model, false),
+            layer_norm: T5LayerNorm::new_with_device(
+                config.d_model,
+                config.layer_norm_epsilon,
+                device,
+            ),
+            wi: Linear::new_with_device(config.d_model, config.d_ff, false, device),
+            wo: Linear::new_with_device(config.d_ff, config.d_model, false, device),
             dropout: config.dropout_rate,
+            device,
         })
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -1083,14 +1160,24 @@ impl T5DenseReluDense {
 struct T5LayerNorm {
     weight: Tensor,
     epsilon: f32,
+    device: Device,
 }
 
 impl T5LayerNorm {
     fn new(hidden_size: usize, epsilon: f32) -> Self {
+        Self::new_with_device(hidden_size, epsilon, Device::CPU)
+    }
+
+    fn new_with_device(hidden_size: usize, epsilon: f32, device: Device) -> Self {
         Self {
-            weight: Tensor::ones(&[hidden_size]).unwrap(),
+            weight: Tensor::ones(&[hidden_size]).expect("operation failed"),
             epsilon,
+            device,
         }
+    }
+
+    fn device(&self) -> &Device {
+        &self.device
     }
 
     fn load_weights(&mut self, reader: &mut dyn WeightReader, prefix: &str) -> Result<()> {
@@ -1103,7 +1190,7 @@ impl T5LayerNorm {
         match (&hidden_states, &self.weight) {
             (Tensor::F32(x), Tensor::F32(w)) => {
                 // Calculate RMS
-                let variance = x.mapv(|v| v * v).mean().unwrap() + self.epsilon;
+                let variance = x.mapv(|v| v * v).mean().expect("operation failed") + self.epsilon;
                 let x = x / variance.sqrt();
 
                 // Apply weight

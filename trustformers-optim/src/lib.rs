@@ -1,3 +1,12 @@
+// Allow certain clippy warnings at crate level for numeric algorithms
+// These patterns are common and intentional in optimization code
+#![allow(
+    clippy::needless_range_loop,
+    clippy::manual_memcpy,
+    clippy::vec_init_then_push,
+    clippy::borrowed_box
+)]
+
 //! # TrustformeRS Optimization
 //!
 //! This crate provides state-of-the-art optimization algorithms for training transformer models,

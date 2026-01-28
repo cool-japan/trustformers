@@ -3,10 +3,9 @@
 //! This module provides a built-in HTTP server for serving TrustformeRS models
 //! via REST API endpoints.
 
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int};
@@ -61,7 +60,6 @@ impl Default for HttpServerConfig {
 }
 
 /// HTTP server instance
-#[derive(Debug)]
 pub struct HttpServer {
     config: HttpServerConfig,
     server_handle: Option<ServerHandle>,
@@ -69,6 +67,22 @@ pub struct HttpServer {
     models: HashMap<String, ModelEndpoint>,
     middleware: Vec<MiddlewareHandler>,
     metrics: ServerMetrics,
+}
+
+impl std::fmt::Debug for HttpServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HttpServer")
+            .field("config", &self.config)
+            .field("server_handle", &self.server_handle)
+            .field("routes", &format!("{} routes", self.routes.len()))
+            .field("models", &self.models)
+            .field(
+                "middleware",
+                &format!("{} middleware", self.middleware.len()),
+            )
+            .field("metrics", &self.metrics)
+            .finish()
+    }
 }
 
 /// Server handle for managing the HTTP server
@@ -85,7 +99,7 @@ type RouteHandler = Box<dyn Fn(&HttpRequest) -> HttpResponse + Send + Sync>;
 type MiddlewareHandler = Box<dyn Fn(&mut HttpRequest, &mut HttpResponse) -> bool + Send + Sync>;
 
 /// Model endpoint configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEndpoint {
     pub name: String,
     pub model_path: String,
@@ -97,7 +111,7 @@ pub struct ModelEndpoint {
 }
 
 /// Rate limiting configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RateLimit {
     pub requests_per_minute: u32,
     pub burst_limit: u32,
@@ -123,7 +137,7 @@ pub struct HttpResponse {
 }
 
 /// Server metrics
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ServerMetrics {
     pub total_requests: u64,
     pub successful_requests: u64,
@@ -405,7 +419,7 @@ impl HttpServer {
 
     fn start(&mut self) -> TrustformersResult<()> {
         if self.server_handle.is_some() {
-            return Err(anyhow!("Server is already running"));
+            return Err(anyhow!("Server is already running").into());
         }
 
         // Add default routes

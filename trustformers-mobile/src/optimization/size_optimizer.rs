@@ -317,7 +317,7 @@ mod tests {
     #[test]
     fn test_size_optimizer_creation() {
         let config = SizeOptimizerConfig::default();
-        let optimizer = SizeOptimizer::new(config).unwrap();
+        let optimizer = SizeOptimizer::new(config).expect("Operation failed");
 
         assert_eq!(optimizer.config.target_size_mb, 50.0);
         assert!(optimizer.config.enable_lto);
@@ -327,9 +327,9 @@ mod tests {
     #[test]
     fn test_size_analysis() {
         let config = SizeOptimizerConfig::default();
-        let mut optimizer = SizeOptimizer::new(config).unwrap();
+        let mut optimizer = SizeOptimizer::new(config).expect("Operation failed");
 
-        let metrics = optimizer.analyze_current_size().unwrap();
+        let metrics = optimizer.analyze_current_size().expect("Operation failed");
         assert!(metrics.current_size_mb > 0.0);
         assert!(metrics.optimized_size_mb < metrics.current_size_mb);
     }
@@ -339,8 +339,8 @@ mod tests {
         let mut config = SizeOptimizerConfig::default();
         config.strategy = SizeOptimizationStrategy::Minimal;
 
-        let mut optimizer = SizeOptimizer::new(config).unwrap();
-        optimizer.analyze_current_size().unwrap();
+        let mut optimizer = SizeOptimizer::new(config).expect("Operation failed");
+        optimizer.analyze_current_size().expect("Operation failed");
 
         // With minimal strategy, should be able to achieve target
         assert!(optimizer.is_target_achievable());
@@ -349,8 +349,8 @@ mod tests {
     #[test]
     fn test_optimization_recommendations() {
         let config = SizeOptimizerConfig::default();
-        let mut optimizer = SizeOptimizer::new(config).unwrap();
-        optimizer.analyze_current_size().unwrap();
+        let mut optimizer = SizeOptimizer::new(config).expect("Operation failed");
+        optimizer.analyze_current_size().expect("Operation failed");
 
         let recommendations = optimizer.generate_optimization_recommendations();
         assert!(!recommendations.is_empty());
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn test_build_config_generation() {
         let config = SizeOptimizerConfig::default();
-        let optimizer = SizeOptimizer::new(config).unwrap();
+        let optimizer = SizeOptimizer::new(config).expect("Operation failed");
 
         let build_config = optimizer.generate_build_config();
         assert!(build_config.contains("opt-level = 'z'"));
@@ -369,8 +369,8 @@ mod tests {
     #[test]
     fn test_export_report() {
         let config = SizeOptimizerConfig::default();
-        let mut optimizer = SizeOptimizer::new(config).unwrap();
-        optimizer.analyze_current_size().unwrap();
+        let mut optimizer = SizeOptimizer::new(config).expect("Operation failed");
+        optimizer.analyze_current_size().expect("Operation failed");
 
         let report = optimizer.export_optimization_report();
         assert!(report.contains("framework_size_analysis"));

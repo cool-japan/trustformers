@@ -1807,7 +1807,7 @@ mod tests {
     #[test]
     fn test_crash_severity_assessment() {
         let config = CrashReporterConfig::default();
-        let reporter = MobileCrashReporter::new(config).unwrap();
+        let reporter = MobileCrashReporter::new(config).expect("Operation failed");
 
         let crash_info = CrashInfo {
             crash_type: CrashType::SegmentationFault,
@@ -1833,7 +1833,7 @@ mod tests {
         config.privacy_config.include_user_data = false;
         config.privacy_config.anonymize_data = true;
 
-        let reporter = MobileCrashReporter::new(config).unwrap();
+        let reporter = MobileCrashReporter::new(config).expect("Operation failed");
 
         let crash_info = CrashInfo {
             crash_type: CrashType::OutOfMemory,
@@ -1855,7 +1855,7 @@ mod tests {
     #[test]
     fn test_recovery_suggestions() {
         let config = CrashReporterConfig::default();
-        let reporter = MobileCrashReporter::new(config).unwrap();
+        let reporter = MobileCrashReporter::new(config).expect("Operation failed");
 
         let crash_report = CrashReport {
             report_id: "test".to_string(),
@@ -1863,7 +1863,8 @@ mod tests {
             crash_type: CrashType::OutOfMemory,
             severity: CrashSeverity::High,
             system_info: SystemCrashInfo {
-                device_info: crate::device_info::MobileDeviceDetector::detect().unwrap(),
+                device_info: crate::device_info::MobileDeviceDetector::detect()
+                    .expect("Operation failed"),
                 performance_metrics: None,
                 memory_usage: MemoryUsageInfo {
                     total_mb: 1024.0,
@@ -1910,7 +1911,8 @@ mod tests {
             is_privacy_compliant: true,
         };
 
-        let suggestions = reporter.generate_recovery_suggestions(&crash_report).unwrap();
+        let suggestions =
+            reporter.generate_recovery_suggestions(&crash_report).expect("Operation failed");
         assert!(!suggestions.is_empty());
         assert_eq!(suggestions[0].suggestion_type, RecoveryStrategy::ClearCache);
     }

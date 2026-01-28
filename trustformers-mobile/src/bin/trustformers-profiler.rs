@@ -3,6 +3,8 @@
 //! This tool provides command-line profiling of mobile AI models including
 //! performance metrics, memory usage, battery consumption, and platform-specific optimizations.
 
+#![allow(clippy::result_large_err)]
+
 use clap::{Arg, Command};
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -142,7 +144,7 @@ fn main() -> Result<()> {
     let report = run_profiling_session(config, mobile_config)?;
 
     // Save results
-    let output_file = matches.get_one::<String>("output").unwrap();
+    let output_file = matches.get_one::<String>("output").expect("Operation failed");
     save_profiling_report(&report, output_file, &report.config.output_format)?;
 
     // Print summary
@@ -154,35 +156,35 @@ fn main() -> Result<()> {
 fn parse_configuration(matches: &clap::ArgMatches) -> Result<ProfilingConfiguration> {
     let batch_size = matches
         .get_one::<String>("batch-size")
-        .unwrap()
+        .expect("Operation failed")
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid batch size", "parse"))?;
     let sequence_length = matches
         .get_one::<String>("seq-length")
-        .unwrap()
+        .expect("Operation failed")
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid sequence length", "parse"))?;
     let num_iterations = matches
         .get_one::<String>("iterations")
-        .unwrap()
+        .expect("Operation failed")
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid iteration count", "parse"))?;
     let warmup_iterations = matches
         .get_one::<String>("warmup")
-        .unwrap()
+        .expect("Operation failed")
         .parse()
         .map_err(|_| TrustformersError::config_error("Invalid warmup count", "parse"))?;
 
     Ok(ProfilingConfiguration {
-        model_name: matches.get_one::<String>("model").unwrap().clone(),
-        platform: matches.get_one::<String>("platform").unwrap().clone(),
-        backend: matches.get_one::<String>("backend").unwrap().clone(),
+        model_name: matches.get_one::<String>("model").expect("Operation failed").clone(),
+        platform: matches.get_one::<String>("platform").expect("Operation failed").clone(),
+        backend: matches.get_one::<String>("backend").expect("Operation failed").clone(),
         batch_size,
         sequence_length,
         num_iterations,
         warmup_iterations,
-        profiling_mode: matches.get_one::<String>("mode").unwrap().clone(),
-        output_format: matches.get_one::<String>("format").unwrap().clone(),
+        profiling_mode: matches.get_one::<String>("mode").expect("Operation failed").clone(),
+        output_format: matches.get_one::<String>("format").expect("Operation failed").clone(),
     })
 }
 
@@ -249,7 +251,7 @@ fn run_profiling_session(
 
         if (i + 1) % 5 == 0 {
             print!(".");
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::io::Write::flush(&mut std::io::stdout()).expect("Operation failed");
         }
     }
     println!(" Done");
@@ -272,7 +274,7 @@ fn run_profiling_session(
 
         if (i + 1) % 10 == 0 {
             print!(".");
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::io::Write::flush(&mut std::io::stdout()).expect("Operation failed");
         }
     }
 
@@ -280,7 +282,7 @@ fn run_profiling_session(
     println!(" Done");
 
     // Calculate statistics
-    latencies.sort_by(|a, b| a.partial_cmp(b).unwrap().into());
+    latencies.sort_by(|a, b| a.partial_cmp(b).expect("Operation failed"));
     let avg_latency_ms = latencies.iter().sum::<f64>() / latencies.len() as f64;
     let min_latency_ms = *latencies.first().unwrap_or(&0.0);
     let max_latency_ms = *latencies.last().unwrap_or(&0.0);
@@ -310,7 +312,7 @@ fn run_profiling_session(
 
 fn create_sample_input(batch_size: usize, sequence_length: usize) -> Result<Tensor> {
     // Create random input tensor for profiling
-    Ok(Tensor::randn(&[batch_size, sequence_length])?)
+    Tensor::randn(&[batch_size, sequence_length])
 }
 
 fn simulate_inference(config: &MobileConfig, _input: &Tensor, profile: bool) -> Result<Tensor> {
@@ -335,7 +337,7 @@ fn simulate_inference(config: &MobileConfig, _input: &Tensor, profile: bool) -> 
     }
 
     // Return mock output tensor
-    Ok(Tensor::randn(&[1, 768])?) // Simple output
+    Tensor::randn(&[1, 768]) // Simple output
 }
 
 fn generate_optimization_recommendations(
@@ -411,8 +413,7 @@ fn save_profiling_report(report: &ProfilingReport, output_file: &str, format: &s
             return Err(TrustformersError::tensor_op_error(
                 "Unsupported output format",
                 "save_report",
-            )
-            .into());
+            ));
         },
     }
 

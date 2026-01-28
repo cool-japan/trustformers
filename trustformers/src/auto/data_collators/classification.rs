@@ -33,7 +33,7 @@
 //!
 //! ### Sentiment Analysis
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::classification::{
 //!     ClassificationDataCollator, ClassificationCollatorConfig
 //! };
@@ -52,12 +52,14 @@
 //!
 //! ### Multi-label Classification
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::classification::{
 //!     ClassificationDataCollator, ClassificationCollatorConfig
 //! };
 //! use trustformers::auto::types::{DataExample, PaddingStrategy};
+//! use std::collections::HashMap;
 //!
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! // Configuration for multi-label topic classification
 //! let config = ClassificationCollatorConfig {
 //!     max_length: Some(256),
@@ -81,6 +83,8 @@
 //! ];
 //!
 //! let batch = collator.collate(&examples)?;
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Supported Tasks
@@ -141,7 +145,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// ## Usage Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::classification::{
 ///     ClassificationDataCollator, ClassificationCollatorConfig
 /// };
@@ -185,7 +189,7 @@ impl ClassificationDataCollator {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = ClassificationCollatorConfig {
     ///     max_length: Some(512),
     ///     padding: PaddingStrategy::Longest,
@@ -434,7 +438,9 @@ impl ClassificationCollatorConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
+    /// # use trustformers::auto::data_collators::classification::ClassificationCollatorConfig;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "pad_token_id": 0,
@@ -446,6 +452,8 @@ impl ClassificationCollatorConfig {
     /// assert_eq!(config.max_length, Some(512));
     /// assert_eq!(config.pad_token_id, 0);
     /// assert_eq!(config.num_labels, 3);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {

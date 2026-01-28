@@ -5,9 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-wasm"
 description = "WebAssembly bindings for TrustformeRS transformer library"
 categories = ["wasm", "web-programming", "science"]
 keywords = ["transformers", "webassembly", "wasm", "machine-learning", "nlp"]
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -16,16 +19,16 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen = { version = "0.2.104", features = ["serde-serialize"] }
-wasm-bindgen-futures = "0.4.54"
-js-sys = "0.3.81"
+wasm-bindgen = { version = "0.2.108", features = ["serde-serialize"] }
+wasm-bindgen-futures = "0.4.58"
+js-sys = "0.3.85"
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
 serde-wasm-bindgen = "0.6.5"
-getrandom = { version = "0.3.3", features = ["wasm_js"] }
+getrandom = { version = "0.3.4", features = ["wasm_js"] }
 console_error_panic_hook = { version = "0.1.7", optional = true }
 wee_alloc = { version = "0.4.5", optional = true }
-dlmalloc = { version = "0.2.10", features = ["global"], optional = true }
+dlmalloc = { version = "0.2.12", features = ["global"], optional = true }
 bytemuck = { workspace = true }
 # SciRS2 dependencies (following SCIRS2 POLICY)
 scirs2-core = { workspace = true, optional = true }
@@ -35,7 +38,7 @@ scirs2-core = { workspace = true, optional = true }
 # We'll implement our own tensor operations for now
 
 # Core web-sys features for essential functionality
-web-sys = { version = "0.3.81", features = [
+web-sys = { version = "0.3.85", features = [
     "console",
     "Navigator",
     "Performance",
@@ -135,7 +138,7 @@ web-sys = { version = "0.3.81", features = [
 ] }
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3.54"
+wasm-bindgen-test = "0.3.58"
 
 [features]
 default = ["console_panic", "wee-alloc"]

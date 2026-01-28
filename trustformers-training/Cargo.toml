@@ -5,7 +5,12 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-training"
 description = "Training infrastructure for TrustformeRS"
+keywords = ["training", "distributed", "machine-learning", "transformers", "optimization"]
+categories = ["science", "algorithms"]
+readme = "README.md"
 
 [lints]
 workspace = true
@@ -13,24 +18,20 @@ workspace = true
 [dependencies]
 trustformers-core.workspace = true
 trustformers-optim.workspace = true
-scirs2-core.workspace = true
+# Note: ndarray support provided by scirs2-core
+scirs2-core = { workspace = true }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-ndarray.workspace = true
-rand.workspace = true
-rand_distr.workspace = true
-ndarray-rand.workspace = true
-bincode.workspace = true
+oxicode.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 fastrand.workspace = true
 tokio.workspace = true
 sha2.workspace = true
 half.workspace = true
-num-complex.workspace = true
-rayon.workspace = true
+rmp-serde.workspace = true
 log.workspace = true
 
 [dev-dependencies]
@@ -41,5 +42,8 @@ tempfile.workspace = true
 
 [features]
 default = []
+# torch feature disabled by default - requires matching libtorch version at runtime
 torch = ["trustformers-core/torch"]
 candle = ["trustformers-core/candle"]
+# Full feature set for testing (excludes torch)
+full = ["candle", "trustformers-core/full"]

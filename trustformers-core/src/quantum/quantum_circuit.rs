@@ -481,7 +481,7 @@ mod tests {
         let encoding = QuantumEncoding::Angle;
         let data = vec![0.5, 1.0, 1.5];
 
-        let circuit = encoding.encode(&data, 3).unwrap();
+        let circuit = encoding.encode(&data, 3).expect("Encoding failed");
         assert_eq!(circuit.num_qubits, 3);
         assert_eq!(circuit.gates.len(), 3);
     }
@@ -491,7 +491,7 @@ mod tests {
         let encoding = QuantumEncoding::Basis;
         let data = vec![0.3, 0.7, 0.1]; // Only middle value > 0.5
 
-        let circuit = encoding.encode(&data, 3).unwrap();
+        let circuit = encoding.encode(&data, 3).expect("Encoding failed");
         assert_eq!(circuit.num_qubits, 3);
         assert_eq!(circuit.gates.len(), 1); // Only one X gate for value > 0.5
     }
@@ -501,7 +501,7 @@ mod tests {
         let encoding = QuantumEncoding::IQP { depth: 2 };
         let data = vec![0.1, 0.2];
 
-        let circuit = encoding.encode(&data, 2).unwrap();
+        let circuit = encoding.encode(&data, 2).expect("Encoding failed");
         assert_eq!(circuit.num_qubits, 2);
         assert!(!circuit.gates.is_empty());
     }

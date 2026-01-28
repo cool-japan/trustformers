@@ -716,7 +716,8 @@ impl super::optimization::OptimizationStrategy for BufferSizeOptimizer {
 
     fn is_applicable(&self, _context: &super::optimization::OptimizationContext) -> bool {
         // Buffer size optimization is applicable when sizes differ significantly
-        let size_diff = (self.current_size as i64 - self.optimal_size as i64).abs() as usize;
+        let size_diff =
+            (self.current_size as i64 - self.optimal_size as i64).unsigned_abs() as usize;
         size_diff > self.optimal_size / 10 // More than 10% difference
     }
 
@@ -753,7 +754,8 @@ impl super::optimization::OptimizationStrategy for BufferSizeOptimizer {
         _context: &super::optimization::OptimizationContext,
         _effectiveness: &std::collections::HashMap<String, f64>,
     ) -> TestCharacterizationResult<super::optimization::OptimizationRecommendation> {
-        let size_diff = (self.current_size as i64 - self.optimal_size as i64).abs() as usize;
+        let size_diff =
+            (self.current_size as i64 - self.optimal_size as i64).unsigned_abs() as usize;
         let relative_diff = size_diff as f64 / self.optimal_size as f64;
 
         let urgency = if relative_diff > 0.5 {
@@ -4803,7 +4805,7 @@ impl super::locking::LockAnalysisAlgorithm for HoldTimeAnalysis {
 impl super::patterns::PatternDetectionAlgorithm for ProducerConsumerDetection {
     fn detect(&self) -> String {
         if self.detected {
-            format!("Producer-Consumer pattern detected (confidence: 0.85)")
+            "Producer-Consumer pattern detected (confidence: 0.85)".to_string()
         } else {
             "No Producer-Consumer pattern detected".to_string()
         }

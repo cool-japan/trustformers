@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn test_engine_state_management() {
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("Operation failed");
 
         assert!(!engine.is_model_loaded());
         assert_eq!(engine.get_config().platform, MobilePlatform::Android);
@@ -465,7 +465,7 @@ mod tests {
     #[test]
     fn test_cpu_model_loading() {
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("Operation failed");
 
         let result = engine.load_cpu_model("test_model.tflite");
         assert!(result.is_ok());
@@ -475,20 +475,20 @@ mod tests {
     #[test]
     fn test_cpu_inference() {
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("Operation failed");
 
         // Load CPU model first
-        engine.load_cpu_model("test_model.tflite").unwrap();
+        engine.load_cpu_model("test_model.tflite").expect("Operation failed");
 
         // Create test input
         let input_data = vec![1.0, 2.0, 3.0, 4.0];
-        let input_tensor = Tensor::from_vec(input_data.clone(), &[4]).unwrap();
+        let input_tensor = Tensor::from_vec(input_data.clone(), &[4]).expect("Operation failed");
 
         // Perform inference
         let result = engine.cpu_inference(&input_tensor);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("Operation failed");
         let output_data = output.data();
 
         // Check that output is input * 0.5
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn test_config_update() {
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("Operation failed");
 
         let mut new_config = MobileConfig::android_optimized();
         new_config.max_memory_mb = 2048;
@@ -513,10 +513,10 @@ mod tests {
     #[test]
     fn test_inference_without_model() {
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("Operation failed");
 
         let input_data = vec![1.0, 2.0, 3.0, 4.0];
-        let input_tensor = Tensor::from_vec(input_data, &[4]).unwrap();
+        let input_tensor = Tensor::from_vec(input_data, &[4]).expect("Operation failed");
 
         let result = engine.inference(&input_tensor);
         assert!(result.is_err());

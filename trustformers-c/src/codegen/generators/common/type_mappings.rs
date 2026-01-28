@@ -91,7 +91,7 @@ pub fn get_doc_comment_prefix(language: TargetLanguage) -> &'static str {
         TargetLanguage::Kotlin => "//",
         TargetLanguage::Swift => "//",
         TargetLanguage::Ruby => "#",
-        TargetLanguage::Php => "//",
+        TargetLanguage::PHP => "//",
         _ => "//",
     }
 }

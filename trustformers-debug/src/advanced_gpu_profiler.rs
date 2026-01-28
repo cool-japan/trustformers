@@ -81,7 +81,7 @@ pub struct MemoryAccessPattern {
     pub cache_hit_rate: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MemoryUsageStats {
     pub total_accesses: u64,
     pub bytes_read: u64,
@@ -1043,18 +1043,6 @@ impl Default for MemoryAccessPattern {
             random_access_ratio: 0.2,
             coalesced_access_ratio: 0.9,
             cache_hit_rate: 0.85,
-        }
-    }
-}
-
-impl Default for MemoryUsageStats {
-    fn default() -> Self {
-        Self {
-            total_accesses: 0,
-            bytes_read: 0,
-            bytes_written: 0,
-            lifetime_duration: None,
-            peak_concurrent_usage: 0,
         }
     }
 }

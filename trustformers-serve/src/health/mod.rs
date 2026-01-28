@@ -249,6 +249,12 @@ pub struct HAMetrics {
     retry_attempts: Arc<RwLock<u64>>,
 }
 
+impl Default for HAMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HAMetrics {
     pub fn new() -> Self {
         Self {

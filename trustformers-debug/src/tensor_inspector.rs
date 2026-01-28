@@ -538,8 +538,12 @@ impl TensorInspector {
         let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
 
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let median = if sorted_values.len() % 2 == 0 {
+        // Filter out NaN values before sorting to avoid panic
+        sorted_values.retain(|x| !x.is_nan());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = if sorted_values.is_empty() {
+            f64::NAN
+        } else if sorted_values.len() % 2 == 0 {
             (sorted_values[sorted_values.len() / 2 - 1] + sorted_values[sorted_values.len() / 2])
                 / 2.0
         } else {

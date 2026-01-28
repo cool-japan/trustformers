@@ -3,11 +3,10 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 /// Get available device (CPU, CUDA, Metal, etc.)
 #[pyfunction]
-pub fn get_device(py: Python<'_>) -> PyResult<String> {
+pub fn get_device(_py: Python<'_>) -> PyResult<String> {
     // Check for available devices
     #[cfg(feature = "cuda")]
     {
@@ -63,13 +62,19 @@ pub struct NoGradContext {
     prev_state: bool,
 }
 
+impl Default for NoGradContext {
+    fn default() -> Self {
+        let prev_state =
+            std::env::var("TRUSTFORMERS_GRAD_ENABLED").map(|v| v == "true").unwrap_or(true);
+        NoGradContext { prev_state }
+    }
+}
+
 #[pymethods]
 impl NoGradContext {
     #[new]
     pub fn new() -> Self {
-        let prev_state =
-            std::env::var("TRUSTFORMERS_GRAD_ENABLED").map(|v| v == "true").unwrap_or(true);
-        NoGradContext { prev_state }
+        Self::default()
     }
 
     fn __enter__(&self) -> PyResult<()> {
@@ -92,18 +97,18 @@ impl NoGradContext {
 #[pyfunction]
 #[pyo3(signature = (
     model_name,
-    cache_dir = None,
+    _cache_dir = None,
     force_download = false,
-    resume_download = true,
-    token = None,
+    _resume_download = true,
+    _token = None,
 ))]
 pub fn download_model(
     py: Python<'_>,
     model_name: String,
-    cache_dir: Option<String>,
+    _cache_dir: Option<String>,
     force_download: bool,
-    resume_download: bool,
-    token: Option<String>,
+    _resume_download: bool,
+    _token: Option<String>,
 ) -> PyResult<Bound<'_, PyDict>> {
     // In a real implementation, this would download from HF Hub
     // For now, return mock information
@@ -189,15 +194,21 @@ pub struct PyMemoryTracker {
     peak: usize,
 }
 
-#[pymethods]
-impl PyMemoryTracker {
-    #[new]
-    pub fn new() -> Self {
+impl Default for PyMemoryTracker {
+    fn default() -> Self {
         let baseline = get_memory_usage();
         PyMemoryTracker {
             baseline,
             peak: baseline,
         }
+    }
+}
+
+#[pymethods]
+impl PyMemoryTracker {
+    #[new]
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Get current memory usage in MB
@@ -282,10 +293,7 @@ impl PyTimer {
     fn get_laps<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let laps = PyList::new(
             py,
-            self.laps.iter().map(|(label, time)| {
-                let tuple = (label.clone(), *time);
-                tuple
-            }),
+            self.laps.iter().map(|(label, time)| (label.clone(), *time)),
         )?;
         Ok(laps)
     }
@@ -317,7 +325,7 @@ impl PyTimer {
 
 /// Configuration utilities
 #[pyclass(name = "Config")]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct PyConfig {
     data: HashMap<String, String>,
 }
@@ -326,9 +334,7 @@ pub struct PyConfig {
 impl PyConfig {
     #[new]
     pub fn new() -> Self {
-        PyConfig {
-            data: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Load configuration from file

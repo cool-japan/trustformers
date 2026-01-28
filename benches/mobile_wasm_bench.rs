@@ -1,6 +1,7 @@
 //! Benchmarks for mobile and WebAssembly performance
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use std::hint::black_box;
 
 #[cfg(feature = "mobile")]
 use trustformers_mobile::{

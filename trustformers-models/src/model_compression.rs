@@ -984,7 +984,7 @@ mod tests {
         let pipeline = CompressionPipeline::new(config);
         assert!(pipeline.is_ok());
 
-        let pipeline = pipeline.unwrap();
+        let pipeline = pipeline.expect("operation failed");
         assert_eq!(pipeline.compression_stages.len(), 1);
         assert_eq!(pipeline.current_stage, 0);
     }
@@ -995,7 +995,7 @@ mod tests {
         let pipeline = CompressionPipeline::new(config);
         assert!(pipeline.is_ok());
 
-        let pipeline = pipeline.unwrap();
+        let pipeline = pipeline.expect("operation failed");
         assert_eq!(pipeline.compression_stages.len(), 3);
     }
 }

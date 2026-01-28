@@ -4,78 +4,97 @@ build-backend = "maturin"
 
 [project]
 name = "trustformers"
-version = "0.1.0a1"
-description = "High-performance transformer library for Python, written in Rust"
+version = "0.1.0a2"
+description = "Python bindings for TrustformeRS - High-performance Rust Transformers library"
 readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT OR Apache-2.0"}
 authors = [
-    {name = "TrustformeRS Team", email = "contact@trustformers.dev"}
+    {name = "COOLJAPAN OU (Team KitaSan)", email = "contact@cooljapan.tech"}
 ]
-license = {text = "Apache-2.0"}
+maintainers = [
+    {name = "COOLJAPAN OU (Team KitaSan)", email = "contact@cooljapan.tech"}
+]
+keywords = ["transformers", "nlp", "machine-learning", "deep-learning", "bert", "gpt", "llama", "rust", "pyo3"]
 classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "License :: OSI Approved :: Apache Software License",
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Developers",
-    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
-    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Text Processing :: Linguistic",
+    "Operating System :: OS Independent",
 ]
-keywords = ["transformers", "machine-learning", "nlp", "deep-learning", "pytorch", "huggingface"]
 dependencies = [
-    "numpy>=1.21.0",
-    "tqdm>=4.62.0",
-    "requests>=2.26.0",
-    "regex>=2021.8.3",
-    "pyyaml>=5.4.1",
-    "packaging>=20.0",
+    "numpy>=1.20.0",
 ]
-requires-python = ">=3.8"
 
 [project.optional-dependencies]
-torch = ["torch>=1.9.0"]
-tensorflow = ["tensorflow>=2.5.0"]
 dev = [
-    "pytest>=6.0",
-    "pytest-cov>=2.0",
-    "black>=22.0",
-    "isort>=5.0",
-    "mypy>=0.910",
-    "ruff>=0.0.261",
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "mypy>=1.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
 ]
-all = ["torch>=1.9.0", "tensorflow>=2.5.0"]
+jupyter = [
+    "jupyter>=1.0.0",
+    "matplotlib>=3.5.0",
+]
+torch = [
+    "torch>=2.0.0",
+]
+transformers = [
+    "transformers>=4.30.0",
+    "tokenizers>=0.13.0",
+]
+all = [
+    "trustformers[dev,jupyter,torch,transformers]",
+]
 
 [project.urls]
 Homepage = "https://github.com/cool-japan/trustformers"
-Documentation = "https://trustformers.readthedocs.io"
 Repository = "https://github.com/cool-japan/trustformers"
+Documentation = "https://github.com/cool-japan/trustformers/blob/main/README.md"
 Issues = "https://github.com/cool-japan/trustformers/issues"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-python-source = "python"
-module-name = "trustformers._trustformers"
+strip = true  # Strip debug symbols for smaller wheels
+include = ["trustformers.pyi", "README.md", "examples/**/*", "tests/**/*"]
+# Note: sdist disabled due to workspace path dependencies - users can install from git
 
 [tool.pytest.ini_options]
-minversion = "6.0"
-addopts = "-ra -q"
 testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_any_generics = false
 
 [tool.black]
 line-length = 100
-target-version = ['py38']
-
-[tool.isort]
-profile = "black"
-line_length = 100
+target-version = ["py39", "py310", "py311", "py312"]
 
 [tool.ruff]
 line-length = 100
-select = ["E", "F", "I", "N", "W"]
-ignore = ["E501"]
+target-version = "py39"
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = []
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+"tests/*" = ["F401", "F811"]

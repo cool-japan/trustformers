@@ -395,23 +395,43 @@ impl DynamicPruner {
     ) -> Result<PruningResult> {
         match &self.strategy {
             PruningStrategy::AttentionBased => {
-                let config = self.attention_config.as_ref().unwrap();
+                let config = self.attention_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "AttentionBased strategy requires attention_config".to_string(),
+                    )
+                })?;
                 self.attention_based_pruning(hidden_states, attention_scores, config)
             },
             PruningStrategy::ConfidenceBased => {
-                let config = self.confidence_config.as_ref().unwrap();
+                let config = self.confidence_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "ConfidenceBased strategy requires confidence_config".to_string(),
+                    )
+                })?;
                 self.confidence_based_pruning(hidden_states, config)
             },
             PruningStrategy::LearnedGates => {
-                let config = self.learned_gate_config.as_ref().unwrap();
+                let config = self.learned_gate_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "LearnedGates strategy requires learned_gate_config".to_string(),
+                    )
+                })?;
                 self.learned_gate_pruning(hidden_states, config)
             },
             PruningStrategy::LayerAdaptive => {
-                let config = self.layer_adaptive_config.as_ref().unwrap();
+                let config = self.layer_adaptive_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "LayerAdaptive strategy requires layer_adaptive_config".to_string(),
+                    )
+                })?;
                 self.layer_adaptive_pruning(hidden_states, layer_index.unwrap_or(0), config)
             },
             PruningStrategy::Progressive => {
-                let config = self.progressive_config.as_ref().unwrap();
+                let config = self.progressive_config.as_ref().ok_or_else(|| {
+                    TrustformersError::invalid_config(
+                        "Progressive strategy requires progressive_config".to_string(),
+                    )
+                })?;
                 self.progressive_pruning(
                     hidden_states,
                     layer_index.unwrap_or(0),
@@ -549,7 +569,11 @@ impl DynamicPruner {
         hidden_states: &Tensor,
         _config: &LearnedGatePruningConfig,
     ) -> Result<PruningResult> {
-        let gate_network = self.gate_network.as_ref().unwrap();
+        let gate_network = self.gate_network.as_ref().ok_or_else(|| {
+            TrustformersError::invalid_config(
+                "LearnedGates strategy requires gate_network to be initialized".to_string(),
+            )
+        })?;
 
         // Compute gate probabilities
         let gate_probs = gate_network.forward(hidden_states)?;
@@ -865,7 +889,7 @@ impl DynamicPruner {
             let confidence = if config.use_entropy {
                 // Simulate entropy-based confidence
                 // Higher entropy = lower confidence, lower entropy = higher confidence
-                let simulated_logits = vec![
+                let simulated_logits = [
                     0.8 + (i as f32 / seq_len as f32) * 0.15, // Main prediction
                     0.1 - (i as f32 / seq_len as f32) * 0.05, // Alternative 1
                     0.1 - (i as f32 / seq_len as f32) * 0.05, // Alternative 2
@@ -1006,7 +1030,7 @@ impl DynamicPruner {
             importance_scores.iter().enumerate().map(|(i, &score)| (i, score)).collect();
 
         // Sort by importance (descending)
-        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut keep_mask = vec![false; seq_len];
         let mut pruning_reasons = vec![PruningReason::LowAttention; seq_len];
@@ -1594,10 +1618,10 @@ mod tests {
         let config = AttentionBasedPruningConfig::default();
         let pruner = DynamicPruner::attention_based(config);
 
-        match pruner.strategy {
-            PruningStrategy::AttentionBased => assert!(true),
-            _ => panic!("Expected AttentionBased strategy"),
-        }
+        assert!(
+            matches!(pruner.strategy, PruningStrategy::AttentionBased),
+            "Expected AttentionBased strategy"
+        );
     }
 
     #[test]
@@ -1633,8 +1657,8 @@ mod tests {
     #[test]
     fn test_pruning_statistics() {
         let results = vec![PruningResult {
-            pruned_hidden_states: Tensor::zeros(&[1, 5, 768]).unwrap(),
-            pruned_attention_mask: Tensor::ones(&[1, 5]).unwrap(),
+            pruned_hidden_states: Tensor::zeros(&[1, 5, 768]).expect("operation failed"),
+            pruned_attention_mask: Tensor::ones(&[1, 5]).expect("operation failed"),
             token_importance: TokenImportance {
                 importance_scores: vec![0.9, 0.8, 0.3, 0.2, 0.1],
                 token_indices: vec![0, 1, 2, 3, 4],

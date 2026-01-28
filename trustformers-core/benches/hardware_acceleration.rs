@@ -1,9 +1,13 @@
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_imports)]
 //! Hardware acceleration performance benchmarks
 //!
 //! This module benchmarks different hardware acceleration backends
 //! to demonstrate performance improvements and help select optimal backends.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
 use std::time::Duration;
 use trustformers_core::hardware_acceleration::{
     api, AccelerationBackend, AccelerationConfig, HardwareAccelerator,

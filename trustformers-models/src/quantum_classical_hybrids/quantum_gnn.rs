@@ -97,8 +97,8 @@ impl QuantumGraphNeuralNetwork {
 
         let combined_measurements = if !quantum_measurements.is_empty() {
             let mut combined = quantum_measurements[0].clone();
-            for i in 1..quantum_measurements.len() {
-                combined = combined.add(&quantum_measurements[i])?;
+            for measurement in quantum_measurements.iter().skip(1) {
+                combined = combined.add(measurement)?;
             }
             Some(combined)
         } else {

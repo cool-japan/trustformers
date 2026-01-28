@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crate::error::{TrustformersError, TrustformersResult};
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 
 use super::config::*;
 use super::types::*;
@@ -451,8 +451,8 @@ impl QuantizationEngine {
         println!("    - Less sensitive layers: INT4 or INT2");
 
         // Layer categorization based on sensitivity
-        let sensitive_keywords = vec!["attention", "head", "cls", "prediction"];
-        let less_sensitive_keywords = vec!["norm", "bias", "pooling"];
+        let sensitive_keywords = ["attention", "head", "cls", "prediction"];
+        let less_sensitive_keywords = ["norm", "bias", "pooling"];
 
         for (layer_name, layer_quantizer) in &self.layer_quantizers {
             let params = &layer_quantizer.quantization_params;

@@ -191,6 +191,12 @@ pub struct PriorityQueue<T> {
     heap: BinaryHeap<T>,
 }
 
+impl<T: Ord> Default for PriorityQueue<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<T: Ord> PriorityQueue<T> {
     pub fn new() -> Self {
         Self {
@@ -253,6 +259,12 @@ impl TimeoutPolicy {
 pub struct MultiQueueScheduler {
     queues: HashMap<Priority, Arc<Mutex<VecDeque<RequestBatch>>>>,
     round_robin_index: Arc<Mutex<usize>>,
+}
+
+impl Default for MultiQueueScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MultiQueueScheduler {
@@ -553,6 +565,12 @@ pub struct SystemLoadMonitor {
     last_update: Instant,
 }
 
+impl Default for SystemLoadMonitor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SystemLoadMonitor {
     pub fn new() -> Self {
         Self {
@@ -712,21 +730,19 @@ impl AdvancedQueueManager {
     /// Enqueue a request with comprehensive validation and prioritization
     pub async fn enqueue_request(&mut self, mut request: AdvancedRequest) -> Result<()> {
         // Rate limiting check
-        if self.config.enable_rate_limiting {
-            if !self.check_rate_limit(&request.client_id).await {
-                self.stats
-                    .lock()
-                    .await
-                    .client_stats
-                    .entry(request.client_id.clone())
-                    .or_default()
-                    .rate_limit_violations += 1;
+        if self.config.enable_rate_limiting && !self.check_rate_limit(&request.client_id).await {
+            self.stats
+                .lock()
+                .await
+                .client_stats
+                .entry(request.client_id.clone())
+                .or_default()
+                .rate_limit_violations += 1;
 
-                return Err(anyhow::anyhow!(
-                    "Rate limit exceeded for client: {}",
-                    request.client_id
-                ));
-            }
+            return Err(anyhow::anyhow!(
+                "Rate limit exceeded for client: {}",
+                request.client_id
+            ));
         }
 
         // Apply SLA-based priority adjustments
@@ -955,7 +971,7 @@ impl AdvancedQueueManager {
 
     async fn dequeue_fair_share(&self) -> Option<AdvancedRequest> {
         // Simple round-robin among clients
-        for (_client_id, queue) in &self.client_queues {
+        for queue in self.client_queues.values() {
             if let Some(request) = queue.lock().await.pop_front() {
                 return Some(request);
             }

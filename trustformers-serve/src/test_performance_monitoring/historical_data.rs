@@ -1393,7 +1393,7 @@ mod tests {
             test_ids: Some(vec!["test-001".to_string()]),
             metric_names: Some(vec!["execution_time".to_string()]),
             time_range: TimeRange {
-                start_time: SystemTime::now() - Duration::from_secs(1 * 3600),
+                start_time: SystemTime::now() - Duration::from_secs(3600),
                 end_time: SystemTime::now(),
                 time_zone: None,
                 resolution: None,
@@ -1414,7 +1414,7 @@ mod tests {
             metric_names: Some(vec!["execution_time".to_string()]),
             time_range: TimeRange {
                 start_time: SystemTime::now(),
-                end_time: SystemTime::now() - Duration::from_secs(1 * 3600), // Invalid: end before start
+                end_time: SystemTime::now() - Duration::from_secs(3600), // Invalid: end before start
                 time_zone: None,
                 resolution: None,
             },
@@ -1444,7 +1444,7 @@ mod tests {
                 description: "Occasional missing data points".to_string(),
                 affected_data_points: 10,
                 first_detected: SystemTime::now() - Duration::from_secs(24 * 3600),
-                last_detected: SystemTime::now() - Duration::from_secs(1 * 3600),
+                last_detected: SystemTime::now() - Duration::from_secs(3600),
                 mitigation_suggestions: vec!["Improve data collection robustness".to_string()],
             }],
             last_quality_check: SystemTime::now(),

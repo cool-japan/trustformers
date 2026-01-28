@@ -47,7 +47,7 @@ impl Default for LongPollingConfig {
 }
 
 /// Event types for long polling
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum PollEvent {
     /// Inference job completed
     InferenceComplete {
@@ -117,7 +117,7 @@ pub struct LongPollResponse {
 }
 
 /// Event with ID for tracking
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct PollEventWithId {
     /// Event ID
     pub id: String,
@@ -233,7 +233,7 @@ impl LongPollingService {
                 interval.tick().await;
 
                 // Clean up expired connections
-                let mut connections_lock = connections.write().unwrap();
+                let mut connections_lock = connections.write().expect("RwLock poisoned");
                 let now = Instant::now();
 
                 let expired_connections: Vec<String> = connections_lock
@@ -268,7 +268,8 @@ impl LongPollingService {
         }
 
         // Close all active connections
-        let mut connections_lock = self.connections.write().unwrap();
+        let mut connections_lock =
+            self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
         for (_, conn) in connections_lock.drain() {
             let _ = conn.response_sender.send(LongPollResponse {
                 events: vec![],
@@ -285,7 +286,8 @@ impl LongPollingService {
     pub async fn poll(&self, request: LongPollRequest) -> Result<LongPollResponse> {
         // Check connection limits
         {
-            let connections_lock = self.connections.read().unwrap();
+            let connections_lock =
+                self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             if connections_lock.len() >= self.config.max_concurrent_connections {
                 return Ok(LongPollResponse {
                     events: vec![],
@@ -328,15 +330,17 @@ impl LongPollingService {
 
         // Store connection
         {
-            let mut connections_lock = self.connections.write().unwrap();
+            let mut connections_lock =
+                self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             connections_lock.insert(connection_id.clone(), connection);
         }
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             stats.total_connections_served += 1;
-            stats.active_connections = self.connections.read().unwrap().len();
+            stats.active_connections =
+                self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?.len();
         }
 
         // Subscribe to events
@@ -351,7 +355,7 @@ impl LongPollingService {
                 while let Ok(event) = event_receiver.recv().await {
                     // Check if connection is still active
                     let connection_active = {
-                        let connections_lock = self.connections.read().unwrap();
+                        let connections_lock = self.connections.read().expect("RwLock poisoned");
                         connections_lock.contains_key(&connection_id)
                     };
 
@@ -360,7 +364,7 @@ impl LongPollingService {
                     }
 
                     // Check if event matches subscription
-                    let connections_lock = self.connections.read().unwrap();
+                    let connections_lock = self.connections.read().expect("RwLock poisoned");
                     if let Some(conn) = connections_lock.get(&connection_id) {
                         if conn.event_types.contains(&event.event_type) ||
                            conn.event_types.contains(&"*".to_string()) {
@@ -380,7 +384,7 @@ impl LongPollingService {
 
             // Wait for timeout
             _ = sleep(timeout_duration) => {
-                let mut stats = self.stats.write().unwrap();
+                let mut stats = self.stats.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
                 stats.total_timeouts += 1;
 
                 LongPollResponse {
@@ -394,14 +398,16 @@ impl LongPollingService {
 
         // Clean up connection
         {
-            let mut connections_lock = self.connections.write().unwrap();
+            let mut connections_lock =
+                self.connections.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             connections_lock.remove(&connection_id);
         }
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
-            stats.active_connections = self.connections.read().unwrap().len();
+            let mut stats = self.stats.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
+            stats.active_connections =
+                self.connections.read().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?.len();
         }
 
         Ok(response)
@@ -438,7 +444,7 @@ impl LongPollingService {
 
         // Update stats
         {
-            let mut stats = self.stats.write().unwrap();
+            let mut stats = self.stats.write().map_err(|_| anyhow::anyhow!("RwLock poisoned"))?;
             stats.total_events_published += 1;
         }
 
@@ -458,12 +464,11 @@ impl LongPollingService {
             let mut missed_events = Vec::new();
 
             for event in history.iter() {
-                if found_last {
-                    if connection.event_types.contains(&event.event_type)
-                        || connection.event_types.contains(&"*".to_string())
-                    {
-                        missed_events.push(event.clone());
-                    }
+                if found_last
+                    && (connection.event_types.contains(&event.event_type)
+                        || connection.event_types.contains(&"*".to_string()))
+                {
+                    missed_events.push(event.clone());
                 }
 
                 if event.id == *last_event_id {
@@ -479,13 +484,13 @@ impl LongPollingService {
 
     /// Get service statistics
     pub async fn get_stats(&self) -> LongPollingStats {
-        let stats = self.stats.read().unwrap();
+        let stats = self.stats.read().expect("RwLock poisoned");
         stats.clone()
     }
 
     /// Get active connection count
     pub fn get_active_connections(&self) -> usize {
-        self.connections.read().unwrap().len()
+        self.connections.read().expect("RwLock poisoned").len()
     }
 }
 
@@ -523,7 +528,7 @@ mod tests {
             processing_time_ms: 100.0,
         };
 
-        service.publish_event(event).await.unwrap();
+        service.publish_event(event).await.expect("Failed to publish event");
 
         let stats = service.get_stats().await;
         assert_eq!(stats.total_events_published, 1);
@@ -543,7 +548,7 @@ mod tests {
             last_event_id: None,
         };
 
-        let response = service.poll(request).await.unwrap();
+        let response = service.poll(request).await.expect("Failed to poll");
 
         assert!(response.timeout);
         assert!(response.events.is_empty());

@@ -802,7 +802,7 @@ impl FederatedLearningClient {
             Ok(ModelParameters {
                 parameters: updates,
                 shapes,
-                version: format!("update_{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()),
+                version: format!("update_{}", SystemTime::now().duration_since(UNIX_EPOCH).expect("Operation failed").as_secs()),
                 checksum: "placeholder_checksum".to_string(),
             })
         } else {
@@ -832,7 +832,7 @@ impl FederatedLearningClient {
             if params.len() > k {
                 // Find indices of top-k largest values by magnitude
                 let mut indexed_params: Vec<(usize, f32)> = params.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-                indexed_params.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap().into());
+                indexed_params.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).expect("Operation failed").into());
 
                 // Zero out all but top-k
                 let mut new_params = vec![0.0; params.len()];
@@ -1095,7 +1095,7 @@ impl CommunicationManager {
                 preferred_device_types: Vec::new(),
                 region_preferences: None,
             },
-            deadline: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 3600,
+            deadline: SystemTime::now().duration_since(UNIX_EPOCH).expect("Operation failed").as_secs() + 3600,
         })
     }
 
@@ -1357,7 +1357,7 @@ mod tests {
 
     #[test]
     fn test_topk_compression() {
-        let client = FederatedLearningClient::new(FederatedLearningConfig::default()).unwrap();
+        let client = FederatedLearningClient::new(FederatedLearningConfig::default()).expect("Operation failed");
 
         let mut update = LocalUpdate {
             client_id: "test".to_string(),
@@ -1389,7 +1389,7 @@ mod tests {
             },
         };
 
-        let compressed = client.apply_topk_compression(update.clone(), 3).unwrap();
+        let compressed = client.apply_topk_compression(update.clone(), 3).expect("Operation failed");
 
         // Check that only top-3 values remain non-zero
         let params = &compressed.parameter_updates.parameters["layer1"];

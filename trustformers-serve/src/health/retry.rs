@@ -305,6 +305,12 @@ pub struct RetryStats {
     pub created_at: u64, // Unix timestamp in seconds
 }
 
+impl Default for RetryStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RetryStats {
     pub fn new() -> Self {
         Self {
@@ -515,10 +521,7 @@ mod tests {
                 Box::pin(async move {
                     let count = counter.fetch_add(1, Ordering::SeqCst);
                     if count < 2 {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "temporary failure",
-                        ))
+                        Err(std::io::Error::other("temporary failure"))
                     } else {
                         Ok("success")
                     }
@@ -550,10 +553,7 @@ mod tests {
                 let counter = counter_clone.clone();
                 Box::pin(async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    Err::<&str, _>(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "permanent failure",
-                    ))
+                    Err::<&str, _>(std::io::Error::other("permanent failure"))
                 })
             })
             .await;

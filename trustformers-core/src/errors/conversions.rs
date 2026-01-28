@@ -6,6 +6,7 @@
 use super::{ErrorKind, TrustformersError};
 use crate::error::CoreError;
 use anyhow::Error as AnyhowError;
+use scirs2_core::ndarray::ShapeError;
 use std::time::Instant;
 
 impl From<CoreError> for TrustformersError {
@@ -77,9 +78,9 @@ impl From<CoreError> for TrustformersError {
             },
             CoreError::TokenizerError(msg) => TrustformersError::new(ErrorKind::Other(msg)),
             CoreError::RuntimeError(msg) => TrustformersError::new(ErrorKind::Other(msg)),
-            CoreError::IoError(msg) => TrustformersError::new(ErrorKind::IoError(
-                std::io::Error::new(std::io::ErrorKind::Other, msg),
-            )),
+            CoreError::IoError(msg) => {
+                TrustformersError::new(ErrorKind::IoError(std::io::Error::other(msg)))
+            },
             CoreError::ConfigError {
                 message,
                 context: _,
@@ -235,8 +236,8 @@ impl From<TrustformersError> for CoreError {
     }
 }
 
-impl From<ndarray::ShapeError> for TrustformersError {
-    fn from(err: ndarray::ShapeError) -> Self {
+impl From<ShapeError> for TrustformersError {
+    fn from(err: ShapeError) -> Self {
         TrustformersError::new(ErrorKind::DimensionMismatch {
             expected: "valid shape".to_string(),
             actual: format!("invalid shape: {}", err),

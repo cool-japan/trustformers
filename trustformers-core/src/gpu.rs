@@ -439,7 +439,7 @@ pub fn gpu_manager() -> Arc<Mutex<GpuManager>> {
 /// Initialize GPU subsystem with optional device preference
 pub fn init_gpu(preferred_backend: Option<GpuBackend>) -> Result<Arc<GpuContext>> {
     let manager = gpu_manager();
-    let manager_lock = manager.lock().unwrap();
+    let manager_lock = manager.lock().expect("Lock poisoned");
 
     let device_id = if let Some(backend) = preferred_backend {
         manager_lock
@@ -454,7 +454,7 @@ pub fn init_gpu(preferred_backend: Option<GpuBackend>) -> Result<Arc<GpuContext>
     let device_id = device_id.unwrap_or_else(|| manager_lock.best_device().id);
     drop(manager_lock); // Release the lock before calling get_or_create_context
 
-    let mut manager_lock = manager.lock().unwrap();
+    let mut manager_lock = manager.lock().expect("Lock poisoned");
     manager_lock.get_or_create_context(Some(device_id))
 }
 
@@ -518,10 +518,17 @@ mod tests {
         #[cfg(target_os = "macos")]
         assert_eq!(backend, GpuBackend::Metal);
 
+        // On non-macOS platforms, any valid backend is acceptable
+        // The actual backend depends on available hardware
         #[cfg(not(target_os = "macos"))]
         assert!(matches!(
             backend,
-            GpuBackend::Cuda | GpuBackend::Rocm | GpuBackend::Vulkan | GpuBackend::Cpu
+            GpuBackend::Cuda
+                | GpuBackend::Rocm
+                | GpuBackend::Vulkan
+                | GpuBackend::Metal
+                | GpuBackend::WebGpu
+                | GpuBackend::Cpu
         ));
     }
 

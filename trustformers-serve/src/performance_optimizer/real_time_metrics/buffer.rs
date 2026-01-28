@@ -573,7 +573,7 @@ impl<T> CircularBuffer<T> {
             return Vec::new();
         }
 
-        let start_index = if n >= size { 0 } else { size - n };
+        let start_index = size.saturating_sub(n);
         (start_index..size).filter_map(|i| self.get(i)).collect()
     }
 
@@ -640,7 +640,7 @@ impl<T> CircularBuffer<T> {
         let new_buffer = vec![None; new_capacity];
 
         // Copy existing data in correct order
-        for (_i, _item) in self.iter().enumerate() {
+        for _item in self.iter() {
             // Note: This requires T: Clone, might need adjustment for non-Clone types
             // For now, we'll skip this operation for non-Clone types
         }
@@ -1472,7 +1472,7 @@ mod uuid {
             let mut hasher = DefaultHasher::new();
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_else(|_| std::time::Duration::from_secs(0))
                 .as_nanos()
                 .hash(&mut hasher);
             Uuid(hasher.finish() as u128)

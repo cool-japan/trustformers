@@ -148,6 +148,112 @@ import {
   createNAS
 } from './neural-architecture-search.js';
 
+// NEW: ENAS NAS (2025-11-10 Session 3)
+import {
+  ENASOperations,
+  ENASController,
+  ENASSharedModel,
+  ENASSearcher,
+  createENASSearcher,
+  ENASSearchSpaces
+} from './nas/enas-nas.js';
+
+// NEW: Enhanced Federated Learning (2025-11-10 Session 3)
+import {
+  FedBNAggregator,
+  FedNovaAggregator,
+  EnhancedFederatedServer,
+  createEnhancedFederatedLearning
+} from './federated-learning-enhanced.js';
+
+// NEW: ONNX Operators (2025-11-10 Session 3)
+import {
+  ONNXOperatorRegistry,
+  createOperatorRegistry,
+  Tensor as ONNXTensor,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  MatMul,
+  Gemm,
+  Relu,
+  Gelu,
+  Sigmoid,
+  Tanh,
+  Softmax,
+  Swish,
+  BatchNormalization,
+  LayerNormalization,
+  Reshape,
+  Transpose,
+  Concat,
+  Slice,
+  ReduceSum,
+  ReduceMean,
+  ReduceMax
+} from './onnx-operators.js';
+
+// NEW: Real-time Collaboration (2025-11-10 Session 3)
+import {
+  CollaborativeSession,
+  CollaborativeExperiment,
+  CollaborativeMetricsDashboard,
+  createCollaborativeSession,
+  createCollaborativeExperiment,
+  createMetricsDashboard
+} from './realtime-collaboration.js';
+
+// Import new performance and infrastructure modules
+import {
+  WorkerPool,
+  ParallelProcessor,
+  createWorkerPool,
+  createParallelProcessor,
+  TaskPriority,
+  TaskStatus
+} from './worker-pool.js';
+
+import {
+  IndexedDBCache,
+  ModelCache,
+  createCache,
+  createModelCache
+} from './indexeddb-cache.js';
+
+// Import pipeline modules
+import * as ImagePipeline from './pipeline/image-pipeline.js';
+import * as AudioPipeline from './pipeline/audio-pipeline.js';
+
+// Import GGUF quantization
+import * as GGUFQuantization from './quantization/gguf-quantization.js';
+
+// Import DARTS NAS
+import * as DARTSNAS from './nas/darts-nas.js';
+
+// Import streaming model loader
+import {
+  StreamingModelLoader,
+  LayerPriority,
+  LayerStatus,
+  createStreamingLoader
+} from './streaming-model-loader.js';
+
+// Import WebGPU compute shaders
+import {
+  WGSLShaders,
+  WebGPUComputeShaders,
+  createComputeShaders
+} from './webgpu-compute-shaders.js';
+
+// Import browser performance profiler
+import {
+  BrowserPerformanceProfiler,
+  MetricType,
+  PerformanceBudgets,
+  createBrowserProfiler
+} from './browser-performance-profiler.js';
+
 import {
   DistillationLoss,
   TeacherModel,
@@ -1096,5 +1202,96 @@ export {
   BottleneckDetector,
   MLBasedOptimizer,
   AutoPerformanceOptimizer,
-  createAutoOptimizer
+  createAutoOptimizer,
+
+  // NEW: Web Worker Pool (2025-11-10)
+  WorkerPool,
+  ParallelProcessor,
+  createWorkerPool,
+  createParallelProcessor,
+  TaskPriority,
+  TaskStatus,
+
+  // NEW: IndexedDB Cache (2025-11-10)
+  IndexedDBCache,
+  ModelCache,
+  createCache,
+  createModelCache,
+
+  // NEW: Image Pipeline (2025-11-10)
+  ImagePipeline,
+
+  // NEW: Audio Pipeline (2025-11-10)
+  AudioPipeline,
+
+  // NEW: GGUF Quantization (2025-11-10)
+  GGUFQuantization,
+
+  // NEW: DARTS NAS (2025-11-10)
+  DARTSNAS,
+
+  // NEW: Streaming Model Loader (2025-11-10)
+  StreamingModelLoader,
+  LayerPriority,
+  LayerStatus,
+  createStreamingLoader,
+
+  // NEW: WebGPU Compute Shaders (2025-11-10)
+  WGSLShaders,
+  WebGPUComputeShaders,
+  createComputeShaders,
+
+  // NEW: Browser Performance Profiler (2025-11-10)
+  BrowserPerformanceProfiler,
+  MetricType,
+  PerformanceBudgets,
+  createBrowserProfiler,
+
+  // NEW: ENAS NAS (2025-11-10 Session 3)
+  ENASOperations,
+  ENASController,
+  ENASSharedModel,
+  ENASSearcher,
+  createENASSearcher,
+  ENASSearchSpaces,
+
+  // NEW: Enhanced Federated Learning (2025-11-10 Session 3)
+  FedBNAggregator,
+  FedNovaAggregator,
+  EnhancedFederatedServer,
+  createEnhancedFederatedLearning,
+
+  // NEW: ONNX Operators (2025-11-10 Session 3)
+  ONNXOperatorRegistry,
+  createOperatorRegistry,
+  ONNXTensor,
+  Add,
+  Sub,
+  Mul,
+  Div,
+  MatMul,
+  Gemm,
+  Relu,
+  Gelu,
+  Sigmoid,
+  Tanh,
+  Softmax,
+  Swish,
+  BatchNormalization,
+  LayerNormalization,
+  Reshape,
+  Transpose,
+  Concat,
+  Slice,
+  ReduceSum,
+  ReduceMean,
+  ReduceMax,
+
+  // NEW: Real-time Collaboration (2025-11-10 Session 3)
+  CollaborativeSession,
+  CollaborativeExperiment,
+  CollaborativeMetricsDashboard,
+  createCollaborativeSession,
+  createCollaborativeExperiment,
+  createMetricsDashboard
 };

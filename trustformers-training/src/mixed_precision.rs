@@ -1,4 +1,5 @@
 use anyhow::Result;
+use scirs2_core::Complex; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use trustformers_core::tensor::Tensor;
@@ -201,11 +202,7 @@ impl LossScaler {
                 }
                 Ok(false)
             },
-            Tensor::Sparse(_) => Ok(false), // Assume sparse tensors are validated
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok(false), // Torch tensors handled by PyTorch
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok(false), // Candle tensors handled by Candle
+            _ => Ok(false), // Assume sparse and other tensor types are validated
         }
     }
 }
@@ -257,18 +254,14 @@ impl AMPManager {
                     let im_clamped = x.im.clamp(-65504.0, 65504.0);
                     let re_scaled = (re_clamped * 1024.0).round() / 1024.0;
                     let im_scaled = (im_clamped * 1024.0).round() / 1024.0;
-                    num_complex::Complex::new(re_scaled, im_scaled)
+                    Complex::new(re_scaled, im_scaled)
                 });
                 Ok(Tensor::C32(quantized))
             },
             Tensor::C64(_) => Ok(tensor.clone()),
             Tensor::CF16(_) => Ok(tensor.clone()), // Already fp16 precision
             Tensor::CBF16(_) => Ok(tensor.clone()), // Already reduced precision
-            Tensor::Sparse(_) => Ok(tensor.clone()), // Sparse tensors unchanged
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok(tensor.clone()), // Torch tensors unchanged
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok(tensor.clone()), // Candle tensors unchanged
+            _ => Ok(tensor.clone()),               // Sparse and other tensor types unchanged
         }
     }
 
@@ -408,11 +401,7 @@ pub mod utils {
             },
             Tensor::CF16(_) => Ok(true),  // Already fp16, so always safe
             Tensor::CBF16(_) => Ok(true), // BF16 has similar range to fp16
-            Tensor::Sparse(_) => Ok(true), // Assume sparse tensors are safe
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok(true), // Assume Torch tensors are safe
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok(true), // Assume Candle tensors are safe
+            _ => Ok(true),                // Assume sparse and other tensor types are safe
         }
     }
 
@@ -530,11 +519,7 @@ pub mod utils {
 
                 Ok((min_val, max_val))
             },
-            Tensor::Sparse(_) => Ok((0.0, 1.0)), // Default range for sparse tensors
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok((0.0, 1.0)), // Default range for Torch tensors
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok((0.0, 1.0)), // Default range for Candle tensors
+            _ => Ok((0.0, 1.0)), // Default range for sparse and other tensor types
         }
     }
 }
@@ -877,11 +862,7 @@ impl AdvancedMixedPrecisionManager {
                     .sqrt();
                 Ok(norm)
             },
-            Tensor::Sparse(_) => Ok(1.0), // Default norm for sparse tensors
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok(1.0), // Default norm for Torch tensors
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok(1.0), // Default norm for Candle tensors
+            _ => Ok(1.0), // Default norm for sparse and other tensor types
         }
     }
 
@@ -917,21 +898,15 @@ impl AdvancedMixedPrecisionManager {
             },
             Tensor::CF16(arr) => {
                 let factor_f16 = half::f16::from_f32(factor);
-                let scaled =
-                    arr.mapv(|x| num_complex::Complex::new(x.re * factor_f16, x.im * factor_f16));
+                let scaled = arr.mapv(|x| Complex::new(x.re * factor_f16, x.im * factor_f16));
                 Ok(Tensor::CF16(scaled))
             },
             Tensor::CBF16(arr) => {
                 let factor_bf16 = half::bf16::from_f32(factor);
-                let scaled =
-                    arr.mapv(|x| num_complex::Complex::new(x.re * factor_bf16, x.im * factor_bf16));
+                let scaled = arr.mapv(|x| Complex::new(x.re * factor_bf16, x.im * factor_bf16));
                 Ok(Tensor::CBF16(scaled))
             },
-            Tensor::Sparse(_) => Ok(tensor.clone()), // Don't scale sparse tensors
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok(tensor.clone()), // Don't scale Torch tensors
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok(tensor.clone()), // Don't scale Candle tensors
+            _ => Ok(tensor.clone()), // Don't scale sparse and other tensor types
         }
     }
 
@@ -1003,11 +978,7 @@ impl AdvancedMixedPrecisionManager {
                 }
                 Ok(false)
             },
-            Tensor::Sparse(_) => Ok(false), // Assume sparse tensors don't overflow
-            #[cfg(feature = "torch")]
-            Tensor::Torch(_) => Ok(false), // Assume Torch tensors don't overflow
-            #[cfg(feature = "candle")]
-            Tensor::Candle(_) => Ok(false), // Assume Candle tensors don't overflow
+            _ => Ok(false), // Assume sparse and other tensor types don't overflow
         }
     }
 

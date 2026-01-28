@@ -247,6 +247,12 @@ pub struct StreamingMetrics {
     stream_durations: Arc<tokio::sync::RwLock<Vec<std::time::Duration>>>,
 }
 
+impl Default for StreamingMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StreamingMetrics {
     pub fn new() -> Self {
         Self {

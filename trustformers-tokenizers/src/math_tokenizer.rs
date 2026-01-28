@@ -152,9 +152,9 @@ impl MathTokenizer {
 
     /// Create a new math tokenizer with custom configuration
     pub fn with_config(config: MathTokenizerConfig) -> Result<Self> {
-        let number_regex = Regex::new(r"^\d+\.?\d*$").unwrap();
-        let scientific_regex = Regex::new(r"^\d+\.?\d*[eE][+-]?\d+$").unwrap();
-        let latex_command_regex = Regex::new(r"^\\[a-zA-Z]+$").unwrap();
+        let number_regex = Regex::new(r"^\d+\.?\d*$").expect("valid regex");
+        let scientific_regex = Regex::new(r"^\d+\.?\d*[eE][+-]?\d+$").expect("valid regex");
+        let latex_command_regex = Regex::new(r"^\\[a-zA-Z]+$").expect("valid regex");
 
         // Build Greek letters set
         let greek_letters = [
@@ -457,11 +457,10 @@ impl MathTokenizer {
             }
         }
 
-        let token_type = if self.config.recognize_scientific_notation
-            && self.scientific_regex.is_match(&number)
+        let token_type = if (self.config.recognize_scientific_notation
+            && self.scientific_regex.is_match(&number))
+            || self.number_regex.is_match(&number)
         {
-            MathTokenType::Number
-        } else if self.number_regex.is_match(&number) {
             MathTokenType::Number
         } else {
             MathTokenType::Unknown
@@ -829,9 +828,9 @@ impl Clone for MathTokenizer {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            number_regex: Regex::new(r"^\d+\.?\d*$").unwrap(),
-            scientific_regex: Regex::new(r"^\d+\.?\d*[eE][+-]?\d+$").unwrap(),
-            latex_command_regex: Regex::new(r"^\\[a-zA-Z]+$").unwrap(),
+            number_regex: Regex::new(r"^\d+\.?\d*$").expect("valid regex"),
+            scientific_regex: Regex::new(r"^\d+\.?\d*[eE][+-]?\d+$").expect("valid regex"),
+            latex_command_regex: Regex::new(r"^\\[a-zA-Z]+$").expect("valid regex"),
             greek_letters: self.greek_letters.clone(),
             math_functions: self.math_functions.clone(),
             math_constants: self.math_constants.clone(),

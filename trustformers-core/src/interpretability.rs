@@ -1,7 +1,7 @@
 use crate::errors::{TrustformersError, Result};
 use crate::tensor::Tensor;
 use crate::layers::attention::MultiHeadAttention;
-use ndarray::{Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{Array2, ArrayD, Axis, IxDyn, s};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -162,7 +162,7 @@ impl InterpretabilityAnalyzer {
                 }
 
                 let seq_len = shape[shape.len() - 1];
-                let attention_matrix = arr.slice(ndarray::s![.., ..]).to_owned();
+                let attention_matrix = arr.slice(s![.., ..]).to_owned();
 
                 // Convert to nested Vec for serialization
                 let attention_weights_vec: Vec<Vec<f32>> = (0..seq_len)
@@ -250,7 +250,7 @@ impl InterpretabilityAnalyzer {
         ];
 
         let (max_score, pattern_type) = scores.into_iter()
-            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+            .max_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"))
             .unwrap();
 
         if max_score > 0.3 {
@@ -763,7 +763,7 @@ impl InterpretabilityAnalyzer {
             .map(|fi| {
                 fi.token_importance.iter()
                     .enumerate()
-                    .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                    .max_by(|a, b| a.1.partial_cmp(b.1).expect("Partial comparison failed"))
                     .map(|(idx, _)| idx)
                     .unwrap_or(0)
             })
@@ -848,7 +848,7 @@ mod tests {
 
         // Create dummy attention weights
         let attention_data = vec![0.1, 0.2, 0.3, 0.4];
-        let attention_tensor = Tensor::from_vec(attention_data, &[2, 2]).unwrap();
+        let attention_tensor = Tensor::from_vec(attention_data, &[2, 2]).expect("Tensor from_vec failed");
         let attention_weights = vec![attention_tensor];
 
         let result = analyzer.analyze_attention_patterns(&attention_weights, 0);
@@ -909,7 +909,7 @@ mod tests {
         let analyzer = InterpretabilityAnalyzer::new(config);
 
         let activation_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 0.0, 0.0];
-        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).unwrap();
+        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
 
         let stats = analyzer.calculate_activation_statistics(&activation_tensor).unwrap();
         assert!(stats.mean > 0.0);
@@ -924,7 +924,7 @@ mod tests {
 
         // Create tensor with some dead neurons (all zeros)
         let activation_data = vec![1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0];
-        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).unwrap();
+        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
 
         let dead_count = analyzer.count_dead_neurons(&activation_tensor).unwrap();
         assert!(dead_count > 0);
@@ -938,8 +938,8 @@ mod tests {
         let input_data = vec![1.0, 2.0, 3.0, 4.0];
         let gradient_data = vec![0.1, 0.2, 0.3, 0.4];
 
-        let inputs = Tensor::from_vec(input_data, &[2, 2]).unwrap();
-        let gradients = Tensor::from_vec(gradient_data, &[2, 2]).unwrap();
+        let inputs = Tensor::from_vec(input_data, &[2, 2]).expect("Tensor from_vec failed");
+        let gradients = Tensor::from_vec(gradient_data, &[2, 2]).expect("Tensor from_vec failed");
 
         let result = analyzer.analyze_gradient_attribution(&inputs, &gradients, AttributionMethod::Gradients);
         assert!(result.is_ok());
@@ -953,7 +953,7 @@ mod tests {
 
         let mut activations = HashMap::new();
         let activation_data = vec![1.0, 2.0, 3.0, 0.0, 4.0, 5.0, 0.0, 0.0];
-        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).unwrap();
+        let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
         activations.insert("layer1".to_string(), activation_tensor);
 
         let result = analyzer.analyze_activations(&activations);
@@ -987,8 +987,8 @@ mod tests {
             output_dir: Some("/tmp/interpretability".to_string()),
         };
 
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: InterpretabilityConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: InterpretabilityConfig = serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(config.enable_attention_analysis, deserialized.enable_attention_analysis);
         assert_eq!(config.enable_gradient_analysis, deserialized.enable_gradient_analysis);

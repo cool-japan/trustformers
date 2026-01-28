@@ -483,7 +483,7 @@ impl GGUFExporter {
 
     fn align_offset(&self, offset: u64) -> u64 {
         let alignment = self.alignment as u64;
-        (offset + alignment - 1) / alignment * alignment
+        offset.div_ceil(alignment) * alignment
     }
 
     fn generate_dummy_tensor_data(

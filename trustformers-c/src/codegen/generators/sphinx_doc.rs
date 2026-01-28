@@ -350,7 +350,7 @@ todo_include_todos = True
 
         for func in &interface.functions {
             let category = self.categorize_function(&func.name);
-            categories.entry(category).or_insert_with(Vec::new).push(func);
+            categories.entry(category).or_default().push(func);
         }
 
         // Sort categories
@@ -1455,6 +1455,7 @@ mod tests {
                 license: "MIT".to_string(),
                 repository: "https://github.com/test/test".to_string(),
             },
+            package_name: Some("com.trustformers.sphinx".to_string()),
             features: HashMap::new(),
             type_mappings: HashMap::new(),
         };

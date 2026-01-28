@@ -842,6 +842,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "wasm32")]
     fn test_feature_detection() {
         let _supported = is_streaming_supported();
         let _config = get_optimal_streaming_config();

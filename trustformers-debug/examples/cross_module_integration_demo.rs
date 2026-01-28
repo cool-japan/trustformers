@@ -265,7 +265,7 @@ async fn training_pipeline_debugging() -> Result<()> {
             let metrics = ModelPerformanceMetrics {
                 training_step: global_step,
                 loss: training_state.loss,
-                accuracy: Some((1.0 - training_state.loss / 3.0).max(0.0).min(1.0)),
+                accuracy: Some((1.0 - training_state.loss / 3.0).clamp(0.0, 1.0)),
                 learning_rate: training_state.learning_rate,
                 batch_size: training_config.batch_size,
                 throughput_samples_per_sec: 150.0 + global_step as f64 * 2.0,
@@ -1034,7 +1034,7 @@ async fn create_comprehensive_visualizations(visualizer: &mut DebugVisualizer) -
     let steps: Vec<f64> = (0..50).map(|x| x as f64).collect();
     let losses: Vec<f64> = steps.iter().map(|&s| 2.0 * (-0.05 * s).exp() + 0.1).collect();
     let accuracies: Vec<f64> =
-        losses.iter().map(|&loss| (1.0 - loss / 2.5).max(0.0).min(1.0)).collect();
+        losses.iter().map(|&loss| (1.0 - loss / 2.5).clamp(0.0, 1.0)).collect();
 
     // Training metrics
     visualizer.plot_training_metrics(&steps, &losses, Some(&accuracies))?;

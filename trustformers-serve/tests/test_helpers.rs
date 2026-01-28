@@ -28,8 +28,8 @@ use trustformers_serve::{
 static PORT_ALLOCATOR: AtomicU16 = AtomicU16::new(8000);
 
 /// Global test registry to track active test environments
-static TEST_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, TestEnvironment>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static TEST_REGISTRY: once_cell::sync::Lazy<Mutex<HashMap<String, TestEnvironment>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Test environment isolation levels
 #[derive(Debug, Clone, PartialEq)]
@@ -277,8 +277,12 @@ pub async fn create_isolated_test_environment(
     // Apply isolation settings
     apply_isolation_settings(&mut server_config, &config)?;
 
-    // Create server instance
-    let server = create_test_server_instance(server_config.clone()).await?;
+    // Create server instance with or without auth
+    let server = if config.enable_auth {
+        create_test_server_instance_with_auth(server_config.clone(), true).await?
+    } else {
+        create_test_server_instance(server_config.clone()).await?
+    };
 
     // Initialize environment state
     let state = Arc::new(RwLock::new(TestEnvironmentState {
@@ -310,20 +314,18 @@ pub async fn create_isolated_test_environment(
 
 /// Create test server configuration
 fn create_test_server_config(config: &TestEnvironmentConfig, port: u16) -> Result<ServerConfig> {
-    let mut server_config = ServerConfig::default();
-
-    // Basic server settings
-    server_config.host = "127.0.0.1".to_string();
-    server_config.port = port;
-
-    // Model configuration
-    server_config.model_config = config.model_config.clone().unwrap_or_else(|| ModelConfig {
-        model_name: format!("test-model-{}", config.test_name),
-        model_version: Some("1.0.0".to_string()),
-        device: Device::Cpu,
-        max_sequence_length: 2048,
-        enable_caching: config.enable_caching,
-    });
+    let mut server_config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        model_config: config.model_config.clone().unwrap_or_else(|| ModelConfig {
+            model_name: format!("test-model-{}", config.test_name),
+            model_version: Some("1.0.0".to_string()),
+            device: Device::Cpu,
+            max_sequence_length: 2048,
+            enable_caching: config.enable_caching,
+        }),
+        ..Default::default()
+    };
 
     // Authentication configuration
     // Note: Authentication is now handled at the server level using with_auth() method
@@ -344,12 +346,34 @@ fn create_test_server_config(config: &TestEnvironmentConfig, port: u16) -> Resul
         };
     }
 
-    // Streaming configuration
+    // Streaming configuration with very short timeouts for tests (500ms)
     if config.enable_streaming {
+        use trustformers_serve::streaming::{SseConfig, WsConfig};
+
         server_config.streaming_config = StreamingConfig {
             buffer_size: 100,
-            max_concurrent_streams: 10,
-            heartbeat_interval: Duration::from_secs(30),
+            stream_timeout: Duration::from_millis(500),
+            max_concurrent_streams: 100,
+            enable_compression: false,
+            chunk_size: 1024,
+            heartbeat_interval: Duration::from_millis(250),
+            sse_config: SseConfig {
+                buffer_size: 10,
+                heartbeat_interval: Duration::from_millis(250),
+                connection_timeout: Duration::from_millis(500),
+                max_connections: 100,
+                enable_compression: false,
+                cors_origins: vec!["*".to_string()],
+            },
+            ws_config: WsConfig {
+                buffer_size: 10,
+                connection_timeout: Duration::from_millis(500),
+                max_connections: 100,
+                max_message_size: 1024,
+                enable_compression: false,
+                ping_interval: Duration::from_millis(250),
+                max_frame_size: 1024,
+            },
             ..Default::default()
         };
     }
@@ -683,33 +707,37 @@ impl Default for TestFixtures {
 // Helper functions for common test scenarios
 pub fn create_test_inference_request() -> Value {
     serde_json::json!({
-        "model": "test-model",
-        "input": "Test inference request",
-        "parameters": {
-            "max_tokens": 100,
-            "temperature": 0.7
-        }
+        "text": "Test inference request",
+        "max_length": 100,
+        "temperature": 0.7
     })
 }
 
 pub fn create_test_batch_request() -> Value {
     serde_json::json!({
-        "model": "test-model",
-        "inputs": [
-            "Batch test 1",
-            "Batch test 2",
-            "Batch test 3"
-        ],
-        "parameters": {
-            "max_tokens": 50,
-            "temperature": 0.5
-        }
+        "requests": [
+            {
+                "text": "Batch test 1",
+                "max_length": 50,
+                "temperature": 0.5
+            },
+            {
+                "text": "Batch test 2",
+                "max_length": 50,
+                "temperature": 0.5
+            },
+            {
+                "text": "Batch test 3",
+                "max_length": 50,
+                "temperature": 0.5
+            }
+        ]
     })
 }
 
 pub fn create_test_auth_request() -> Value {
     serde_json::json!({
-        "username": "test-user",
-        "password": "test-password"
+        "username": "testuser",
+        "password": "password123"
     })
 }

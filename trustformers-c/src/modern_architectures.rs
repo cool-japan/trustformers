@@ -7,7 +7,7 @@
 //! - Advanced normalization techniques (RMSNorm, LayerNorm variants)
 
 use crate::error::{TrustformersError, TrustformersResult};
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
@@ -524,10 +524,10 @@ pub extern "C" fn trustformers_mamba_inference(
         let output_slice = std::slice::from_raw_parts_mut(output, output_length);
 
         // Convert to Vec for processing
-        let input_vec: Vec<f32> = input_slice.iter().copied().collect();
+        let input_vec: Vec<f32> = input_slice.to_vec();
 
         // Perform SSM forward pass
-        let result = ssm_ops.forward(&input_vec, &mut state_slice);
+        let result = ssm_ops.forward(&input_vec, state_slice);
 
         // Copy result to output buffer
         let copy_len = result.len().min(output_length);

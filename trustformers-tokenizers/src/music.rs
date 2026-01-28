@@ -326,11 +326,11 @@ impl MusicTokenizer {
     fn create_chord_patterns() -> Vec<Regex> {
         vec![
             // Basic triads and sevenths
-            Regex::new(r"[A-G][#b]?(m|maj|M|min|dim|aug|sus[24])?[67]?").unwrap(),
+            Regex::new(r"[A-G][#b]?(m|maj|M|min|dim|aug|sus[24])?[67]?").expect("valid regex"),
             // Complex chord extensions
-            Regex::new(r"[A-G][#b]?(add|sus|maj|min|dim|aug)\d+").unwrap(),
+            Regex::new(r"[A-G][#b]?(add|sus|maj|min|dim|aug)\d+").expect("valid regex"),
             // Slash chords
-            Regex::new(r"[A-G][#b]?[^/]*/[A-G][#b]?").unwrap(),
+            Regex::new(r"[A-G][#b]?[^/]*/[A-G][#b]?").expect("valid regex"),
         ]
     }
 
@@ -338,17 +338,17 @@ impl MusicTokenizer {
     fn create_abc_patterns() -> Vec<Regex> {
         vec![
             // ABC notes with accidentals and octaves
-            Regex::new(r"[_=^]*[A-Ga-g][',]*").unwrap(),
+            Regex::new(r"[_=^]*[A-Ga-g][',]*").expect("valid regex"),
             // Duration modifiers
-            Regex::new(r"\d*/?\.?").unwrap(),
+            Regex::new(r"\d*/?\.?").expect("valid regex"),
             // Rests
-            Regex::new(r"z\d*/?\.?").unwrap(),
+            Regex::new(r"z\d*/?\.?").expect("valid regex"),
             // Barlines
-            Regex::new(r"\|[\|:\]]*").unwrap(),
+            Regex::new(r"\|[\|:\]]*").expect("valid regex"),
             // Chords (bracketed notes)
-            Regex::new(r"\[([A-Ga-g][',]*\d*/?\.?)+\]").unwrap(),
+            Regex::new(r"\[([A-Ga-g][',]*\d*/?\.?)+\]").expect("valid regex"),
             // Slurs and ties
-            Regex::new(r"[()~-]").unwrap(),
+            Regex::new(r"[()~-]").expect("valid regex"),
         ]
     }
 
@@ -452,7 +452,7 @@ impl MusicTokenizer {
         let mut tokens = Vec::new();
 
         // Simple XML tag extraction
-        let tag_regex = Regex::new(r"<([^>]+)>([^<]*)</[^>]+>").unwrap();
+        let tag_regex = Regex::new(r"<([^>]+)>([^<]*)</[^>]+>").expect("valid regex");
 
         for mat in tag_regex.find_iter(text) {
             let token_text = mat.as_str().to_string();
@@ -497,9 +497,9 @@ impl MusicTokenizer {
             MusicTokenType::Barline
         } else if token.chars().any(|c| "ABCDEFGabcdefg".contains(c)) {
             MusicTokenType::NoteName
-        } else if token.chars().all(|c| c.is_ascii_digit() || "/".contains(c)) {
-            MusicTokenType::Duration
-        } else if token.contains('.') {
+        } else if token.chars().all(|c| c.is_ascii_digit() || "/".contains(c))
+            || token.contains('.')
+        {
             MusicTokenType::Duration
         } else {
             MusicTokenType::Unknown

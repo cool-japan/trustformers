@@ -310,14 +310,14 @@ impl CacheOptimizer {
             tensor.shape()[2],
             tensor.shape()[3],
         ];
-        let c_padded = (c + 3) / 4 * 4; // Round up to multiple of 4
+        let c_padded = c.div_ceil(4) * 4; // Round up to multiple of 4
 
         let mut packed_data = vec![0.0f32; n * c_padded * h * w];
         let src_data = tensor.data()?;
 
         // Pack channels in groups of 4 for SIMD
         for batch in 0..n {
-            for c_group in 0..(c + 3) / 4 {
+            for c_group in 0..c.div_ceil(4) {
                 for row in 0..h {
                     for col in 0..w {
                         for c_offset in 0..4 {
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn test_layout_optimization() {
         let optimizer = CacheOptimizer::new(MobilePlatform::Android);
-        let tensor = Tensor::ones(&[1, 64, 32, 32]).unwrap();
+        let tensor = Tensor::ones(&[1, 64, 32, 32]).expect("Operation failed");
         let pattern = AccessPattern {
             strides: vec![1, 1],
             access_type: AccessType::Strided,
@@ -569,7 +569,7 @@ mod tests {
             working_set_size: 64 * 1024,
         };
 
-        let optimized = optimizer.optimize_layout(&tensor, &pattern).unwrap();
+        let optimized = optimizer.optimize_layout(&tensor, &pattern).expect("Operation failed");
         // On Android with strided access, should transpose to NHWC
         assert_eq!(optimized.shape(), &[1, 32, 32, 64]);
     }
@@ -587,7 +587,7 @@ mod tests {
             cache_hints: None,
         };
 
-        let config = optimizer.compute_tiling_config(&operator).unwrap();
+        let config = optimizer.compute_tiling_config(&operator).expect("Operation failed");
         assert!(!config.tile_sizes.is_empty());
         assert!(!config.loop_order.is_empty());
     }
@@ -598,7 +598,7 @@ mod tests {
         let kernel = KernelType::Conv2d;
         let input_shapes = vec![vec![1, 3, 224, 224]];
 
-        let hints = optimizer.generate_hints(&kernel, &input_shapes).unwrap();
+        let hints = optimizer.generate_hints(&kernel, &input_shapes).expect("Operation failed");
         assert!(hints.prefetch_distance > 0);
         assert!(!hints.temporal_hints.is_empty());
     }

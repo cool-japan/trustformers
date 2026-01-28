@@ -41,7 +41,7 @@ impl LatencyMetrics {
         }
 
         let mut sorted: Vec<f64> = durations.iter().map(|d| d.as_secs_f64() * 1000.0).collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
 
         let count = sorted.len();
         let mean_ms = sorted.iter().sum::<f64>() / count as f64;

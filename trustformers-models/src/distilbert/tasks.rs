@@ -1,6 +1,7 @@
 use crate::distilbert::config::DistilBertConfig;
 use crate::distilbert::model::DistilBertModel;
 use std::io::Read;
+use trustformers_core::device::Device;
 use trustformers_core::errors::Result;
 use trustformers_core::layers::Linear;
 use trustformers_core::tensor::Tensor;
@@ -14,13 +15,23 @@ pub struct DistilBertForSequenceClassification {
     dropout: f32,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl DistilBertForSequenceClassification {
     pub fn new(config: DistilBertConfig, num_labels: usize) -> Result<Self> {
-        let distilbert = DistilBertModel::new(config.clone())?;
-        let pre_classifier = Linear::new(config.hidden_size, config.hidden_size, true);
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DistilBertConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let distilbert = DistilBertModel::new_with_device(config.clone(), device)?;
+        let pre_classifier =
+            Linear::new_with_device(config.hidden_size, config.hidden_size, true, device);
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
@@ -29,7 +40,12 @@ impl DistilBertForSequenceClassification {
             classifier,
             dropout,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -80,24 +96,37 @@ pub struct DistilBertForMaskedLM {
     vocab_transform: Linear,
     vocab_layer_norm: trustformers_core::layers::LayerNorm,
     vocab_projector: Linear,
+    device: Device,
 }
 
 impl DistilBertForMaskedLM {
     pub fn new(config: DistilBertConfig) -> Result<Self> {
-        let distilbert = DistilBertModel::new(config.clone())?;
-        let vocab_transform = Linear::new(config.hidden_size, config.hidden_size, true);
-        let vocab_layer_norm = trustformers_core::layers::LayerNorm::new(
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DistilBertConfig, device: Device) -> Result<Self> {
+        let distilbert = DistilBertModel::new_with_device(config.clone(), device)?;
+        let vocab_transform =
+            Linear::new_with_device(config.hidden_size, config.hidden_size, true, device);
+        let vocab_layer_norm = trustformers_core::layers::LayerNorm::new_with_device(
             vec![config.hidden_size],
             config.layer_norm_eps,
+            device,
         )?;
-        let vocab_projector = Linear::new(config.hidden_size, config.vocab_size, true);
+        let vocab_projector =
+            Linear::new_with_device(config.hidden_size, config.vocab_size, true, device);
 
         Ok(Self {
             distilbert,
             vocab_transform,
             vocab_layer_norm,
             vocab_projector,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -148,12 +177,21 @@ pub struct DistilBertForTokenClassification {
     dropout: f32,
     #[allow(dead_code)]
     num_labels: usize,
+    device: Device,
 }
 
 impl DistilBertForTokenClassification {
     pub fn new(config: DistilBertConfig, num_labels: usize) -> Result<Self> {
-        let distilbert = DistilBertModel::new(config.clone())?;
-        let classifier = Linear::new(config.hidden_size, num_labels, true);
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DistilBertConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
+        let distilbert = DistilBertModel::new_with_device(config.clone(), device)?;
+        let classifier = Linear::new_with_device(config.hidden_size, num_labels, true, device);
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
@@ -161,7 +199,12 @@ impl DistilBertForTokenClassification {
             classifier,
             dropout,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -208,19 +251,29 @@ pub struct DistilBertForQuestionAnswering {
     distilbert: DistilBertModel,
     qa_outputs: Linear,
     dropout: f32,
+    device: Device,
 }
 
 impl DistilBertForQuestionAnswering {
     pub fn new(config: DistilBertConfig) -> Result<Self> {
-        let distilbert = DistilBertModel::new(config.clone())?;
-        let qa_outputs = Linear::new(config.hidden_size, 2, true);
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DistilBertConfig, device: Device) -> Result<Self> {
+        let distilbert = DistilBertModel::new_with_device(config.clone(), device)?;
+        let qa_outputs = Linear::new_with_device(config.hidden_size, 2, true, device);
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
             distilbert,
             qa_outputs,
             dropout,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 

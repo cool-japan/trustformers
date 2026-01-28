@@ -397,7 +397,9 @@ use approx::assert_abs_diff_eq;
 #[test]
 fn test_{{model_name_lower}}_creation() {
     let config = {{model_name}}Config::default();
-    let model = {{model_name}}Model::new(config).expect("Failed to create model");
+    let model = {{model_name}}Model::new(config).unwrap_or_else(|e| {
+        panic!("Failed to create model: {:?}", e);
+    });
 
     // Model should be created successfully
     assert_eq!(model.config().vocab_size, {{default_vocab_size}});
@@ -406,13 +408,17 @@ fn test_{{model_name_lower}}_creation() {
 #[test]
 fn test_{{model_name_lower}}_forward_pass() {
     let config = {{model_name}}Config::default();
-    let model = {{model_name}}Model::new(config.clone()).expect("Failed to create model");
+    let model = {{model_name}}Model::new(config.clone()).unwrap_or_else(|e| {
+        panic!("Failed to create model: {:?}", e);
+    });
 
     let batch_size = 2;
     let seq_length = 10;
     let input = Tensor::zeros(&[batch_size, seq_length]);
 
-    let output = model.forward(&input).expect("Forward pass failed");
+    let output = model.forward(&input).unwrap_or_else(|e| {
+        panic!("Forward pass failed: {:?}", e);
+    });
 
     // Verify output shape
     match &output {
@@ -430,10 +436,14 @@ fn test_{{model_name_lower}}_forward_pass() {
 #[test]
 fn test_{{model_name_lower}}_numerical_stability() {
     let config = {{model_name}}Config::default();
-    let model = {{model_name}}Model::new(config).expect("Failed to create model");
+    let model = {{model_name}}Model::new(config).unwrap_or_else(|e| {
+        panic!("Failed to create model: {:?}", e);
+    });
 
     let input = Tensor::randn(&[4, 16]);
-    let output = model.forward(&input).expect("Forward pass failed");
+    let output = model.forward(&input).unwrap_or_else(|e| {
+        panic!("Forward pass failed: {:?}", e);
+    });
 
     // Check for NaN or infinite values
     match &output {

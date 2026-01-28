@@ -170,9 +170,9 @@ impl Default for NamingChecker {
         Self {
             conventions: NamingConventions::default(),
             excluded_patterns: vec![
-                Regex::new(r"^_.*").unwrap(), // Private items starting with underscore
-                Regex::new(r".*_test$").unwrap(), // Test functions
-                Regex::new(r"^test_.*").unwrap(), // Test functions
+                Regex::new(r"^_.*").expect("Regex compilation failed"), // Private items starting with underscore
+                Regex::new(r".*_test$").expect("Regex compilation failed"), // Test functions
+                Regex::new(r"^test_.*").expect("Regex compilation failed"), // Test functions
             ],
             included_extensions: {
                 let mut set = HashSet::new();
@@ -529,37 +529,37 @@ impl NamingChecker {
 
     /// Check if name is snake_case
     fn is_snake_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[a-z][a-z0-9_]*$").unwrap();
+        let regex = Regex::new(r"^[a-z][a-z0-9_]*$").expect("Regex compilation failed");
         regex.is_match(name) && !name.ends_with('_') && !name.contains("__")
     }
 
     /// Check if name is PascalCase
     fn is_pascal_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[A-Z][a-zA-Z0-9]*$").unwrap();
+        let regex = Regex::new(r"^[A-Z][a-zA-Z0-9]*$").expect("Regex compilation failed");
         regex.is_match(name)
     }
 
     /// Check if name is camelCase
     fn is_camel_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[a-z][a-zA-Z0-9]*$").unwrap();
+        let regex = Regex::new(r"^[a-z][a-zA-Z0-9]*$").expect("Regex compilation failed");
         regex.is_match(name)
     }
 
     /// Check if name is SCREAMING_SNAKE_CASE
     fn is_screaming_snake_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[A-Z][A-Z0-9_]*$").unwrap();
+        let regex = Regex::new(r"^[A-Z][A-Z0-9_]*$").expect("Regex compilation failed");
         regex.is_match(name) && !name.ends_with('_') && !name.contains("__")
     }
 
     /// Check if name is kebab-case
     fn is_kebab_case(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[a-z][a-z0-9-]*$").unwrap();
+        let regex = Regex::new(r"^[a-z][a-z0-9-]*$").expect("Regex compilation failed");
         regex.is_match(name) && !name.ends_with('-') && !name.contains("--")
     }
 
     /// Check if name is single uppercase letter
     fn is_single_uppercase(&self, name: &str) -> bool {
-        let regex = Regex::new(r"^[A-Z]$").unwrap();
+        let regex = Regex::new(r"^[A-Z]$").expect("Regex compilation failed");
         regex.is_match(name)
     }
 

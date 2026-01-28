@@ -226,7 +226,7 @@ impl CustomResourceManager {
 
             // Update statistics
             pool.statistics.total_allocations += count as u64;
-            pool.statistics.currently_allocated = pool.statistics.currently_allocated + count;
+            pool.statistics.currently_allocated += count;
             pool.statistics.peak_usage =
                 pool.statistics.peak_usage.max(pool.statistics.currently_allocated);
 

@@ -571,7 +571,7 @@ impl TVMExporter {
                     values.iter().flat_map(|&x| x.to_le_bytes()).collect::<Vec<u8>>()
                 },
                 ExportPrecision::INT8 => (0..size).map(|i| (i % 256) as u8).collect(),
-                ExportPrecision::INT4 => (0..(size + 1) / 2)
+                ExportPrecision::INT4 => (0..size.div_ceil(2))
                     .map(|i| {
                         let low = (i * 2) % 16;
                         let high = ((i * 2 + 1) % 16) << 4;

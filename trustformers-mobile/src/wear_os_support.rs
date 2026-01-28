@@ -1394,12 +1394,12 @@ mod tests {
     #[test]
     fn test_wear_os_connection() {
         let config = WearOSConfig::default();
-        let integration = WearOSIntegration::new(config).unwrap();
+        let integration = WearOSIntegration::new(config).expect("Operation failed");
 
         let result = integration.connect();
         assert!(result.is_ok());
 
-        let status = integration.get_status().unwrap();
+        let status = integration.get_status().expect("Operation failed");
         assert!(status.connected);
         assert!(status.device_info.is_some());
     }
@@ -1407,11 +1407,11 @@ mod tests {
     #[test]
     fn test_health_data_recording() {
         let config = WearOSConfig::default();
-        let integration = WearOSIntegration::new(config).unwrap();
+        let integration = WearOSIntegration::new(config).expect("Operation failed");
 
         let health_record = HealthDataRecord {
             data_type: HealthDataType::HeartRate,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).expect("Operation failed").as_secs(),
             value: 72.0,
             unit: "bpm".to_string(),
             confidence: 0.95,
@@ -1425,13 +1425,13 @@ mod tests {
     #[test]
     fn test_battery_status_updates() {
         let config = WearOSConfig::default();
-        let integration = WearOSIntegration::new(config).unwrap();
+        let integration = WearOSIntegration::new(config).expect("Operation failed");
 
         // Test low battery scenario
         let result = integration.update_battery_status(0.10, false);
         assert!(result.is_ok());
 
-        let status = integration.get_status().unwrap();
+        let status = integration.get_status().expect("Operation failed");
         assert_eq!(status.battery_level, 0.10);
         assert!(!status.charging);
     }
@@ -1439,13 +1439,13 @@ mod tests {
     #[test]
     fn test_health_monitoring_start() {
         let config = WearOSConfig::default();
-        let integration = WearOSIntegration::new(config).unwrap();
+        let integration = WearOSIntegration::new(config).expect("Operation failed");
 
-        integration.connect().unwrap();
+        integration.connect().expect("Operation failed");
         let result = integration.start_health_monitoring();
         assert!(result.is_ok());
 
-        let status = integration.get_status().unwrap();
+        let status = integration.get_status().expect("Operation failed");
         assert!(status.health_monitoring_active);
     }
 }

@@ -457,6 +457,7 @@ impl MathSpecializedConfig {
                 ReasoningStrategy::BackwardReasoning,
                 ReasoningStrategy::CaseAnalysis,
                 ReasoningStrategy::Induction,
+                ReasoningStrategy::ProofByContradiction,
                 ReasoningStrategy::Constructive,
                 ReasoningStrategy::Analogical,
                 ReasoningStrategy::Symbolic,
@@ -913,19 +914,19 @@ mod tests {
         let config = MathSpecializedConfig::mammoth_7b();
         assert_eq!(config.model_variant, MathModelVariant::Mammoth);
         assert_eq!(config.supported_domains.len(), 12); // All domains
-        assert_eq!(config.reasoning_strategies.len(), 8); // All strategies
+        assert_eq!(config.reasoning_strategies.len(), 9); // All strategies including ProofByContradiction
     }
 
     #[test]
     fn test_from_pretrained_name() {
         let config = MathSpecializedConfig::from_pretrained_name("math-llama-7b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.model_variant, MathModelVariant::MathLlama);
 
         let config = MathSpecializedConfig::from_pretrained_name("minerva-8b");
         assert!(config.is_some());
-        let config = config.unwrap();
+        let config = config.expect("operation failed");
         assert_eq!(config.model_variant, MathModelVariant::Minerva);
 
         let config = MathSpecializedConfig::from_pretrained_name("unknown-model");
@@ -1046,7 +1047,7 @@ mod tests {
 
         let model = MathSpecializedModel::new(config.clone());
         assert!(model.is_ok());
-        let model = model.unwrap();
+        let model = model.expect("operation failed");
         assert!(model.supports_domain(&MathDomain::Algebra));
         assert!(model.supports_strategy(&ReasoningStrategy::StepByStep));
 

@@ -4,7 +4,7 @@
 
 use crate::neuromorphic::SpikeEvent;
 use anyhow::Result;
-use rand::Rng;
+use scirs2_core::random::*; // SciRS2 Policy compliant
 
 /// Spiking neural network
 #[derive(Debug, Clone)]
@@ -285,6 +285,7 @@ impl SpikingNeuralNetwork {
     fn create_layered_connections(&mut self, layers: &[usize]) {
         self.synapses.clear();
         let mut neuron_idx = 0;
+        let mut rng = thread_rng();
 
         for i in 0..layers.len() - 1 {
             let current_layer_size = layers[i];
@@ -294,7 +295,7 @@ impl SpikingNeuralNetwork {
                 for next in 0..next_layer_size {
                     let pre = neuron_idx + current;
                     let post = neuron_idx + current_layer_size + next;
-                    let weight = (rand::random::<f32>() - 0.5) * 2.0; // Random weight [-1, 1]
+                    let weight = (rng.random::<f32>() - 0.5) * 2.0; // Random weight [-1, 1]
                     let _ = self.add_synapse(pre, post, weight, 1.0);
                 }
             }
@@ -306,24 +307,25 @@ impl SpikingNeuralNetwork {
         // Simplified small-world network creation
         self.synapses.clear();
         let n = self.neurons.len();
+        let mut rng = thread_rng();
 
         // Create ring lattice
         for i in 0..n {
             let next = (i + 1) % n;
-            let weight = (rand::random::<f32>() - 0.5) * 2.0;
+            let weight = (rng.random::<f32>() - 0.5) * 2.0;
             let _ = self.add_synapse(i, next, weight, 1.0);
         }
 
         // Rewire some connections
         let mut synapses_to_rewire = Vec::new();
         for (idx, synapse) in self.synapses.iter().enumerate() {
-            if rand::random::<f32>() < rewiring_prob {
+            if rng.random::<f32>() < rewiring_prob {
                 synapses_to_rewire.push(idx);
             }
         }
 
         for idx in synapses_to_rewire {
-            let new_target = rand::rng().random_range(0..n);
+            let new_target = rng.gen_range(0..n);
             self.synapses[idx].post_neuron = new_target;
         }
     }

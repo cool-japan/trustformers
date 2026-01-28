@@ -460,7 +460,7 @@ impl TapeContext {
     /// Create a new tape context
     pub fn new(tape: Arc<std::sync::Mutex<GradientTape>>) -> Self {
         let was_enabled = {
-            let tape_guard = tape.lock().unwrap();
+            let tape_guard = tape.lock().expect("Lock poisoned");
             tape_guard.is_enabled()
         };
 
@@ -469,13 +469,13 @@ impl TapeContext {
 
     /// Enable recording
     pub fn enable(&self) {
-        let mut tape = self.tape.lock().unwrap();
+        let mut tape = self.tape.lock().expect("Lock poisoned");
         tape.enable();
     }
 
     /// Disable recording
     pub fn disable(&self) {
-        let mut tape = self.tape.lock().unwrap();
+        let mut tape = self.tape.lock().expect("Lock poisoned");
         tape.disable();
     }
 
@@ -489,7 +489,7 @@ impl TapeContext {
         input_shapes: Vec<Vec<usize>>,
         output_shape: Vec<usize>,
     ) -> Result<usize> {
-        let mut tape = self.tape.lock().unwrap();
+        let mut tape = self.tape.lock().expect("Lock poisoned");
         tape.record_operation(
             operation,
             inputs,
@@ -503,7 +503,7 @@ impl TapeContext {
 
 impl Drop for TapeContext {
     fn drop(&mut self) {
-        let mut tape = self.tape.lock().unwrap();
+        let mut tape = self.tape.lock().expect("Lock poisoned");
         if self.was_enabled {
             tape.enable();
         } else {
@@ -736,12 +736,12 @@ mod tests {
         let tape = Arc::new(std::sync::Mutex::new(GradientTape::new()));
         let context = TapeContext::new(tape.clone());
 
-        assert!(context.tape.lock().unwrap().is_enabled());
+        assert!(context.tape.lock().expect("Lock poisoned").is_enabled());
 
         context.disable();
-        assert!(!context.tape.lock().unwrap().is_enabled());
+        assert!(!context.tape.lock().expect("Lock poisoned").is_enabled());
 
         context.enable();
-        assert!(context.tape.lock().unwrap().is_enabled());
+        assert!(context.tape.lock().expect("Lock poisoned").is_enabled());
     }
 }

@@ -988,6 +988,12 @@ pub struct LearningMetricsTracker {
     pub last_adaptation: Option<DateTime<Utc>>,
 }
 
+impl Default for LearningMetricsTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LearningMetricsTracker {
     /// Create new metrics tracker
     pub fn new() -> Self {

@@ -505,10 +505,7 @@ impl GpuPerformanceTracker {
             duration: benchmark.execution_time,
         };
 
-        performance_history
-            .entry(device_id)
-            .or_insert_with(VecDeque::new)
-            .push_back(record);
+        performance_history.entry(device_id).or_default().push_back(record);
 
         // Maintain reasonable history size (24 hours worth of 5-minute intervals = 288 records)
         if let Some(device_history) = performance_history.get_mut(&device_id) {

@@ -177,7 +177,7 @@ impl HardwareManager {
             // GPU backend initialization - no longer needed with new trait design
             self.register_backend_devices(&gpu_backend).await?;
 
-            *self.gpu_backend.lock().unwrap() = Some(gpu_backend);
+            *self.gpu_backend.lock().expect("lock should not be poisoned") = Some(gpu_backend);
         }
         Ok(())
     }
@@ -185,7 +185,7 @@ impl HardwareManager {
     /// Register devices from a backend
     async fn register_backend_devices(&self, backend: &dyn HardwareBackend) -> HardwareResult<()> {
         let devices = backend.discover_devices().await?;
-        let mut device_info = self.device_info.write().unwrap();
+        let mut device_info = self.device_info.write().expect("lock should not be poisoned");
 
         for device in devices {
             let device_id = device.device_id().to_string();

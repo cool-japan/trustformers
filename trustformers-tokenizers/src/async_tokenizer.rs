@@ -783,14 +783,17 @@ mod tests {
 
         let results = async_tokenizer
             .encode_large_batch_with_progress(&texts, move |completed, total| {
-                progress_updates_clone.lock().unwrap().push((completed, total));
+                progress_updates_clone
+                    .lock()
+                    .expect("lock should not be poisoned")
+                    .push((completed, total));
             })
             .await
             .unwrap();
 
         assert_eq!(results.len(), texts.len());
 
-        let updates = progress_updates.lock().unwrap();
+        let updates = progress_updates.lock().expect("lock should not be poisoned");
         assert!(!updates.is_empty());
         assert_eq!(updates.last().unwrap().0, texts.len());
         assert_eq!(updates.last().unwrap().1, texts.len());

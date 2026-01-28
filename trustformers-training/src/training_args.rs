@@ -195,8 +195,7 @@ impl TrainingArguments {
         if let Some(max_steps) = self.max_steps {
             max_steps
         } else {
-            let steps_per_epoch = (num_examples + self.per_device_train_batch_size - 1)
-                / self.per_device_train_batch_size;
+            let steps_per_epoch = num_examples.div_ceil(self.per_device_train_batch_size);
             (self.num_train_epochs * steps_per_epoch as f32) as usize
         }
     }

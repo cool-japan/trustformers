@@ -672,7 +672,7 @@ impl SustainableModelCompression {
 
         // Calculate magnitude-based pruning threshold
         let mut magnitudes: Vec<f32> = data_vec.iter().map(|x| x.abs()).collect();
-        magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        magnitudes.sort_by(|a, b| a.partial_cmp(b).expect("Operation failed"));
 
         let pruning_threshold = magnitudes[data_vec.len() * 30 / 100]; // Prune bottom 30%
 
@@ -818,7 +818,7 @@ impl EnergyOptimalBatchProcessor {
                 let b_efficiency = b.estimated_energy / b.data.len() as f32;
                 a_efficiency
                     .partial_cmp(&b_efficiency)
-                    .unwrap()
+                    .expect("Operation failed")
                     .then(a.deadline.cmp(&b.deadline))
             });
         }
@@ -995,7 +995,7 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let impact = result.unwrap();
+        let impact = result.expect("Operation failed");
         assert!(impact.carbon_emission_grams >= 0.0);
         assert!(impact.sustainability_score >= 0.0 && impact.sustainability_score <= 1.0);
     }
@@ -1030,7 +1030,7 @@ mod tests {
         let result = compressor.compress_for_sustainability(&model_data, 0.3, 0.1);
         assert!(result.is_ok());
 
-        let compression_result = result.unwrap();
+        let compression_result = result.expect("Operation failed");
         assert!(compression_result.energy_reduction >= 0.0);
         assert!(compression_result.sustainability_score >= 0.0);
     }

@@ -338,7 +338,7 @@ impl ModelSplitter {
         // Split remaining data into attention and FFN layers
         let remaining_start = components.last().unwrap().end_offset();
         let remaining_size = total_size - remaining_start;
-        let num_layer_chunks = (remaining_size + chunk_size - 1) / chunk_size;
+        let num_layer_chunks = remaining_size.div_ceil(chunk_size);
 
         for i in 0..num_layer_chunks {
             let start = remaining_start + i * chunk_size;

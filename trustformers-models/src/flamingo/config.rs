@@ -583,8 +583,8 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = FlamingoConfig::flamingo_9b();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: FlamingoConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("operation failed");
+        let deserialized: FlamingoConfig = serde_json::from_str(&json).expect("operation failed");
 
         assert_eq!(config.media_token_length, deserialized.media_token_length);
         assert_eq!(config.vision_language_dim, deserialized.vision_language_dim);

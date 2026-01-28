@@ -1314,16 +1314,11 @@ impl TestGroupingEngine {
     fn add_resource_requirements(
         &self,
         base: ResourceRequirement,
-        _usage: &TestResourceUsage,
+        usage: &TestResourceUsage,
     ) -> ResourceRequirement {
-        // TODO: Properly combine resource requirements using the new generic structure
-        ResourceRequirement {
-            resource_type: base.resource_type.clone(),
-            min_amount: base.min_amount,
-            max_amount: base.max_amount,
-            priority: base.priority.clone(),
-            flexibility: base.flexibility.clone(),
-        }
+        // Convert TestResourceUsage to ResourceRequirement and combine
+        let usage_req = ResourceRequirement::from_resource_usage(usage);
+        self.combine_resource_requirements(&base, &usage_req)
     }
 
     /// Combine two resource requirements
@@ -1332,13 +1327,59 @@ impl TestGroupingEngine {
         req1: &ResourceRequirement,
         req2: &ResourceRequirement,
     ) -> ResourceRequirement {
-        // TODO: Properly combine resource requirements using the new generic structure
-        ResourceRequirement {
-            resource_type: req1.resource_type.clone(),
-            min_amount: req1.min_amount + req2.min_amount,
-            max_amount: req1.max_amount + req2.max_amount,
-            priority: req1.priority.clone(),
-            flexibility: req1.flexibility.clone(),
+        // If resource types match, combine additively
+        if req1.resource_type == req2.resource_type {
+            ResourceRequirement {
+                resource_type: req1.resource_type.clone(),
+                min_amount: req1.min_amount + req2.min_amount,
+                max_amount: req1.max_amount + req2.max_amount,
+                // Use higher priority
+                priority: if self.priority_level(&req1.priority)
+                    > self.priority_level(&req2.priority)
+                {
+                    req1.priority.clone()
+                } else {
+                    req2.priority.clone()
+                },
+                // Use more restrictive flexibility
+                flexibility: if self.flexibility_level(&req1.flexibility)
+                    < self.flexibility_level(&req2.flexibility)
+                {
+                    req1.flexibility.clone()
+                } else {
+                    req2.flexibility.clone()
+                },
+            }
+        } else {
+            // For different resource types, use the more constrained requirement
+            // (higher total amount)
+            let req1_total = req1.min_amount + req1.max_amount;
+            let req2_total = req2.min_amount + req2.max_amount;
+
+            if req1_total >= req2_total {
+                req1.clone()
+            } else {
+                req2.clone()
+            }
+        }
+    }
+
+    /// Get numeric priority level for comparison
+    fn priority_level(&self, priority: &UsagePriority) -> u8 {
+        match priority {
+            UsagePriority::Critical => 3,
+            UsagePriority::High => 2,
+            UsagePriority::Normal => 1,
+            UsagePriority::Low => 0,
+        }
+    }
+
+    /// Get numeric flexibility level for comparison
+    fn flexibility_level(&self, flexibility: &RequirementFlexibility) -> u8 {
+        match flexibility {
+            RequirementFlexibility::Strict => 0,
+            RequirementFlexibility::Flexible => 1,
+            RequirementFlexibility::Optional => 2,
         }
     }
 
@@ -1891,17 +1932,53 @@ struct ComplexityDistribution {
 
 /// Helper implementation for ResourceRequirement
 impl ResourceRequirement {
-    /// Create from TestResourceUsage (simplified to CPU requirement)
+    /// Create from TestResourceUsage with comprehensive resource analysis
     pub fn from_resource_usage(usage: &TestResourceUsage) -> Self {
         use crate::test_independence_analyzer::types::{RequirementFlexibility, UsagePriority};
 
-        // Simplified: create a CPU-based requirement
+        // Analyze all resource types and create a composite requirement
+        // Calculate weighted resource cost considering all resource types
+        let cpu_cost = usage.cpu_cores as f64;
+        let memory_cost = (usage.memory_mb as f64) / 1024.0; // Convert MB to GB
+        let gpu_cost = (usage.gpu_devices.len() as f64) * 2.0; // GPU weighted higher
+        let port_cost = (usage.network_ports.len() as f64) * 0.1; // Ports weighted lower
+
+        let total_cost = cpu_cost + memory_cost + gpu_cost + port_cost;
+
+        // Determine primary resource type based on highest usage
+        let resource_type = if gpu_cost > cpu_cost && gpu_cost > memory_cost {
+            "gpu_device"
+        } else if memory_cost > cpu_cost {
+            "memory"
+        } else {
+            "cpu"
+        };
+
+        // Determine priority based on resource intensity
+        let priority = if total_cost > 10.0 {
+            UsagePriority::High
+        } else if total_cost > 5.0 {
+            UsagePriority::Normal
+        } else {
+            UsagePriority::Low
+        };
+
+        // Determine flexibility based on GPU requirements
+        // GPU requirements are typically less flexible
+        let flexibility = if !usage.gpu_devices.is_empty() {
+            RequirementFlexibility::Strict // GPU requirements are strict
+        } else if usage.cpu_cores < 2.0 {
+            RequirementFlexibility::Flexible
+        } else {
+            RequirementFlexibility::Flexible
+        };
+
         Self {
-            resource_type: "cpu".to_string(),
-            min_amount: usage.cpu_cores as f64,
-            max_amount: usage.cpu_cores as f64,
-            priority: UsagePriority::Normal,
-            flexibility: RequirementFlexibility::Flexible,
+            resource_type: resource_type.to_string(),
+            min_amount: total_cost,
+            max_amount: total_cost * 1.2, // 20% buffer for peak usage
+            priority,
+            flexibility,
         }
     }
 }

@@ -8,7 +8,7 @@
 
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::{DType, Tensor};
-use ndarray::{ArrayD, IxDyn};
+use scirs2_core::ndarray::{ArrayD, IxDyn};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -1023,7 +1023,7 @@ mod tests {
     #[test]
     fn test_dense_to_sparse() {
         let dense = Tensor::new(vec![1.0, 0.0, 0.0, 2.0]).unwrap();
-        let dense_2d = dense.reshape(&[2, 2]).unwrap();
+        let dense_2d = dense.reshape(&[2, 2]).expect("Reshape failed");
 
         let sparse = SparseTensor::from_dense(&dense_2d, 0.5).unwrap();
         assert_eq!(sparse.nnz(), 2);
@@ -1057,7 +1057,7 @@ mod tests {
         let sparse2 =
             SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![1, 0], vec![3.0, 4.0]).unwrap();
 
-        let result = sparse1.add(&sparse2).unwrap();
+        let result = sparse1.add(&sparse2).expect("Addition failed");
         assert_eq!(result.nnz(), 4); // Four non-zero elements after addition
     }
 
@@ -1086,7 +1086,7 @@ mod tests {
             SparseTensor::new_csr(vec![2, 2], vec![0, 1, 2], vec![0, 1], vec![1.0, 2.0]).unwrap();
 
         let dense = Tensor::new(vec![1.0, 0.0, 0.0, 1.0]).unwrap();
-        let dense_2d = dense.reshape(&[2, 2]).unwrap();
+        let dense_2d = dense.reshape(&[2, 2]).expect("Reshape failed");
 
         let result = sparse.dense_matmul(&dense_2d).unwrap();
         assert_eq!(result.shape(), vec![2, 2]);

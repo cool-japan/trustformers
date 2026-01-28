@@ -59,6 +59,12 @@ pub struct VectorIndex {
     embeddings: HashMap<EmbeddingKey, EmbeddingEntry>,
 }
 
+impl Default for VectorIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VectorIndex {
     pub fn new() -> Self {
         Self {

@@ -1,5 +1,5 @@
+#![allow(unused_variables)]
 use anyhow::Result;
-#[allow(unused_variables)]
 use std::collections::HashMap;
 use trustformers_serve::serverless::{
     Architecture, AwsLambdaProvider, AzureFunctionsProvider, ColdStartConfig, CostAlert,
@@ -121,10 +121,8 @@ async fn main() -> Result<()> {
     println!("🔧 Optimization Recommendations:");
     for rec in recommendations {
         println!(
-            "  • [{}] {}: {}",
-            format!("{:?}", rec.priority),
-            rec.category,
-            rec.description
+            "  • [{:?}] {}: {}",
+            rec.priority, rec.category, rec.description
         );
         println!("    Impact: {} (Effort: {:?})", rec.impact, rec.effort);
     }

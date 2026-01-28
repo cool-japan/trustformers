@@ -3,7 +3,7 @@
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
 
-#[cfg(feature = "metal")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 use mpsgraph as mps;
 
 /// Metal Performance Shaders implementation for Apple Silicon hardware acceleration
@@ -22,11 +22,11 @@ use mpsgraph as mps;
 /// - macOS 10.15+ or iOS 13+ for Metal Performance Shaders
 /// - Apple Silicon hardware for optimal performance
 pub struct MetalImpl {
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     device: metal::Device,
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     command_queue: metal::CommandQueue,
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     library: metal::Library,
 
     #[cfg(not(feature = "metal"))]
@@ -36,7 +36,7 @@ pub struct MetalImpl {
 impl MetalImpl {
     /// Create new Metal implementation
     pub fn new() -> Result<Self> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             Self::new_with_metal()
         }
@@ -47,7 +47,7 @@ impl MetalImpl {
         }
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn new_with_metal() -> Result<Self> {
         // Create Metal device (automatically selects the best available GPU)
         let device = metal::Device::system_default().ok_or_else(|| {
@@ -87,7 +87,7 @@ impl MetalImpl {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     #[allow(deprecated)]
     fn supports_mps(device: &metal::Device) -> bool {
         // Check for Metal Performance Shaders support
@@ -107,7 +107,7 @@ impl MetalImpl {
             || device.supports_feature_set(metal::MTLFeatureSet::iOS_GPUFamily4_v1)
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn create_kernel_library(device: &metal::Device) -> Result<metal::Library> {
         // Metal Shading Language source for custom kernels
         let kernel_source = r#"
@@ -157,6 +157,22 @@ impl MetalImpl {
             ) {
                 if (index >= size) return;
                 output[index] = max(0.0f, input[index]);
+            }
+
+            // GELU activation function
+            // GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+            kernel void gelu_f32(
+                device const float* input [[buffer(0)]],
+                device float* output [[buffer(1)]],
+                constant uint& size [[buffer(2)]],
+                uint index [[thread_position_in_grid]]
+            ) {
+                if (index >= size) return;
+                float x = input[index];
+                float x_cubed = x * x * x;
+                // sqrt(2/π) ≈ 0.7978845608
+                float inner = 0.7978845608f * (x + 0.044715f * x_cubed);
+                output[index] = 0.5f * x * (1.0f + tanh(inner));
             }
 
             // Optimized softmax for attention mechanisms
@@ -283,7 +299,7 @@ impl MetalImpl {
     /// - Utilizes GPU parallelization with 2D thread grid
     /// - Memory-efficient with unified memory on Apple Silicon
     /// - Batching handled via thread groups for optimal throughput
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn matrix_multiply(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         // Validate input tensors
         if a.shape().len() < 2 || b.shape().len() < 2 {
@@ -369,8 +385,8 @@ impl MetalImpl {
         // Use 2D grid: (N columns, M rows) for output matrix
         let thread_group_size = metal::MTLSize::new(16, 16, 1); // 16x16 thread block
         let thread_groups = metal::MTLSize::new(
-            ((b_cols + 15) / 16) as u64, // Number of column blocks
-            ((a_rows + 15) / 16) as u64, // Number of row blocks
+            b_cols.div_ceil(16) as u64, // Number of column blocks
+            a_rows.div_ceil(16) as u64, // Number of row blocks
             1,
         );
 
@@ -387,7 +403,7 @@ impl MetalImpl {
     }
 
     /// Execute element-wise addition using custom Metal kernel
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn add_tensors(&self, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         if a.shape() != b.shape() {
             return Err(TrustformersError::tensor_op_error(
@@ -439,7 +455,7 @@ impl MetalImpl {
         );
 
         let thread_group_size = metal::MTLSize::new(256, 1, 1);
-        let thread_groups = metal::MTLSize::new(((size + 255) / 256) as u64, 1, 1);
+        let thread_groups = metal::MTLSize::new(size.div_ceil(256) as u64, 1, 1);
 
         encoder.dispatch_thread_groups(thread_groups, thread_group_size);
         encoder.end_encoding();
@@ -449,6 +465,65 @@ impl MetalImpl {
 
         // Convert result back to Tensor
         Tensor::from_metal_buffer(&result_buffer, &result_shape)
+    }
+
+    /// Execute GELU activation function using Metal kernel
+    ///
+    /// GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x^3)))
+    ///
+    /// This is a GPU-accelerated elementwise operation optimized for Apple Silicon.
+    pub fn gelu(&self, input: &Tensor) -> Result<Tensor> {
+        let size = input.len();
+        let result_shape = input.shape().to_vec();
+
+        // Create Metal buffers
+        let input_buffer = input.to_metal_buffer(&self.device)?;
+        let output_buffer = self.device.new_buffer(
+            (size * std::mem::size_of::<f32>()) as u64,
+            metal::MTLResourceOptions::StorageModeShared,
+        );
+
+        // Get compute function
+        let function = self.library.get_function("gelu_f32", None).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to get gelu kernel: {}", e),
+                "MetalImpl::gelu",
+            )
+        })?;
+
+        let pipeline =
+            self.device.new_compute_pipeline_state_with_function(&function).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create compute pipeline: {}", e),
+                    "MetalImpl::gelu",
+                )
+            })?;
+
+        // Execute kernel
+        let command_buffer = self.command_queue.new_command_buffer();
+        let encoder = command_buffer.new_compute_command_encoder();
+
+        encoder.set_compute_pipeline_state(&pipeline);
+        encoder.set_buffer(0, Some(&input_buffer), 0);
+        encoder.set_buffer(1, Some(&output_buffer), 0);
+        let size_u32 = size as u32;
+        encoder.set_bytes(
+            2,
+            std::mem::size_of::<u32>() as u64,
+            &size_u32 as *const u32 as *const std::ffi::c_void,
+        );
+
+        let thread_group_size = metal::MTLSize::new(256, 1, 1);
+        let thread_groups = metal::MTLSize::new(size.div_ceil(256) as u64, 1, 1);
+
+        encoder.dispatch_thread_groups(thread_groups, thread_group_size);
+        encoder.end_encoding();
+
+        command_buffer.commit();
+        command_buffer.wait_until_completed();
+
+        // Convert result back to Tensor
+        Tensor::from_metal_buffer(&output_buffer, &result_shape)
     }
 
     /// Execute Flash Attention using custom Metal kernel
@@ -470,7 +545,7 @@ impl MetalImpl {
     /// - `key`: Key tensor [batch, seq_k, dim]
     /// - `value`: Value tensor [batch, seq_k, dim_v]
     /// - `output`: Output tensor (modified in-place) [batch, seq_q, dim_v]
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     pub fn flash_attention(
         &self,
         query: &Tensor,
@@ -596,8 +671,8 @@ impl MetalImpl {
         // 3D grid: (dim_v, seq_q, batch)
         let thread_group_size = metal::MTLSize::new(8, 8, 1); // 8x8x1 thread block
         let thread_groups = metal::MTLSize::new(
-            ((dim_v + 7) / 8) as u64,     // dim_v blocks
-            ((seq_len_q + 7) / 8) as u64, // seq_q blocks
+            dim_v.div_ceil(8) as u64,     // dim_v blocks
+            seq_len_q.div_ceil(8) as u64, // seq_q blocks
             batch_size as u64,            // batch blocks
         );
 
@@ -618,7 +693,7 @@ impl MetalImpl {
 
     /// Get device information
     pub fn device_info(&self) -> Result<String> {
-        #[cfg(feature = "metal")]
+        #[cfg(all(target_os = "macos", feature = "metal"))]
         {
             Ok(format!(
                 "Metal Device: {}\nUnified Memory: {} GB\nMax Threads Per Group: {}",
@@ -817,7 +892,7 @@ trait TensorMetalExt {
 }
 
 impl TensorMetalExt for Tensor {
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn to_metal_buffer(&self, device: &metal::Device) -> Result<metal::Buffer> {
         let data = self.data()?;
         let buffer = device.new_buffer_with_data(
@@ -836,7 +911,7 @@ impl TensorMetalExt for Tensor {
         ))
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     fn from_metal_buffer(buffer: &metal::Buffer, shape: &[usize]) -> Result<Tensor> {
         let data_ptr = buffer.contents() as *const f32;
         let len = shape.iter().product::<usize>();
@@ -872,7 +947,7 @@ mod tests {
         assert!(!info.is_empty());
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn test_matrix_multiply() {
         let metal_impl = MetalImpl::new().unwrap();
@@ -887,7 +962,7 @@ mod tests {
         assert_eq!(result_tensor.shape(), &[2, 2]);
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn test_add_tensors() {
         let metal_impl = MetalImpl::new().unwrap();

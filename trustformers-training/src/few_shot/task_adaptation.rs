@@ -1,5 +1,4 @@
 use anyhow::Result;
-use ndarray_rand::RandomExt;
 use scirs2_core::ndarray::{Array1, Array2, Axis}; // SciRS2 Integration Policy
 use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
@@ -253,14 +252,15 @@ impl AdapterLayer {
         let down_bound = (6.0 / (hidden_dim + bottleneck_dim) as f32).sqrt();
         let up_bound = (6.0 / (bottleneck_dim + hidden_dim) as f32).sqrt();
 
-        let down_projection = Array2::random(
-            (hidden_dim, bottleneck_dim),
-            ndarray_rand::rand_distr::Uniform::new(-down_bound, down_bound),
-        );
-        let up_projection = Array2::random(
-            (bottleneck_dim, hidden_dim),
-            ndarray_rand::rand_distr::Uniform::new(-up_bound, up_bound),
-        );
+        let mut rng = thread_rng();
+        let down_uniform = Uniform::new(-down_bound, down_bound)?;
+        let down_projection = Array2::from_shape_fn((hidden_dim, bottleneck_dim), |_| {
+            down_uniform.sample(&mut rng)
+        });
+        let up_uniform = Uniform::new(-up_bound, up_bound)?;
+        let up_projection = Array2::from_shape_fn((bottleneck_dim, hidden_dim), |_| {
+            up_uniform.sample(&mut rng)
+        });
 
         let down_bias = Array1::zeros(bottleneck_dim);
         let up_bias = Array1::zeros(hidden_dim);
@@ -415,10 +415,10 @@ impl TaskAdapter {
 
         // Xavier initialization
         let bound = (6.0 / (input_dim + output_dim) as f32).sqrt();
-        let classifier = Array2::random(
-            (input_dim, output_dim),
-            ndarray_rand::rand_distr::Uniform::new(-bound, bound),
-        );
+        let mut rng = thread_rng();
+        let uniform = Uniform::new(-bound, bound)?;
+        let classifier =
+            Array2::from_shape_fn((input_dim, output_dim), |_| uniform.sample(&mut rng));
 
         self.classifier_head = Some(classifier);
         Ok(())
@@ -524,9 +524,10 @@ impl TaskAdapter {
 
     /// Sample batch indices
     fn sample_batch_indices(&self, total_size: usize, batch_size: usize) -> Vec<usize> {
-        use rand::seq::SliceRandom;
+        // SliceRandom already available via scirs2_core::random::*
+        let mut rng = thread_rng();
         let mut indices: Vec<_> = (0..total_size).collect();
-        indices.shuffle(&mut thread_rng().rng_mut());
+        indices.shuffle(&mut rng);
         indices.into_iter().take(batch_size).collect()
     }
 
@@ -542,12 +543,13 @@ impl TaskAdapter {
 
     /// Save adapter state
     pub fn save(&self, path: &str) -> Result<()> {
-        let serialized = bincode::serialize(&(
+        let data_to_serialize = (
             &self.task_descriptor,
             &self.config,
             &self.training_stats,
             self.current_step,
-        ))?;
+        );
+        let serialized = rmp_serde::to_vec(&data_to_serialize)?;
         std::fs::write(path, serialized)?;
         Ok(())
     }
@@ -560,7 +562,7 @@ impl TaskAdapter {
             AdaptationConfig,
             AdaptationStats,
             usize,
-        ) = bincode::deserialize(&data)?;
+        ) = rmp_serde::from_slice(&data)?;
 
         let mut adapter = Self {
             task_descriptor,

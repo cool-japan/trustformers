@@ -1,10 +1,14 @@
+// Allow result_large_err for internal functions - TrustformersError is intentionally detailed
+// Allow excessive_nesting for matrix multiplication algorithms
+#![allow(clippy::result_large_err, clippy::excessive_nesting)]
+
 use crate::errors::{TrustformersPyError, TrustformersPyResult};
-use numpy::{PyArray, PyArrayMethods};
+use scirs2_numpy::{PyArray, PyArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use rayon::prelude::*;
-use scirs2_core::ndarray::{self as ndarray, ArrayD, ArrayViewD, Axis, Dimension, IxDyn};
+use scirs2_core::ndarray::{self as ndarray, ArrayD, Axis, Dimension, IxDyn};
+use scirs2_core::parallel_ops::*; // SciRS2 Integration Policy - replaces rayon
 use trustformers_core::quantization::{
     QuantizationConfig, QuantizationScheme, QuantizedTensor, Quantizer,
 };
@@ -176,13 +180,13 @@ impl TensorOptimizer {
         }
 
         // Try to reshape without copying if memory layout allows
-        if let Ok(reshaped) = tensor.view().into_shape(IxDyn(new_shape)) {
+        if let Ok(reshaped) = tensor.view().into_shape_with_order(IxDyn(new_shape)) {
             Ok(reshaped.to_owned())
         } else {
             // Need to create a contiguous copy
             let contiguous = tensor.as_standard_layout();
             Ok(contiguous
-                .into_shape(IxDyn(new_shape))
+                .into_shape_with_order(IxDyn(new_shape))
                 .map_err(|e| TrustformersPyError::TensorError {
                     message: format!("Reshape failed: {}", e),
                 })?
@@ -288,7 +292,7 @@ impl TensorOptimizer {
         key: &ArrayD<f32>,
         value: &ArrayD<f32>,
         mask: Option<&ArrayD<f32>>,
-        dropout_p: f32,
+        _dropout_p: f32,
         scale: Option<f32>,
     ) -> TrustformersPyResult<ArrayD<f32>> {
         let q_shape = query.shape();
@@ -314,7 +318,7 @@ impl TensorOptimizer {
         }
 
         // Compute attention scores: Q @ K^T
-        let key_t = key.clone().reversed_axes(); // Transpose last two dimensions
+        let _key_t = key.clone().reversed_axes(); // Transpose last two dimensions
 
         // For simplicity, compute attention for 2D case (can be extended for batch dims)
         let mut scores = ArrayD::<f32>::zeros(IxDyn(&[seq_len_q, seq_len_k]));
@@ -432,24 +436,26 @@ impl TensorOptimizer {
 }
 
 /// Memory pool for reusing tensor allocations
+#[derive(Default)]
 pub struct TensorMemoryPool {
     pools: std::collections::HashMap<Vec<usize>, Vec<ArrayD<f32>>>,
 }
 
 /// Python wrapper for optimized tensor operations
 #[pyclass(name = "TensorOptimized", module = "trustformers")]
+#[derive(Default)]
 pub struct PyTensorOptimized;
 
 #[pymethods]
 impl PyTensorOptimized {
     #[new]
     pub fn new() -> Self {
-        PyTensorOptimized
+        Self
     }
 
     /// Apply GELU activation function
     #[staticmethod]
-    pub fn gelu(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn gelu(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::gelu(&input_array);
         let result_shape = result.shape();
@@ -461,7 +467,7 @@ impl PyTensorOptimized {
 
     /// Apply SiLU/Swish activation function
     #[staticmethod]
-    pub fn silu(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn silu(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::silu(&input_array);
         let result_shape = result.shape().to_vec();
@@ -473,7 +479,7 @@ impl PyTensorOptimized {
 
     /// Apply Mish activation function
     #[staticmethod]
-    pub fn mish(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn mish(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::mish(&input_array);
         let result_shape = result.shape().to_vec();
@@ -485,7 +491,10 @@ impl PyTensorOptimized {
 
     /// Apply fast GELU activation function
     #[staticmethod]
-    pub fn gelu_fast(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn gelu_fast(
+        py: Python<'_>,
+        input: &Bound<'_, PyArray<f32, IxDyn>>,
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::gelu_fast(&input_array);
         let result_shape = result.shape().to_vec();
@@ -501,7 +510,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         input: &Bound<'_, PyArray<f32, IxDyn>>,
         axis: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::stable_softmax(&input_array, axis)
             .map_err(|e| PyValueError::new_err(format!("Softmax error: {:?}", e)))?;
@@ -518,7 +527,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         a: &Bound<'_, PyArray<f32, IxDyn>>,
         b: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let a_array = a.try_readonly()?.as_array().to_owned();
         let b_array = b.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::optimized_matmul(&a_array, &b_array)
@@ -539,7 +548,7 @@ impl PyTensorOptimized {
         bias: Option<&Bound<'_, PyArray<f32, IxDyn>>>,
         eps: f32,
         normalized_shape: Vec<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let weight_array = weight.map(|w| w.try_readonly().unwrap().as_array().to_owned());
         let bias_array = bias.map(|b| b.try_readonly().unwrap().as_array().to_owned());
@@ -570,7 +579,7 @@ impl PyTensorOptimized {
         mask: Option<&Bound<'_, PyArray<f32, IxDyn>>>,
         dropout_p: f32,
         scale: Option<f32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let query_array = query.try_readonly()?.as_array().to_owned();
         let key_array = key.try_readonly()?.as_array().to_owned();
         let value_array = value.try_readonly()?.as_array().to_owned();
@@ -600,7 +609,7 @@ impl PyTensorOptimized {
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         cos: &Bound<'_, PyArray<f32, IxDyn>>,
         sin: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let tensor_array = tensor.try_readonly()?.as_array().to_owned();
         let cos_array = cos.try_readonly()?.as_array().to_owned();
         let sin_array = sin.try_readonly()?.as_array().to_owned();
@@ -621,7 +630,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensors: &Bound<'_, PyList>,
         axis: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         if tensors.is_empty() {
             return Err(PyValueError::new_err(
                 "Cannot concatenate empty list of tensors",
@@ -632,7 +641,7 @@ impl PyTensorOptimized {
         let arrays: Result<Vec<ArrayD<f32>>, PyErr> = tensors
             .iter()
             .map(|item| {
-                let tensor = item.downcast::<PyArray<f32, IxDyn>>()?;
+                let tensor = item.cast::<PyArray<f32, IxDyn>>()?;
                 Ok(tensor.try_readonly()?.as_array().to_owned())
             })
             .collect();
@@ -670,7 +679,7 @@ impl PyTensorOptimized {
 
     /// Element-wise logarithm
     #[staticmethod]
-    pub fn log(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn log(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| if x > 0.0 { x.ln() } else { f32::NEG_INFINITY });
 
@@ -683,7 +692,7 @@ impl PyTensorOptimized {
 
     /// Element-wise exponential
     #[staticmethod]
-    pub fn exp(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn exp(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x.exp());
 
@@ -696,7 +705,7 @@ impl PyTensorOptimized {
 
     /// Element-wise square root
     #[staticmethod]
-    pub fn sqrt(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn sqrt(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| if x >= 0.0 { x.sqrt() } else { f32::NAN });
 
@@ -713,7 +722,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         input: &Bound<'_, PyArray<f32, IxDyn>>,
         exponent: f32,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x.powf(exponent));
 
@@ -730,7 +739,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         new_shape: Vec<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let tensor_array = tensor.try_readonly()?.as_array().to_owned();
 
         // Validate that total elements match
@@ -754,7 +763,7 @@ impl PyTensorOptimized {
     pub fn transpose(
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let tensor_array = tensor.try_readonly()?.as_array().to_owned();
         let result = tensor_array.clone().reversed_axes();
 
@@ -772,7 +781,7 @@ impl PyTensorOptimized {
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         axis: Option<usize>,
         keepdims: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let tensor_array = tensor.try_readonly()?.as_array().to_owned();
         let keepdims = keepdims.unwrap_or(false);
 
@@ -791,12 +800,13 @@ impl PyTensorOptimized {
             ArrayD::from_elem(vec![], total_sum)
         };
 
-        let result_shape = if keepdims && axis.is_some() {
-            let mut shape = tensor_array.shape().to_vec();
-            shape[axis.unwrap()] = 1;
-            shape
-        } else {
-            result.shape().to_vec()
+        let result_shape = match (keepdims, axis) {
+            (true, Some(ax)) => {
+                let mut shape = tensor_array.shape().to_vec();
+                shape[ax] = 1;
+                shape
+            },
+            _ => result.shape().to_vec(),
         };
 
         let result_data: Vec<f32> = result.iter().cloned().collect();
@@ -811,7 +821,7 @@ impl PyTensorOptimized {
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         axis: Option<usize>,
         keepdims: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let tensor_array = tensor.try_readonly()?.as_array().to_owned();
         let keepdims = keepdims.unwrap_or(false);
 
@@ -834,12 +844,13 @@ impl PyTensorOptimized {
             ArrayD::from_elem(vec![], total_mean)
         };
 
-        let result_shape = if keepdims && axis.is_some() {
-            let mut shape = tensor_array.shape().to_vec();
-            shape[axis.unwrap()] = 1;
-            shape
-        } else {
-            result.shape().to_vec()
+        let result_shape = match (keepdims, axis) {
+            (true, Some(ax)) => {
+                let mut shape = tensor_array.shape().to_vec();
+                shape[ax] = 1;
+                shape
+            },
+            _ => result.shape().to_vec(),
         };
 
         let result_data: Vec<f32> = result.iter().cloned().collect();
@@ -854,7 +865,7 @@ impl PyTensorOptimized {
         input: &Bound<'_, PyArray<f32, IxDyn>>,
         min_value: Option<f32>,
         max_value: Option<f32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
 
         let result = input_array.mapv(|x| {
@@ -877,7 +888,7 @@ impl PyTensorOptimized {
 
     /// Element-wise absolute value
     #[staticmethod]
-    pub fn abs(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn abs(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x.abs());
 
@@ -890,7 +901,7 @@ impl PyTensorOptimized {
 
     /// Element-wise sign function
     #[staticmethod]
-    pub fn sign(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn sign(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| {
             if x > 0.0 {
@@ -911,7 +922,7 @@ impl PyTensorOptimized {
 
     /// Element-wise sine function
     #[staticmethod]
-    pub fn sin(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn sin(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x.sin());
         let result_shape = result.shape();
@@ -922,7 +933,7 @@ impl PyTensorOptimized {
 
     /// Element-wise cosine function
     #[staticmethod]
-    pub fn cos(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn cos(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x.cos());
         let result_shape = result.shape();
@@ -933,7 +944,7 @@ impl PyTensorOptimized {
 
     /// Element-wise tangent function
     #[staticmethod]
-    pub fn tan(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn tan(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x.tan());
         let result_shape = result.shape();
@@ -948,7 +959,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         input1: &Bound<'_, PyArray<f32, IxDyn>>,
         input2: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array1 = input1.try_readonly()?.as_array().to_owned();
         let array2 = input2.try_readonly()?.as_array().to_owned();
         if array1.shape() != array2.shape() {
@@ -956,7 +967,7 @@ impl PyTensorOptimized {
                 "Input tensors must have the same shape",
             ));
         }
-        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a, &b| a.max(b));
+        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a: &f32, &b: &f32| a.max(b));
         let result_shape = result.shape();
         let result_data: Vec<f32> = result.iter().cloned().collect();
         let py_array = PyArray::from_vec(py, result_data).reshape(result_shape)?;
@@ -969,7 +980,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         input1: &Bound<'_, PyArray<f32, IxDyn>>,
         input2: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array1 = input1.try_readonly()?.as_array().to_owned();
         let array2 = input2.try_readonly()?.as_array().to_owned();
         if array1.shape() != array2.shape() {
@@ -977,7 +988,7 @@ impl PyTensorOptimized {
                 "Input tensors must have the same shape",
             ));
         }
-        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a, &b| a.min(b));
+        let result = ndarray::Zip::from(&array1).and(&array2).map_collect(|&a: &f32, &b: &f32| a.min(b));
         let result_shape = result.shape();
         let result_data: Vec<f32> = result.iter().cloned().collect();
         let py_array = PyArray::from_vec(py, result_data).reshape(result_shape)?;
@@ -990,7 +1001,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         axis: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let new_shape: Vec<usize> = if let Some(axis) = axis {
             if axis >= array.ndim() {
@@ -1020,7 +1031,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         axis: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         if axis > array.ndim() {
             return Err(PyValueError::new_err("Axis out of bounds"));
@@ -1039,7 +1050,7 @@ impl PyTensorOptimized {
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         symmetric: Option<bool>,
         per_channel: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let tensor_core = Tensor::from(array.into_dyn());
 
@@ -1079,7 +1090,7 @@ impl PyTensorOptimized {
         symmetric: Option<bool>,
         per_channel: Option<bool>,
         group_size: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let tensor_core = Tensor::from(array.into_dyn());
 
@@ -1117,7 +1128,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         per_channel: Option<bool>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let tensor_core = Tensor::from(array.into_dyn());
 
@@ -1151,7 +1162,7 @@ impl PyTensorOptimized {
 
     /// Dequantize tensor back to FP32
     #[staticmethod]
-    pub fn dequantize(py: Python<'_>, quantized_data: &Bound<'_, PyDict>) -> PyResult<PyObject> {
+    pub fn dequantize(py: Python<'_>, quantized_data: &Bound<'_, PyDict>) -> PyResult<Py<PyAny>> {
         // Extract quantized tensor data from Python dictionary
         let data: Vec<u8> = quantized_data
             .get_item("data")?
@@ -1218,7 +1229,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         schemes: Option<Vec<String>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let tensor_core = Tensor::from(array.into_dyn());
 
@@ -1288,7 +1299,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         input1: &Bound<'_, PyArray<f32, IxDyn>>,
         input2: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array1 = input1.try_readonly()?.as_array().to_owned();
         let array2 = input2.try_readonly()?.as_array().to_owned();
 
@@ -1328,7 +1339,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         input1: &Bound<'_, PyArray<f32, IxDyn>>,
         input2: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array1 = input1.try_readonly()?.as_array().to_owned();
         let array2 = input2.try_readonly()?.as_array().to_owned();
 
@@ -1369,7 +1380,7 @@ impl PyTensorOptimized {
         input: &Bound<'_, PyArray<f32, IxDyn>>,
         indices: &Bound<'_, PyArray<i64, IxDyn>>,
         axis: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = input.try_readonly()?.as_array().to_owned();
         let indices_array = indices.try_readonly()?.as_array().to_owned();
         let axis = axis.unwrap_or(0);
@@ -1399,7 +1410,7 @@ impl PyTensorOptimized {
 
     /// Create a tensor filled with ones
     #[staticmethod]
-    pub fn ones(py: Python<'_>, shape: Vec<usize>) -> PyResult<PyObject> {
+    pub fn ones(py: Python<'_>, shape: Vec<usize>) -> PyResult<Py<PyAny>> {
         let total_elements: usize = shape.iter().product();
         let data = vec![1.0f32; total_elements];
         let py_array = PyArray::from_vec(py, data).reshape(shape)?;
@@ -1408,7 +1419,7 @@ impl PyTensorOptimized {
 
     /// Create a tensor filled with zeros
     #[staticmethod]
-    pub fn zeros(py: Python<'_>, shape: Vec<usize>) -> PyResult<PyObject> {
+    pub fn zeros(py: Python<'_>, shape: Vec<usize>) -> PyResult<Py<PyAny>> {
         let total_elements: usize = shape.iter().product();
         let data = vec![0.0f32; total_elements];
         let py_array = PyArray::from_vec(py, data).reshape(shape)?;
@@ -1417,7 +1428,7 @@ impl PyTensorOptimized {
 
     /// Create a tensor filled with a specific value
     #[staticmethod]
-    pub fn full(py: Python<'_>, shape: Vec<usize>, fill_value: f32) -> PyResult<PyObject> {
+    pub fn full(py: Python<'_>, shape: Vec<usize>, fill_value: f32) -> PyResult<Py<PyAny>> {
         let total_elements: usize = shape.iter().product();
         let data = vec![fill_value; total_elements];
         let py_array = PyArray::from_vec(py, data).reshape(shape)?;
@@ -1431,7 +1442,7 @@ impl PyTensorOptimized {
         shape: Vec<usize>,
         mean: Option<f32>,
         std: Option<f32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         use scirs2_core::random::*;
 
         let total_elements: usize = shape.iter().product();
@@ -1455,7 +1466,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         repeats: Vec<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
 
         if repeats.len() != array.ndim() {
@@ -1473,7 +1484,7 @@ impl PyTensorOptimized {
 
         // Simple implementation for demonstration - can be optimized
         let original_data: Vec<f32> = array.iter().cloned().collect();
-        let elements_per_repeat = array.len();
+        let _elements_per_repeat = array.len();
 
         for _ in 0..repeats.iter().product::<usize>() / array.len() {
             result_data.extend(original_data.iter());
@@ -1491,7 +1502,7 @@ impl PyTensorOptimized {
         axis: usize,
         start: usize,
         end: usize,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
 
         if axis >= array.ndim() {
@@ -1514,7 +1525,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         ranges: Vec<(usize, usize)>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
 
         if ranges.len() != array.ndim() {
@@ -1547,7 +1558,7 @@ impl PyTensorOptimized {
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         dim: usize,
         index: i64,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
 
         if dim >= array.ndim() {
@@ -1574,7 +1585,7 @@ impl PyTensorOptimized {
         condition: &Bound<'_, PyArray<f32, IxDyn>>,
         input_true: &Bound<'_, PyArray<f32, IxDyn>>,
         input_false: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let cond_array = condition.try_readonly()?.as_array().to_owned();
         let true_array = input_true.try_readonly()?.as_array().to_owned();
         let false_array = input_false.try_readonly()?.as_array().to_owned();
@@ -1588,7 +1599,7 @@ impl PyTensorOptimized {
         let result = ndarray::Zip::from(&cond_array)
             .and(&true_array)
             .and(&false_array)
-            .map_collect(|&c, &t, &f| if c != 0.0 { t } else { f });
+            .map_collect(|&c: &f32, &t: &f32, &f: &f32| if c != 0.0 { t } else { f });
 
         let result_shape = result.shape();
         let result_data: Vec<f32> = result.iter().cloned().collect();
@@ -1603,7 +1614,7 @@ impl PyTensorOptimized {
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         mask: &Bound<'_, PyArray<f32, IxDyn>>,
         value: f32,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let mask_array = mask.try_readonly()?.as_array().to_owned();
 
@@ -1613,7 +1624,7 @@ impl PyTensorOptimized {
             ));
         }
 
-        let result = ndarray::Zip::from(&array).and(&mask_array).map_collect(|&x, &m| {
+        let result = ndarray::Zip::from(&array).and(&mask_array).map_collect(|&x: &f32, &m: &f32| {
             if m != 0.0 {
                 value
             } else {
@@ -1633,7 +1644,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         mask: &Bound<'_, PyArray<f32, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let mask_array = mask.try_readonly()?.as_array().to_owned();
 
@@ -1661,7 +1672,7 @@ impl PyTensorOptimized {
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         dim: usize,
         indices: &Bound<'_, PyArray<i64, IxDyn>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let indices_array = indices.try_readonly()?.as_array().to_owned();
 
@@ -1692,7 +1703,7 @@ impl PyTensorOptimized {
 
     /// Non-zero elements (returns indices)
     #[staticmethod]
-    pub fn nonzero(py: Python<'_>, tensor: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn nonzero(py: Python<'_>, tensor: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
 
         let mut indices: Vec<Vec<usize>> = vec![Vec::new(); array.ndim()];
@@ -1709,7 +1720,7 @@ impl PyTensorOptimized {
         let result_list = PyList::empty(py);
         for dim_indices in indices {
             let dim_indices_i64: Vec<i64> = dim_indices.iter().map(|&x| x as i64).collect();
-            let py_array = numpy::PyArray::from_vec(py, dim_indices_i64);
+            let py_array = scirs2_numpy::PyArray::from_vec(py, dim_indices_i64);
             result_list.append(py_array)?;
         }
 
@@ -1722,7 +1733,7 @@ impl PyTensorOptimized {
         py: Python<'_>,
         tensor: &Bound<'_, PyArray<f32, IxDyn>>,
         dims: Option<Vec<usize>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let array = tensor.try_readonly()?.as_array().to_owned();
         let dims_to_flip = dims.unwrap_or_else(|| (0..array.ndim()).collect());
 
@@ -1742,18 +1753,19 @@ impl PyTensorOptimized {
 
 /// Advanced activation functions for neural networks
 #[pyclass(name = "AdvancedActivations")]
+#[derive(Default)]
 pub struct PyAdvancedActivations;
 
 #[pymethods]
 impl PyAdvancedActivations {
     #[new]
     pub fn new() -> Self {
-        PyAdvancedActivations
+        Self
     }
 
     /// Swish activation function (x * sigmoid(x))
     #[staticmethod]
-    pub fn swish(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn swish(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x * (1.0 / (1.0 + (-x).exp())));
         let result_shape = result.shape();
@@ -1768,7 +1780,7 @@ impl PyAdvancedActivations {
         py: Python<'_>,
         input: &Bound<'_, PyArray<f32, IxDyn>>,
         alpha: Option<f32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let alpha_val = alpha.unwrap_or(1.0);
         let result = input_array.mapv(|x| if x >= 0.0 { x } else { alpha_val * (x.exp() - 1.0) });
@@ -1785,7 +1797,7 @@ impl PyAdvancedActivations {
         input: &Bound<'_, PyArray<f32, IxDyn>>,
         min_val: Option<f32>,
         max_val: Option<f32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let min_value = min_val.unwrap_or(-1.0);
         let max_value = max_val.unwrap_or(1.0);
@@ -1798,10 +1810,10 @@ impl PyAdvancedActivations {
 
     /// SELU (Scaled Exponential Linear Unit) activation function
     #[staticmethod]
-    pub fn selu(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn selu(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
-        let alpha = 1.6732632423543772848170429916717;
-        let scale = 1.0507009873554804934193349852946;
+        let alpha = 1.673_263_2_f32;
+        let scale = 1.050_701_f32;
         let result =
             input_array.mapv(
                 |x| {
@@ -1820,10 +1832,13 @@ impl PyAdvancedActivations {
 
     /// Hardswish activation function
     #[staticmethod]
-    pub fn hardswish(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn hardswish(
+        py: Python<'_>,
+        input: &Bound<'_, PyArray<f32, IxDyn>>,
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| {
-            let relu6 = (x + 3.0).max(0.0).min(6.0);
+            let relu6 = (x + 3.0).clamp(0.0, 6.0);
             x * relu6 / 6.0
         });
         let result_shape = result.shape();
@@ -1838,7 +1853,7 @@ impl PyAdvancedActivations {
         py: Python<'_>,
         input: &Bound<'_, PyArray<f32, IxDyn>>,
         beta: Option<f32>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let beta_val = beta.unwrap_or(1.0);
         let result = input_array.mapv(|x| (1.0 + (beta_val * x).exp()).ln() / beta_val);
@@ -1850,7 +1865,7 @@ impl PyAdvancedActivations {
 
     /// Softsign activation function (smooth alternative to tanh)
     #[staticmethod]
-    pub fn softsign(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<PyObject> {
+    pub fn softsign(py: Python<'_>, input: &Bound<'_, PyArray<f32, IxDyn>>) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = input_array.mapv(|x| x / (1.0 + x.abs()));
         let result_shape = result.shape();
@@ -1862,9 +1877,7 @@ impl PyAdvancedActivations {
 
 impl TensorMemoryPool {
     pub fn new() -> Self {
-        Self {
-            pools: std::collections::HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn get_tensor(&mut self, shape: &[usize]) -> ArrayD<f32> {
@@ -1880,11 +1893,11 @@ impl TensorMemoryPool {
 
     pub fn return_tensor(&mut self, tensor: ArrayD<f32>) {
         let shape = tensor.shape().to_vec();
-        self.pools.entry(shape).or_insert_with(Vec::new).push(tensor);
+        self.pools.entry(shape).or_default().push(tensor);
     }
 }
 
-/// Thread-local memory pool for efficient tensor allocation
+// Thread-local memory pool for efficient tensor allocation
 thread_local! {
     static MEMORY_POOL: std::cell::RefCell<TensorMemoryPool> =
         std::cell::RefCell::new(TensorMemoryPool::new());

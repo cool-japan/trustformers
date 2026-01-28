@@ -1600,7 +1600,7 @@ mod tests {
 
     #[test]
     fn test_openvino_backend_config() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
 
         let config = OpenVINOBackendConfig::cpu_optimized(model_path.clone());
@@ -1614,7 +1614,7 @@ mod tests {
 
     #[test]
     fn test_openvino_backend_config_gpu() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
 
         let config = OpenVINOBackendConfig::gpu_optimized(model_path.clone(), Some(0));
@@ -1625,7 +1625,7 @@ mod tests {
 
     #[test]
     fn test_openvino_backend_config_vpu() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
 
         let config = OpenVINOBackendConfig::vpu_optimized(model_path.clone());
@@ -1637,7 +1637,7 @@ mod tests {
 
     #[test]
     fn test_openvino_pipeline_options() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
 
         let options = OpenVINOPipelineOptions::cpu_optimized(model_path.clone());
@@ -1655,7 +1655,7 @@ mod tests {
 
     #[test]
     fn test_performance_hints() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
 
         let latency_config = OpenVINOBackendConfig::low_latency(model_path.clone());
@@ -1685,7 +1685,7 @@ mod tests {
 
     #[test]
     fn test_config_with_weights() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
         let weights_path = temp_dir.path().join("model.bin");
 
@@ -1698,7 +1698,7 @@ mod tests {
 
     #[test]
     fn test_config_with_cache() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
         let cache_dir = temp_dir.path().join("cache");
 
@@ -1710,7 +1710,7 @@ mod tests {
 
     #[test]
     fn test_config_with_timeout() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.xml");
 
         let config = OpenVINOBackendConfig::cpu_optimized(model_path.clone()).with_timeout(5000);

@@ -1,6 +1,5 @@
 // Dataset loading and management for evaluation
 use anyhow::Result;
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -63,14 +62,13 @@ impl EvaluationDataset {
     }
 
     pub fn shuffle(&mut self, seed: Option<u64>) {
-        use rand::seq::SliceRandom;
-        use rand::SeedableRng;
+        use scirs2_core::random::*;
 
         if let Some(seed) = seed {
             let mut rng = StdRng::seed_from_u64(seed);
             self.samples.shuffle(&mut rng);
         } else {
-            let mut rng = rand::rng();
+            let mut rng = thread_rng();
             self.samples.shuffle(&mut rng);
         }
     }

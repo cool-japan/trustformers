@@ -6,7 +6,6 @@ use super::{ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
 use byteorder::{LittleEndian, WriteBytesExt};
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -287,7 +286,7 @@ impl GGMLExporter {
     fn generate_dummy_weights(&self, size: usize, tensor_type: GGMLType) -> Result<Vec<u8>> {
         // Generate realistic weight patterns based on neural network initialization schemes
         let mut data = Vec::new();
-        use rand::Rng;
+        use scirs2_core::random::*;
         let mut rng = thread_rng();
 
         match tensor_type {
@@ -319,7 +318,7 @@ impl GGMLExporter {
                 // Realistic Q8_0 quantization with proper scaling
                 // Q8_0 format: 32 float values -> 1 scale + 32 quantized values
                 let block_size = 32;
-                let num_blocks = (size + block_size - 1) / block_size;
+                let num_blocks = size.div_ceil(block_size);
 
                 for _ in 0..num_blocks {
                     // Generate a realistic scale factor for this block

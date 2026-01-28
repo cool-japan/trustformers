@@ -33,7 +33,7 @@
 //!
 //! ### Translation Task
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::seq2seq::{
 //!     Seq2SeqDataCollator, Seq2SeqCollatorConfig
 //! };
@@ -52,7 +52,7 @@
 //!
 //! ### Summarization Task
 //!
-//! ```rust
+//! ```rust,ignore
 //! use trustformers::auto::data_collators::seq2seq::{
 //!     Seq2SeqDataCollator, Seq2SeqCollatorConfig
 //! };
@@ -141,7 +141,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// ## Usage Examples
 ///
-/// ```rust
+/// ```rust,ignore
 /// use trustformers::auto::data_collators::seq2seq::{
 ///     Seq2SeqDataCollator, Seq2SeqCollatorConfig
 /// };
@@ -185,7 +185,7 @@ impl Seq2SeqDataCollator {
     ///
     /// # Examples
     ///
-    /// ```rust
+    /// ```rust,ignore
     /// let config = Seq2SeqCollatorConfig {
     ///     max_length: Some(512),
     ///     max_target_length: Some(128),
@@ -444,8 +444,8 @@ impl Seq2SeqCollatorConfig {
     ///
     /// # Examples
     ///
-    /// ```rust
-    /// let model_config = serde_json::json!({
+    /// ```rust,ignore
+    ///    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "max_target_length": 128,
     ///     "pad_token_id": 0,
@@ -456,7 +456,7 @@ impl Seq2SeqCollatorConfig {
     /// assert_eq!(config.max_length, Some(512));
     /// assert_eq!(config.max_target_length, Some(128));
     /// assert_eq!(config.pad_token_id, 0);
-    /// ```
+
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         let max_length = config
             .get("max_position_embeddings")

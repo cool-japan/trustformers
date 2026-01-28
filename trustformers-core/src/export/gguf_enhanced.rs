@@ -562,7 +562,7 @@ impl GGUFExporter {
 
         if self.quantization_type.is_quantized() {
             let block_size = self.quantization_type.block_size() as u64;
-            let num_blocks = (element_count + block_size - 1) / block_size;
+            let num_blocks = element_count.div_ceil(block_size);
             Ok(num_blocks * element_size)
         } else {
             Ok(element_count * element_size)

@@ -456,7 +456,7 @@ impl FeatureEngineeringOrchestrator {
         // This is a simplified dummy implementation
         // In practice, you'd need proper mapping from features back to data point structure
         PerformanceDataPoint {
-            parallelism: features.get(0).copied().unwrap_or(1.0) as usize,
+            parallelism: features.first().copied().unwrap_or(1.0) as usize,
             throughput: features.get(1).copied().unwrap_or(100.0),
             latency: Duration::from_millis(features.get(2).copied().unwrap_or(10.0) as u64),
             cpu_utilization: features.get(3).copied().unwrap_or(0.5) as f32,
@@ -898,6 +898,12 @@ pub struct StandardScaler {
     stds: Option<Vec<f64>>,
 }
 
+impl Default for StandardScaler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl StandardScaler {
     pub fn new() -> Self {
         Self {
@@ -984,6 +990,12 @@ impl FeatureTransformer for StandardScaler {
 pub struct MinMaxNormalizer {
     mins: Option<Vec<f64>>,
     maxs: Option<Vec<f64>>,
+}
+
+impl Default for MinMaxNormalizer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MinMaxNormalizer {
@@ -1092,6 +1104,12 @@ impl FeatureTransformer for LogTransformer {
 pub struct RobustScaler {
     medians: Option<Vec<f64>>,
     iqrs: Option<Vec<f64>>,
+}
+
+impl Default for RobustScaler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RobustScaler {
@@ -1556,6 +1574,12 @@ struct FeatureStats {
     total_count: usize,
 }
 
+impl Default for FeatureStatisticsTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FeatureStatisticsTracker {
     pub fn new() -> Self {
         Self {
@@ -1624,6 +1648,12 @@ pub struct FeatureImportanceTracker {
     importance_scores: HashMap<String, f32>,
     /// Importance history
     importance_history: Vec<(DateTime<Utc>, HashMap<String, f32>)>,
+}
+
+impl Default for FeatureImportanceTracker {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FeatureImportanceTracker {

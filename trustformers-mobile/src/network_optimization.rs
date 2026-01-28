@@ -852,7 +852,7 @@ impl NetworkOptimizationManager {
 
         // Check if download is already in progress
         {
-            let manager = self.download_manager.lock().unwrap();
+            let manager = self.download_manager.lock().expect("Operation failed");
             if manager.active_downloads.contains_key(&request.download_id) {
                 return Err(TrustformersError::runtime_error(
                     "Download already in progress".into(),
@@ -870,7 +870,7 @@ impl NetworkOptimizationManager {
 
         // Add to download queue
         {
-            let mut manager = self.download_manager.lock().unwrap();
+            let mut manager = self.download_manager.lock().expect("Operation failed");
             manager.enqueue_download(request.clone());
         }
 
@@ -882,25 +882,25 @@ impl NetworkOptimizationManager {
 
     /// Get download progress
     pub fn get_download_progress(&self, download_id: &str) -> Result<Option<DownloadProgress>> {
-        let manager = self.download_manager.lock().unwrap();
+        let manager = self.download_manager.lock().expect("Operation failed");
         Ok(manager.get_download_progress(download_id))
     }
 
     /// Pause download
     pub async fn pause_download(&self, download_id: &str) -> Result<bool> {
-        let mut manager = self.download_manager.lock().unwrap();
+        let mut manager = self.download_manager.lock().expect("Operation failed");
         manager.pause_download(download_id)
     }
 
     /// Resume download
     pub async fn resume_download(&self, download_id: &str) -> Result<bool> {
-        let mut manager = self.download_manager.lock().unwrap();
+        let mut manager = self.download_manager.lock().expect("Operation failed");
         manager.resume_download(download_id)
     }
 
     /// Cancel download
     pub async fn cancel_download(&self, download_id: &str) -> Result<bool> {
-        let mut manager = self.download_manager.lock().unwrap();
+        let mut manager = self.download_manager.lock().expect("Operation failed");
         manager.cancel_download(download_id)
     }
 
@@ -914,7 +914,7 @@ impl NetworkOptimizationManager {
             .into());
         }
 
-        let mut p2p_manager = self.p2p_manager.lock().unwrap();
+        let mut p2p_manager = self.p2p_manager.lock().expect("Operation failed");
         p2p_manager.add_shared_model(model_id)?;
 
         tracing::info!("Enabled P2P sharing for model: {}", model_id);
@@ -927,7 +927,7 @@ impl NetworkOptimizationManager {
             return Ok(Vec::new());
         }
 
-        let mut p2p_manager = self.p2p_manager.lock().unwrap();
+        let mut p2p_manager = self.p2p_manager.lock().expect("Operation failed");
         let peers = p2p_manager.discover_peers().await?;
 
         Ok(peers)
@@ -939,7 +939,7 @@ impl NetworkOptimizationManager {
             return Ok(None);
         }
 
-        let mut edge_manager = self.edge_manager.lock().unwrap();
+        let mut edge_manager = self.edge_manager.lock().expect("Operation failed");
         let server = edge_manager.select_optimal_server().await?;
 
         Ok(server)
@@ -947,7 +947,7 @@ impl NetworkOptimizationManager {
 
     /// Check network quality
     pub async fn check_network_quality(&self) -> Result<String> {
-        let mut monitor = self.quality_monitor.lock().unwrap();
+        let mut monitor = self.quality_monitor.lock().expect("Operation failed");
         let quality = monitor.measure_quality().await?;
 
         let quality_json = serde_json::json!({
@@ -970,7 +970,7 @@ impl NetworkOptimizationManager {
             .into());
         }
 
-        let mut offline_manager = self.offline_manager.lock().unwrap();
+        let mut offline_manager = self.offline_manager.lock().expect("Operation failed");
         offline_manager.enter_offline_mode().await?;
 
         tracing::info!("Entered offline mode");
@@ -979,7 +979,7 @@ impl NetworkOptimizationManager {
 
     /// Exit offline mode and sync
     pub async fn exit_offline_mode(&self) -> Result<()> {
-        let mut offline_manager = self.offline_manager.lock().unwrap();
+        let mut offline_manager = self.offline_manager.lock().expect("Operation failed");
         offline_manager.exit_offline_mode().await?;
 
         // Start synchronization
@@ -1005,22 +1005,22 @@ impl NetworkOptimizationManager {
     /// Get network optimization statistics
     pub fn get_optimization_statistics(&self) -> Result<String> {
         let download_stats = {
-            let manager = self.download_manager.lock().unwrap();
+            let manager = self.download_manager.lock().expect("Operation failed");
             manager.get_statistics()
         };
 
         let p2p_stats = {
-            let manager = self.p2p_manager.lock().unwrap();
+            let manager = self.p2p_manager.lock().expect("Operation failed");
             manager.get_statistics()
         };
 
         let edge_stats = {
-            let manager = self.edge_manager.lock().unwrap();
+            let manager = self.edge_manager.lock().expect("Operation failed");
             manager.get_statistics()
         };
 
         let quality_stats = {
-            let monitor = self.quality_monitor.lock().unwrap();
+            let monitor = self.quality_monitor.lock().expect("Operation failed");
             monitor.get_statistics()
         };
 
@@ -1071,7 +1071,7 @@ impl NetworkOptimizationManager {
     }
 
     async fn process_download_queue(&self) -> Result<()> {
-        let mut manager = self.download_manager.lock().unwrap();
+        let mut manager = self.download_manager.lock().expect("Operation failed");
         manager.process_queue().await
     }
 
@@ -1093,7 +1093,7 @@ impl NetworkOptimizationManager {
     async fn sync_adaptive(&self) -> Result<()> {
         // Implement adaptive sync based on network conditions
         let quality = {
-            let monitor = self.quality_monitor.lock().unwrap();
+            let monitor = self.quality_monitor.lock().expect("Operation failed");
             monitor.current_quality
         };
 
@@ -1116,7 +1116,7 @@ impl NetworkOptimizationManager {
     }
 
     async fn get_current_bandwidth(&self) -> f64 {
-        let manager = self.download_manager.lock().unwrap();
+        let manager = self.download_manager.lock().expect("Operation failed");
         manager.bandwidth_monitor.current_bandwidth_kbps
     }
 

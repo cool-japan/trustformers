@@ -29,7 +29,8 @@ pub struct BPETokenizer {
 // GPT-2 uses a special byte-level BPE
 static GPT2_PATTERN: Lazy<Regex> = Lazy::new(|| {
     // Simplified regex without lookahead - matches the same patterns but less precisely
-    Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+").unwrap()
+    Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+")
+        .expect("valid regex")
 });
 
 impl Clone for BPETokenizer {
@@ -228,9 +229,8 @@ impl BPETokenizer {
         for ch in text.chars() {
             let is_chinese = self.is_chinese_char(ch);
 
-            if is_chinese && !prev_was_chinese && !result.is_empty() && !result.ends_with(' ') {
-                result.push(' ');
-            } else if !is_chinese && prev_was_chinese && !result.is_empty() {
+            // Add space when transitioning between Chinese and non-Chinese text
+            if (is_chinese != prev_was_chinese) && !result.is_empty() && !result.ends_with(' ') {
                 result.push(' ');
             }
 

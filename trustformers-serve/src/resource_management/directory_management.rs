@@ -803,7 +803,7 @@ impl DirectoryCleanupScheduler {
         let mut scheduled_tasks = self.scheduled_tasks.lock();
         let initial_count = scheduled_tasks.len();
 
-        scheduled_tasks.retain(|task| &task.test_id != test_id);
+        scheduled_tasks.retain(|task| task.test_id != test_id);
 
         let cancelled_count = initial_count - scheduled_tasks.len();
         if cancelled_count > 0 {

@@ -718,6 +718,12 @@ pub struct ResourceOptimizedStrategy {
     pub target_overhead: f64,
 }
 
+impl Default for ResourceOptimizedStrategy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ResourceOptimizedStrategy {
     pub fn new() -> Self {
         Self {
@@ -1393,7 +1399,7 @@ impl DeadlockDetectionAlgorithm for ResourceAllocationGraphAlgorithm {
             for dependent in &dep.dependent_locks {
                 resource_waiters
                     .entry(dependent.clone())
-                    .or_insert_with(|| Vec::new())
+                    .or_insert_with(Vec::new)
                     .push(dep.lock_id.clone());
             }
         }

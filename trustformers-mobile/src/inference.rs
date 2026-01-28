@@ -817,7 +817,7 @@ impl InferenceCache {
         // Simple eviction strategy - remove oldest entries
         // In practice, would use a proper LRU implementation
         if !self.cache.is_empty() {
-            let first_key = self.cache.keys().next().unwrap().clone();
+            let first_key = self.cache.keys().next().expect("Cache is empty").clone();
             self.cache.remove(&first_key);
             self.current_size_bytes = self.current_size_bytes.saturating_sub(1024 * 1024);
             // Approximate
@@ -951,11 +951,17 @@ mod tests {
     #[test]
     fn test_model_loading() {
         let config = MobileConfig::default();
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         let mut weights = HashMap::new();
-        weights.insert("layer1".to_string(), Tensor::ones(&[10, 10]).unwrap());
-        weights.insert("layer2".to_string(), Tensor::ones(&[10, 5]).unwrap());
+        weights.insert(
+            "layer1".to_string(),
+            Tensor::ones(&[10, 10]).expect("Failed to create tensor"),
+        );
+        weights.insert(
+            "layer2".to_string(),
+            Tensor::ones(&[10, 5]).expect("Failed to create tensor"),
+        );
 
         let result = engine.load_model(weights);
         assert!(result.is_ok());
@@ -965,15 +971,18 @@ mod tests {
     #[test]
     fn test_inference() {
         let config = MobileConfig::default();
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Load a simple model
         let mut weights = HashMap::new();
-        weights.insert("layer1".to_string(), Tensor::ones(&[5, 5]).unwrap());
-        engine.load_model(weights).unwrap();
+        weights.insert(
+            "layer1".to_string(),
+            Tensor::ones(&[5, 5]).expect("Failed to create tensor"),
+        );
+        engine.load_model(weights).expect("Failed to load model");
 
         // Perform inference
-        let input = Tensor::ones(&[5]).unwrap();
+        let input = Tensor::ones(&[5]).expect("Failed to create tensor");
         let result = engine.inference(&input);
         assert!(result.is_ok());
     }
@@ -985,24 +994,30 @@ mod tests {
             max_batch_size: 3,
             ..Default::default()
         };
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Load a simple model
         let mut weights = HashMap::new();
-        weights.insert("layer1".to_string(), Tensor::ones(&[5, 5]).unwrap());
-        engine.load_model(weights).unwrap();
+        weights.insert(
+            "layer1".to_string(),
+            Tensor::ones(&[5, 5]).expect("Failed to create tensor"),
+        );
+        engine.load_model(weights).expect("Failed to load model");
 
         // Perform batch inference
-        let inputs = vec![Tensor::ones(&[5]).unwrap(), Tensor::ones(&[5]).unwrap()];
+        let inputs = vec![
+            Tensor::ones(&[5]).expect("Failed to create tensor"),
+            Tensor::ones(&[5]).expect("Failed to create tensor"),
+        ];
         let results = engine.batch_inference(inputs);
         assert!(results.is_ok());
-        assert_eq!(results.unwrap().len(), 2);
+        assert_eq!(results.expect("Batch inference failed").len(), 2);
     }
 
     #[test]
     fn test_memory_info() {
         let config = MobileConfig::default();
-        let engine = MobileInferenceEngine::new(config).unwrap();
+        let engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         let memory_info = engine.get_memory_info();
         assert!(memory_info.memory_limit_mb > 0);
@@ -1028,7 +1043,7 @@ mod tests {
     #[test]
     fn test_config_update() {
         let config = MobileConfig::default();
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         let new_config = MobileConfig {
             max_memory_mb: 1024,
@@ -1046,12 +1061,15 @@ mod tests {
             max_memory_mb: 1024, // Enough for cache
             ..Default::default()
         };
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Load model to enable caching
         let mut weights = HashMap::new();
-        weights.insert("layer1".to_string(), Tensor::ones(&[5, 5]).unwrap());
-        engine.load_model(weights).unwrap();
+        weights.insert(
+            "layer1".to_string(),
+            Tensor::ones(&[5, 5]).expect("Failed to create tensor"),
+        );
+        engine.load_model(weights).expect("Failed to load model");
 
         // Test cache operations
         engine.clear_cache();
@@ -1063,16 +1081,19 @@ mod tests {
     #[test]
     fn test_warm_up() {
         let config = MobileConfig::default();
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Load model first
         let mut weights = HashMap::new();
-        weights.insert("embedding".to_string(), Tensor::ones(&[100, 512]).unwrap());
+        weights.insert(
+            "embedding".to_string(),
+            Tensor::ones(&[100, 512]).expect("Operation failed"),
+        );
         weights.insert(
             "layer.0.weight".to_string(),
-            Tensor::ones(&[512, 512]).unwrap(),
+            Tensor::ones(&[512, 512]).expect("Operation failed"),
         );
-        engine.load_model(weights).unwrap();
+        engine.load_model(weights).expect("Failed to load model");
 
         // Test warm-up
         let result = engine.warm_up();
@@ -1082,7 +1103,7 @@ mod tests {
     #[test]
     fn test_warm_up_without_model() {
         let config = MobileConfig::default();
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Test warm-up without loading model (should fail)
         let result = engine.warm_up();
@@ -1092,7 +1113,7 @@ mod tests {
     #[test]
     fn test_set_performance_mode() {
         let config = MobileConfig::default();
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Test all valid performance modes
         assert!(
@@ -1126,15 +1147,15 @@ mod tests {
             backend: crate::MobileBackend::CPU,
             ..Default::default()
         };
-        let mut engine = MobileInferenceEngine::new(config).unwrap();
+        let mut engine = MobileInferenceEngine::new(config).expect("Failed to create engine");
 
         // Set to high performance mode
-        engine.set_performance_mode(2).unwrap();
+        engine.set_performance_mode(2).expect("Operation failed");
         // In high performance mode, fp16 should be disabled and backend should be GPU
         // (Note: These assertions verify the implementation logic)
 
         // Set to power saving mode
-        engine.set_performance_mode(0).unwrap();
+        engine.set_performance_mode(0).expect("Operation failed");
         // In power saving mode, fp16 should be enabled and backend should be CPU
 
         // The engine should still be functional after mode changes

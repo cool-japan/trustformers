@@ -2,7 +2,49 @@ use crate::errors::{Result, TrustformersError};
 use crate::layers::Linear;
 use crate::tensor::Tensor;
 use crate::traits::Layer;
-use ndarray::{s, Array1, Array2, ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{
+    s, Array1, Array2, ArrayBase, ArrayD, Axis, Dimension, IxDyn, OwnedRepr, Zip,
+};
+#[cfg(not(target_os = "macos"))]
+use scirs2_core::simd_ops::SimdUnifiedOps;
+
+/// Minimum size threshold for BLAS GEMM
+const MIN_SIZE_FOR_BLAS: usize = 32;
+
+/// Direct BLAS GEMM using OxiBLAS for maximum performance
+#[cfg(target_os = "macos")]
+#[inline]
+fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+    use oxiblas_blas::level3::gemm;
+    use oxiblas_matrix::{MatMut, MatRef};
+
+    // Create matrix views from slices (row-major layout)
+    let a_mat = MatRef::new(a.as_ptr(), m, k, k);
+    let b_mat = MatRef::new(b.as_ptr(), k, n, n);
+    let c_mat = MatMut::new(c.as_mut_ptr(), m, n, n);
+
+    // GEMM: C = 1.0 * A * B + 0.0 * C
+    gemm(1.0, a_mat, b_mat, 0.0, c_mat);
+}
+
+/// Fallback for non-macOS: use scirs2-core SIMD GEMM
+#[cfg(not(target_os = "macos"))]
+#[inline]
+fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
+    // Safe expect: shape and vector length are guaranteed to match by caller
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).expect("BLAS input shape mismatch");
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).expect("BLAS input shape mismatch");
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).expect("BLAS output shape mismatch");
+    f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
+    if let Some(slice) = c_arr.as_slice() {
+        c.copy_from_slice(slice);
+    } else {
+        // Fallback: copy element by element
+        for (i, &val) in c_arr.iter().enumerate() {
+            c[i] = val;
+        }
+    }
+}
 
 /// FlashAttention: Memory-efficient attention computation
 ///
@@ -201,7 +243,7 @@ impl FlashAttention {
                 let mut m =
                     ArrayD::from_elem(IxDyn(&[batch_size, num_heads, seq_len]), f32::NEG_INFINITY); // row maxes
 
-                let num_blocks = (seq_len + self.block_size - 1) / self.block_size;
+                let num_blocks = seq_len.div_ceil(self.block_size);
 
                 // Iterate over blocks of Q (queries)
                 for i in 0..num_blocks {
@@ -263,7 +305,7 @@ impl FlashAttention {
                         });
 
                         let m_prev = m_block.clone();
-                        let m_combined = ndarray::Zip::from(&m_block)
+                        let m_combined = Zip::from(&m_block)
                             .and(&m_new)
                             .map_collect(|&m_old, &m_curr| m_old.max(m_curr));
 
@@ -281,19 +323,18 @@ impl FlashAttention {
                                 }
                             }
                         }
-                        let exp_scores = ndarray::Zip::from(&scores)
+                        let exp_scores = Zip::from(&scores)
                             .and(&m_combined_expanded)
                             .map_collect(|&score, &m_max| (score - m_max).exp());
 
-                        let exp_prev = ndarray::Zip::from(&m_prev)
+                        let exp_prev = Zip::from(&m_prev)
                             .and(&m_combined)
                             .map_collect(|&m_old, &m_new| (m_old - m_new).exp());
 
                         // Update row sums
                         let l_new = exp_scores.sum_axis(Axis(3));
-                        let l_prev_scaled = ndarray::Zip::from(&l_block)
-                            .and(&exp_prev)
-                            .map_collect(|&l, &exp| l * exp);
+                        let l_prev_scaled =
+                            Zip::from(&l_block).and(&exp_prev).map_collect(|&l, &exp| l * exp);
                         l_block = l_prev_scaled + l_new;
 
                         // Update output - broadcast exp_prev to match o_block shape
@@ -347,12 +388,12 @@ impl FlashAttention {
     /// Helper function for batched matrix multiplication with array slices
     fn batched_matmul_slices<D1, D2>(
         &self,
-        a: &ndarray::ArrayBase<ndarray::OwnedRepr<f32>, D1>,
-        b: &ndarray::ArrayBase<ndarray::OwnedRepr<f32>, D2>,
+        a: &ArrayBase<OwnedRepr<f32>, D1>,
+        b: &ArrayBase<OwnedRepr<f32>, D2>,
     ) -> Result<ArrayD<f32>>
     where
-        D1: ndarray::Dimension,
-        D2: ndarray::Dimension,
+        D1: Dimension,
+        D2: Dimension,
     {
         // Convert to dynamic arrays for uniform handling
         let a_dyn = a.view().into_dyn().to_owned();
@@ -394,14 +435,25 @@ impl FlashAttention {
                 let b_slice = b.index_axis(Axis(0), b_idx);
                 let b_mat = b_slice.index_axis(Axis(0), h_idx);
 
-                // Convert to owned 2D arrays for matrix multiplication
-                let a_2d = Array2::from_shape_vec((m, k), a_mat.iter().cloned().collect())
-                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                // Collect data for matrix multiplication
+                let a_data: Vec<f32> = a_mat.iter().cloned().collect();
+                let b_data: Vec<f32> = b_mat.iter().cloned().collect();
 
-                let b_2d = Array2::from_shape_vec((k, n), b_mat.iter().cloned().collect())
-                    .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
-
-                let product = a_2d.dot(&b_2d);
+                // Use direct BLAS for larger matrices
+                let product =
+                    if m >= MIN_SIZE_FOR_BLAS && k >= MIN_SIZE_FOR_BLAS && n >= MIN_SIZE_FOR_BLAS {
+                        let mut result_vec = vec![0.0f32; m * n];
+                        blas_sgemm(&a_data, &b_data, &mut result_vec, m, k, n);
+                        Array2::from_shape_vec((m, n), result_vec)
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?
+                    } else {
+                        // Fallback to ndarray dot for small matrices
+                        let a_2d = Array2::from_shape_vec((m, k), a_data)
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                        let b_2d = Array2::from_shape_vec((k, n), b_data)
+                            .map_err(|e| TrustformersError::shape_error(e.to_string()))?;
+                        a_2d.dot(&b_2d)
+                    };
 
                 result
                     .index_axis_mut(Axis(0), b_idx)
@@ -439,7 +491,7 @@ impl FlashAttention {
 
                 // FlashAttention-2: Better work partitioning
                 // Process multiple query blocks in parallel (conceptually)
-                let num_blocks = (seq_len + self.block_size - 1) / self.block_size;
+                let num_blocks = seq_len.div_ceil(self.block_size);
 
                 // For each batch and head
                 for b in 0..batch_size {
@@ -794,7 +846,7 @@ mod tests {
         let flash_attn = FlashAttention::new(768, 12, 0.1, true, Some(64), false);
         assert!(flash_attn.is_ok());
 
-        let flash_attn = flash_attn.unwrap();
+        let flash_attn = flash_attn.expect("Failed to create FlashAttention");
         assert_eq!(flash_attn.num_heads, 12);
         assert_eq!(flash_attn.hidden_size, 768);
         assert_eq!(flash_attn.head_dim, 64);
@@ -804,10 +856,11 @@ mod tests {
 
     #[test]
     fn test_flash_attention_forward_pass() {
-        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), false).unwrap();
+        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), false)
+            .expect("Failed to create FlashAttention");
 
         // Create test input
-        let hidden_states = Tensor::randn(&[2, 128, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[2, 128, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -816,7 +869,7 @@ mod tests {
         let output = flash_attn.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 128, 256]);
     }
 
@@ -825,7 +878,7 @@ mod tests {
         let mqa = MultiQueryAttention::new(768, 12, 0.1, true);
         assert!(mqa.is_ok());
 
-        let mqa = mqa.unwrap();
+        let mqa = mqa.expect("Failed to create MultiQueryAttention");
         assert_eq!(mqa.num_heads, 12);
         assert_eq!(mqa.hidden_size, 768);
         assert_eq!(mqa.head_dim, 64);
@@ -836,7 +889,7 @@ mod tests {
         let gqa = GroupedQueryAttention::new(768, 12, 4, 0.1, true);
         assert!(gqa.is_ok());
 
-        let gqa = gqa.unwrap();
+        let gqa = gqa.expect("Failed to create GroupedQueryAttention");
         assert_eq!(gqa.num_query_heads, 12);
         assert_eq!(gqa.num_key_value_heads, 4);
         assert_eq!(gqa.hidden_size, 768);
@@ -845,9 +898,10 @@ mod tests {
 
     #[test]
     fn test_flash_attention_causal() {
-        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), true).unwrap();
+        let flash_attn = FlashAttention::new(256, 8, 0.0, true, Some(32), true)
+            .expect("Failed to create FlashAttention");
 
-        let hidden_states = Tensor::randn(&[1, 64, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[1, 64, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -856,26 +910,27 @@ mod tests {
         let output = flash_attn.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
     }
 
     #[test]
     fn test_flash_attention_deterministic() {
-        let flash_attn = FlashAttention::new(128, 4, 0.0, true, Some(16), false).unwrap();
+        let flash_attn = FlashAttention::new(128, 4, 0.0, true, Some(16), false)
+            .expect("Failed to create FlashAttention");
 
-        let hidden_states = Tensor::ones(&[1, 32, 128]).unwrap();
+        let hidden_states = Tensor::ones(&[1, 32, 128]).expect("Failed to create ones tensor");
         let input = FlashAttentionInput {
             hidden_states: hidden_states.clone(),
             attention_mask: None,
         };
 
-        let output1 = flash_attn.forward(input.clone()).unwrap();
-        let output2 = flash_attn.forward(input).unwrap();
+        let output1 = flash_attn.forward(input.clone()).expect("Forward pass failed");
+        let output2 = flash_attn.forward(input).expect("Forward pass failed");
 
         // With same input and no dropout, outputs should be identical
-        let data1 = output1.data().unwrap();
-        let data2 = output2.data().unwrap();
+        let data1 = output1.data().expect("Failed to get data");
+        let data2 = output2.data().expect("Failed to get data");
 
         for (a, b) in data1.iter().zip(data2.iter()) {
             assert!((a - b).abs() < 1e-6, "Outputs should be deterministic");
@@ -888,7 +943,7 @@ mod tests {
             FlashAttention::new_with_version(768, 12, 0.1, true, Some(64), false, true);
         assert!(flash_attn_2.is_ok());
 
-        let flash_attn_2 = flash_attn_2.unwrap();
+        let flash_attn_2 = flash_attn_2.expect("Failed to create FlashAttention-2");
         assert_eq!(flash_attn_2.num_heads, 12);
         assert_eq!(flash_attn_2.hidden_size, 768);
         assert_eq!(flash_attn_2.head_dim, 64);
@@ -900,10 +955,11 @@ mod tests {
     #[test]
     fn test_flash_attention_2_forward_pass() {
         let flash_attn_2 =
-            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), false, true).unwrap();
+            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), false, true)
+                .expect("Failed to create FlashAttention-2");
 
         // Create test input
-        let hidden_states = Tensor::randn(&[2, 128, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[2, 128, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -912,7 +968,7 @@ mod tests {
         let output = flash_attn_2.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 128, 256]);
     }
 
@@ -920,22 +976,24 @@ mod tests {
     fn test_flash_attention_2_vs_1_consistency() {
         // Test that FlashAttention-2 produces similar results to FlashAttention-1
         let flash_attn_1 =
-            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, false).unwrap();
+            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, false)
+                .expect("Failed to create FlashAttention-1");
         let flash_attn_2 =
-            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, true).unwrap();
+            FlashAttention::new_with_version(128, 4, 0.0, true, Some(16), false, true)
+                .expect("Failed to create FlashAttention-2");
 
-        let hidden_states = Tensor::ones(&[1, 32, 128]).unwrap();
+        let hidden_states = Tensor::ones(&[1, 32, 128]).expect("Failed to create ones tensor");
         let input = FlashAttentionInput {
             hidden_states: hidden_states.clone(),
             attention_mask: None,
         };
 
-        let output1 = flash_attn_1.forward(input.clone()).unwrap();
-        let output2 = flash_attn_2.forward(input).unwrap();
+        let output1 = flash_attn_1.forward(input.clone()).expect("Forward pass failed");
+        let output2 = flash_attn_2.forward(input).expect("Forward pass failed");
 
         // Results should be very close (allowing for small numerical differences)
-        let data1 = output1.data().unwrap();
-        let data2 = output2.data().unwrap();
+        let data1 = output1.data().expect("Failed to get data");
+        let data2 = output2.data().expect("Failed to get data");
 
         let mut max_diff: f32 = 0.0;
         for (a, b) in data1.iter().zip(data2.iter()) {
@@ -954,9 +1012,10 @@ mod tests {
     #[test]
     fn test_flash_attention_2_causal() {
         let flash_attn_2 =
-            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), true, true).unwrap();
+            FlashAttention::new_with_version(256, 8, 0.0, true, Some(32), true, true)
+                .expect("Failed to create FlashAttention-2");
 
-        let hidden_states = Tensor::randn(&[1, 64, 256]).unwrap();
+        let hidden_states = Tensor::randn(&[1, 64, 256]).expect("Failed to create random tensor");
         let input = FlashAttentionInput {
             hidden_states,
             attention_mask: None,
@@ -965,7 +1024,7 @@ mod tests {
         let output = flash_attn_2.forward(input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.shape(), vec![1, 64, 256]);
     }
 }

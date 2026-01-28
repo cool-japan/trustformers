@@ -615,7 +615,7 @@ impl OptimizationResult {
 
         Self {
             result_id: format!("combined_{}", results.len()),
-            optimization_type: results[0].optimization_type.clone(),
+            optimization_type: results[0].optimization_type,
             success: all_successful,
             performance_improvement: total_improvement,
             resource_savings: combined_savings,

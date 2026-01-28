@@ -364,7 +364,7 @@ impl ModelValidationOrchestrator {
     where
         F: Fn(&PerformanceDataPoint) -> f64,
     {
-        let features: Vec<f64> = data.iter().map(|d| feature_extractor(d)).collect();
+        let features: Vec<f64> = data.iter().map(feature_extractor).collect();
         let throughputs: Vec<f64> = data.iter().map(|d| d.throughput).collect();
 
         self.calculate_correlation(&features, &throughputs)
@@ -522,7 +522,7 @@ impl ModelValidator for ModelValidationOrchestrator {
     }
 
     fn strategy(&self) -> ValidationStrategyType {
-        self.config.read().strategy.clone()
+        self.config.read().strategy
     }
 
     fn config(&self) -> &ValidationConfig {
@@ -840,6 +840,12 @@ impl ValidationStrategy for CrossValidation {
 #[derive(Debug)]
 pub struct TimeSeriesValidation;
 
+impl Default for TimeSeriesValidation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TimeSeriesValidation {
     pub fn new() -> Self {
         Self
@@ -1098,6 +1104,12 @@ impl BootstrapValidation {
 #[derive(Debug)]
 pub struct LeaveOneOutValidation;
 
+impl Default for LeaveOneOutValidation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LeaveOneOutValidation {
     pub fn new() -> Self {
         Self
@@ -1116,7 +1128,7 @@ impl ValidationStrategy for LeaveOneOutValidation {
         let mut all_predictions = Vec::new();
         let mut all_actuals = Vec::new();
 
-        for (_test_idx, test_point) in data.iter().enumerate() {
+        for test_point in data.iter() {
             let prediction_request = PredictionRequest {
                 parallelism_levels: vec![test_point.parallelism],
                 test_characteristics: test_point.test_characteristics.clone(),
@@ -1194,7 +1206,7 @@ impl ValidationStrategy for LeaveOneOutValidation {
     }
 
     fn is_applicable(&self, data_size: usize) -> bool {
-        data_size >= 5 && data_size <= 100 // LOO is computationally intensive for large datasets
+        (5..=100).contains(&data_size) // LOO is computationally intensive for large datasets
     }
 }
 

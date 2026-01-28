@@ -160,6 +160,7 @@ pub use utils_impl::standards;
 // Legacy common_strings module compatibility
 pub mod common_strings {
     use super::*;
+    use crate::error::TrustformersResult;
 
     pub fn init_common_strings() {
         initialize_global_interner();

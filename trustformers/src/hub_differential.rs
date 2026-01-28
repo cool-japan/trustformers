@@ -949,7 +949,7 @@ mod tests {
 
     #[test]
     fn test_version_manager() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
         let mut manager = ModelVersionManager::new(temp_dir.path().to_path_buf()).unwrap();
 
         let version1 = ModelVersion {

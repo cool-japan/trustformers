@@ -1404,9 +1404,11 @@ impl GpuCapability {
     /// Check if this capability supports a specific framework
     pub fn supports_framework(&self, framework: &str) -> bool {
         match self {
+            Self::Cuda(_) => framework.eq_ignore_ascii_case("cuda"),
+            Self::OpenCl(_) => framework.eq_ignore_ascii_case("opencl"),
+            Self::Vulkan(_) => framework.eq_ignore_ascii_case("vulkan"),
             Self::MachineLearning(frameworks) => frameworks.contains(&framework.to_string()),
             Self::Custom(name, _) => name.eq_ignore_ascii_case(framework),
-            _ => false,
         }
     }
 }

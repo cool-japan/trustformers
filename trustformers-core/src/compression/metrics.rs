@@ -369,14 +369,14 @@ impl CompressionEvaluator {
         let pred_idx = output_data
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("Partial comparison failed"))
             .map(|(i, _)| i)
             .unwrap_or(0);
 
         let target_idx = target_data
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("Partial comparison failed"))
             .map(|(i, _)| i)
             .unwrap_or(0);
 
@@ -428,7 +428,7 @@ impl CompressionBenchmark {
                 // Compare by a composite score
                 let score_a = a.accuracy_retention.percentage * a.inference_speedup.speedup_factor;
                 let score_b = b.accuracy_retention.percentage * b.inference_speedup.speedup_factor;
-                score_a.partial_cmp(&score_b).unwrap()
+                score_a.partial_cmp(&score_b).expect("Partial comparison failed")
             })
             .map(|(name, _)| name)
     }

@@ -177,7 +177,7 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Metal => {
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     // Metal backend initialization using Metal Performance Shaders
                     let _metal = crate::kernels::metal_impl::MetalImpl::new()?;
@@ -185,7 +185,7 @@ impl HardwareAccelerator {
                         "Metal backend initialized successfully for Apple Silicon acceleration"
                     );
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     return Err(
                         acceleration_error("Metal", "Support not compiled in this build")
@@ -297,11 +297,11 @@ impl HardwareAccelerator {
             },
             AccelerationBackend::Metal => {
                 // Check if Metal is available by attempting to create a Metal implementation
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     crate::kernels::metal_impl::MetalImpl::new().is_ok()
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     false
                 }
@@ -357,7 +357,7 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Metal => {
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     let metal_impl = crate::kernels::metal_impl::MetalImpl::new()?;
                     metal_impl.matrix_multiply(a, b).and_then(|result| {
@@ -374,7 +374,7 @@ impl HardwareAccelerator {
                         }
                     })
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     self.cpu_matmul(a, b, c)
                 }
@@ -445,12 +445,12 @@ impl HardwareAccelerator {
                 }
             },
             AccelerationBackend::Metal => {
-                #[cfg(feature = "metal")]
+                #[cfg(all(target_os = "macos", feature = "metal"))]
                 {
                     let metal_impl = crate::kernels::metal_impl::MetalImpl::new()?;
                     metal_impl.flash_attention(query, key, value, output)
                 }
-                #[cfg(not(feature = "metal"))]
+                #[cfg(not(all(target_os = "macos", feature = "metal")))]
                 {
                     self.cpu_flash_attention(query, key, value, output)
                 }
@@ -724,9 +724,9 @@ mod tests {
     fn test_accelerated_matmul() {
         let _ = api::init_hardware_acceleration();
 
-        let a = Tensor::ones(&[4, 4]).unwrap();
-        let b = Tensor::ones(&[4, 4]).unwrap();
-        let mut c = Tensor::zeros(&[4, 4]).unwrap();
+        let a = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+        let b = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+        let mut c = Tensor::zeros(&[4, 4]).expect("Failed to create zero tensor");
 
         let result = api::accelerated_matmul(&a, &b, &mut c);
         assert!(result.is_ok());

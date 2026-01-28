@@ -279,13 +279,11 @@ impl DefaultCacheManager {
     pub fn add_entry(&self, key: String, size: u64) {
         let metadata = CacheEntryMetadata::new(key.clone(), size);
 
-        {
-            let mut entries = self.entries.lock().unwrap();
+        if let Ok(mut entries) = self.entries.lock() {
             entries.insert(key, metadata);
         }
 
-        {
-            let mut stats = self.stats.lock().unwrap();
+        if let Ok(mut stats) = self.stats.lock() {
             stats.total_entries += 1;
             stats.total_size += size;
         }
@@ -294,7 +292,7 @@ impl DefaultCacheManager {
     /// Remove a cache entry
     pub fn remove_entry(&self, key: &str) -> Option<u64> {
         let removed_size = {
-            let mut entries = self.entries.lock().unwrap();
+            let mut entries = self.entries.lock().ok()?;
             entries.remove(key).map(|metadata| metadata.size)
         };
 
@@ -557,6 +555,12 @@ impl CacheStats {
 pub struct ModelCacheManager {
     base_manager: DefaultCacheManager,
     model_priorities: Arc<Mutex<HashMap<String, u32>>>,
+}
+
+impl Default for ModelCacheManager {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ModelCacheManager {

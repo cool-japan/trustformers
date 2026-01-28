@@ -109,7 +109,7 @@ impl TypingSimulator {
 
         // Add natural variation based on personality
         let variation = if self.config.speed_variation > 0.0 {
-            let mut rng_state = self.rng_state.lock().unwrap();
+            let mut rng_state = self.rng_state.lock().expect("lock should not be poisoned");
             *rng_state = self.simple_prng(*rng_state);
             let random_val = (*rng_state as f32) / (u64::MAX as f32);
             let base_variation = self.config.speed_variation * self.personality.variation_intensity;
@@ -420,7 +420,7 @@ impl TypingSimulator {
 
     /// Determine if hesitation should be added before typing
     fn should_add_hesitation(&self, segment: &str, analysis: &TypingAnalysis) -> bool {
-        let mut rng_state = self.rng_state.lock().unwrap();
+        let mut rng_state = self.rng_state.lock().expect("lock should not be poisoned");
         *rng_state = self.simple_prng(*rng_state);
         let random_val = (*rng_state as f32) / (u64::MAX as f32);
 
@@ -449,7 +449,7 @@ impl TypingSimulator {
 
     /// Determine if a correction should be simulated
     fn should_add_correction(&self, segment: &str, analysis: &TypingAnalysis) -> bool {
-        let mut rng_state = self.rng_state.lock().unwrap();
+        let mut rng_state = self.rng_state.lock().expect("lock should not be poisoned");
         *rng_state = self.simple_prng(*rng_state);
         let random_val = (*rng_state as f32) / (u64::MAX as f32);
 

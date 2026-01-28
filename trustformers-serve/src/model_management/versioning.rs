@@ -276,7 +276,7 @@ impl VersionManager {
     ) -> ModelResult<()> {
         self.versions
             .entry(model_name.to_string())
-            .or_insert_with(BTreeMap::new)
+            .or_default()
             .insert(metadata.version.clone(), metadata);
         Ok(())
     }

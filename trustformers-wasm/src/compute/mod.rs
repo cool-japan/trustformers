@@ -20,6 +20,9 @@ pub mod threads;
 #[cfg(feature = "web-workers")]
 pub mod web_workers;
 
+// WebNN integration for NPU acceleration
+pub mod webnn;
+
 // Re-export main types for convenience
 #[cfg(feature = "webgpu")]
 pub use webgpu::{
@@ -40,6 +43,12 @@ pub use web_workers::{
 pub use threads::{
     get_optimal_thread_count, is_cross_origin_isolated, is_threading_supported, AtomicOperations,
     ThreadPool, ThreadSync, ThreadTaskType,
+};
+
+// WebNN exports
+pub use webnn::{
+    WebNNCapabilities, WebNNContext, WebNNDeviceType, WebNNExecutionPlan, WebNNGraphBuilder,
+    WebNNModelAdapter, WebNNPowerPreference, WebNNTensor,
 };
 
 /// Compute module initialization
@@ -102,6 +111,8 @@ pub struct ComputeConfig {
     pub max_threads: Option<u32>,
     pub enable_simd: bool,
     pub power_preference: PowerPreference,
+    pub enable_webnn: bool,
+    pub webnn_device_type: WebNNDeviceType,
 }
 
 impl Default for ComputeConfig {
@@ -112,6 +123,8 @@ impl Default for ComputeConfig {
             max_threads: None,
             enable_simd: true,
             power_preference: PowerPreference::HighPerformance,
+            enable_webnn: true,
+            webnn_device_type: WebNNDeviceType::Auto,
         }
     }
 }
@@ -135,6 +148,8 @@ pub struct ComputeCapabilities {
     pub max_compute_workgroup_size: Option<[u32; 3]>,
     pub max_worker_count: u32,
     pub supports_f16: bool,
+    pub has_webnn: bool,
+    pub webnn_supports_npu: bool,
 }
 
 impl ComputeCapabilities {
@@ -150,6 +165,8 @@ impl ComputeCapabilities {
             max_compute_workgroup_size: None,
             max_worker_count: 0,
             supports_f16: false,
+            has_webnn: false,
+            webnn_supports_npu: false,
         };
 
         // Detect WebGPU
@@ -183,6 +200,13 @@ impl ComputeCapabilities {
 
         // Detect SIMD
         capabilities.has_simd = Self::detect_simd();
+
+        // Detect WebNN
+        capabilities.has_webnn = WebNNContext::is_available();
+        if capabilities.has_webnn {
+            let context = WebNNContext::new(WebNNDeviceType::Auto, WebNNPowerPreference::Default);
+            capabilities.webnn_supports_npu = context.capabilities().has_npu();
+        }
 
         capabilities
     }
@@ -322,6 +346,7 @@ pub enum ComputeBackend {
     WebGl,
     WebWorkers,
     Threads,
+    WebNN,
 }
 
 impl core::fmt::Display for ComputeBackend {
@@ -333,6 +358,7 @@ impl core::fmt::Display for ComputeBackend {
             ComputeBackend::WebGl => "WebGL",
             ComputeBackend::WebWorkers => "Web Workers",
             ComputeBackend::Threads => "Threads",
+            ComputeBackend::WebNN => "WebNN",
         };
         write!(f, "{}", name)
     }

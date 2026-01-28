@@ -4,7 +4,6 @@
 
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
-use scirs2_core::random::*; // SciRS2 Integration Policy
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -333,7 +332,7 @@ impl ONNXRuntimeSession {
         inputs: HashMap<String, Tensor>,
     ) -> Result<HashMap<String, Tensor>> {
         let mut outputs = HashMap::new();
-        use rand::Rng;
+        use scirs2_core::random::*;
         let mut rng = thread_rng();
 
         // Determine model type from output names and generate appropriate simulated outputs
@@ -515,7 +514,7 @@ impl ONNXRuntimeSession {
         }
 
         // Calculate statistics
-        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        latencies.sort_by(|a, b| a.partial_cmp(b).expect("Partial comparison failed"));
         let mean = latencies.iter().sum::<f64>() / latencies.len() as f64;
         let median = latencies[latencies.len() / 2];
         let p90 = latencies[(latencies.len() as f64 * 0.9) as usize];
@@ -738,12 +737,12 @@ mod tests {
         let dynamic_mode = QuantizationMode::Dynamic;
 
         match static_mode {
-            QuantizationMode::Static => assert!(true),
+            QuantizationMode::Static => {},
             _ => panic!("Expected Static mode"),
         }
 
         match dynamic_mode {
-            QuantizationMode::Dynamic => assert!(true),
+            QuantizationMode::Dynamic => {},
             _ => panic!("Expected Dynamic mode"),
         }
     }

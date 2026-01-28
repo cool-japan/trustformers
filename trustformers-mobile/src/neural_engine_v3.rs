@@ -458,18 +458,20 @@ impl NeuralEngineV3Engine {
 
         // Execute optimized operation
         let result = match operation {
-            NeuralEngineOperation::MatMulQuantized => self
-                .execute_quantized_matmul(&quantized_input, quantized_weights.as_ref().unwrap())?,
+            NeuralEngineOperation::MatMulQuantized => self.execute_quantized_matmul(
+                &quantized_input,
+                quantized_weights.as_ref().expect("Operation failed"),
+            )?,
             NeuralEngineOperation::ConvolutionAdvanced => self.execute_advanced_convolution(
                 &quantized_input,
-                quantized_weights.as_ref().unwrap(),
+                quantized_weights.as_ref().expect("Operation failed"),
             )?,
             NeuralEngineOperation::AttentionOptimized => {
                 self.execute_optimized_attention(&quantized_input, parameters)?
             },
             NeuralEngineOperation::BatchNormalization => self.execute_batch_normalization(
                 &quantized_input,
-                quantized_weights.as_ref().unwrap(),
+                quantized_weights.as_ref().expect("Operation failed"),
             )?,
             NeuralEngineOperation::LayerNormalization => {
                 self.execute_layer_normalization(&quantized_input, parameters)?
@@ -483,8 +485,10 @@ impl NeuralEngineV3Engine {
             NeuralEngineOperation::SoftmaxStable => {
                 self.execute_stable_softmax(&quantized_input)?
             },
-            NeuralEngineOperation::EmbeddingLookup => self
-                .execute_embedding_lookup(&quantized_input, quantized_weights.as_ref().unwrap())?,
+            NeuralEngineOperation::EmbeddingLookup => self.execute_embedding_lookup(
+                &quantized_input,
+                quantized_weights.as_ref().expect("Operation failed"),
+            )?,
             NeuralEngineOperation::MultiHeadAttentionFused => {
                 self.execute_fused_multihead_attention(&quantized_input, parameters)?
             },
@@ -1210,7 +1214,7 @@ mod tests {
             NeuralEngineV3Engine::detect_hardware_capabilities(&AppleDeviceType::iPhone16Pro);
         assert!(capabilities.is_ok());
 
-        let caps = capabilities.unwrap();
+        let caps = capabilities.expect("Operation failed");
         assert_eq!(caps.neural_engine_cores, 18);
         assert_eq!(caps.peak_tops, 35.0);
         assert!(caps.advanced_features.int4_quantization);
@@ -1219,40 +1223,40 @@ mod tests {
     #[test]
     fn test_quantized_matrix_multiplication() {
         let config = NeuralEngineV3Config::default();
-        let mut engine = NeuralEngineV3Engine::new(config).unwrap();
+        let mut engine = NeuralEngineV3Engine::new(config).expect("Operation failed");
 
-        let a = Tensor::from_vec(&vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        let b = Tensor::from_vec(&vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let a = Tensor::from_vec(&vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Operation failed");
+        let b = Tensor::from_vec(&vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Operation failed");
 
         let result =
             engine.optimize_operation(NeuralEngineOperation::MatMulQuantized, &a, Some(&b), None);
 
         assert!(result.is_ok());
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("Operation failed");
         assert_eq!(result_tensor.shape(), &[2, 2]);
     }
 
     #[test]
     fn test_gelu_activation() {
         let config = NeuralEngineV3Config::default();
-        let mut engine = NeuralEngineV3Engine::new(config).unwrap();
+        let mut engine = NeuralEngineV3Engine::new(config).expect("Operation failed");
 
-        let input = Tensor::from_vec(&vec![-1.0, 0.0, 1.0, 2.0], &[4]).unwrap();
+        let input = Tensor::from_vec(&vec![-1.0, 0.0, 1.0, 2.0], &[4]).expect("Operation failed");
 
         let result =
             engine.optimize_operation(NeuralEngineOperation::GeluActivation, &input, None, None);
 
         assert!(result.is_ok());
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("Operation failed");
         assert_eq!(result_tensor.shape(), &[4]);
     }
 
     #[test]
     fn test_attention_optimization() {
         let config = NeuralEngineV3Config::default();
-        let mut engine = NeuralEngineV3Engine::new(config).unwrap();
+        let mut engine = NeuralEngineV3Engine::new(config).expect("Operation failed");
 
-        let input = Tensor::from_vec(&vec![1.0; 24], &[2, 3, 4]).unwrap(); // [batch=2, seq_len=3, d_model=4]
+        let input = Tensor::from_vec(&vec![1.0; 24], &[2, 3, 4]).expect("Operation failed"); // [batch=2, seq_len=3, d_model=4]
 
         let result = engine.optimize_operation(
             NeuralEngineOperation::AttentionOptimized,
@@ -1262,14 +1266,14 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("Operation failed");
         assert_eq!(result_tensor.shape(), &[2, 3, 4]);
     }
 
     #[test]
     fn test_performance_metrics() {
         let config = NeuralEngineV3Config::default();
-        let engine = NeuralEngineV3Engine::new(config).unwrap();
+        let engine = NeuralEngineV3Engine::new(config).expect("Operation failed");
 
         let metrics = engine.get_performance_metrics();
         assert_eq!(metrics.operations_per_second, 0.0);
@@ -1289,10 +1293,10 @@ mod tests {
     fn test_device_type_capabilities() {
         let iphone_caps =
             NeuralEngineV3Engine::detect_hardware_capabilities(&AppleDeviceType::iPhone16ProMax)
-                .unwrap();
+                .expect("Operation failed");
         let ipad_caps =
             NeuralEngineV3Engine::detect_hardware_capabilities(&AppleDeviceType::iPadProM4_13)
-                .unwrap();
+                .expect("Operation failed");
 
         assert!(ipad_caps.peak_tops > iphone_caps.peak_tops);
         assert!(ipad_caps.neural_engine_cores >= iphone_caps.neural_engine_cores);
@@ -1301,7 +1305,7 @@ mod tests {
     #[test]
     fn test_performance_report() {
         let config = NeuralEngineV3Config::default();
-        let engine = NeuralEngineV3Engine::new(config).unwrap();
+        let engine = NeuralEngineV3Engine::new(config).expect("Operation failed");
 
         let report = engine.export_performance_report();
         assert!(report.contains("Apple Neural Engine V3"));

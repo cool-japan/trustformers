@@ -1,14 +1,10 @@
-use numpy::{
-    IxDyn, PyArray, PyArrayDescrMethods, PyArrayDyn, PyArrayMethods, PyReadonlyArrayDyn,
-    PyUntypedArrayMethods,
+use scirs2_numpy::{
+    IxDyn, PyArray, PyArrayDyn, PyArrayMethods, PyReadonlyArrayDyn, PyUntypedArrayMethods,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyMemoryView};
-use scirs2_core::ndarray::{ArrayD, ArrayViewD, IxDyn as NdIxDyn};
-use std::ptr;
-use std::sync::Arc;
-use trustformers_core::autodiff::variable::{Variable, VariableRef};
+use pyo3::types::PyDict;
+use trustformers_core::autodiff::variable::Variable;
 use trustformers_core::tensor::Tensor;
 
 /// Python wrapper for TrustformeRS Tensor
@@ -44,12 +40,12 @@ impl PyTensor {
 
         // Determine the shape by recursively examining the nested structure
         fn get_shape(obj: &Bound<'_, PyAny>, current_shape: &mut Vec<usize>) -> PyResult<()> {
-            if let Ok(seq) = obj.downcast::<pyo3::types::PyList>() {
+            if let Ok(seq) = obj.cast::<pyo3::types::PyList>() {
                 current_shape.push(seq.len());
                 if seq.len() > 0 {
                     get_shape(&seq.get_item(0)?, current_shape)?;
                 }
-            } else if let Ok(seq) = obj.downcast::<pyo3::types::PyTuple>() {
+            } else if let Ok(seq) = obj.cast::<pyo3::types::PyTuple>() {
                 current_shape.push(seq.len());
                 if seq.len() > 0 {
                     get_shape(&seq.get_item(0)?, current_shape)?;
@@ -64,11 +60,11 @@ impl PyTensor {
         let mut flat_data = Vec::new();
 
         fn extract_flat(obj: &Bound<'_, PyAny>, flat_data: &mut Vec<f32>) -> PyResult<()> {
-            if let Ok(seq) = obj.downcast::<pyo3::types::PyList>() {
+            if let Ok(seq) = obj.cast::<pyo3::types::PyList>() {
                 for item in seq {
                     extract_flat(&item, flat_data)?;
                 }
-            } else if let Ok(seq) = obj.downcast::<pyo3::types::PyTuple>() {
+            } else if let Ok(seq) = obj.cast::<pyo3::types::PyTuple>() {
                 for item in seq {
                     extract_flat(&item, flat_data)?;
                 }
@@ -129,9 +125,9 @@ impl PyTensor {
                 variable: None,
             })
         } else {
-            return Err(PyValueError::new_err(
+            Err(PyValueError::new_err(
                 "Array must be C-contiguous for zero-copy conversion",
-            ));
+            ))
         }
     }
 
@@ -168,15 +164,15 @@ impl PyTensor {
 impl PyTensor {
     /// Create a new tensor from a numpy array or Python list
     #[new]
-    #[pyo3(signature = (data, device=None, requires_grad=false))]
+    #[pyo3(signature = (data, _device=None, requires_grad=false))]
     pub fn new(
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
-        device: Option<String>,
+        _device: Option<String>,
         requires_grad: bool,
     ) -> PyResult<Self> {
         // Try to handle as numpy array first (zero-copy when possible)
-        if let Ok(array) = data.downcast::<PyArray<f32, IxDyn>>() {
+        if let Ok(array) = data.cast::<PyArray<f32, IxDyn>>() {
             let shape = array.shape().to_vec();
 
             // Try zero-copy conversion first
@@ -221,8 +217,12 @@ impl PyTensor {
 
     /// Create a tensor of zeros
     #[staticmethod]
-    #[pyo3(signature = (shape, device=None, requires_grad=false))]
-    pub fn zeros(shape: Vec<usize>, device: Option<String>, requires_grad: bool) -> PyResult<Self> {
+    #[pyo3(signature = (shape, _device=None, requires_grad=false))]
+    pub fn zeros(
+        shape: Vec<usize>,
+        _device: Option<String>,
+        requires_grad: bool,
+    ) -> PyResult<Self> {
         let tensor = Tensor::zeros(&shape)
             .map_err(|e| PyValueError::new_err(format!("Failed to create zeros tensor: {}", e)))?;
         Ok(PyTensor::from_tensor_with_grad(tensor, requires_grad))
@@ -230,8 +230,8 @@ impl PyTensor {
 
     /// Create a tensor of ones
     #[staticmethod]
-    #[pyo3(signature = (shape, device=None, requires_grad=false))]
-    pub fn ones(shape: Vec<usize>, device: Option<String>, requires_grad: bool) -> PyResult<Self> {
+    #[pyo3(signature = (shape, _device=None, requires_grad=false))]
+    pub fn ones(shape: Vec<usize>, _device: Option<String>, requires_grad: bool) -> PyResult<Self> {
         let tensor = Tensor::ones(&shape)
             .map_err(|e| PyValueError::new_err(format!("Failed to create ones tensor: {}", e)))?;
         Ok(PyTensor::from_tensor_with_grad(tensor, requires_grad))
@@ -239,12 +239,12 @@ impl PyTensor {
 
     /// Create a tensor with random normal distribution
     #[staticmethod]
-    #[pyo3(signature = (shape, mean=0.0, std=1.0, device=None, requires_grad=false))]
+    #[pyo3(signature = (shape, _mean=0.0, _std=1.0, _device=None, requires_grad=false))]
     pub fn randn(
         shape: Vec<usize>,
-        mean: f32,
-        std: f32,
-        device: Option<String>,
+        _mean: f32,
+        _std: f32,
+        _device: Option<String>,
         requires_grad: bool,
     ) -> PyResult<Self> {
         let tensor = Tensor::randn(&shape)
@@ -254,12 +254,12 @@ impl PyTensor {
 
     /// Create a tensor with random uniform distribution
     #[staticmethod]
-    #[pyo3(signature = (shape, low=0.0, high=1.0, device=None, requires_grad=false))]
+    #[pyo3(signature = (shape, _low=0.0, _high=1.0, _device=None, requires_grad=false))]
     pub fn rand(
         shape: Vec<usize>,
-        low: f32,
-        high: f32,
-        device: Option<String>,
+        _low: f32,
+        _high: f32,
+        _device: Option<String>,
         requires_grad: bool,
     ) -> PyResult<Self> {
         let tensor = Tensor::randn(&shape)
@@ -458,7 +458,7 @@ impl PyTensor {
             } else {
                 // Multiple axes - use sum_axes
                 self.inner
-                    .sum_axes(&axes)
+                    .sum_axes(axes)
                     .map_err(|e| PyValueError::new_err(format!("Sum along axes failed: {}", e)))?
             }
         } else {
@@ -469,19 +469,20 @@ impl PyTensor {
         };
 
         // Handle keepdim parameter for axis-based operations
-        let final_result = if keepdim && axis.is_some() {
-            // Add back dimensions that were reduced
-            let mut shape = self.inner.shape().to_vec();
-            for &ax in axis.as_ref().unwrap() {
-                if ax < shape.len() {
-                    shape[ax] = 1;
+        let final_result = match (keepdim, axis.as_ref()) {
+            (true, Some(axes)) => {
+                // Add back dimensions that were reduced
+                let mut shape = self.inner.shape().to_vec();
+                for &ax in axes {
+                    if ax < shape.len() {
+                        shape[ax] = 1;
+                    }
                 }
-            }
-            result
-                .reshape(&shape)
-                .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
-        } else {
-            result
+                result
+                    .reshape(&shape)
+                    .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
+            },
+            _ => result,
         };
 
         Ok(PyTensor::from_tensor(final_result))
@@ -500,7 +501,7 @@ impl PyTensor {
             } else {
                 // Multiple axes - use mean_axes
                 self.inner
-                    .mean_axes(&axes)
+                    .mean_axes(axes)
                     .map_err(|e| PyValueError::new_err(format!("Mean along axes failed: {}", e)))?
             }
         } else {
@@ -511,19 +512,20 @@ impl PyTensor {
         };
 
         // Handle keepdim parameter for axis-based operations
-        let final_result = if keepdim && axis.is_some() {
-            // Add back dimensions that were reduced
-            let mut shape = self.inner.shape().to_vec();
-            for &ax in axis.as_ref().unwrap() {
-                if ax < shape.len() {
-                    shape[ax] = 1;
+        let final_result = match (keepdim, axis.as_ref()) {
+            (true, Some(axes)) => {
+                // Add back dimensions that were reduced
+                let mut shape = self.inner.shape().to_vec();
+                for &ax in axes {
+                    if ax < shape.len() {
+                        shape[ax] = 1;
+                    }
                 }
-            }
-            result
-                .reshape(&shape)
-                .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
-        } else {
-            result
+                result
+                    .reshape(&shape)
+                    .map_err(|e| PyValueError::new_err(format!("Reshape for keepdim failed: {}", e)))?
+            },
+            _ => result,
         };
 
         Ok(PyTensor::from_tensor(final_result))
@@ -576,7 +578,7 @@ impl PyTensor {
 
     /// Get memory layout information
     pub fn memory_info(&self) -> PyResult<Py<PyDict>> {
-        Python::with_gil(|py| {
+        Python::attach(|py| {
             let dict = PyDict::new(py);
 
             dict.set_item("contiguous", self.is_contiguous())?;
@@ -594,7 +596,9 @@ impl PyTensor {
     }
 
     /// Clone the tensor
-    pub fn clone(&self) -> PyTensor {
+    #[pyo3(name = "clone")]
+    #[allow(clippy::should_implement_trait)]
+    pub fn py_clone(&self) -> PyTensor {
         PyTensor::from_tensor(self.inner.clone())
     }
 
@@ -681,7 +685,7 @@ impl PyTensor {
     }
 
     /// Get item
-    pub fn __getitem__(&self, indices: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
+    pub fn __getitem__(&self, _indices: &Bound<'_, PyAny>) -> PyResult<PyTensor> {
         // Simple implementation for now
         Ok(self.clone())
     }
@@ -689,8 +693,8 @@ impl PyTensor {
     /// Set item
     pub fn __setitem__(
         &mut self,
-        indices: &Bound<'_, PyAny>,
-        value: PyTensorOrScalar,
+        _indices: &Bound<'_, PyAny>,
+        _value: PyTensorOrScalar,
     ) -> PyResult<()> {
         // Simple implementation for now
         Ok(())

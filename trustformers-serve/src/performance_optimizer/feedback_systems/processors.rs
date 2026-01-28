@@ -59,6 +59,12 @@ impl Default for QualityThresholds {
     }
 }
 
+impl Default for EnhancedThroughputProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EnhancedThroughputProcessor {
     /// Create new enhanced throughput processor
     pub fn new() -> Self {
@@ -327,6 +333,12 @@ impl Default for SlaThresholds {
     }
 }
 
+impl Default for LatencyFeedbackProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LatencyFeedbackProcessor {
     /// Create new latency feedback processor
     pub fn new() -> Self {
@@ -558,6 +570,12 @@ pub enum EfficiencyCalculationMethod {
     DataEnvelopmentAnalysis,
     /// Custom method
     Custom(String),
+}
+
+impl Default for ResourceUtilizationProcessor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ResourceUtilizationProcessor {

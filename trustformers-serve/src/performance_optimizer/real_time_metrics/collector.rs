@@ -1110,7 +1110,7 @@ impl RealTimeMetricsCollector {
                     if impact.severity > ImpactSeverity::Low {
                         let _ = event_broadcaster.send(CollectionEvent::PerformanceImpact {
                             timestamp: Utc::now(),
-                            impact: ImpactMeasurement::default(),
+                            impact: ImpactMeasurement,
                             severity: impact.severity,
                         });
                     }
@@ -1315,7 +1315,7 @@ impl PerformanceImpactMonitor {
             baseline: Arc::new(RwLock::new(PerformanceBaseline::default())),
             current_overhead: Arc::new(RwLock::new(OverheadMeasurement::default())),
             impact_analysis: Arc::new(RwLock::new(ImpactAnalysis::default())),
-            config: Arc::new(RwLock::new(ImpactMonitorConfig::default())),
+            config: Arc::new(RwLock::new(ImpactMonitorConfig)),
             alerts: Arc::new(Mutex::new(VecDeque::new())),
             trend_analyzer: Arc::new(ImpactTrendAnalyzer::new()),
             recommendation_engine: Arc::new(ImpactRecommendationEngine::new()),
@@ -1694,7 +1694,7 @@ impl<T> CircularBuffer<T> {
         let write_pos = self.write_pos.load(Ordering::Relaxed);
 
         for i in 0..items_to_get {
-            let pos = if write_pos >= i + 1 {
+            let pos = if write_pos > i {
                 write_pos - i - 1
             } else {
                 self.capacity + write_pos - i - 1
@@ -1823,6 +1823,12 @@ pub struct PublishMessage {
 }
 
 pub struct PidSampleRateAlgorithm;
+impl Default for PidSampleRateAlgorithm {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PidSampleRateAlgorithm {
     pub fn new() -> Self {
         Self
@@ -1872,6 +1878,12 @@ impl SystemLoadMonitor {
 }
 
 pub struct ImpactTrendAnalyzer;
+impl Default for ImpactTrendAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImpactTrendAnalyzer {
     pub fn new() -> Self {
         Self
@@ -1880,11 +1892,17 @@ impl ImpactTrendAnalyzer {
         Ok(())
     }
     pub async fn analyze_trends(&self, _duration: Duration) -> Result<ImpactTrends> {
-        Ok(ImpactTrends::default())
+        Ok(ImpactTrends)
     }
 }
 
 pub struct ImpactRecommendationEngine;
+impl Default for ImpactRecommendationEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ImpactRecommendationEngine {
     pub fn new() -> Self {
         Self
@@ -1901,6 +1919,12 @@ impl ImpactRecommendationEngine {
 }
 
 pub struct DefaultCollectionErrorHandler;
+impl Default for DefaultCollectionErrorHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefaultCollectionErrorHandler {
     pub fn new() -> Self {
         Self
@@ -1920,6 +1944,12 @@ impl CollectionErrorHandler for DefaultCollectionErrorHandler {
 }
 
 pub struct DefaultPublishErrorHandler;
+impl Default for DefaultPublishErrorHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DefaultPublishErrorHandler {
     pub fn new() -> Self {
         Self
@@ -1939,6 +1969,12 @@ impl PublishErrorHandler for DefaultPublishErrorHandler {
 }
 
 pub struct PublishRateLimiter;
+impl Default for PublishRateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PublishRateLimiter {
     pub fn new() -> Self {
         Self

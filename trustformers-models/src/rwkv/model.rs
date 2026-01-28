@@ -1,15 +1,13 @@
 use crate::rwkv::config::RwkvConfig;
 use std::io::Read;
 use trustformers_core::{
+    device::Device,
     errors::{tensor_op_error, Result},
     layers::{Embedding, LayerNorm, Linear},
     ops::activations::{relu, sigmoid},
     tensor::Tensor,
     traits::{Layer, Model},
 };
-
-#[cfg(test)]
-use ndarray;
 
 /// RWKV Time Mixing layer - replaces traditional attention
 /// This implements the core RWKV mechanism for temporal information processing
@@ -27,10 +25,15 @@ pub struct TimeMixing {
     value: Linear,
     receptance: Linear,
     output: Linear,
+    device: Device,
 }
 
 impl TimeMixing {
     pub fn new(config: &RwkvConfig, layer_id: usize) -> Result<Self> {
+        Self::new_with_device(config, layer_id, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RwkvConfig, layer_id: usize, device: Device) -> Result<Self> {
         let n_embd = config.n_embd;
 
         // Time mixing parameters
@@ -41,10 +44,10 @@ impl TimeMixing {
         let time_mix_r = Tensor::randn(&[1, 1, n_embd])?;
 
         // Linear projections for R, K, V
-        let key = Linear::new(n_embd, n_embd, false);
-        let value = Linear::new(n_embd, n_embd, false);
-        let receptance = Linear::new(n_embd, n_embd, false);
-        let output = Linear::new(n_embd, n_embd, false);
+        let key = Linear::new_with_device(n_embd, n_embd, false, device);
+        let value = Linear::new_with_device(n_embd, n_embd, false, device);
+        let receptance = Linear::new_with_device(n_embd, n_embd, false, device);
+        let output = Linear::new_with_device(n_embd, n_embd, false, device);
 
         Ok(Self {
             config: config.clone(),
@@ -58,7 +61,12 @@ impl TimeMixing {
             value,
             receptance,
             output,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -137,10 +145,15 @@ pub struct ChannelMixing {
     key: Linear,
     receptance: Linear,
     value: Linear,
+    device: Device,
 }
 
 impl ChannelMixing {
     pub fn new(config: &RwkvConfig, layer_id: usize) -> Result<Self> {
+        Self::new_with_device(config, layer_id, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RwkvConfig, layer_id: usize, device: Device) -> Result<Self> {
         let n_embd = config.n_embd;
         let n_ffn = config.get_n_ffn();
 
@@ -149,9 +162,9 @@ impl ChannelMixing {
         let time_mix_r = Tensor::randn(&[1, 1, n_embd])?;
 
         // Linear transformations
-        let key = Linear::new(n_embd, n_ffn, false);
-        let receptance = Linear::new(n_embd, n_embd, false);
-        let value = Linear::new(n_ffn, n_embd, false);
+        let key = Linear::new_with_device(n_embd, n_ffn, false, device);
+        let receptance = Linear::new_with_device(n_embd, n_embd, false, device);
+        let value = Linear::new_with_device(n_ffn, n_embd, false, device);
 
         Ok(Self {
             config: config.clone(),
@@ -161,7 +174,12 @@ impl ChannelMixing {
             key,
             receptance,
             value,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -234,14 +252,21 @@ pub struct RwkvBlock {
     ln2: LayerNorm,
     att: TimeMixing,
     ffn: ChannelMixing,
+    device: Device,
 }
 
 impl RwkvBlock {
     pub fn new(config: &RwkvConfig, layer_id: usize) -> Result<Self> {
-        let ln1 = LayerNorm::new(vec![config.n_embd], config.layer_norm_epsilon)?;
-        let ln2 = LayerNorm::new(vec![config.n_embd], config.layer_norm_epsilon)?;
-        let att = TimeMixing::new(config, layer_id)?;
-        let ffn = ChannelMixing::new(config, layer_id)?;
+        Self::new_with_device(config, layer_id, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &RwkvConfig, layer_id: usize, device: Device) -> Result<Self> {
+        let ln1 =
+            LayerNorm::new_with_device(vec![config.n_embd], config.layer_norm_epsilon, device)?;
+        let ln2 =
+            LayerNorm::new_with_device(vec![config.n_embd], config.layer_norm_epsilon, device)?;
+        let att = TimeMixing::new_with_device(config, layer_id, device)?;
+        let ffn = ChannelMixing::new_with_device(config, layer_id, device)?;
 
         Ok(Self {
             layer_id,
@@ -249,7 +274,12 @@ impl RwkvBlock {
             ln2,
             att,
             ffn,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 }
 
@@ -322,24 +352,36 @@ pub struct RwkvModel {
     blocks: Vec<RwkvBlock>,
     ln_out: LayerNorm,
     head: Option<Linear>,
+    device: Device,
 }
 
 impl RwkvModel {
     pub fn new(config: RwkvConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: RwkvConfig, device: Device) -> Result<Self> {
         // Token embeddings
-        let embeddings = Embedding::new(config.vocab_size, config.n_embd, None)?;
+        let embeddings =
+            Embedding::new_with_device(config.vocab_size, config.n_embd, None, device)?;
 
         // RWKV blocks
         let mut blocks = Vec::with_capacity(config.n_layer);
         for layer_id in 0..config.n_layer {
-            blocks.push(RwkvBlock::new(&config, layer_id)?);
+            blocks.push(RwkvBlock::new_with_device(&config, layer_id, device)?);
         }
 
         // Output normalization
-        let ln_out = LayerNorm::new(vec![config.n_embd], config.layer_norm_epsilon)?;
+        let ln_out =
+            LayerNorm::new_with_device(vec![config.n_embd], config.layer_norm_epsilon, device)?;
 
         // Language modeling head (typically tied with embeddings)
-        let head = Some(Linear::new(config.n_embd, config.vocab_size, false));
+        let head = Some(Linear::new_with_device(
+            config.n_embd,
+            config.vocab_size,
+            false,
+            device,
+        ));
 
         Ok(Self {
             config,
@@ -347,7 +389,12 @@ impl RwkvModel {
             blocks,
             ln_out,
             head,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// Forward pass for causal language modeling
@@ -457,6 +504,7 @@ impl RwkvModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use scirs2_core::ndarray::Array1; // SciRS2 Integration Policy
 
     #[test]
     fn test_rwkv_model_creation() {
@@ -487,6 +535,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Very heavy test - creates multiple large RWKV models, run with --ignored
     fn test_predefined_models() {
         assert!(RwkvModel::rwkv_169m().is_ok());
         assert!(RwkvModel::rwkv_430m().is_ok());
@@ -499,11 +548,11 @@ mod tests {
     #[test]
     fn test_forward_pass_shape() {
         let config = RwkvConfig::default();
-        let model = RwkvModel::new(config).unwrap();
+        let model = RwkvModel::new(config).expect("operation failed");
 
         // Create dummy input as i64 tensor (seq_len=8)
         let input_data = vec![1i64, 2, 3, 4, 5, 6, 7, 8];
-        let input_ids = Tensor::I64(ndarray::Array1::from(input_data).into_dyn());
+        let input_ids = Tensor::I64(Array1::from(input_data).into_dyn());
         let output = model.forward(input_ids);
         assert!(output.is_ok());
     }

@@ -1,4 +1,6 @@
 use crate::bert::config::BertConfig;
+use scirs2_core::ndarray::s; // SciRS2 Integration Policy
+use trustformers_core::device::Device;
 use trustformers_core::errors::{tensor_op_error, Result};
 use trustformers_core::layers::{FeedForward, LayerNorm, MultiHeadAttention};
 use trustformers_core::tensor::Tensor;
@@ -12,29 +14,46 @@ pub struct BertEmbeddings {
     layer_norm: LayerNorm,
     #[allow(dead_code)]
     dropout_prob: f32,
+    device: Device,
 }
 
 impl BertEmbeddings {
     pub fn new(config: &BertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &BertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            word_embeddings: trustformers_core::layers::Embedding::new(
+            word_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.vocab_size,
                 config.hidden_size,
                 Some(config.pad_token_id as usize),
+                device,
             )?,
-            position_embeddings: trustformers_core::layers::Embedding::new(
+            position_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.max_position_embeddings,
                 config.hidden_size,
                 None,
+                device,
             )?,
-            token_type_embeddings: trustformers_core::layers::Embedding::new(
+            token_type_embeddings: trustformers_core::layers::Embedding::new_with_device(
                 config.type_vocab_size,
                 config.hidden_size,
                 None,
+                device,
             )?,
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout_prob: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, input_ids: Vec<u32>, token_type_ids: Option<Vec<u32>>) -> Result<Tensor> {
@@ -67,19 +86,34 @@ pub struct BertLayer {
     attention: BertAttention,
     intermediate: FeedForward,
     output_layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl BertLayer {
     pub fn new(config: &BertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &BertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            attention: BertAttention::new(config)?,
-            intermediate: FeedForward::new(
+            attention: BertAttention::new_with_device(config, device)?,
+            intermediate: FeedForward::new_with_device(
                 config.hidden_size,
                 config.intermediate_size,
                 config.hidden_dropout_prob,
+                device,
+            ),
+            output_layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
             )?,
-            output_layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -108,19 +142,34 @@ impl Layer for BertLayer {
 pub struct BertAttention {
     self_attention: MultiHeadAttention,
     output_layer_norm: LayerNorm,
+    device: Device,
 }
 
 impl BertAttention {
     pub fn new(config: &BertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &BertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            self_attention: MultiHeadAttention::new(
+            self_attention: MultiHeadAttention::new_with_device(
                 config.hidden_size,
                 config.num_attention_heads,
                 config.attention_probs_dropout_prob,
                 true,
+                device,
             )?,
-            output_layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            output_layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, input: (Tensor, Option<Tensor>)) -> Result<Tensor> {
@@ -143,15 +192,24 @@ impl BertAttention {
 #[derive(Debug, Clone)]
 pub struct BertEncoder {
     layers: Vec<BertLayer>,
+    device: Device,
 }
 
 impl BertEncoder {
     pub fn new(config: &BertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &BertConfig, device: Device) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for _ in 0..config.num_hidden_layers {
-            layers.push(BertLayer::new(config)?);
+            layers.push(BertLayer::new_with_device(config, device)?);
         }
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, hidden_states: Tensor, attention_mask: Option<Tensor>) -> Result<Tensor> {
@@ -172,17 +230,28 @@ impl BertEncoder {
 #[derive(Debug, Clone)]
 pub struct BertPooler {
     dense: trustformers_core::layers::Linear,
+    device: Device,
 }
 
 impl BertPooler {
     pub fn new(config: &BertConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &BertConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: trustformers_core::layers::Linear::new(
+            dense: trustformers_core::layers::Linear::new_with_device(
                 config.hidden_size,
                 config.hidden_size,
                 true,
+                device,
             ),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn parameter_count(&self) -> usize {
@@ -211,7 +280,7 @@ impl Layer for BertPooler {
                 }
 
                 // Extract first token and keep it 2D: [1, hidden_size]
-                let first_token = arr.slice(ndarray::s![0..1, ..]).to_owned().into_dyn();
+                let first_token = arr.slice(s![0..1, ..]).to_owned().into_dyn();
                 let pooled = self.dense.forward(Tensor::F32(first_token))?;
                 trustformers_core::ops::activations::tanh(&pooled)
             },

@@ -534,6 +534,12 @@ pub struct SafetyValidationHistory {
     pub last_validation: chrono::DateTime<chrono::Utc>,
 }
 
+impl Default for SafetyValidationHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SafetyValidationHistory {
     pub fn new() -> Self {
         Self {

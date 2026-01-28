@@ -88,7 +88,7 @@ impl<T: Optimizer> ZeROStage2<T> {
 
         // Determine optimal bucketing strategy
         let target_bucket_size = self.config.bucket_size_mb * 1024 * 1024; // Convert to bytes
-        let num_buckets = (total_gradient_memory + target_bucket_size - 1) / target_bucket_size;
+        let num_buckets = total_gradient_memory.div_ceil(target_bucket_size);
 
         println!("ZeRO Stage 2: Setting up gradient partitioning");
         println!(
@@ -134,7 +134,7 @@ impl<T: Optimizer> ZeROStage2<T> {
             let total_elements = shape.iter().product::<usize>();
 
             // Calculate partition size for this rank
-            let elements_per_rank = (total_elements + world_size - 1) / world_size;
+            let elements_per_rank = total_elements.div_ceil(world_size);
             let start_idx = rank * elements_per_rank;
             let end_idx = ((rank + 1) * elements_per_rank).min(total_elements);
 

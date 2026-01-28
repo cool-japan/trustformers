@@ -5,7 +5,7 @@
 
 use super::super::Tensor;
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, Axis, IxDyn};
+use scirs2_core::ndarray::{ArrayD, Axis, IxDyn, Zip};
 
 impl Tensor {
     /// Element-wise less-than comparison.
@@ -26,9 +26,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x < y { 1.0f32 } else { 0.0f32 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x < y { 1.0f32 } else { 0.0f32 });
                 Ok(Tensor::F32(result))
             },
             (Tensor::F64(a), Tensor::F64(b)) => {
@@ -38,9 +36,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x < y { 1.0f64 } else { 0.0f64 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x < y { 1.0f64 } else { 0.0f64 });
                 Ok(Tensor::F64(result))
             },
             (Tensor::I64(a), Tensor::I64(b)) => {
@@ -50,9 +46,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x < y { 1i64 } else { 0i64 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x < y { 1i64 } else { 0i64 });
                 Ok(Tensor::I64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -79,7 +73,7 @@ impl Tensor {
                         "Tensors must have the same shape for equal comparison".to_string(),
                     ));
                 }
-                let result = ndarray::Zip::from(a).and(b).map_collect(|&x, &y| {
+                let result = Zip::from(a).and(b).map_collect(|&x, &y| {
                     if (x - y).abs() < f32::EPSILON {
                         1.0f32
                     } else {
@@ -94,7 +88,7 @@ impl Tensor {
                         "Tensors must have the same shape for equal comparison".to_string(),
                     ));
                 }
-                let result = ndarray::Zip::from(a).and(b).map_collect(|&x, &y| {
+                let result = Zip::from(a).and(b).map_collect(|&x, &y| {
                     if (x - y).abs() < f64::EPSILON {
                         1.0f64
                     } else {
@@ -110,9 +104,7 @@ impl Tensor {
                     ));
                 }
                 let result =
-                    ndarray::Zip::from(a)
-                        .and(b)
-                        .map_collect(|&x, &y| if x == y { 1i64 } else { 0i64 });
+                    Zip::from(a).and(b).map_collect(|&x, &y| if x == y { 1i64 } else { 0i64 });
                 Ok(Tensor::I64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -140,11 +132,10 @@ impl Tensor {
                         "All tensors must have the same shape for where operation".to_string(),
                     ));
                 }
-                let result =
-                    ndarray::Zip::from(cond)
-                        .and(a)
-                        .and(b)
-                        .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
+                let result = Zip::from(cond)
+                    .and(a)
+                    .and(b)
+                    .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
                 Ok(Tensor::F32(result))
             },
             (Tensor::F64(a), Tensor::F64(cond), Tensor::F64(b)) => {
@@ -153,11 +144,10 @@ impl Tensor {
                         "All tensors must have the same shape for where operation".to_string(),
                     ));
                 }
-                let result =
-                    ndarray::Zip::from(cond)
-                        .and(a)
-                        .and(b)
-                        .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
+                let result = Zip::from(cond)
+                    .and(a)
+                    .and(b)
+                    .map_collect(|&c, &x, &y| if c > 0.5 { x } else { y });
                 Ok(Tensor::F64(result))
             },
             (Tensor::I64(a), Tensor::I64(cond), Tensor::I64(b)) => {
@@ -166,11 +156,10 @@ impl Tensor {
                         "All tensors must have the same shape for where operation".to_string(),
                     ));
                 }
-                let result =
-                    ndarray::Zip::from(cond)
-                        .and(a)
-                        .and(b)
-                        .map_collect(|&c, &x, &y| if c > 0 { x } else { y });
+                let result = Zip::from(cond)
+                    .and(a)
+                    .and(b)
+                    .map_collect(|&c, &x, &y| if c > 0 { x } else { y });
                 Ok(Tensor::I64(result))
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -212,8 +201,8 @@ impl Tensor {
                 // Calculate statistics along the last axis
                 let mean = a.mean_axis(Axis(axis)).unwrap();
                 let var = a.map_axis(Axis(axis), |lane| {
-                    let lane_mean = lane.mean().unwrap();
-                    lane.mapv(|x| (x - lane_mean).powi(2)).mean().unwrap()
+                    let lane_mean = lane.mean().expect("Mean calculation failed");
+                    lane.mapv(|x| (x - lane_mean).powi(2)).mean().expect("Mean calculation failed")
                 });
 
                 // Normalize
@@ -239,13 +228,13 @@ impl Tensor {
             (Tensor::F32(predictions), Tensor::F32(targets)) => {
                 // Calculate cross entropy: -sum(target * log(prediction))
                 let log_preds = predictions.mapv(|x| (x + 1e-8).ln()); // Add small epsilon to avoid log(0)
-                let losses = ndarray::Zip::from(&log_preds)
+                let losses = Zip::from(&log_preds)
                     .and(targets)
                     .map_collect(|&log_pred, &target| -target * log_pred);
 
                 match reduction {
                     "mean" => {
-                        let mean_loss = losses.mean().unwrap();
+                        let mean_loss = losses.mean().expect("Mean calculation failed");
                         Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), mean_loss)))
                     },
                     "sum" => {
@@ -275,14 +264,14 @@ impl Tensor {
 
                 // Calculate dot product along the specified dimension
                 let dot_product =
-                    ndarray::Zip::from(a).and(b).map_collect(|&x, &y| x * y).sum_axis(Axis(axis));
+                    Zip::from(a).and(b).map_collect(|&x, &y| x * y).sum_axis(Axis(axis));
 
                 // Calculate norms
                 let norm_a = a.mapv(|x| x * x).sum_axis(Axis(axis)).mapv(|x| (x + eps).sqrt());
                 let norm_b = b.mapv(|x| x * x).sum_axis(Axis(axis)).mapv(|x| (x + eps).sqrt());
 
                 // Calculate cosine similarity
-                let similarity = ndarray::Zip::from(&dot_product)
+                let similarity = Zip::from(&dot_product)
                     .and(&norm_a)
                     .and(&norm_b)
                     .map_collect(|&dot, &norm_a, &norm_b| dot / (norm_a * norm_b));

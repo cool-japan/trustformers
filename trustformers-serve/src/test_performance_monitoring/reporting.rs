@@ -424,7 +424,6 @@ mod tests {
         let config = ReportConfig::default();
         let _system = ReportingSystem::new(config);
 
-        // Basic creation test
-        assert!(true);
+        // Basic creation test - succeeds if no panic
     }
 }

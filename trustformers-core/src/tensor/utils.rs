@@ -4,7 +4,7 @@
 
 use super::{DType, Tensor};
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, IxDyn};
+use scirs2_core::ndarray::{ArrayD, IxDyn};
 use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, RwLock};
@@ -68,6 +68,18 @@ impl Tensor {
                 arr.as_ptr().hash(&mut hasher);
                 arr.len().hash(&mut hasher);
             },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => {
+                // Use buffer_id as a unique identifier for Metal tensors
+                data.buffer_id.hash(&mut hasher);
+                self.len().hash(&mut hasher);
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => {
+                // Use buffer_id as a unique identifier for CUDA tensors
+                data.buffer_id.hash(&mut hasher);
+                self.len().hash(&mut hasher);
+            },
             _ => {
                 // For other tensor types, use a simpler approach
                 self.len().hash(&mut hasher);
@@ -97,6 +109,10 @@ impl Tensor {
             Tensor::Torch(t) => t.size().iter().map(|&d| d as usize).collect(),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.shape().dims().to_vec(),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => data.shape.clone(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => data.shape.clone(),
         }
     }
 
@@ -121,6 +137,10 @@ impl Tensor {
             Tensor::Torch(t) => t.numel(),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count(),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => data.shape.iter().product(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => data.shape.iter().product(),
         }
     }
 
@@ -131,6 +151,15 @@ impl Tensor {
     /// True if the tensor has no elements.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Get the number of dimensions in the tensor.
+    ///
+    /// # Returns
+    ///
+    /// The number of dimensions.
+    pub fn ndim(&self) -> usize {
+        self.shape().len()
     }
 
     /// Get the size in bytes of the tensor.
@@ -145,15 +174,25 @@ impl Tensor {
             Tensor::F16(a) => a.len() * std::mem::size_of::<half::f16>(),
             Tensor::BF16(a) => a.len() * std::mem::size_of::<half::bf16>(),
             Tensor::I64(a) => a.len() * std::mem::size_of::<i64>(),
-            Tensor::C32(a) => a.len() * std::mem::size_of::<num_complex::Complex32>(),
-            Tensor::C64(a) => a.len() * std::mem::size_of::<num_complex::Complex64>(),
-            Tensor::CF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::f16>>(),
-            Tensor::CBF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::bf16>>(),
+            Tensor::C32(a) => a.len() * std::mem::size_of::<scirs2_core::Complex32>(),
+            Tensor::C64(a) => a.len() * std::mem::size_of::<scirs2_core::Complex64>(),
+            Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
+            Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.nnz() * std::mem::size_of::<f32>(), // Simplified estimate
             #[cfg(feature = "torch")]
             Tensor::Torch(t) => t.numel() * std::mem::size_of::<f32>(), // Simplified
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count() * std::mem::size_of::<f32>(), // Simplified
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => {
+                let num_elements: usize = data.shape.iter().product();
+                num_elements * data.dtype.size_in_bytes()
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => {
+                let num_elements: usize = data.shape.iter().product();
+                num_elements * data.dtype.size_in_bytes()
+            },
         }
     }
 
@@ -258,6 +297,301 @@ impl Tensor {
                     "to_device"
                 ))
             },
+        }
+    }
+
+    /// Transfer tensor to specified device using Device enum.
+    ///
+    /// This is the preferred method for device transfers in modern code.
+    /// It supports Metal GPU acceleration and provides better type safety.
+    ///
+    /// # Arguments
+    ///
+    /// * `device` - Device enum (Device::CPU, Device::Metal(0), etc.)
+    ///
+    /// # Returns
+    ///
+    /// A tensor on the specified device.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use trustformers_core::tensor::Tensor;
+    /// use trustformers_core::device::Device;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let cpu_tensor = Tensor::randn(&[2, 3])?;
+    ///
+    /// // Transfer to Metal GPU
+    /// let gpu_tensor = cpu_tensor.to_device_enum(&Device::Metal(0))?;
+    ///
+    /// // Transfer back to CPU
+    /// let result = gpu_tensor.to_device_enum(&Device::CPU)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn to_device_enum(&self, device: &crate::device::Device) -> Result<Tensor> {
+        match (self, device) {
+            // F32 → Metal
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (Tensor::F32(arr), crate::device::Device::Metal(_)) => {
+                use crate::gpu_ops::metal::get_metal_backend;
+                let backend = get_metal_backend()?;
+                let data_vec: Vec<f32> = arr.iter().copied().collect();
+
+                #[cfg(debug_assertions)]
+                {
+                    // Debug: Verify data_vec before GPU upload (only in debug builds)
+                    eprintln!(
+                        "🔍 to_device_enum(F32→Metal): data_vec.len()={}",
+                        data_vec.len()
+                    );
+                    if !data_vec.is_empty() {
+                        eprintln!(
+                            "🔍 to_device_enum: first 10 values: {:?}",
+                            &data_vec[..10.min(data_vec.len())]
+                        );
+                        eprintln!(
+                            "🔍 to_device_enum: stats - min={:.4}, max={:.4}, mean={:.4}",
+                            data_vec.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                            data_vec.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)),
+                            data_vec.iter().sum::<f32>() / data_vec.len() as f32
+                        );
+                    }
+                }
+
+                let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+
+                #[cfg(debug_assertions)]
+                {
+                    eprintln!("🔍 to_device_enum: Created buffer_id={:?}", buffer_id);
+
+                    // Verify by immediately downloading (GPU→CPU transfer - expensive!)
+                    let verify_data = backend.download_buffer_to_vec(&buffer_id)?;
+                    eprintln!(
+                        "🔍 to_device_enum: Verification download - len={}, first 10: {:?}",
+                        verify_data.len(),
+                        &verify_data[..10.min(verify_data.len())]
+                    );
+                }
+
+                Ok(Tensor::Metal(super::MetalTensorData {
+                    buffer_id,
+                    shape: arr.shape().to_vec(),
+                    dtype: DType::F32,
+                }))
+            },
+
+            // F64 → Metal (convert to F32 first)
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (Tensor::F64(arr), crate::device::Device::Metal(_)) => {
+                use crate::gpu_ops::metal::get_metal_backend;
+                let backend = get_metal_backend()?;
+                let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
+                let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+                Ok(Tensor::Metal(super::MetalTensorData {
+                    buffer_id,
+                    shape: arr.shape().to_vec(),
+                    dtype: DType::F32,
+                }))
+            },
+
+            // Metal → F32
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (Tensor::Metal(metal_data), crate::device::Device::CPU) => {
+                use crate::gpu_ops::metal::get_metal_backend;
+                let backend = get_metal_backend()?;
+                let buffer = backend.get_persistent_buffer(&metal_data.buffer_id)?;
+
+                // Download from GPU
+                let size: usize = metal_data.shape.iter().product();
+
+                // Handle different dtypes
+                match metal_data.dtype {
+                    DType::F32 => {
+                        let ptr = buffer.contents() as *const f32;
+                        let data_vec = unsafe { std::slice::from_raw_parts(ptr, size) }.to_vec();
+
+                        // Convert to ArrayD
+                        use scirs2_core::ndarray::ArrayD;
+                        let arr = ArrayD::from_shape_vec(
+                            scirs2_core::ndarray::IxDyn(&metal_data.shape),
+                            data_vec,
+                        )
+                        .map_err(|e| {
+                            TrustformersError::tensor_op_error(
+                                &format!("Failed to create array from shape: {}", e),
+                                "to_device_enum",
+                            )
+                        })?;
+                        Ok(Tensor::F32(arr))
+                    },
+                    _ => Err(TrustformersError::tensor_op_error(
+                        &format!("Unsupported Metal tensor dtype: {:?}", metal_data.dtype),
+                        "to_device_enum",
+                    )),
+                }
+            },
+
+            // Metal → Metal (different device, currently just clone)
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            (Tensor::Metal(metal_data), crate::device::Device::Metal(_)) => {
+                // For now, just return a clone (buffer is reference counted)
+                // TODO: Implement actual device-to-device transfer if needed
+                Ok(Tensor::Metal(metal_data.clone()))
+            },
+
+            // Already on correct device - no-op
+            (Tensor::F32(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::F64(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::F16(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::BF16(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::I64(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::C32(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::C64(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::CF16(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::CBF16(_), crate::device::Device::CPU) => Ok(self.clone()),
+            (Tensor::Sparse(_), crate::device::Device::CPU) => Ok(self.clone()),
+
+            // Metal not available in this build
+            #[cfg(not(feature = "metal"))]
+            (_, crate::device::Device::Metal(_)) => Err(TrustformersError::hardware_error(
+                "Metal not available. Compile with --features metal",
+                "to_device_enum",
+            )),
+
+            // F32 → CUDA
+            #[cfg(feature = "cuda")]
+            #[allow(unused_variables)]
+            (Tensor::F32(arr), crate::device::Device::CUDA(device_id)) => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    use crate::gpu_ops::cuda::get_cuda_backend;
+                    let backend = get_cuda_backend(*device_id)?;
+                    let data_vec: Vec<f32> = arr.iter().copied().collect();
+                    let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+                    Ok(Tensor::CUDA(super::CudaTensorData {
+                        buffer_id,
+                        shape: arr.shape().to_vec(),
+                        dtype: DType::F32,
+                    }))
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                {
+                    Err(TrustformersError::hardware_error(
+                        "CUDA is only supported on Linux and Windows",
+                        "to_device_enum",
+                    ))
+                }
+            },
+
+            // F64 → CUDA (convert to F32 first)
+            #[cfg(feature = "cuda")]
+            #[allow(unused_variables)]
+            (Tensor::F64(arr), crate::device::Device::CUDA(device_id)) => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    use crate::gpu_ops::cuda::get_cuda_backend;
+                    let backend = get_cuda_backend(*device_id)?;
+                    let data_vec: Vec<f32> = arr.iter().map(|&x| x as f32).collect();
+                    let buffer_id = backend.create_persistent_buffer(&data_vec)?;
+                    Ok(Tensor::CUDA(super::CudaTensorData {
+                        buffer_id,
+                        shape: arr.shape().to_vec(),
+                        dtype: DType::F32,
+                    }))
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                {
+                    Err(TrustformersError::hardware_error(
+                        "CUDA is only supported on Linux and Windows",
+                        "to_device_enum",
+                    ))
+                }
+            },
+
+            // CUDA → F32
+            #[cfg(feature = "cuda")]
+            #[allow(unused_variables)]
+            (Tensor::CUDA(cuda_data), crate::device::Device::CPU) => {
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                {
+                    use crate::gpu_ops::cuda::get_cuda_backend;
+                    // Use device 0 by default for downloading
+                    let backend = get_cuda_backend(0)?;
+
+                    // Handle different dtypes
+                    match cuda_data.dtype {
+                        DType::F32 => {
+                            // Download from GPU to CPU
+                            let data_vec = backend.download_buffer(&cuda_data.buffer_id)?;
+
+                            // Convert to ArrayD
+                            use scirs2_core::ndarray::ArrayD;
+                            let arr = ArrayD::from_shape_vec(
+                                scirs2_core::ndarray::IxDyn(&cuda_data.shape),
+                                data_vec,
+                            )
+                            .map_err(|e| {
+                                TrustformersError::tensor_op_error(
+                                    &format!("Failed to create array from shape: {}", e),
+                                    "to_device_enum",
+                                )
+                            })?;
+                            Ok(Tensor::F32(arr))
+                        },
+                        _ => Err(TrustformersError::tensor_op_error(
+                            &format!("Unsupported CUDA tensor dtype: {:?}", cuda_data.dtype),
+                            "to_device_enum",
+                        )),
+                    }
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                {
+                    Err(TrustformersError::hardware_error(
+                        "CUDA is only supported on Linux and Windows",
+                        "to_device_enum",
+                    ))
+                }
+            },
+
+            // CUDA → CUDA (different device, currently just clone)
+            #[cfg(feature = "cuda")]
+            (Tensor::CUDA(cuda_data), crate::device::Device::CUDA(_)) => {
+                // For now, just return a clone (buffer is reference counted)
+                // TODO: Implement actual device-to-device transfer if needed
+                Ok(Tensor::CUDA(cuda_data.clone()))
+            },
+
+            // CUDA not available in this build
+            #[cfg(not(feature = "cuda"))]
+            (_, crate::device::Device::CUDA(_)) => Err(TrustformersError::hardware_error(
+                "CUDA not available. Compile with --features cuda",
+                "to_device_enum",
+            )),
+
+            // ROCm transfers (placeholder for future implementation)
+            (_, crate::device::Device::ROCm(_)) => Err(TrustformersError::hardware_error(
+                "ROCm transfer not implemented yet",
+                "to_device_enum",
+            )),
+
+            // WebGPU transfers (placeholder for future implementation)
+            (_, crate::device::Device::WebGPU) => Err(TrustformersError::hardware_error(
+                "WebGPU transfer not implemented yet",
+                "to_device_enum",
+            )),
+
+            // Fallback for unsupported combinations
+            #[allow(unreachable_patterns)]
+            _ => Err(TrustformersError::tensor_op_error(
+                &format!(
+                    "Unsupported device transfer from {:?} to {:?}",
+                    self.dtype(),
+                    device
+                ),
+                "to_device_enum",
+            )),
         }
     }
 
@@ -378,6 +712,18 @@ impl Tensor {
             Tensor::F32(a) => Ok(a.iter().cloned().collect()),
             Tensor::F64(a) => Ok(a.iter().map(|&x| x as f32).collect()),
             Tensor::I64(a) => Ok(a.iter().map(|&x| x as f32).collect()),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(_) => {
+                // Convert to CPU first, then get data
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.data()
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => {
+                // Convert to CPU first, then get data
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.data()
+            },
             _ => Err(TrustformersError::tensor_op_error(
                 "Unsupported tensor type for data conversion",
                 "data_conversion",
@@ -498,6 +844,10 @@ impl Tensor {
             Tensor::Torch(t) => format!("{:?}", t.device()),
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => format!("{:?}", t.device()),
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(_) => "metal".to_string(),
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => "cuda".to_string(),
         }
     }
 
@@ -522,15 +872,19 @@ impl Tensor {
             Tensor::F16(a) => a.len() * std::mem::size_of::<half::f16>(),
             Tensor::BF16(a) => a.len() * std::mem::size_of::<half::bf16>(),
             Tensor::I64(a) => a.len() * std::mem::size_of::<i64>(),
-            Tensor::C32(a) => a.len() * std::mem::size_of::<num_complex::Complex32>(),
-            Tensor::C64(a) => a.len() * std::mem::size_of::<num_complex::Complex64>(),
-            Tensor::CF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::f16>>(),
-            Tensor::CBF16(a) => a.len() * std::mem::size_of::<num_complex::Complex<half::bf16>>(),
+            Tensor::C32(a) => a.len() * std::mem::size_of::<scirs2_core::Complex32>(),
+            Tensor::C64(a) => a.len() * std::mem::size_of::<scirs2_core::Complex64>(),
+            Tensor::CF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::f16>>(),
+            Tensor::CBF16(a) => a.len() * std::mem::size_of::<scirs2_core::Complex<half::bf16>>(),
             Tensor::Sparse(s) => s.memory_usage(),
             #[cfg(feature = "torch")]
             Tensor::Torch(t) => t.numel() * 4, // Approximate
             #[cfg(feature = "candle")]
             Tensor::Candle(t) => t.elem_count() * 4, // Approximate
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(m) => m.shape.iter().product::<usize>() * 4, // Approximate as f32
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(c) => c.shape.iter().product::<usize>() * 4, // Approximate as f32
         }
     }
 
@@ -555,6 +909,10 @@ impl Tensor {
             Tensor::Torch(_) => DType::F32, // Default assumption
             #[cfg(feature = "candle")]
             Tensor::Candle(_) => DType::F32, // Default assumption
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(data) => data.dtype,
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(data) => data.dtype,
         }
     }
 
@@ -599,6 +957,18 @@ impl Tensor {
                     ));
                 }
                 Ok(a.iter().nth(index).copied().unwrap_or(0.0) as f32)
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(_) => {
+                // Convert to CPU first, then get float
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.get_float(index)
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => {
+                // Convert to CPU first, then get float
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.get_float(index)
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Get float not supported for this tensor type",
@@ -657,6 +1027,18 @@ impl Tensor {
                         "item",
                     )
                 })
+            },
+            #[cfg(all(target_os = "macos", feature = "metal"))]
+            Tensor::Metal(_) => {
+                // Convert to CPU first, then get item
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.item::<T>()
+            },
+            #[cfg(feature = "cuda")]
+            Tensor::CUDA(_) => {
+                // Convert to CPU first, then get item
+                let cpu_tensor = self.to_device_enum(&crate::device::Device::CPU)?;
+                cpu_tensor.item::<T>()
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "item() not supported for this tensor type",
@@ -724,7 +1106,7 @@ impl Tensor {
     /// ```
     /// use trustformers_core::tensor::Tensor;
     ///
-    /// let tensor = Tensor::ones(&[10, 4]).unwrap();
+    /// let tensor = Tensor::ones(&[10, 4]).expect("Failed to create ones tensor");
     /// let batches = tensor.batch_split(3).unwrap();
     /// assert_eq!(batches.len(), 4); // [3, 3, 3, 1]
     /// assert_eq!(batches[0].shape(), &[3, 4]);
@@ -773,9 +1155,9 @@ impl Tensor {
     /// ```
     /// use trustformers_core::tensor::Tensor;
     ///
-    /// let t1 = Tensor::ones(&[3, 4]).unwrap();
-    /// let t2 = Tensor::zeros(&[3, 4]).unwrap();
-    /// let t3 = Tensor::ones(&[3, 4]).unwrap();
+    /// let t1 = Tensor::ones(&[3, 4]).expect("Failed to create ones tensor");
+    /// let t2 = Tensor::zeros(&[3, 4]).expect("Failed to create zero tensor");
+    /// let t3 = Tensor::ones(&[3, 4]).expect("Failed to create ones tensor");
     ///
     /// let batched = Tensor::batch_stack(&[&t1, &t2, &t3]).unwrap();
     /// assert_eq!(batched.shape(), &[3, 3, 4]);
@@ -836,7 +1218,7 @@ impl Tensor {
     /// ```
     /// use trustformers_core::tensor::Tensor;
     ///
-    /// let batched = Tensor::ones(&[3, 4, 5]).unwrap();
+    /// let batched = Tensor::ones(&[3, 4, 5]).expect("Failed to create ones tensor");
     /// let unbatched = batched.unbatch().unwrap();
     /// assert_eq!(unbatched.len(), 3);
     /// assert_eq!(unbatched[0].shape(), &[4, 5]);
@@ -873,8 +1255,9 @@ mod tests {
         // Test basic gradient functionality
         enable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let grad = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let grad = Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3])
+            .expect("Tensor from_vec failed");
 
         // Set gradient
         assert!(x.set_grad(grad.clone()).is_ok());
@@ -891,8 +1274,8 @@ mod tests {
         // Test that gradients fail when tracking is disabled
         disable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let grad = Tensor::ones(&[2, 3]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let grad = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
 
         // Should fail when gradient tracking is disabled
         assert!(x.set_grad(grad).is_err());
@@ -903,8 +1286,8 @@ mod tests {
     fn test_gradient_shape_validation() {
         enable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let wrong_shape_grad = Tensor::ones(&[3, 2]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let wrong_shape_grad = Tensor::ones(&[3, 2]).expect("Failed to create ones tensor");
 
         // Should fail when gradient shape doesn't match tensor shape
         assert!(x.set_grad(wrong_shape_grad).is_err());
@@ -916,8 +1299,8 @@ mod tests {
     fn test_clear_gradients() {
         enable_grad();
 
-        let mut x = Tensor::ones(&[2, 3]).unwrap();
-        let grad = Tensor::ones(&[2, 3]).unwrap();
+        let mut x = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
+        let grad = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
 
         // Set gradient
         x.set_grad(grad).unwrap();

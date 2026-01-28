@@ -71,21 +71,20 @@ mod tests {
 
     #[test]
     fn test_model_test_suite_creation() {
-        let test_suite = ModelTestSuite::new("test-model");
+        let _test_suite = ModelTestSuite::new("test-model");
         // We can't access private fields directly, so just test construction succeeds
-        drop(test_suite);
     }
 
     #[test]
     fn test_performance_profiler_creation() {
-        let profiler = PerformanceProfiler::new();
-        drop(profiler);
+        let _profiler = PerformanceProfiler::new();
     }
 
     #[test]
     fn test_reference_comparator() {
         let comparator = ReferenceComparator::new(1e-3);
-        drop(comparator);
+        // Verify comparator is usable
+        let _ = comparator.tolerance();
     }
 
     #[test]

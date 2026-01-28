@@ -11,15 +11,22 @@ use crate::tensor::Tensor;
 use std::sync::{Arc, OnceLock};
 
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-use cudarc::driver::{CudaDevice, CudaSlice, DeviceSlice, LaunchAsync, LaunchConfig};
+use cudarc::driver::{CudaContext, CudaSlice, CudaStream, LaunchConfig};
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+use std::collections::HashMap;
+#[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+use std::sync::Mutex;
 #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
 use cudarc::nvrtc::compile_ptx;
 
 /// Real CUDA implementation with hardware bindings
 pub struct CudaImpl {
-    /// CUDA device handle
+    /// CUDA context
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
-    device: Arc<CudaDevice>,
+    context: Arc<CudaContext>,
+    /// CUDA stream
+    #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
+    stream: Arc<CudaStream>,
     /// Compiled kernel cache
     #[cfg(all(feature = "cuda", any(target_os = "linux", target_os = "windows")))]
     kernel_cache: Arc<Mutex<HashMap<String, CudaKernel>>>,
@@ -80,15 +87,18 @@ static CUDA_INSTANCE: OnceLock<Arc<CudaImpl>> = OnceLock::new();
 impl CudaImpl {
     /// Initialize CUDA with the first available device
     pub fn new() -> Result<Self> {
-        let device = CudaDevice::new(0).map_err(|e| {
+        let context = CudaContext::new(0).map_err(|e| {
             TrustformersError::hardware_error(
-                &format!("Failed to initialize CUDA device: {}", e),
+                &format!("Failed to initialize CUDA context: {}", e),
                 "cuda_init",
             )
         })?;
 
+        let stream = context.default_stream();
+
         Ok(Self {
-            device,
+            context,
+            stream,
             kernel_cache: Arc::new(Mutex::new(HashMap::new())),
             memory_pool: Arc::new(Mutex::new(MemoryPool::new())),
         })
@@ -125,7 +135,7 @@ impl CudaImpl {
     ) -> Result<CudaKernel> {
         // Check cache first
         {
-            let cache = self.kernel_cache.lock().unwrap();
+            let cache = self.kernel_cache.lock().expect("Lock poisoned");
             if let Some(kernel) = cache.get(name) {
                 return Ok(kernel.clone());
             }
@@ -164,7 +174,7 @@ impl CudaImpl {
 
         // Cache the kernel
         {
-            let mut cache = self.kernel_cache.lock().unwrap();
+            let mut cache = self.kernel_cache.lock().expect("Lock poisoned");
             cache.insert(name.to_string(), kernel.clone());
         }
 
@@ -177,7 +187,7 @@ impl CudaImpl {
 
         // Try to get from pool first
         {
-            let mut pool = self.memory_pool.lock().unwrap();
+            let mut pool = self.memory_pool.lock().expect("Lock poisoned");
             if let Some(block) = pool.get_block(elements) {
                 return Ok(block.slice);
             }
@@ -193,7 +203,7 @@ impl CudaImpl {
 
         // Update memory tracking
         {
-            let mut pool = self.memory_pool.lock().unwrap();
+            let mut pool = self.memory_pool.lock().expect("Lock poisoned");
             pool.total_allocated += size;
             pool.peak_memory = pool.peak_memory.max(pool.total_allocated);
         }
@@ -737,7 +747,7 @@ extern "C" __global__ void flash_attention_kernel(
 
     /// Get memory usage statistics
     pub fn memory_stats(&self) -> (usize, usize) {
-        let pool = self.memory_pool.lock().unwrap();
+        let pool = self.memory_pool.lock().expect("Lock poisoned");
         (pool.total_allocated, pool.peak_memory)
     }
 }
@@ -904,11 +914,11 @@ mod tests {
     #[test]
     fn test_cuda_matmul() {
         if let Ok(cuda) = CudaImpl::new() {
-            let a = Tensor::ones(&[4, 4]).unwrap();
-            let b = Tensor::ones(&[4, 4]).unwrap();
-            let mut c = Tensor::zeros(&[4, 4]).unwrap();
+            let a = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+            let b = Tensor::ones(&[4, 4]).expect("Failed to create ones tensor");
+            let mut c = Tensor::zeros(&[4, 4]).expect("Failed to create zero tensor");
 
-            cuda.matmul(&a, &b, &mut c).unwrap();
+            cuda.matmul(&a, &b, &mut c).expect("Matrix multiplication failed");
 
             // Result should be all 4s (4x4 matrix of ones * 4x4 matrix of ones)
             let data = c.data_f32().unwrap();

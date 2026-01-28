@@ -3,26 +3,28 @@
 //! Focused benchmarks for core functionality that doesn't require
 //! complex service interactions or mocking.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use serde_json::json;
+use std::hint::black_box;
 use std::time::Duration;
 use tokio::runtime::Runtime;
 use trustformers_serve::{Device, ModelConfig, ServerConfig, TrustformerServer};
 
 /// Create a benchmark-optimized server configuration
 fn create_benchmark_config() -> ServerConfig {
-    let mut config = ServerConfig::default();
-    config.host = "127.0.0.1".to_string();
-    config.port = 0;
-    config.num_workers = 4;
-    config.model_config = ModelConfig {
-        model_name: "benchmark-model".to_string(),
-        model_version: Some("1.0.0".to_string()),
-        device: Device::Cpu,
-        max_sequence_length: 1024,
-        enable_caching: true,
-    };
-    config
+    ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        num_workers: 4,
+        model_config: ModelConfig {
+            model_name: "benchmark-model".to_string(),
+            model_version: Some("1.0.0".to_string()),
+            device: Device::Cpu,
+            max_sequence_length: 1024,
+            enable_caching: true,
+        },
+        ..Default::default()
+    }
 }
 
 /// Benchmark server creation and configuration
@@ -139,7 +141,7 @@ fn bench_config_variations(c: &mut Criterion) {
             |b, device| {
                 b.iter(|| {
                     let mut config = create_benchmark_config();
-                    config.model_config.device = device.clone();
+                    config.model_config.device = *device;
                     let server = TrustformerServer::new(black_box(config));
                     black_box(server)
                 })
@@ -214,6 +216,7 @@ fn bench_json_processing(c: &mut Criterion) {
 }
 
 /// Benchmark concurrent server operations
+#[allow(clippy::excessive_nesting)] // Concurrent operations require nesting
 fn bench_concurrent_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrent_operations");
     let rt = Runtime::new().unwrap();

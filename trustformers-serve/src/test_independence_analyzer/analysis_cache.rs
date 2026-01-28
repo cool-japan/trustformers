@@ -676,7 +676,7 @@ pub enum EvictionPolicyType {
 pub enum SerializationFormat {
     /// JSON format
     Json,
-    /// Binary format (bincode)
+    /// Binary format (oxicode, bincode-compatible)
     Bincode,
     /// MessagePack format
     MessagePack,
@@ -838,21 +838,27 @@ impl CacheSerializer for JsonCacheSerializer {
     }
 }
 
-/// Bincode cache serializer
+/// Oxicode cache serializer (bincode-compatible)
 #[derive(Debug)]
 struct BincodeCacheSerializer;
 
 impl CacheSerializer for BincodeCacheSerializer {
     fn serialize<T: Serialize>(&self, data: &T) -> AnalysisResult<Vec<u8>> {
-        bincode::serialize(data).map_err(|e| AnalysisError::CacheError {
-            message: format!("Bincode serialization failed: {}", e),
+        oxicode::serde::encode_to_vec(data, oxicode::config::standard()).map_err(|e| {
+            AnalysisError::CacheError {
+                message: format!("Oxicode serialization failed: {}", e),
+            }
         })
     }
 
     fn deserialize<T: for<'de> Deserialize<'de>>(&self, data: &[u8]) -> AnalysisResult<T> {
-        bincode::deserialize(data).map_err(|e| AnalysisError::CacheError {
-            message: format!("Bincode deserialization failed: {}", e),
-        })
+        let (result, _): (T, usize) =
+            oxicode::serde::decode_from_slice(data, oxicode::config::standard()).map_err(|e| {
+                AnalysisError::CacheError {
+                    message: format!("Oxicode deserialization failed: {}", e),
+                }
+            })?;
+        Ok(result)
     }
 }
 

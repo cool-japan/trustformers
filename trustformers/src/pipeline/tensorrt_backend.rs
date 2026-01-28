@@ -1573,7 +1573,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_backend_config() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = TensorRTBackendConfig::latency_optimized(model_path.clone());
@@ -1589,7 +1589,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_backend_config_throughput() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = TensorRTBackendConfig::throughput_optimized(model_path.clone(), 8);
@@ -1603,7 +1603,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_backend_config_memory() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = TensorRTBackendConfig::memory_optimized(model_path.clone());
@@ -1615,7 +1615,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_backend_config_int8() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
         let calib_path = temp_dir.path().join("calibration.txt");
 
@@ -1628,7 +1628,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_pipeline_options() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let options = TensorRTPipelineOptions::latency_optimized(model_path.clone());
@@ -1656,7 +1656,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_config_with_dla() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = TensorRTBackendConfig::latency_optimized(model_path.clone()).with_dla(0);
@@ -1667,7 +1667,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_config_with_profiling() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
         let profile_path = temp_dir.path().join("profile.json");
 
@@ -1680,7 +1680,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_config_with_engine_cache() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("failed to create temp dir");
         let model_path = temp_dir.path().join("model.onnx");
         let cache_path = temp_dir.path().join("cache");
 

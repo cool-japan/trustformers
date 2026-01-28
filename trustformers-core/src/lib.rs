@@ -1,3 +1,63 @@
+//! # TrustformeRS Core
+//!
+//! Core traits, types, and utilities for the TrustformeRS transformer library.
+//!
+//! This crate provides the foundational building blocks for implementing transformer models
+//! in pure Rust with zero-cost abstractions. It includes:
+//!
+//! - **Tensor operations**: High-performance tensor abstractions with GPU acceleration
+//! - **Neural network layers**: Attention mechanisms, feed-forward networks, normalization
+//! - **Model traits**: Unified interfaces for models, tokenizers, and configurations
+//! - **Device management**: CPU, CUDA, Metal, and other hardware backend support
+//! - **Quantization**: INT4/INT8/FP16 quantization for efficient inference
+//! - **Memory management**: Caching, checkpointing, and memory-efficient operations
+//! - **Hardware acceleration**: SIMD, BLAS, GPU kernels, and compiler optimizations
+//!
+//! ## Quick Start
+//!
+//! ```rust,no_run
+//! use trustformers_core::{
+//!     tensor::Tensor,
+//!     device::Device,
+//!     layers::Linear,
+//! };
+//!
+//! // Create a tensor and move to GPU if available
+//! let device = Device::cuda_if_available().unwrap_or(Device::cpu());
+//! let input = Tensor::randn(&[32, 512])?;
+//! let input = input.to_device(&device)?;
+//!
+//! // Create a linear layer
+//! let linear = Linear::new(512, 768, true)?;
+//! let output = linear.forward(input)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
+//!
+//! ## Architecture
+//!
+//! TrustformeRS Core follows a dual-layer architecture:
+//! - High-level ML abstractions (tensors, layers, models)
+//! - Low-level scientific computing via SciRS2 (SIMD, parallel ops, BLAS)
+//!
+//! All external dependencies (PyTorch, ONNX Runtime, tokenizers) are abstracted
+//! through unified interfaces to maintain flexibility and testability.
+//!
+//! ## Features
+//!
+//! - `cuda`: NVIDIA GPU support via CUDA
+//! - `metal`: Apple GPU support via Metal
+//! - `opencl`: OpenCL GPU support
+//! - `mkl`: Intel MKL BLAS backend
+//! - `quantization`: Model quantization support
+//! - `distributed`: Distributed training utilities
+//!
+//! ## Safety and Performance
+//!
+//! - **Memory-safe**: Pure Rust with no unsafe code in critical paths
+//! - **Zero-cost abstractions**: Performance comparable to C++ implementations
+//! - **GPU-accelerated**: Automatic dispatch to GPU when available
+//! - **SIMD-optimized**: Vectorized operations for CPU performance
+
 #![allow(clippy::excessive_nesting)] // Algorithm-heavy code often requires deep nesting
 #![allow(clippy::result_large_err)] // Large error enums are intentional for rich error context
 #![allow(clippy::excessive_precision)] // High-precision floats needed for ML computations
@@ -14,17 +74,23 @@ pub mod cache;
 pub mod checkpoint;
 pub mod compiler;
 pub mod compression;
+pub mod device;
 pub mod error;
 pub mod errors;
 pub mod evaluation;
 pub mod export;
 pub mod generation;
 pub mod gpu;
-#[cfg(feature = "cuda")]
+// Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
+#[cfg(not(feature = "cuda"))]
 pub mod gpu_accelerated;
+pub mod gpu_ops;
 pub mod hardware;
+// Temporarily disabled when CUDA feature is enabled - needs cudarc 0.17.7 API migration
+#[cfg(not(feature = "cuda"))]
 pub mod hardware_acceleration;
 pub mod kernel_fusion;
+pub mod kernel_tuning;
 pub mod kernels;
 pub mod layers;
 pub mod leaderboard;
@@ -41,11 +107,14 @@ pub mod performance;
 pub mod plugins;
 pub mod quantization;
 pub mod quantum;
+pub mod sparse_ops;
 pub mod sparse_tensor;
 pub mod tensor;
+pub mod tensor_debugger;
 pub mod testing;
 #[cfg(test)]
 pub mod tests;
+pub mod tokenizer_backend;
 pub mod traits;
 pub mod utils;
 pub mod versioning;
@@ -131,6 +200,7 @@ pub use compression::{
     TeacherModel,
     UnstructuredPruner,
 };
+pub use device::Device;
 pub use errors::{Result, TrustformersError};
 pub use evaluation::{
     Accuracy, DatasetLoader, DatasetManager, DatasetSample, EvaluationConfig, EvaluationDataset,
@@ -147,10 +217,10 @@ pub use generation::{
     GenerationConfig,
     GenerationStrategy,
     GenerationStream,
-    KVCache,
+    // KVCache, // Now exported from cache module
     // SpeculativeDecoder, TextGenerator,  // Temporarily disabled due to missing modules
 };
-#[cfg(feature = "cuda")]
+#[cfg(not(feature = "cuda"))]
 pub use gpu_accelerated::{GpuAcceleratedOps, GpuOpsConfig, GpuPrecision};
 pub use hardware::{
     AsicBackend, AsicDevice, AsicOperationSet, DataType, HardwareBackend, HardwareCapabilities,
@@ -162,6 +232,10 @@ pub use kernel_fusion::{
     FusedKernel, FusionConstraint, FusionOpportunity, FusionPattern, FusionStatistics,
     GraphNode as FusionGraphNode, KernelFusionEngine, KernelImplementation, MemoryLayout,
     NodeMetadata, OperationType, TensorInfo,
+};
+pub use kernel_tuning::{
+    get_kernel_tuner, Backend as TuningBackend, KernelParams, KernelTuner,
+    Operation as TuningOperation, PlatformInfo, TuningConfig, TuningStatistics,
 };
 pub use kernels::fused_ops::ActivationType;
 pub use kernels::{
@@ -203,6 +277,7 @@ pub use hardware::asic::{
     AsicDeviceConfig, AsicDriver, AsicDriverFactory, AsicMemoryConfig, AsicPerformanceMonitor,
     AsicSpec, AsicType, AsicVendor, CacheConfig as AsicCacheConfig,
 };
+#[cfg(not(feature = "cuda"))]
 pub use hardware_acceleration::{
     api as hardware_acceleration_api, AccelerationBackend, AccelerationConfig, AccelerationStats,
     HardwareAccelerator,
@@ -213,8 +288,9 @@ pub use leaderboard::{
     LeaderboardSubmission, RankingCriteria, SubmissionValidator,
 };
 pub use memory::{
-    get_memory_manager, get_tensor, init_memory_manager, return_tensor, MemoryConfig,
-    MemoryMappedTensor, MemoryPoolStats, TensorMemoryPool, TensorView,
+    get_memory_manager, get_tensor, init_memory_manager, return_tensor, AdaptiveStrategy,
+    MemoryConfig, MemoryEvictionPolicy, MemoryMappedTensor, MemoryPoolStats, TensorMemoryPool,
+    TensorView,
 };
 pub use monitoring::{
     AttentionPattern, AttentionPatternType, AttentionReport, AttentionVisualizer,
@@ -298,10 +374,12 @@ pub use plugins::{
 };
 pub use quantization::{
     dequantize_bitsandbytes,
+    estimate_quantization_error,
     from_bitsandbytes_format,
     quantize_4bit,
     quantize_dynamic_tree,
     quantize_int8,
+    select_fp8_format,
     to_bitsandbytes_format,
     AWQQuantizer,
     ActivationLayerQuantConfig,
@@ -314,13 +392,27 @@ pub use quantization::{
     AutoBitAllocationStrategy,
     // BitsAndBytes compatibility
     BitsAndBytesConfig,
+    // GGUF K-quant formats
+    BlockQ2K,
+    BlockQ3K,
+    BlockQ4K,
     BnBComputeType,
     BnBConfig,
     BnBQuantType,
     BnBQuantizer,
     BnBStorageType,
+    // FP8 quantization
+    DelayedScalingConfig,
+    FP8Config,
+    FP8Format,
+    FP8Quantizer,
+    FP8Tensor,
     FakeQuantize,
     GPTQQuantizer,
+    KQuantConfig,
+    KQuantTensor,
+    KQuantType,
+    KQuantizer,
     LayerQuantConfig,
     MixedBitConfig,
     MixedBitQuantizedTensor,
@@ -334,13 +426,24 @@ pub use quantization::{
     QuantizedBlock,
     QuantizedTensor,
     Quantizer,
+    ScaleFactors,
+    ScalingStrategy,
     SensitivityConfig,
     SensitivityMetric,
+};
+pub use sparse_ops::{
+    conversion, pruning, sparse_attention, sparse_matmul, BlockSparsity, NMSparsity,
+    StructuredSparsityPattern,
 };
 pub use sparse_tensor::{SparseFormat, SparseIndices, SparseTensor};
 pub use tensor::{
     DType, EvalContext, ExprNode, OpType, OptimizationHints, Tensor, TensorExpr, TensorType,
 };
+pub use tensor_debugger::{
+    DebugTensorStats, OperationTrace, Severity, TensorDebugIssue, TensorDebugger,
+    TensorDebuggerConfig, TensorIssueType, WatchCondition, Watchpoint,
+};
+pub use tokenizer_backend::{Encoding, Tokenizer, TokenizerError};
 pub use traits::{Config, Layer, Model};
 pub use versioning::{
     ActiveDeployment,

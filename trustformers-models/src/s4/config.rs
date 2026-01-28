@@ -260,7 +260,7 @@ mod tests {
     fn test_from_pretrained_name() {
         let config = S4Config::from_pretrained_name("s4-base");
         assert!(config.is_some());
-        assert_eq!(config.unwrap().d_model, 768);
+        assert_eq!(config.expect("operation failed").d_model, 768);
 
         let config = S4Config::from_pretrained_name("unknown-model");
         assert!(config.is_none());

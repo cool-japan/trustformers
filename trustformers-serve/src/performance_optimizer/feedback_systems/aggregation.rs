@@ -268,7 +268,7 @@ impl ConsensusAggregationStrategy {
             .map(|&value| {
                 if std_dev > 0.0 {
                     let z_score = (value - mean).abs() / std_dev;
-                    z_score as f64 > self.outlier_threshold as f64
+                    z_score > self.outlier_threshold as f64
                 } else {
                     false
                 }
@@ -502,7 +502,7 @@ impl MultiObjectiveAggregationStrategy {
     fn check_constraints(&self, objective_values: &[f64]) -> bool {
         for constraint in &self.constraints {
             let constraint_value = match constraint.constraint_type {
-                ConstraintType::Performance => objective_values.get(0).copied().unwrap_or(0.0),
+                ConstraintType::Performance => objective_values.first().copied().unwrap_or(0.0),
                 ConstraintType::Resource => objective_values.get(1).copied().unwrap_or(0.0),
                 ConstraintType::Safety => objective_values
                     .iter()

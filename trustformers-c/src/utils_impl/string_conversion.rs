@@ -171,12 +171,7 @@ pub mod conversion_utils {
             return false;
         }
 
-        unsafe {
-            match CStr::from_ptr(c_str).to_str() {
-                Ok(_) => true,
-                Err(_) => false,
-            }
-        }
+        unsafe { CStr::from_ptr(c_str).to_str().is_ok() }
     }
 
     /// Get the length of a C string safely

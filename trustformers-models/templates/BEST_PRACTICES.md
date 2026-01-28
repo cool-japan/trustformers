@@ -1152,8 +1152,12 @@ impl Model {
         }
         
         // Deserialize with size limits
-        let config: ModelConfig = bincode::deserialize_from(
-            reader.take(MAX_CONFIG_SIZE)
+        let mut limited_reader = reader.take(MAX_CONFIG_SIZE);
+        let mut config_bytes = Vec::new();
+        limited_reader.read_to_end(&mut config_bytes)?;
+        let (config, _): (ModelConfig, _) = oxicode::decode_from_slice_with_config(
+            &config_bytes,
+            oxicode::config::standard()
         )?;
         
         // Validate config before proceeding

@@ -635,7 +635,7 @@ impl MetaLearner {
             let predicted_class = distances
                 .iter()
                 .enumerate()
-                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(i, _)| i)
                 .unwrap_or(0);
 
@@ -1244,7 +1244,6 @@ pub struct TaskDistribution {
 
 /// Concrete implementations of meta-learning models would go here
 /// For brevity, I'll include basic stubs
-
 pub struct MAMLModel {
     #[allow(dead_code)]
     config: MetaLearningConfig,
@@ -1920,8 +1919,8 @@ mod tests {
     #[test]
     fn test_task_sampler() {
         let config = MetaLearningConfig::default();
-        let mut sampler = TaskSampler::new(&config).unwrap();
-        let task_batch = sampler.sample_batch(4).unwrap();
+        let mut sampler = TaskSampler::new(&config).expect("operation failed");
+        let task_batch = sampler.sample_batch(4).expect("operation failed");
         assert_eq!(task_batch.tasks.len(), 4);
     }
 

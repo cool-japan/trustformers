@@ -57,6 +57,14 @@ impl Default for ViTConfig {
 
 impl Config for ViTConfig {
     fn validate(&self) -> trustformers_core::errors::Result<()> {
+        // Check for zero patch_size first to avoid division by zero
+        if self.patch_size == 0 {
+            return Err(trustformers_core::errors::invalid_config(
+                "patch_size",
+                "patch_size must be greater than 0",
+            ));
+        }
+
         if self.hidden_size % self.num_attention_heads != 0 {
             return Err(trustformers_core::errors::invalid_config(
                 "hidden_size",
@@ -68,13 +76,6 @@ impl Config for ViTConfig {
             return Err(trustformers_core::errors::invalid_config(
                 "image_size",
                 "image_size must be divisible by patch_size",
-            ));
-        }
-
-        if self.patch_size == 0 {
-            return Err(trustformers_core::errors::invalid_config(
-                "patch_size",
-                "patch_size must be greater than 0",
             ));
         }
 

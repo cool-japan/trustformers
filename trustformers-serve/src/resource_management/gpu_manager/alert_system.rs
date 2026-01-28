@@ -1224,7 +1224,7 @@ impl GpuAlertSystem {
         let mut counts = HashMap::new();
 
         for alert in alerts.values() {
-            *counts.entry(alert.severity.clone()).or_insert(0) += 1;
+            *counts.entry(alert.severity).or_insert(0) += 1;
         }
 
         counts
@@ -1282,7 +1282,8 @@ mod tests {
     #[tokio::test]
     async fn test_alert_system_creation() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
 
         assert!(!alert_system.is_running());
 
@@ -1293,28 +1294,33 @@ mod tests {
     #[tokio::test]
     async fn test_alert_system_start_stop() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
 
         // Start system
-        alert_system.start().await.unwrap();
+        alert_system.start().await.expect("Alert system start should succeed");
         assert!(alert_system.is_running());
 
         // Stop system
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
         assert!(!alert_system.is_running());
     }
 
     #[tokio::test]
     async fn test_temperature_alert_generation() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
-        alert_system.start().await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
+        alert_system.start().await.expect("Alert system start should succeed");
 
         // Create metrics that should trigger temperature alert
         let high_temp_metrics = create_test_metrics(0, 90.0, 50.0, 8192);
 
         // Check metrics for alerts
-        alert_system.check_metrics_for_alerts(0, &high_temp_metrics).await.unwrap();
+        alert_system
+            .check_metrics_for_alerts(0, &high_temp_metrics)
+            .await
+            .expect("Check metrics should succeed");
 
         // Wait for alert processing
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1323,24 +1329,28 @@ mod tests {
         let alerts = alert_system.get_active_alerts().await;
         assert!(!alerts.is_empty());
 
-        let alert = alerts.values().next().unwrap();
+        let alert = alerts.values().next().expect("Should have alert");
         assert_eq!(alert.device_id, 0);
         assert_eq!(alert.alert_type, GpuAlertType::HighTemperature);
         assert_eq!(alert.severity, AlertSeverity::Critical);
 
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
     }
 
     #[tokio::test]
     async fn test_utilization_alert_generation() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
-        alert_system.start().await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
+        alert_system.start().await.expect("Alert system start should succeed");
 
         // Create metrics that should trigger utilization alert
         let high_util_metrics = create_test_metrics(0, 60.0, 98.0, 8192);
 
-        alert_system.check_metrics_for_alerts(0, &high_util_metrics).await.unwrap();
+        alert_system
+            .check_metrics_for_alerts(0, &high_util_metrics)
+            .await
+            .expect("Check metrics should succeed");
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1348,21 +1358,25 @@ mod tests {
         let alerts = alert_system.get_active_alerts().await;
         assert!(!alerts.is_empty());
 
-        let alert = alerts.values().next().unwrap();
+        let alert = alerts.values().next().expect("Should have alert");
         assert_eq!(alert.alert_type, GpuAlertType::HighUtilization);
 
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
     }
 
     #[tokio::test]
     async fn test_alert_acknowledgment() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
-        alert_system.start().await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
+        alert_system.start().await.expect("Alert system start should succeed");
 
         // Generate an alert
         let metrics = create_test_metrics(0, 90.0, 50.0, 8192);
-        alert_system.check_metrics_for_alerts(0, &metrics).await.unwrap();
+        alert_system
+            .check_metrics_for_alerts(0, &metrics)
+            .await
+            .expect("Check metrics should succeed");
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1370,30 +1384,37 @@ mod tests {
         let alerts = alert_system.get_active_alerts().await;
         assert!(!alerts.is_empty());
 
-        let alert_id = alerts.keys().next().unwrap().clone();
+        let alert_id = alerts.keys().next().expect("Should have alert").clone();
         let alert = &alerts[&alert_id];
         assert!(!alert.acknowledged);
 
         // Acknowledge the alert
-        alert_system.acknowledge_alert(&alert_id).await.unwrap();
+        alert_system
+            .acknowledge_alert(&alert_id)
+            .await
+            .expect("Acknowledge alert should succeed");
 
         // Verify acknowledgment
         let alerts = alert_system.get_active_alerts().await;
         let alert = &alerts[&alert_id];
         assert!(alert.acknowledged);
 
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
     }
 
     #[tokio::test]
     async fn test_alert_history() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
-        alert_system.start().await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
+        alert_system.start().await.expect("Alert system start should succeed");
 
         // Generate alerts
         let metrics = create_test_metrics(0, 90.0, 50.0, 8192);
-        alert_system.check_metrics_for_alerts(0, &metrics).await.unwrap();
+        alert_system
+            .check_metrics_for_alerts(0, &metrics)
+            .await
+            .expect("Check metrics should succeed");
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1406,21 +1427,28 @@ mod tests {
         assert_eq!(event.event_type, GpuAlertEventType::Triggered);
         assert_eq!(event.alert.device_id, 0);
 
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
     }
 
     #[tokio::test]
     async fn test_device_specific_alerts() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
-        alert_system.start().await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
+        alert_system.start().await.expect("Alert system start should succeed");
 
         // Generate alerts for different devices
         let metrics_0 = create_test_metrics(0, 90.0, 50.0, 8192);
         let metrics_1 = create_test_metrics(1, 70.0, 98.0, 8192);
 
-        alert_system.check_metrics_for_alerts(0, &metrics_0).await.unwrap();
-        alert_system.check_metrics_for_alerts(1, &metrics_1).await.unwrap();
+        alert_system
+            .check_metrics_for_alerts(0, &metrics_0)
+            .await
+            .expect("Check metrics should succeed");
+        alert_system
+            .check_metrics_for_alerts(1, &metrics_1)
+            .await
+            .expect("Check metrics should succeed");
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1435,18 +1463,22 @@ mod tests {
         assert_eq!(device_0_alerts[0].alert_type, GpuAlertType::HighTemperature);
         assert_eq!(device_1_alerts[0].alert_type, GpuAlertType::HighUtilization);
 
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
     }
 
     #[tokio::test]
     async fn test_alert_statistics() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
-        alert_system.start().await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
+        alert_system.start().await.expect("Alert system start should succeed");
 
         // Generate multiple alerts
         let metrics = create_test_metrics(0, 90.0, 98.0, 20000);
-        alert_system.check_metrics_for_alerts(0, &metrics).await.unwrap();
+        alert_system
+            .check_metrics_for_alerts(0, &metrics)
+            .await
+            .expect("Check metrics should succeed");
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -1454,7 +1486,7 @@ mod tests {
         let stats = alert_system.get_alert_statistics().await;
         assert!(stats.total_alerts_generated > 0);
 
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
     }
 
     #[tokio::test]
@@ -1472,18 +1504,25 @@ mod tests {
     #[tokio::test]
     async fn test_bulk_acknowledgment() {
         let config = create_test_alert_config();
-        let alert_system = GpuAlertSystem::new(config).await.unwrap();
-        alert_system.start().await.unwrap();
+        let alert_system =
+            GpuAlertSystem::new(config).await.expect("Alert system creation should succeed");
+        alert_system.start().await.expect("Alert system start should succeed");
 
         // Generate multiple alerts for same device
         let metrics = create_test_metrics(0, 90.0, 98.0, 20000);
-        alert_system.check_metrics_for_alerts(0, &metrics).await.unwrap();
+        alert_system
+            .check_metrics_for_alerts(0, &metrics)
+            .await
+            .expect("Check metrics should succeed");
 
         // Wait for processing
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // Acknowledge all alerts for device
-        let ack_count = alert_system.acknowledge_device_alerts(0).await.unwrap();
+        let ack_count = alert_system
+            .acknowledge_device_alerts(0)
+            .await
+            .expect("Acknowledge device alerts should succeed");
         assert!(ack_count > 0);
 
         // Verify all device alerts are acknowledged
@@ -1492,6 +1531,6 @@ mod tests {
             assert!(alert.acknowledged);
         }
 
-        alert_system.stop().await.unwrap();
+        alert_system.stop().await.expect("Alert system stop should succeed");
     }
 }

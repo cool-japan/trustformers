@@ -1126,7 +1126,7 @@ impl CoolingStrategy {
         _readings: &SensorReadings,
         _state: ThermalState,
     ) -> Result<CoolingTarget> {
-        Ok(CoolingTarget::default())
+        Ok(CoolingTarget)
     }
 }
 
@@ -1160,7 +1160,7 @@ impl ThermalAnalyzer {
     }
 
     pub async fn generate_analysis(&self) -> Result<ThermalAnalysisReport> {
-        Ok(ThermalAnalysisReport::default())
+        Ok(ThermalAnalysisReport)
     }
 }
 
@@ -1217,12 +1217,18 @@ impl ThermalReporting {
     }
 
     pub async fn generate_report(&self, _report_type: ReportType) -> Result<ThermalReport> {
-        Ok(ThermalReport::default())
+        Ok(ThermalReport)
     }
 }
 
 // Additional placeholder types
 pub struct AlertRulesEngine;
+impl Default for AlertRulesEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AlertRulesEngine {
     pub fn new() -> Self {
         Self
@@ -1230,6 +1236,12 @@ impl AlertRulesEngine {
 }
 
 pub struct DissipationCalculator;
+impl Default for DissipationCalculator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DissipationCalculator {
     pub fn new() -> Self {
         Self
@@ -1237,6 +1249,12 @@ impl DissipationCalculator {
 }
 
 pub struct ThermalDesignAnalyzer;
+impl Default for ThermalDesignAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThermalDesignAnalyzer {
     pub fn new() -> Self {
         Self
@@ -1407,18 +1425,23 @@ mod tests {
     #[test]
     async fn test_temperature_monitor_creation() {
         let config = TemperatureMonitorConfig::default();
-        let monitor = TemperatureMonitor::new(config).await.unwrap();
+        let monitor = TemperatureMonitor::new(config).await.expect("Failed to create monitor");
 
-        let current_temp = monitor.get_current_temperature().await.unwrap();
+        let current_temp = monitor
+            .get_current_temperature()
+            .await
+            .expect("Failed to get current temperature");
         assert!(current_temp.cpu_temperature > 0.0);
     }
 
     #[test]
     async fn test_thermal_sensor_manager() {
         let config = SensorManagerConfig::default();
-        let manager = ThermalSensorManager::new(config).await.unwrap();
+        let manager = ThermalSensorManager::new(config)
+            .await
+            .expect("Failed to create thermal sensor manager");
 
-        let readings = manager.read_sensors().await.unwrap();
+        let readings = manager.read_sensors().await.expect("Failed to read sensors");
         assert!(readings.cpu_temperature > 0.0);
         assert!(readings.system_temperature > 0.0);
     }
@@ -1426,7 +1449,9 @@ mod tests {
     #[test]
     async fn test_thermal_state_transitions() {
         let config = StateManagerConfig::default();
-        let manager = ThermalStateManager::new(config).await.unwrap();
+        let manager = ThermalStateManager::new(config)
+            .await
+            .expect("Failed to create thermal state manager");
 
         let thresholds = TemperatureThresholds::default();
         let readings = SensorReadings {
@@ -1442,14 +1467,19 @@ mod tests {
             sensor_details: HashMap::new(),
         };
 
-        let state = manager.update_state(&readings, &thresholds).await.unwrap();
+        let state = manager
+            .update_state(&readings, &thresholds)
+            .await
+            .expect("Failed to update state");
         assert_eq!(state, ThermalState::Warning);
     }
 
     #[test]
     async fn test_throttling_prediction() {
         let config = PredictorConfig::default();
-        let predictor = ThrottlingPredictor::new(config).await.unwrap();
+        let predictor = ThrottlingPredictor::new(config)
+            .await
+            .expect("Failed to create throttling predictor");
 
         let readings = SensorReadings {
             cpu_temperature: 85.0,
@@ -1464,7 +1494,10 @@ mod tests {
             sensor_details: HashMap::new(),
         };
 
-        let predictions = predictor.predict_throttling(&readings).await.unwrap();
+        let predictions = predictor
+            .predict_throttling(&readings)
+            .await
+            .expect("Failed to predict throttling");
         assert!(!predictions.is_empty());
         assert!(predictions[0].probability >= 0.0 && predictions[0].probability <= 1.0);
     }
@@ -1472,9 +1505,11 @@ mod tests {
     #[test]
     async fn test_cooling_controller() {
         let config = CoolingConfig::default();
-        let controller = CoolingController::new(config).await.unwrap();
+        let controller = CoolingController::new(config)
+            .await
+            .expect("Failed to create cooling controller");
 
-        let status = controller.get_status().await.unwrap();
+        let status = controller.get_status().await.expect("Failed to get status");
         assert!(status.cooling_effectiveness > 0.0);
         assert!(status.cooling_effectiveness <= 1.0);
     }

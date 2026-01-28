@@ -1121,7 +1121,7 @@ mod tests {
         }
 
         // Should have at least one degradation anomaly
-        assert!(detector.get_anomalies().len() >= 1);
+        assert!(!detector.get_anomalies().is_empty());
         assert!(detector
             .get_anomalies()
             .iter()

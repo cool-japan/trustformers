@@ -545,11 +545,13 @@ impl ElasticTrainingCoordinator {
 
     /// Get current system status
     pub fn get_system_status(&self) -> SystemStatus {
+        // Calculate performance first to avoid deadlock (it also acquires workers lock)
+        let performance = self.calculate_system_performance();
+
+        // Now acquire workers lock for remaining stats
         let workers = self.workers.lock().unwrap();
         let active_count =
             workers.iter().filter(|(_, w)| matches!(w.status, WorkerStatus::Active)).count();
-
-        let performance = self.calculate_system_performance();
 
         SystemStatus {
             total_workers: workers.len(),

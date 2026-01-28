@@ -47,7 +47,7 @@ static mut INFERENCE_CALLBACK: Option<InferenceCompleteCallback> = None;
 macro_rules! c_string {
     ($s:expr) => {
         CString::new($s)
-            .unwrap_or_else(|_| CString::new("Invalid string").unwrap())
+            .unwrap_or_else(|_| CString::new("Invalid string").expect("Operation failed"))
             .into_raw()
     };
 }
@@ -59,7 +59,7 @@ macro_rules! handle_error {
             Ok(val) => val,
             Err(e) => {
                 let error_msg = format!("TrustformeRS Error: {}", e);
-                let c_msg = CString::new(error_msg).unwrap();
+                let c_msg = CString::new(error_msg).expect("Operation failed");
                 unsafe {
                     if let Some(callback) = ERROR_CALLBACK {
                         callback(-1, c_msg.as_ptr());
@@ -273,7 +273,7 @@ pub extern "C" fn trustformers_load_model(
             log::error(&error_msg);
             unsafe {
                 if let Some(callback) = ERROR_CALLBACK {
-                    let c_msg = CString::new(error_msg).unwrap();
+                    let c_msg = CString::new(error_msg).expect("Operation failed");
                     callback(-2, c_msg.as_ptr());
                 }
             }
@@ -503,7 +503,7 @@ pub extern "C" fn trustformers_set_performance_mode(engine_ptr: *mut c_void, mod
             log::error(&error_msg);
             unsafe {
                 if let Some(callback) = ERROR_CALLBACK {
-                    let c_msg = CString::new(error_msg).unwrap();
+                    let c_msg = CString::new(error_msg).expect("Operation failed");
                     callback(-3, c_msg.as_ptr());
                 }
             }
@@ -584,7 +584,7 @@ pub extern "C" fn trustformers_warm_up(engine_ptr: *mut c_void) -> c_int {
             log::error(&error_msg);
             unsafe {
                 if let Some(callback) = ERROR_CALLBACK {
-                    let c_msg = CString::new(error_msg).unwrap();
+                    let c_msg = CString::new(error_msg).expect("Operation failed");
                     callback(-3, c_msg.as_ptr());
                 }
             }
@@ -602,8 +602,9 @@ pub extern "C" fn trustformers_allocate_managed_memory(size: c_int) -> *mut c_vo
         return ptr::null_mut();
     }
 
-    let layout = std::alloc::Layout::from_size_align(size as usize, 8)
-        .unwrap_or_else(|_| std::alloc::Layout::from_size_align(size as usize, 1).unwrap());
+    let layout = std::alloc::Layout::from_size_align(size as usize, 8).unwrap_or_else(|_| {
+        std::alloc::Layout::from_size_align(size as usize, 1).expect("Operation failed")
+    });
 
     unsafe { std::alloc::alloc(layout) as *mut c_void }
 }
@@ -665,7 +666,7 @@ mod log {
     use super::*;
 
     pub fn info(message: &str) {
-        let c_msg = CString::new(message).unwrap();
+        let c_msg = CString::new(message).expect("Operation failed");
         unsafe {
             if let Some(callback) = LOG_CALLBACK {
                 callback(c_msg.as_ptr());
@@ -675,7 +676,7 @@ mod log {
     }
 
     pub fn error(message: &str) {
-        let c_msg = CString::new(message).unwrap();
+        let c_msg = CString::new(message).expect("Operation failed");
         unsafe {
             if let Some(callback) = ERROR_CALLBACK {
                 callback(-1, c_msg.as_ptr());
@@ -692,8 +693,8 @@ mod tests {
     #[test]
     fn test_engine_creation_and_destruction() {
         let config = MobileConfig::default();
-        let config_json = serde_json::to_string(&config).unwrap();
-        let c_config = CString::new(config_json).unwrap();
+        let config_json = serde_json::to_string(&config).expect("Operation failed");
+        let c_config = CString::new(config_json).expect("Operation failed");
 
         let engine_ptr = trustformers_create_engine(c_config.as_ptr());
         assert!(!engine_ptr.is_null());

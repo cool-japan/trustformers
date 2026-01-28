@@ -1496,6 +1496,7 @@ mod tests {
     async fn test_start_and_complete_profile() {
         let mut config = RequestProfilingConfig::default();
         config.sampling_rate = 1.0; // 100% sampling for testing
+        config.min_duration_to_profile_ms = 0; // Store all profiles regardless of duration
 
         let service = RequestProfilingService::new(config);
 
@@ -1601,6 +1602,7 @@ mod tests {
     async fn test_profile_filtering() {
         let mut config = RequestProfilingConfig::default();
         config.sampling_rate = 1.0;
+        config.min_duration_to_profile_ms = 0; // Store all profiles regardless of duration
 
         let service = RequestProfilingService::new(config);
 

@@ -116,7 +116,7 @@ impl EnergyConsumptionMonitor {
         // Calculate efficiency ratio (now self is no longer mutably borrowed)
         let power_profile = self.get_power_profile(&device_type);
         let efficiency_ratio =
-            self.calculate_efficiency_ratio(&power_profile, power_watts, utilization);
+            self.calculate_efficiency_ratio(power_profile, power_watts, utilization);
 
         let measurement = EnergyMeasurement {
             timestamp: now,

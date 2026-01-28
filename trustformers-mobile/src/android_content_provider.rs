@@ -594,7 +594,7 @@ impl AndroidModelContentProvider {
         let log_entry = AccessLog {
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs(),
             package_name: package_name.to_string(),
             operation,
@@ -731,7 +731,7 @@ impl ModelRegistry {
             model.metadata = metadata;
             model.modified_at = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs();
             Ok(())
         } else {
@@ -871,7 +871,7 @@ impl ModelCacheManager {
         if let Some(cached) = self.cache.get_mut(model_id) {
             cached.last_accessed = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs();
             cached.access_count += 1;
             Ok(Some(cached.data.clone()))
@@ -913,17 +913,17 @@ impl ModelCacheManager {
                 },
                 created_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .expect("Operation failed")
                     .as_secs(),
                 modified_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .expect("Operation failed")
                     .as_secs(),
             },
             data: data.to_vec(),
             last_accessed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Operation failed")
                 .as_secs(),
             access_count: 1,
         };
@@ -949,7 +949,7 @@ impl ModelCacheManager {
         // Remove entries that haven't been accessed in a while
         let cutoff_time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("Operation failed")
             .as_secs()
             - 3600; // 1 hour
 
@@ -1022,7 +1022,7 @@ mod tests {
     #[test]
     fn test_model_info_validation() {
         let config = ContentProviderConfig::default();
-        let provider = AndroidModelContentProvider::new(config).unwrap();
+        let provider = AndroidModelContentProvider::new(config).expect("Operation failed");
 
         let invalid_model = ModelInfo {
             id: "".to_string(), // Invalid: empty ID
@@ -1065,7 +1065,10 @@ mod tests {
             sort_by: Some(SortOrder::Name),
         };
 
-        assert_eq!(params.model_type.unwrap(), ModelType::Transformer);
+        assert_eq!(
+            params.model_type.expect("Operation failed"),
+            ModelType::Transformer
+        );
         assert_eq!(params.tags.len(), 1);
     }
 }

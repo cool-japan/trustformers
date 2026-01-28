@@ -1047,7 +1047,7 @@ mod tests {
         let mut lora = LoRALayer::new(64, 64, 4, 8.0, 0.0, false).unwrap();
         lora.initialize_weights().unwrap();
 
-        let input = Tensor::randn(&[10, 64]).unwrap();
+        let input = Tensor::randn(&[10, 64]).expect("Failed to create random tensor");
         let output = lora.forward(input.clone()).unwrap();
 
         assert_eq!(output.shape(), input.shape());
@@ -1074,7 +1074,7 @@ mod tests {
         let quant_config = crate::quantization::QuantizationConfig::default();
         qlora.quantize_base(&quant_config).unwrap();
 
-        let input = Tensor::randn(&[5, 64]).unwrap();
+        let input = Tensor::randn(&[5, 64]).expect("Failed to create random tensor");
         let output = qlora.forward(input.clone()).unwrap();
 
         assert_eq!(output.shape(), input.shape());
@@ -1085,7 +1085,7 @@ mod tests {
         let adapter = AdapterLayer::new(128, 32, ActivationType::GELU, 0.1);
         assert_eq!(adapter.bottleneck_size, 32);
 
-        let input = Tensor::randn(&[8, 128]).unwrap();
+        let input = Tensor::randn(&[8, 128]).expect("Failed to create random tensor");
         let output = adapter.forward(input.clone()).unwrap();
 
         assert_eq!(output.shape(), input.shape());
@@ -1129,8 +1129,9 @@ mod tests {
     #[test]
     fn test_peft_config_serialization() {
         let config = PeftConfig::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: PeftConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: PeftConfig =
+            serde_json::from_str(&json).expect("JSON deserialization failed");
 
         assert_eq!(config.method, deserialized.method);
         assert_eq!(config.r, deserialized.r);
@@ -1140,7 +1141,8 @@ mod tests {
     #[test]
     fn test_activation_functions() {
         let adapter = AdapterLayer::new(64, 16, ActivationType::ReLU, 0.0);
-        let input = Tensor::from_vec(vec![-1.0, 0.0, 1.0, 2.0], &[4]).unwrap();
+        let input =
+            Tensor::from_vec(vec![-1.0, 0.0, 1.0, 2.0], &[4]).expect("Tensor from_vec failed");
 
         let relu_result = adapter.relu(&input).unwrap();
         let data = relu_result.data().unwrap();

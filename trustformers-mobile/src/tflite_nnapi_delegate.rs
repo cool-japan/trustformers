@@ -150,7 +150,7 @@ impl TfLiteNNAPIDelegate {
         let start_time = Instant::now();
 
         // Invoke TensorFlow Lite interpreter with NNAPI delegate
-        let interpreter = self.interpreter_handle.unwrap();
+        let interpreter = self.interpreter_handle.expect("Operation failed");
         self.invoke_interpreter(interpreter)?;
 
         let invocation_time = start_time.elapsed().as_millis() as f32;
@@ -305,14 +305,14 @@ impl TfLiteNNAPIDelegate {
 
             // Set accelerator name if specified
             if let Some(ref accelerator_name) = self.config.accelerator_name {
-                let name_cstring = CString::new(accelerator_name.as_str()).unwrap();
+                let name_cstring = CString::new(accelerator_name.as_str()).expect("Operation failed");
                 tflite_nnapi_delegate_options_set_accelerator_name(options, name_cstring.as_ptr());
             }
 
             // Set caching if enabled
             if self.config.enable_delegate_caching {
-                let cache_dir = CString::new("/data/data/com.trustformers/cache").unwrap();
-                let model_token = CString::new("trustformers_model").unwrap();
+                let cache_dir = CString::new("/data/data/com.trustformers/cache").expect("Operation failed");
+                let model_token = CString::new("trustformers_model").expect("Operation failed");
                 tflite_nnapi_delegate_options_set_cache_dir(options, cache_dir.as_ptr());
                 tflite_nnapi_delegate_options_set_model_token(options, model_token.as_ptr());
             }

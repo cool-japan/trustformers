@@ -55,7 +55,7 @@ impl VersionMigrator {
         // Create comprehensive backup
         let backup_path = base_path
             .parent()
-            .unwrap()
+            .ok_or_else(|| anyhow::anyhow!("Base path has no parent directory"))?
             .join(format!("full_backup_{}", Utc::now().timestamp()));
         self.create_full_backup(base_path, &backup_path).await?;
 
@@ -397,18 +397,11 @@ impl VersionMigrator {
                     let path = entry.path();
                     if path.is_dir() {
                         stack.push(path);
-                    } else {
-                        if let Some(ext) = path.extension() {
-                            if ext == "toml" || ext == "json" {
-                                // Check if it's a config file
-                                if path.file_name().unwrap().to_str().unwrap().contains("config")
-                                    || path
-                                        .file_name()
-                                        .unwrap()
-                                        .to_str()
-                                        .unwrap()
-                                        .contains("server")
-                                {
+                    } else if let Some(ext) = path.extension() {
+                        if ext == "toml" || ext == "json" {
+                            // Check if it's a config file
+                            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                                if name.contains("config") || name.contains("server") {
                                     config_files.push(path);
                                 }
                             }
@@ -641,11 +634,11 @@ impl VersionMigrator {
             changes.push("Database schema has been updated".to_string());
         }
 
-        if self.current_version < Version::parse("2.0.0").unwrap()
-            && self.target_version >= Version::parse("2.0.0").unwrap()
-        {
-            changes.push("Plugin system has been redesigned".to_string());
-            changes.push("Model format has been updated".to_string());
+        if let (Ok(v2), Ok(target_v2)) = (Version::parse("2.0.0"), Version::parse("2.0.0")) {
+            if self.current_version < v2 && self.target_version >= target_v2 {
+                changes.push("Plugin system has been redesigned".to_string());
+                changes.push("Model format has been updated".to_string());
+            }
         }
 
         changes
@@ -672,6 +665,12 @@ impl VersionMigrator {
 pub struct MigrationGraph {
     nodes: Vec<String>,
     edges: HashMap<String, Vec<String>>,
+}
+
+impl Default for MigrationGraph {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MigrationGraph {
@@ -824,29 +823,36 @@ mod tests {
         let graph = MigrationGraph::new();
 
         // Test direct path
-        let path = graph.find_migration_path("1.0.0", "2.0.0").unwrap();
+        let path = graph
+            .find_migration_path("1.0.0", "2.0.0")
+            .expect("Failed to find migration path");
         assert_eq!(path, vec!["1.0.0", "2.0.0"]);
 
         // Test multi-step path
-        let path = graph.find_migration_path("0.1.0", "2.1.0").unwrap();
+        let path = graph
+            .find_migration_path("0.1.0", "2.1.0")
+            .expect("Failed to find migration path");
         assert_eq!(path, vec!["0.1.0", "1.0.0", "2.0.0", "2.1.0"]);
     }
 
     #[test]
     fn test_migration_type_detection() {
-        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string()).unwrap();
+        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string())
+            .expect("Failed to create migrator");
         assert_eq!(
             migrator.determine_migration_type(),
             MigrationTypeInfo::Major
         );
 
-        let migrator = VersionMigrator::new("2.0.0".to_string(), "2.1.0".to_string()).unwrap();
+        let migrator = VersionMigrator::new("2.0.0".to_string(), "2.1.0".to_string())
+            .expect("Failed to create migrator");
         assert_eq!(
             migrator.determine_migration_type(),
             MigrationTypeInfo::Minor
         );
 
-        let migrator = VersionMigrator::new("2.1.0".to_string(), "2.1.1".to_string()).unwrap();
+        let migrator = VersionMigrator::new("2.1.0".to_string(), "2.1.1".to_string())
+            .expect("Failed to create migrator");
         assert_eq!(
             migrator.determine_migration_type(),
             MigrationTypeInfo::Patch
@@ -855,16 +861,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_version_file_update() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
         let base_path = temp_dir.path();
 
-        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string()).unwrap();
-        migrator.update_version_file(base_path, "2.0.0").await.unwrap();
+        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string())
+            .expect("Failed to create migrator");
+        migrator
+            .update_version_file(base_path, "2.0.0")
+            .await
+            .expect("Failed to update version file");
 
         let version_file = base_path.join("VERSION");
         assert!(version_file.exists());
 
-        let content = fs::read_to_string(&version_file).await.unwrap();
+        let content = fs::read_to_string(&version_file).await.expect("Failed to read version file");
         assert_eq!(content, "2.0.0");
     }
 

@@ -261,7 +261,7 @@ impl CleanupManager {
             directory_path: task
                 .details
                 .get("directory_path")
-                .map(|p| PathBuf::from(p))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("")),
             test_id: task.details.get("test_id").cloned().unwrap_or_else(|| "unknown".to_string()),
             duration: cleanup_result.duration,
@@ -286,7 +286,7 @@ impl CleanupManager {
             target_path: task
                 .details
                 .get("directory_path")
-                .map(|p| PathBuf::from(p))
+                .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("")),
             bytes_cleaned: cleanup_result.resources_cleaned as u64,
             files_cleaned: 0,
@@ -525,8 +525,8 @@ impl LifecycleTracker {
 
         if let Some(lifecycle) = active_lifecycles.get_mut(resource_id) {
             let transition = LifecycleTransition {
-                from_stage: lifecycle.current_stage.clone(),
-                to_stage: new_stage.clone(),
+                from_stage: lifecycle.current_stage,
+                to_stage: new_stage,
                 transitioned_at: Utc::now(),
                 metadata: HashMap::new(),
             };

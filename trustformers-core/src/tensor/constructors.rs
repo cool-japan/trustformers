@@ -1,15 +1,13 @@
 //! Tensor constructor functions.
 //!
 //! This module contains functions for creating new tensors with various
-
-#![allow(deprecated)] // Using rand legacy API, will migrate to scirs2_core
 //! initialization patterns.
 
 use super::{DType, Tensor};
 use crate::errors::{Result, TrustformersError};
-use ndarray::{ArrayD, IxDyn};
-use num_complex::{Complex32, Complex64};
-use rand::thread_rng;
+use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Policy compliant
+use scirs2_core::random::{thread_rng, Distribution, Normal};
+use scirs2_core::{Complex, Complex32, Complex64}; // SciRS2 Policy compliant (root level)
 
 impl Tensor {
     /// Creates a new 1D tensor from a vector of data.
@@ -174,7 +172,6 @@ impl Tensor {
     /// # }
     /// ```
     pub fn randn(shape: &[usize]) -> Result<Self> {
-        use rand_distr::{Distribution, Normal};
         let normal = Normal::new(0.0, 1.0).unwrap();
         let mut rng = thread_rng();
         let size = shape.iter().product();
@@ -378,14 +375,14 @@ impl Tensor {
     /// Creates a tensor filled with zeros (complex f16).
     pub fn zeros_cf16(shape: &[usize]) -> Result<Self> {
         let total_size: usize = shape.iter().product();
-        let data = vec![num_complex::Complex::new(half::f16::ZERO, half::f16::ZERO); total_size];
+        let data = vec![Complex::new(half::f16::ZERO, half::f16::ZERO); total_size];
         Ok(Tensor::CF16(ArrayD::from_shape_vec(IxDyn(shape), data)?))
     }
 
     /// Creates a tensor filled with zeros (complex bf16).
     pub fn zeros_cbf16(shape: &[usize]) -> Result<Self> {
         let total_size: usize = shape.iter().product();
-        let data = vec![num_complex::Complex::new(half::bf16::ZERO, half::bf16::ZERO); total_size];
+        let data = vec![Complex::new(half::bf16::ZERO, half::bf16::ZERO); total_size];
         Ok(Tensor::CBF16(ArrayD::from_shape_vec(IxDyn(shape), data)?))
     }
 
@@ -596,7 +593,6 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (f16 precision).
     pub fn randn_f16(shape: &[usize]) -> Result<Self> {
-        use rand_distr::{Distribution, Normal};
         let normal = Normal::new(0.0, 1.0).unwrap();
         let mut rng = thread_rng();
         let size = shape.iter().product();
@@ -610,7 +606,6 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (bf16 precision).
     pub fn randn_bf16(shape: &[usize]) -> Result<Self> {
-        use rand_distr::{Distribution, Normal};
         let normal = Normal::new(0.0, 1.0).unwrap();
         let mut rng = thread_rng();
         let size = shape.iter().product();
@@ -630,10 +625,10 @@ impl Tensor {
             ));
         }
 
-        let complex_data: Vec<num_complex::Complex<half::f16>> = real
+        let complex_data: Vec<Complex<half::f16>> = real
             .into_iter()
             .zip(imag)
-            .map(|(r, i)| num_complex::Complex::new(half::f16::from_f32(r), half::f16::from_f32(i)))
+            .map(|(r, i)| Complex::new(half::f16::from_f32(r), half::f16::from_f32(i)))
             .collect();
 
         Ok(Tensor::CF16(
@@ -650,12 +645,10 @@ impl Tensor {
             ));
         }
 
-        let complex_data: Vec<num_complex::Complex<half::bf16>> = real
+        let complex_data: Vec<Complex<half::bf16>> = real
             .into_iter()
             .zip(imag)
-            .map(|(r, i)| {
-                num_complex::Complex::new(half::bf16::from_f32(r), half::bf16::from_f32(i))
-            })
+            .map(|(r, i)| Complex::new(half::bf16::from_f32(r), half::bf16::from_f32(i)))
             .collect();
 
         Ok(Tensor::CBF16(
@@ -893,8 +886,7 @@ impl Tensor {
     ///
     /// A tensor filled with random integers.
     pub fn randint(low: i64, high: i64, shape: &[usize], dtype: DType) -> Result<Self> {
-        use rand::thread_rng;
-        use rand::Rng;
+        use scirs2_core::random::{rng, Rng}; // SciRS2 Policy compliant (updated API)
 
         if low >= high {
             return Err(TrustformersError::tensor_op_error(
@@ -903,26 +895,28 @@ impl Tensor {
             ));
         }
 
-        let mut rng = thread_rng();
+        let mut rng = rng(); // Use updated scirs2-core API
         let size: usize = shape.iter().product();
 
         match dtype {
             DType::I64 => {
-                let data: Vec<i64> = (0..size).map(|_| rng.gen_range(low..high)).collect();
+                let data: Vec<i64> = (0..size).map(|_| rng.random_range(low..high)).collect(); // Updated API
                 Ok(Tensor::I64(
                     ArrayD::from_shape_vec(IxDyn(shape), data)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
                 ))
             },
             DType::F32 => {
-                let data: Vec<f32> = (0..size).map(|_| rng.gen_range(low..high) as f32).collect();
+                let data: Vec<f32> =
+                    (0..size).map(|_| rng.random_range(low..high) as f32).collect(); // Updated API
                 Ok(Tensor::F32(
                     ArrayD::from_shape_vec(IxDyn(shape), data)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
                 ))
             },
             DType::F64 => {
-                let data: Vec<f64> = (0..size).map(|_| rng.gen_range(low..high) as f64).collect();
+                let data: Vec<f64> =
+                    (0..size).map(|_| rng.random_range(low..high) as f64).collect(); // Updated API
                 Ok(Tensor::F64(
                     ArrayD::from_shape_vec(IxDyn(shape), data)
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,

@@ -1033,8 +1033,7 @@ impl StatisticalAnalyzer {
 
         let outliers: Vec<Outlier> = data
             .iter()
-            .enumerate()
-            .filter_map(|(_i, &value)| {
+            .filter_map(|&value| {
                 if value < lower_bound || value > upper_bound {
                     Some(Outlier {
                         value,

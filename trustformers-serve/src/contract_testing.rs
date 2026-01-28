@@ -785,13 +785,13 @@ impl ContractTestingFramework {
         let result = self.get_test_results(test_id).await.ok_or("Test result not found")?;
 
         let mut report = String::new();
-        report.push_str(&format!("# Contract Test Report\n\n"));
+        report.push_str(&"# Contract Test Report\n\n".to_string());
         report.push_str(&format!("**Test ID**: {}\n", result.test_id));
         report.push_str(&format!("**Contract ID**: {}\n", result.contract_id));
         report.push_str(&format!("**Timestamp**: {}\n", result.timestamp));
         report.push_str(&format!("**Status**: {:?}\n\n", result.status));
 
-        report.push_str(&format!("## Summary\n\n"));
+        report.push_str(&"## Summary\n\n".to_string());
         report.push_str(&format!("- Total Tests: {}\n", result.summary.total_tests));
         report.push_str(&format!("- Passed: {}\n", result.summary.passed));
         report.push_str(&format!("- Failed: {}\n", result.summary.failed));
@@ -806,7 +806,7 @@ impl ContractTestingFramework {
         ));
 
         if !result.errors.is_empty() {
-            report.push_str(&format!("## Errors\n\n"));
+            report.push_str(&"## Errors\n\n".to_string());
             for error in &result.errors {
                 report.push_str(&format!(
                     "- **{:?}**: {} ({})\n",
@@ -817,7 +817,7 @@ impl ContractTestingFramework {
         }
 
         if !result.warnings.is_empty() {
-            report.push_str(&format!("## Warnings\n\n"));
+            report.push_str(&"## Warnings\n\n".to_string());
             for warning in &result.warnings {
                 report.push_str(&format!(
                     "- **{:?}**: {} ({})\n",

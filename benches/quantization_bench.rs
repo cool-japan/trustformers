@@ -1,6 +1,7 @@
 //! Benchmarks for quantization performance
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
+use std::hint::black_box;
 use trustformers_core::{
     tensor::Tensor,
     quantization::{

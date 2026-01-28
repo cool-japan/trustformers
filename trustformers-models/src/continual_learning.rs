@@ -245,7 +245,7 @@ impl MemoryBuffer {
                         .priorities
                         .iter()
                         .enumerate()
-                        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                        .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                         .map(|(idx, _)| idx)
                         .unwrap_or(0);
 
@@ -1015,18 +1015,18 @@ mod tests {
         assert_eq!(buffer.size(), 0);
 
         // Add examples
-        let input1 = Tensor::zeros(&[1, 10]).unwrap();
-        let target1 = Tensor::zeros(&[1]).unwrap();
+        let input1 = Tensor::zeros(&[1, 10]).expect("operation failed");
+        let target1 = Tensor::zeros(&[1]).expect("operation failed");
         buffer.add_example(input1, target1, 0, 1.0);
         assert_eq!(buffer.size(), 1);
 
-        let input2 = Tensor::ones(&[1, 10]).unwrap();
-        let target2 = Tensor::ones(&[1]).unwrap();
+        let input2 = Tensor::ones(&[1, 10]).expect("operation failed");
+        let target2 = Tensor::ones(&[1]).expect("operation failed");
         buffer.add_example(input2, target2, 1, 2.0);
         assert_eq!(buffer.size(), 2);
 
         // Sample batch
-        let (inputs, targets, task_ids) = buffer.sample_batch(2).unwrap();
+        let (inputs, targets, task_ids) = buffer.sample_batch(2).expect("operation failed");
         assert_eq!(inputs.len(), 2);
         assert_eq!(targets.len(), 2);
         assert_eq!(task_ids.len(), 2);

@@ -503,7 +503,7 @@ impl GGUFLoader {
         let mut f32_data = vec![0.0f32; total_elements];
 
         let block_size = 32;
-        let expected_blocks = (total_elements + block_size - 1) / block_size;
+        let expected_blocks = total_elements.div_ceil(block_size);
         let bytes_per_block = 2 + 16; // 2 bytes for scale (f16) + 16 bytes for 32 4-bit values
 
         if data.len() < expected_blocks * bytes_per_block {
@@ -548,7 +548,7 @@ impl GGUFLoader {
         let mut f32_data = vec![0.0f32; total_elements];
 
         let block_size = 32;
-        let expected_blocks = (total_elements + block_size - 1) / block_size;
+        let expected_blocks = total_elements.div_ceil(block_size);
         let bytes_per_block = 2 + 2 + 16; // 2 bytes for scale (f16) + 2 bytes for min (f16) + 16 bytes for 32 4-bit values
 
         if data.len() < expected_blocks * bytes_per_block {
@@ -598,7 +598,7 @@ impl GGUFLoader {
         let mut f32_data = vec![0.0f32; total_elements];
 
         let block_size = 32;
-        let expected_blocks = (total_elements + block_size - 1) / block_size;
+        let expected_blocks = total_elements.div_ceil(block_size);
         let bytes_per_block = 2 + 32; // 2 bytes for scale (f16) + 32 bytes for 32 8-bit values
 
         if data.len() < expected_blocks * bytes_per_block {
@@ -685,15 +685,15 @@ impl WeightLoader for GGUFLoader {
                 GGMLType::F32 => total_elements * 4,
                 GGMLType::F16 => total_elements * 2,
                 GGMLType::Q4_0 => {
-                    let blocks = (total_elements + 31) / 32;
+                    let blocks = total_elements.div_ceil(32);
                     blocks * (2 + 16) // 2 bytes scale + 16 bytes data per block
                 },
                 GGMLType::Q4_1 => {
-                    let blocks = (total_elements + 31) / 32;
+                    let blocks = total_elements.div_ceil(32);
                     blocks * (2 + 2 + 16) // 2 bytes scale + 2 bytes min + 16 bytes data per block
                 },
                 GGMLType::Q8_0 => {
-                    let blocks = (total_elements + 31) / 32;
+                    let blocks = total_elements.div_ceil(32);
                     blocks * (2 + 32) // 2 bytes scale + 32 bytes data per block
                 },
                 _ => {

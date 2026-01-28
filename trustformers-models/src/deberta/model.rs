@@ -1,5 +1,6 @@
 use crate::deberta::config::DebertaConfig;
-use scirs2_core::ndarray::{Array1, Array2, Array3, Array4, Axis}; // SciRS2 Integration Policy
+use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4, Axis, Ix2, Ix3}; // SciRS2 Integration Policy
+use trustformers_core::device::Device;
 use trustformers_core::errors::{Result, TrustformersError};
 use trustformers_core::layers::{
     embedding::Embedding, feedforward::FeedForward, layernorm::LayerNorm, linear::Linear,
@@ -13,27 +14,45 @@ pub struct DebertaEmbeddings {
     pub word_embeddings: Embedding,
     pub layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaEmbeddings {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            word_embeddings: Embedding::new(
+            word_embeddings: Embedding::new_with_device(
                 config.vocab_size,
                 config.hidden_size,
                 Some(config.pad_token_id as usize),
+                device,
             )?,
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(&self, input_ids: &Array1<u32>) -> Result<Array2<f32>> {
         // Word embeddings
-        let embeddings = self.word_embeddings.forward_ids(input_ids.as_slice().unwrap())?;
+        let input_ids_slice = input_ids.as_slice().ok_or_else(|| {
+            TrustformersError::tensor_op_error("forward", "input_ids is not contiguous in memory")
+        })?;
+        let embeddings = self.word_embeddings.forward_ids(input_ids_slice)?;
         let embeddings_2d = match embeddings {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -48,7 +67,7 @@ impl DebertaEmbeddings {
         let embeddings = self.layer_norm.forward(norm_input)?;
         let embeddings_2d = match embeddings {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -78,40 +97,56 @@ pub struct DebertaDisentangledSelfAttention {
     pub max_relative_positions: i32,
     pub pos_att_type: Vec<String>,
     pub share_att_key: bool,
+    device: Device,
 }
 
 impl DebertaDisentangledSelfAttention {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         let attention_head_size = config.hidden_size / config.num_attention_heads;
         let all_head_size = config.num_attention_heads * attention_head_size;
 
         let pos_query_proj = if config.pos_att_type.contains(&"c2p".to_string()) {
-            Some(Linear::new(config.hidden_size, all_head_size, true))
+            Some(Linear::new_with_device(
+                config.hidden_size,
+                all_head_size,
+                true,
+                device,
+            ))
         } else {
             None
         };
 
         let pos_key_proj =
             if config.pos_att_type.contains(&"p2c".to_string()) && !config.share_att_key {
-                Some(Linear::new(config.hidden_size, all_head_size, true))
+                Some(Linear::new_with_device(
+                    config.hidden_size,
+                    all_head_size,
+                    true,
+                    device,
+                ))
             } else {
                 None
             };
 
         let pos_proj = if config.max_relative_positions > 0 {
-            Some(Linear::new(
+            Some(Linear::new_with_device(
                 config.max_relative_positions as usize * 2,
                 all_head_size,
                 false,
+                device,
             ))
         } else {
             None
         };
 
         Ok(Self {
-            query_proj: Linear::new(config.hidden_size, all_head_size, true),
-            key_proj: Linear::new(config.hidden_size, all_head_size, true),
-            value_proj: Linear::new(config.hidden_size, all_head_size, true),
+            query_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
+            key_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
+            value_proj: Linear::new_with_device(config.hidden_size, all_head_size, true, device),
             pos_query_proj,
             pos_key_proj,
             pos_proj,
@@ -122,10 +157,15 @@ impl DebertaDisentangledSelfAttention {
             max_relative_positions: config.max_relative_positions,
             pos_att_type: config.pos_att_type.clone(),
             share_att_key: config.share_att_key,
+            device,
         })
     }
 
-    fn transpose_for_scores(&self, x: &Array3<f32>) -> Array4<f32> {
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    fn transpose_for_scores(&self, x: &Array3<f32>) -> Result<Array4<f32>> {
         let (batch_size, seq_len, _) = x.dim();
 
         // Reshape to (batch_size, seq_len, num_heads, head_size)
@@ -136,11 +176,13 @@ impl DebertaDisentangledSelfAttention {
                 self.num_attention_heads,
                 self.attention_head_size,
             ))
-            .unwrap()
+            .map_err(|e| {
+                TrustformersError::shape_error(format!("Failed to reshape tensor: {}", e))
+            })?
             .to_owned();
 
         // Transpose to (batch_size, num_heads, seq_len, head_size)
-        reshaped.permuted_axes([0, 2, 1, 3])
+        Ok(reshaped.permuted_axes([0, 2, 1, 3]))
     }
 
     fn build_relative_position(&self, query_size: usize, key_size: usize) -> Array2<i32> {
@@ -182,7 +224,7 @@ impl DebertaDisentangledSelfAttention {
 
         let query_layer = match query_layer {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -193,7 +235,7 @@ impl DebertaDisentangledSelfAttention {
         };
         let key_layer = match key_layer {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -204,7 +246,7 @@ impl DebertaDisentangledSelfAttention {
         };
         let value_layer = match value_layer {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -214,9 +256,9 @@ impl DebertaDisentangledSelfAttention {
             },
         };
 
-        let query_layer = self.transpose_for_scores(&query_layer);
-        let key_layer = self.transpose_for_scores(&key_layer);
-        let value_layer = self.transpose_for_scores(&value_layer);
+        let query_layer = self.transpose_for_scores(&query_layer)?;
+        let key_layer = self.transpose_for_scores(&key_layer)?;
+        let value_layer = self.transpose_for_scores(&value_layer)?;
 
         // Compute attention scores
         let mut attention_scores =
@@ -225,16 +267,16 @@ impl DebertaDisentangledSelfAttention {
         // Content-to-content attention
         for b in 0..batch_size {
             for h in 0..self.num_attention_heads {
-                let q = query_layer.slice(ndarray::s![b, h, .., ..]);
-                let k = key_layer.slice(ndarray::s![b, h, .., ..]);
+                let q = query_layer.slice(s![b, h, .., ..]);
+                let k = key_layer.slice(s![b, h, .., ..]);
 
                 // Compute dot product attention
                 for i in 0..seq_len {
                     for j in 0..seq_len {
                         let score: f32 = q
-                            .slice(ndarray::s![i, ..])
+                            .slice(s![i, ..])
                             .iter()
-                            .zip(k.slice(ndarray::s![j, ..]).iter())
+                            .zip(k.slice(s![j, ..]).iter())
                             .map(|(a, b)| a * b)
                             .sum();
 
@@ -253,7 +295,7 @@ impl DebertaDisentangledSelfAttention {
                 let pos_query_result = pos_query_proj.forward(pos_query_input)?;
                 let pos_query_layer = match pos_query_result {
                     Tensor::F32(arr) => arr
-                        .into_dimensionality::<ndarray::Ix3>()
+                        .into_dimensionality::<Ix3>()
                         .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
                     _ => {
                         return Err(TrustformersError::tensor_op_error(
@@ -262,7 +304,7 @@ impl DebertaDisentangledSelfAttention {
                         ))
                     },
                 };
-                let _pos_query_layer = self.transpose_for_scores(&pos_query_layer);
+                let _pos_query_layer = self.transpose_for_scores(&pos_query_layer)?;
 
                 // Build relative position embeddings
                 let relative_pos = self.build_relative_position(seq_len, seq_len);
@@ -371,7 +413,7 @@ impl DebertaDisentangledSelfAttention {
         // Reshape to (batch_size, seq_len, all_head_size)
         let context_layer = context_layer
             .to_shape((batch_size, seq_len, self.all_head_size))
-            .unwrap()
+            .expect("operation failed")
             .to_owned();
 
         Ok(context_layer)
@@ -383,15 +425,29 @@ pub struct DebertaSelfOutput {
     pub dense: Linear,
     pub layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaSelfOutput {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            dense: Linear::new(config.hidden_size, config.hidden_size, true),
-            layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
+            dense: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
+            )?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -403,7 +459,7 @@ impl DebertaSelfOutput {
         let dense_output = self.dense.forward(dense_input)?;
         let hidden_states = match dense_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -418,7 +474,7 @@ impl DebertaSelfOutput {
         let output = self.layer_norm.forward(norm_input)?;
         let output = match output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -435,14 +491,24 @@ impl DebertaSelfOutput {
 pub struct DebertaAttention {
     pub self_attention: DebertaDisentangledSelfAttention,
     pub output: DebertaSelfOutput,
+    device: Device,
 }
 
 impl DebertaAttention {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            self_attention: DebertaDisentangledSelfAttention::new(config)?,
-            output: DebertaSelfOutput::new(config)?,
+            self_attention: DebertaDisentangledSelfAttention::new_with_device(config, device)?,
+            output: DebertaSelfOutput::new_with_device(config, device)?,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -462,20 +528,35 @@ pub struct DebertaLayer {
     pub feed_forward: FeedForward,
     pub output_layer_norm: LayerNorm,
     pub dropout: f32,
+    device: Device,
 }
 
 impl DebertaLayer {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            attention: DebertaAttention::new(config)?,
-            feed_forward: FeedForward::new(
+            attention: DebertaAttention::new_with_device(config, device)?,
+            feed_forward: FeedForward::new_with_device(
                 config.hidden_size,
                 config.intermediate_size,
                 config.hidden_dropout_prob,
+                device,
+            ),
+            output_layer_norm: LayerNorm::new_with_device(
+                vec![config.hidden_size],
+                config.layer_norm_eps,
+                device,
             )?,
-            output_layer_norm: LayerNorm::new(vec![config.hidden_size], config.layer_norm_eps)?,
             dropout: config.hidden_dropout_prob,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -491,7 +572,7 @@ impl DebertaLayer {
         let ff_output = self.feed_forward.forward(ff_input)?;
         let ff_output = match ff_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -506,7 +587,7 @@ impl DebertaLayer {
         let output = self.output_layer_norm.forward(norm_input)?;
         let output = match output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -523,16 +604,25 @@ impl DebertaLayer {
 #[derive(Debug, Clone)]
 pub struct DebertaEncoder {
     pub layers: Vec<DebertaLayer>,
+    device: Device,
 }
 
 impl DebertaEncoder {
     pub fn new(config: &DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: &DebertaConfig, device: Device) -> Result<Self> {
         let mut layers = Vec::new();
         for _ in 0..config.num_hidden_layers {
-            layers.push(DebertaLayer::new(config)?);
+            layers.push(DebertaLayer::new_with_device(config, device)?);
         }
 
-        Ok(Self { layers })
+        Ok(Self { layers, device })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn forward(
@@ -553,15 +643,25 @@ pub struct DebertaModel {
     pub embeddings: DebertaEmbeddings,
     pub encoder: DebertaEncoder,
     pub config: DebertaConfig,
+    device: Device,
 }
 
 impl DebertaModel {
     pub fn new(config: DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            embeddings: DebertaEmbeddings::new(&config)?,
-            encoder: DebertaEncoder::new(&config)?,
+            embeddings: DebertaEmbeddings::new_with_device(&config, device)?,
+            encoder: DebertaEncoder::new_with_device(&config, device)?,
             config,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
@@ -594,19 +694,33 @@ pub struct DebertaForSequenceClassification {
     pub classifier: Linear,
     pub dropout: f32,
     pub num_labels: usize,
+    device: Device,
 }
 
 impl DebertaForSequenceClassification {
     pub fn new(config: DebertaConfig, num_labels: usize) -> Result<Self> {
+        Self::new_with_device(config, num_labels, Device::CPU)
+    }
+
+    pub fn new_with_device(
+        config: DebertaConfig,
+        num_labels: usize,
+        device: Device,
+    ) -> Result<Self> {
         let dropout = config.classifier_dropout.unwrap_or(config.hidden_dropout_prob);
 
         Ok(Self {
-            deberta: DebertaModel::new(config.clone())?,
-            pooler: Linear::new(config.hidden_size, config.hidden_size, true),
-            classifier: Linear::new(config.hidden_size, num_labels, true),
+            deberta: DebertaModel::new_with_device(config.clone(), device)?,
+            pooler: Linear::new_with_device(config.hidden_size, config.hidden_size, true, device),
+            classifier: Linear::new_with_device(config.hidden_size, num_labels, true, device),
             dropout,
             num_labels,
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str, num_labels: usize) -> Result<Self> {
@@ -622,14 +736,14 @@ impl DebertaForSequenceClassification {
         let hidden_states = self.deberta.forward(input_ids, attention_mask)?;
 
         // Use [CLS] token representation (first token)
-        let cls_hidden = hidden_states.slice(ndarray::s![0, 0, ..]).to_owned();
+        let cls_hidden = hidden_states.slice(s![0, 0, ..]).to_owned();
 
         // Pooler
         let pooler_input = Tensor::F32(cls_hidden.insert_axis(Axis(0)).into_dyn());
         let pooled_output = self.pooler.forward(pooler_input)?;
         let pooled_output = match pooled_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -642,7 +756,7 @@ impl DebertaForSequenceClassification {
         let pooled_output = gelu(&pooled_tensor)?;
         let pooled_output = match pooled_output {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -660,7 +774,7 @@ impl DebertaForSequenceClassification {
         let logits = self.classifier.forward(classifier_input)?;
         let logits = match logits {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix2>()
+                .into_dimensionality::<Ix2>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
@@ -678,14 +792,24 @@ impl DebertaForSequenceClassification {
 pub struct DebertaForMaskedLM {
     pub deberta: DebertaModel,
     pub cls: Linear,
+    device: Device,
 }
 
 impl DebertaForMaskedLM {
     pub fn new(config: DebertaConfig) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
+    }
+
+    pub fn new_with_device(config: DebertaConfig, device: Device) -> Result<Self> {
         Ok(Self {
-            deberta: DebertaModel::new(config.clone())?,
-            cls: Linear::new(config.hidden_size, config.vocab_size, true),
+            deberta: DebertaModel::new_with_device(config.clone(), device)?,
+            cls: Linear::new_with_device(config.hidden_size, config.vocab_size, true, device),
+            device,
         })
+    }
+
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     pub fn from_pretrained(model_name: &str) -> Result<Self> {
@@ -703,7 +827,7 @@ impl DebertaForMaskedLM {
         let prediction_scores = self.cls.forward(cls_input)?;
         let prediction_scores = match prediction_scores {
             Tensor::F32(arr) => arr
-                .into_dimensionality::<ndarray::Ix3>()
+                .into_dimensionality::<Ix3>()
                 .map_err(|e| TrustformersError::shape_error(e.to_string()))?,
             _ => {
                 return Err(TrustformersError::tensor_op_error(
