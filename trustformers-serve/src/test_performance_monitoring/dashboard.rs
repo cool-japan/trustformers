@@ -230,7 +230,6 @@ mod tests {
         let config = DashboardConfig::default();
         let _manager = DashboardManager::new(config);
 
-        // Basic creation test
-        assert!(true);
+        // Basic creation test - succeeds if no panic
     }
 }

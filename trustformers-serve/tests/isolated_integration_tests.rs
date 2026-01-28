@@ -147,7 +147,7 @@ async fn test_isolated_streaming_monitoring() -> Result<()> {
         };
 
         // Run SSE test with timeout
-        if let Err(_) = timeout(Duration::from_secs(1), sse_future).await {
+        if timeout(Duration::from_secs(1), sse_future).await.is_err() {
             // Timeout is acceptable - connection cleanup will happen via configured timeout
         }
 
@@ -223,7 +223,7 @@ async fn test_isolated_full_multi_service() -> Result<()> {
     let token = auth_result["access_token"].as_str().unwrap();
 
     // Test multi-service workflow with authentication
-    let test_cases = vec![
+    let test_cases = [
         // Single inference with caching
         json!({
             "model": "test-model",

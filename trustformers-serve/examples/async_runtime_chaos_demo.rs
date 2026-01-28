@@ -408,6 +408,7 @@ async fn demo_streaming_service_chaos() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::excessive_nesting)] // Batch processing logic requires nesting
 async fn demo_batching_service_chaos() -> Result<()> {
     println!("    Testing batching service under chaos conditions...");
 

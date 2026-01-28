@@ -7,7 +7,6 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use proptest::prelude::*;
-use tokio_test;
 use trustformers_serve::memory_pressure::{
     BufferCompactionHandler, CleanupHandler, GarbageCollectionHandler, GpuCleanupStrategy,
     MemoryPressureConfig, MemoryPressureHandler, MemoryPressureLevel, PressureSnapshot,
@@ -38,15 +37,17 @@ fn memory_pressure_config_strategy() -> impl Strategy<Value = MemoryPressureConf
                 let critical = (thresholds[3]).max(high + 0.02);
                 let emergency = (thresholds[4]).max(critical + 0.02).min(0.99);
 
-                let mut config = MemoryPressureConfig::default();
-                config.enabled = enabled;
+                let mut config = MemoryPressureConfig {
+                    enabled,
+                    emergency_threshold: emergency,
+                    monitoring_interval_seconds: interval,
+                    memory_buffer_mb: buffer,
+                    ..Default::default()
+                };
                 config.pressure_thresholds.low = low;
                 config.pressure_thresholds.medium = medium;
                 config.pressure_thresholds.high = high;
                 config.pressure_thresholds.critical = critical;
-                config.emergency_threshold = emergency;
-                config.monitoring_interval_seconds = interval;
-                config.memory_buffer_mb = buffer;
 
                 config
             },
@@ -374,7 +375,7 @@ proptest! {
                 predictions.push((utilization, prediction));
 
                 // Property: Each prediction should be valid
-                prop_assert!(prediction >= 0.0 && prediction <= 1.0);
+                prop_assert!((0.0..=1.0).contains(&prediction));
             }
 
             // Property: Predictions should show some correlation with actual values
@@ -438,7 +439,7 @@ proptest! {
         let trend = handler.calculate_pressure_trend(&snapshot_refs);
 
         // Property: Trend should be bounded
-        prop_assert!(trend >= -1.0 && trend <= 1.0);
+        prop_assert!((-1.0..=1.0).contains(&trend));
 
         // Property: For constant utilization, trend should be near zero
         let utilizations: Vec<f32> = snapshots.iter().map(|s| s.utilization).collect();
@@ -530,6 +531,7 @@ mod stress_tests {
     use tokio::time::{timeout, Duration};
 
     /// Stress test: Concurrent memory allocations and deallocations
+    #[allow(clippy::excessive_nesting)] // Complex concurrent test requires nesting
     #[tokio::test]
     async fn stress_concurrent_allocations() {
         let config = MemoryPressureConfig::default();
@@ -620,6 +622,7 @@ mod stress_tests {
     }
 
     /// Stress test: GPU cleanup under high load
+    #[allow(clippy::excessive_nesting)] // Complex concurrent test requires nesting
     #[tokio::test]
     async fn stress_gpu_cleanup_high_load() {
         let config = MemoryPressureConfig::default();

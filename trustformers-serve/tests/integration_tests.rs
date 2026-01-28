@@ -18,15 +18,17 @@ use trustformers_serve::{
 fn create_test_config() -> ServerConfig {
     use trustformers_serve::streaming::StreamingConfig;
 
-    let mut config = ServerConfig::default();
-    config.host = "127.0.0.1".to_string();
-    config.port = 0; // Use random available port
-    config.model_config = ModelConfig {
-        model_name: "test-model".to_string(),
-        model_version: Some("1.0.0".to_string()),
-        device: Device::Cpu,
-        max_sequence_length: 2048,
-        enable_caching: true,
+    let mut config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0, // Use random available port
+        model_config: ModelConfig {
+            model_name: "test-model".to_string(),
+            model_version: Some("1.0.0".to_string()),
+            device: Device::Cpu,
+            max_sequence_length: 2048,
+            enable_caching: true,
+        },
+        ..Default::default()
     };
     // Use Fixed batching mode for tests to form batches immediately
     // This avoids timeout-based batch formation which can cause test delays
@@ -716,7 +718,7 @@ async fn test_streaming_monitoring_interaction() {
         };
 
         // Run SSE test with timeout
-        if let Err(_) = tokio::time::timeout(Duration::from_secs(1), sse_future).await {
+        if tokio::time::timeout(Duration::from_secs(1), sse_future).await.is_err() {
             // Timeout is acceptable - connection cleanup will happen via configured timeout
         }
 

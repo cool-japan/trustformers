@@ -521,10 +521,7 @@ mod tests {
                 Box::pin(async move {
                     let count = counter.fetch_add(1, Ordering::SeqCst);
                     if count < 2 {
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "temporary failure",
-                        ))
+                        Err(std::io::Error::other("temporary failure"))
                     } else {
                         Ok("success")
                     }
@@ -556,10 +553,7 @@ mod tests {
                 let counter = counter_clone.clone();
                 Box::pin(async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    Err::<&str, _>(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "permanent failure",
-                    ))
+                    Err::<&str, _>(std::io::Error::other("permanent failure"))
                 })
             })
             .await;

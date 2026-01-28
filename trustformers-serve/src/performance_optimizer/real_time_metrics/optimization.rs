@@ -4925,7 +4925,7 @@ mod tests {
         let confidence = scorer.score_recommendation(&recommendation).await;
         assert!(confidence.is_ok());
         let confidence_val = confidence.expect("Confidence is None");
-        assert!(confidence_val >= 0.0 && confidence_val <= 1.0);
+        assert!((0.0..=1.0).contains(&confidence_val));
     }
 
     #[tokio::test]
@@ -4985,7 +4985,7 @@ mod tests {
         };
 
         let score = impact.overall_score();
-        assert!(score >= 0.0 && score <= 1.0);
+        assert!((0.0..=1.0).contains(&score));
     }
 
     #[test]

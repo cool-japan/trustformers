@@ -80,6 +80,11 @@ impl TrustformerServer {
         &self.ha_service
     }
 
+    /// Get metrics service
+    pub fn metrics_service(&self) -> &Arc<MetricsService> {
+        &self.metrics_service
+    }
+
     /// Create a new server instance
     pub fn new(config: ServerConfig) -> Self {
         let batching_service =
@@ -1450,13 +1455,15 @@ async fn async_inference_endpoint(
     // 1. Submit the request to the message queue
     // 2. Store the job metadata
     // 3. Return immediately with the job ID
+    // 4. Call the callback_url when the job completes (if provided)
     // For testing, we just return a mock response
 
     tracing::info!(
-        "Async inference job submitted: job_id={}, model={}, text_len={}",
+        "Async inference job submitted: job_id={}, model={}, text_len={}, callback_url={:?}",
         job_id,
         request.model,
-        request.text.len()
+        request.text.len(),
+        request.callback_url
     );
 
     Ok((

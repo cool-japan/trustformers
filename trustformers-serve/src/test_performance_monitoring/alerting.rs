@@ -1414,13 +1414,13 @@ mod tests {
                 },
                 operator: ComparisonOperator::GreaterThan,
                 threshold_value: ThresholdValue::Absolute(10.0),
-                duration_requirement: Some(Duration::from_secs(1 * 60)),
+                duration_requirement: Some(Duration::from_secs(60)),
                 aggregation_method: Some(AggregationMethod::Average),
                 condition_weight: 1.0,
                 evaluation_context: ConditionContext::default(),
             }],
             evaluation_window: Duration::from_secs(5 * 60),
-            evaluation_frequency: Duration::from_secs(1 * 60),
+            evaluation_frequency: Duration::from_secs(60),
             threshold_config: ThresholdConfig {
                 static_thresholds: Some(StaticThresholds {
                     warning_threshold: 5.0,
@@ -1455,7 +1455,7 @@ mod tests {
             severity: SeverityLevel::High,
             conditions: vec![], // Invalid: no conditions
             evaluation_window: Duration::from_secs(5 * 60),
-            evaluation_frequency: Duration::from_secs(1 * 60),
+            evaluation_frequency: Duration::from_secs(60),
             threshold_config: ThresholdConfig {
                 static_thresholds: None,
                 dynamic_thresholds: None,

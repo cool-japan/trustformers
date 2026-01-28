@@ -14,18 +14,19 @@ use trustformers_serve::{
 
 /// Create a minimal test server configuration
 fn create_minimal_test_config() -> ServerConfig {
-    let mut config = ServerConfig::default();
-    config.host = "127.0.0.1".to_string();
-    config.port = 0;
-    config.num_workers = 1;
-    config.model_config = ModelConfig {
-        model_name: "test-model".to_string(),
-        model_version: Some("1.0.0".to_string()),
-        device: Device::Cpu,
-        max_sequence_length: 2048,
-        enable_caching: true,
-    };
-    config
+    ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+        num_workers: 1,
+        model_config: ModelConfig {
+            model_name: "test-model".to_string(),
+            model_version: Some("1.0.0".to_string()),
+            device: Device::Cpu,
+            max_sequence_length: 2048,
+            enable_caching: true,
+        },
+        ..Default::default()
+    }
 }
 
 #[tokio::test]
@@ -33,8 +34,7 @@ async fn test_server_creation() {
     let config = create_minimal_test_config();
     let _server = TrustformerServer::new(config);
 
-    // Test that server can be created without panicking
-    assert!(true, "Server created successfully");
+    // Server created successfully - test passes if no panic occurred
 }
 
 #[tokio::test]
@@ -120,11 +120,11 @@ async fn test_service_configuration_validation() {
 
 #[tokio::test]
 async fn test_batching_config_validation() {
-    let mut config = BatchingConfig::default();
-
-    // Test that we can modify batching config
-    config.max_batch_size = 32;
-    config.max_wait_time = Duration::from_millis(100);
+    let config = BatchingConfig {
+        max_batch_size: 32,
+        max_wait_time: Duration::from_millis(100),
+        ..Default::default()
+    };
 
     assert_eq!(config.max_batch_size, 32);
     assert_eq!(config.max_wait_time, Duration::from_millis(100));

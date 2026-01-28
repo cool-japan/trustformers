@@ -112,8 +112,8 @@ pub struct BaselineManager {
     regression_config: RegressionConfig,
 }
 
-impl BaselineManager {
-    pub fn new() -> Self {
+impl Default for BaselineManager {
+    fn default() -> Self {
         let baseline_file = std::env::var("BASELINE_FILE")
             .unwrap_or_else(|_| "/tmp/memory_pressure_baselines.json".to_string());
 
@@ -121,6 +121,12 @@ impl BaselineManager {
             baseline_file,
             regression_config: RegressionConfig::default(),
         }
+    }
+}
+
+impl BaselineManager {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Load existing baselines from file
@@ -786,7 +792,7 @@ fn bench_complete_memory_pressure_scenarios(c: &mut Criterion) {
             };
 
             // Mock adaptive adjustment based on system performance
-            let historical_pressures = vec![0.75, 0.82, 0.88, 0.91, 0.73, 0.79];
+            let historical_pressures = [0.75, 0.82, 0.88, 0.91, 0.73, 0.79];
             let avg_pressure =
                 historical_pressures.iter().sum::<f32>() / historical_pressures.len() as f32;
 

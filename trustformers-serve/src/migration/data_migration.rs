@@ -337,7 +337,7 @@ impl DataMigrationRule for V1ToV2DataRule {
                                 // Convert from epoch to ISO format
                                 if let Ok(epoch) = ts_str.parse::<i64>() {
                                     let dt = chrono::DateTime::from_timestamp(epoch, 0)
-                                        .unwrap_or_else(|| Utc::now());
+                                        .unwrap_or_else(Utc::now);
                                     *timestamp = Value::String(dt.to_rfc3339());
                                 }
                             }

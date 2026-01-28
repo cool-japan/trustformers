@@ -30,16 +30,17 @@ async fn test_isolated_auth_flow() {
     // Set environment variables for this test
     with_env_vars(&env.env_vars, || async {
         // Create server config using isolated ports and paths
-        let mut config = ServerConfig::default();
-        config.host = "127.0.0.1".to_string();
-        config.port = env.ports.server_port;
-
-        config.model_config = ModelConfig {
-            model_name: "isolated-test-model".to_string(),
-            model_version: Some("1.0.0".to_string()),
-            device: Device::Cpu,
-            max_sequence_length: 1024,
-            enable_caching: true,
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: env.ports.server_port,
+            model_config: ModelConfig {
+                model_name: "isolated-test-model".to_string(),
+                model_version: Some("1.0.0".to_string()),
+                device: Device::Cpu,
+                max_sequence_length: 1024,
+                enable_caching: true,
+            },
+            ..Default::default()
         };
 
         // Note: Authentication is now handled at router level, not in ServerConfig
@@ -107,16 +108,17 @@ async fn run_isolated_inference_test(
     model_name: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     with_env_vars(&env.env_vars, || async {
-        let mut config = ServerConfig::default();
-        config.host = "127.0.0.1".to_string();
-        config.port = env.ports.server_port;
-
-        config.model_config = ModelConfig {
-            model_name: model_name.clone(),
-            model_version: Some("1.0.0".to_string()),
-            device: Device::Cpu,
-            max_sequence_length: 512,
-            enable_caching: false, // Disable caching to avoid interference
+        let config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: env.ports.server_port,
+            model_config: ModelConfig {
+                model_name: model_name.clone(),
+                model_version: Some("1.0.0".to_string()),
+                device: Device::Cpu,
+                max_sequence_length: 512,
+                enable_caching: false, // Disable caching to avoid interference
+            },
+            ..Default::default()
         };
 
         let server = TrustformerServer::new(config);
@@ -216,9 +218,11 @@ async fn test_isolated_database_operations() {
         let db_url = std::env::var("DATABASE_URL").unwrap();
         assert!(db_url.contains(&env.id)); // Database name includes environment ID
 
-        let mut config = ServerConfig::default();
-        config.host = "127.0.0.1".to_string();
-        config.port = env.ports.server_port;
+        let _config = ServerConfig {
+            host: "127.0.0.1".to_string(),
+            port: env.ports.server_port,
+            ..Default::default()
+        };
 
         // In a real implementation, you would:
         // 1. Create isolated database instance

@@ -1466,8 +1466,10 @@ mod tests {
         };
 
         match data {
-            MediaData::Base64 { data: _ } => assert!(true),
-            _ => assert!(false),
+            MediaData::Base64 { data: _ } => {
+                // Correctly matched Base64 variant
+            },
+            _ => panic!("Expected MediaData::Base64 variant"),
         }
     }
 }

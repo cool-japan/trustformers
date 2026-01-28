@@ -1,5 +1,5 @@
+#![allow(unused_variables)]
 use anyhow::Result;
-#[allow(unused_variables)]
 use std::collections::HashMap;
 use trustformers_serve::chaos_testing::{
     ChaosExperiment, ChaosExperimentType, ChaosTestingFramework, ComparisonOperator, ConditionType,

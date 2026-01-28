@@ -130,7 +130,7 @@ async fn example_priority_scheduling() -> Result<()> {
     service.start().await?;
 
     // Submit requests with different priorities
-    let priorities = vec![
+    let priorities = [
         Priority::Low,
         Priority::Critical,
         Priority::Normal,
@@ -282,7 +282,7 @@ async fn example_memory_aware_batching() -> Result<()> {
     println!("Submitting requests with varying sizes...");
 
     // Submit requests with different sequence lengths
-    let sequence_lengths = vec![50, 200, 100, 500, 150, 1000, 75, 250];
+    let sequence_lengths = [50, 200, 100, 500, 150, 1000, 75, 250];
 
     for (i, seq_len) in sequence_lengths.iter().enumerate() {
         let request = Request {
@@ -326,7 +326,7 @@ async fn example_continuous_batching() -> Result<()> {
     println!("Simulating text generation requests...");
 
     // Simulate generation requests with different lengths
-    let prompts = vec![
+    let prompts = [
         ("Short prompt", 50),
         ("Medium length prompt for testing", 150),
         (

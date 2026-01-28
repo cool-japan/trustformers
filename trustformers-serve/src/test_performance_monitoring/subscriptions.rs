@@ -209,7 +209,6 @@ mod tests {
         let config = SubscriptionConfig::default();
         let _manager = SubscriptionManager::new(config);
 
-        // Basic creation test
-        assert!(true);
+        // Basic creation test - succeeds if no panic
     }
 }

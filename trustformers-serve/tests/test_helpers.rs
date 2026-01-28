@@ -28,8 +28,8 @@ use trustformers_serve::{
 static PORT_ALLOCATOR: AtomicU16 = AtomicU16::new(8000);
 
 /// Global test registry to track active test environments
-static TEST_REGISTRY: std::sync::LazyLock<Mutex<HashMap<String, TestEnvironment>>> =
-    std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+static TEST_REGISTRY: once_cell::sync::Lazy<Mutex<HashMap<String, TestEnvironment>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// Test environment isolation levels
 #[derive(Debug, Clone, PartialEq)]
@@ -314,20 +314,18 @@ pub async fn create_isolated_test_environment(
 
 /// Create test server configuration
 fn create_test_server_config(config: &TestEnvironmentConfig, port: u16) -> Result<ServerConfig> {
-    let mut server_config = ServerConfig::default();
-
-    // Basic server settings
-    server_config.host = "127.0.0.1".to_string();
-    server_config.port = port;
-
-    // Model configuration
-    server_config.model_config = config.model_config.clone().unwrap_or_else(|| ModelConfig {
-        model_name: format!("test-model-{}", config.test_name),
-        model_version: Some("1.0.0".to_string()),
-        device: Device::Cpu,
-        max_sequence_length: 2048,
-        enable_caching: config.enable_caching,
-    });
+    let mut server_config = ServerConfig {
+        host: "127.0.0.1".to_string(),
+        port,
+        model_config: config.model_config.clone().unwrap_or_else(|| ModelConfig {
+            model_name: format!("test-model-{}", config.test_name),
+            model_version: Some("1.0.0".to_string()),
+            device: Device::Cpu,
+            max_sequence_length: 2048,
+            enable_caching: config.enable_caching,
+        }),
+        ..Default::default()
+    };
 
     // Authentication configuration
     // Note: Authentication is now handled at the server level using with_auth() method

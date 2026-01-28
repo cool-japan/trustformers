@@ -350,7 +350,7 @@ async fn test_caching_and_model_management_integration() {
 
     assert_eq!(response1.status_code(), StatusCode::OK);
     let result1: Value = response1.json();
-    assert_eq!(result1["cache_hit"].as_bool().unwrap_or(true), false);
+    assert!(!result1["cache_hit"].as_bool().unwrap_or(true));
 
     // Second identical request - should hit cache
     let start_time = Instant::now();
@@ -367,7 +367,7 @@ async fn test_caching_and_model_management_integration() {
 
     assert_eq!(response2.status_code(), StatusCode::OK);
     let result2: Value = response2.json();
-    assert_eq!(result2["cache_hit"].as_bool().unwrap_or(false), true);
+    assert!(result2["cache_hit"].as_bool().unwrap_or(false));
 
     // Cached request should be significantly faster
     assert!(second_duration < first_duration / 2);

@@ -822,9 +822,8 @@ mod tests {
         let handler = MemoryPressureHandler::new(config);
 
         let stats = handler.get_memory_stats().await;
-        // total_memory is u64, always >= 0, so just verify it's populated
-        assert!(stats.total_memory > 0 || stats.total_memory == 0); // Always true but documents intent
-        assert!(stats.utilization >= 0.0 && stats.utilization <= 1.0);
+        // Basic memory stats validation
+        assert!((0.0..=1.0).contains(&stats.utilization));
     }
 
     #[tokio::test]

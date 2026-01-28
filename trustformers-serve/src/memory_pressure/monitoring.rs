@@ -746,7 +746,7 @@ mod tests {
         let monitor = MemoryMonitor::new(config);
 
         let prediction = monitor.update_memory_patterns(0.5).await.unwrap();
-        assert!(prediction >= 0.0 && prediction <= 1.0);
+        assert!((0.0..=1.0).contains(&prediction));
     }
 
     #[tokio::test]
