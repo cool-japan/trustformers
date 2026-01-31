@@ -34,7 +34,7 @@ pub extern "C" fn trustformers_tokenizer_from_pretrained(
         return error;
     }
 
-    let tokenizer = tokenizer_opt.unwrap();
+    let tokenizer = tokenizer_opt.expect("tokenizer should be present after success check");
 
     // Register tokenizer and return handle
     let mut registry = RESOURCE_REGISTRY.write();
@@ -67,7 +67,7 @@ pub extern "C" fn trustformers_tokenizer_from_path(
         return error;
     }
 
-    let tokenizer = tokenizer_opt.unwrap();
+    let tokenizer = tokenizer_opt.expect("tokenizer should be present after success check");
 
     // Register tokenizer and return handle
     let mut registry = RESOURCE_REGISTRY.write();
@@ -119,7 +119,7 @@ pub extern "C" fn trustformers_tokenizer_encode(
         return error;
     }
 
-    let token_output = token_output_opt.unwrap();
+    let token_output = token_output_opt.expect("token_output should be present after success check");
 
     // Convert to C-compatible format
     let input_ids = token_output.input_ids;
@@ -132,7 +132,8 @@ pub extern "C" fn trustformers_tokenizer_encode(
     // Allocate and fill input_ids
     let input_ids_len = input_ids.len();
     let input_ids_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<c_uint>(input_ids_len).unwrap();
+        let layout = std::alloc::Layout::array::<c_uint>(input_ids_len)
+            .expect("Layout::array should succeed for reasonable input_ids_len");
         let ptr = std::alloc::alloc(layout) as *mut c_uint;
         if ptr.is_null() {
             return TrustformersError::OutOfMemory;
@@ -146,11 +147,13 @@ pub extern "C" fn trustformers_tokenizer_encode(
     // Allocate and fill attention_mask
     let attention_mask_len = attention_mask.len();
     let attention_mask_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<c_uint>(attention_mask_len).unwrap();
+        let layout = std::alloc::Layout::array::<c_uint>(attention_mask_len)
+            .expect("Layout::array should succeed for reasonable attention_mask_len");
         let ptr = std::alloc::alloc(layout) as *mut c_uint;
         if ptr.is_null() {
             // Clean up input_ids before returning
-            let layout = std::alloc::Layout::array::<c_uint>(input_ids_len).unwrap();
+            let layout = std::alloc::Layout::array::<c_uint>(input_ids_len)
+            .expect("Layout::array should succeed for reasonable input_ids_len");
             std::alloc::dealloc(input_ids_ptr as *mut u8, layout);
             return TrustformersError::OutOfMemory;
         }
@@ -225,7 +228,8 @@ pub extern "C" fn trustformers_tokenizer_encode_batch(
 
     // Allocate encodings array
     let encodings_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<TrustformersEncoding>(num_texts).unwrap();
+        let layout = std::alloc::Layout::array::<TrustformersEncoding>(num_texts)
+            .expect("Layout::array should succeed for reasonable num_texts");
         let ptr = std::alloc::alloc(layout) as *mut TrustformersEncoding;
         if ptr.is_null() {
             return TrustformersError::OutOfMemory;
@@ -251,13 +255,14 @@ pub extern "C" fn trustformers_tokenizer_encode_batch(
                     let encoding = &mut *encodings_ptr.add(i);
                     trustformers_encoding_free_contents(encoding);
                 }
-                let layout = std::alloc::Layout::array::<TrustformersEncoding>(num_texts).unwrap();
+                let layout = std::alloc::Layout::array::<TrustformersEncoding>(num_texts)
+            .expect("Layout::array should succeed for reasonable num_texts");
                 std::alloc::dealloc(encodings_ptr as *mut u8, layout);
             }
             return error;
         }
 
-        let token_output = token_output_opt.unwrap();
+        let token_output = token_output_opt.expect("token_output should be present after success check");
 
         // Fill encoding at current index
         unsafe {
@@ -269,7 +274,8 @@ pub extern "C" fn trustformers_tokenizer_encode_batch(
                     let enc = &mut *encodings_ptr.add(i);
                     trustformers_encoding_free_contents(enc);
                 }
-                let layout = std::alloc::Layout::array::<TrustformersEncoding>(num_texts).unwrap();
+                let layout = std::alloc::Layout::array::<TrustformersEncoding>(num_texts)
+            .expect("Layout::array should succeed for reasonable num_texts");
                 std::alloc::dealloc(encodings_ptr as *mut u8, layout);
                 return fill_result;
             }
@@ -322,7 +328,7 @@ pub extern "C" fn trustformers_tokenizer_decode(
         return error;
     }
 
-    let text = text_opt.unwrap();
+    let text = text_opt.expect("text should be present after success check");
     let c_text = string_to_c_str(text);
 
     unsafe {
@@ -387,7 +393,8 @@ pub extern "C" fn trustformers_tokenizer_decode_batch(
 
     // Allocate array for decoded text pointers
     let texts_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences).unwrap();
+        let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences)
+            .expect("Layout::array should succeed for reasonable num_sequences");
         let ptr = std::alloc::alloc(layout) as *mut *mut c_char;
         if ptr.is_null() {
             return TrustformersError::OutOfMemory;
@@ -409,7 +416,8 @@ pub extern "C" fn trustformers_tokenizer_decode_batch(
                         let _ = CString::from_raw(text_ptr);
                     }
                 }
-                let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences).unwrap();
+                let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences)
+            .expect("Layout::array should succeed for reasonable num_sequences");
                 std::alloc::dealloc(texts_ptr as *mut u8, layout);
                 return TrustformersError::InvalidParameter;
             }
@@ -432,12 +440,13 @@ pub extern "C" fn trustformers_tokenizer_decode_batch(
                         let _ = CString::from_raw(text_ptr);
                     }
                 }
-                let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences).unwrap();
+                let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences)
+            .expect("Layout::array should succeed for reasonable num_sequences");
                 std::alloc::dealloc(texts_ptr as *mut u8, layout);
                 return error;
             }
 
-            let text = text_opt.unwrap();
+            let text = text_opt.expect("text should be present after success check");
             let c_text = string_to_c_str(text);
             *texts_ptr.add(i) = c_text;
         }
@@ -468,7 +477,8 @@ pub extern "C" fn trustformers_batch_decoded_texts_free(
             }
         }
 
-        let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences).unwrap();
+        let layout = std::alloc::Layout::array::<*mut c_char>(num_sequences)
+            .expect("Layout::array should succeed for reasonable num_sequences");
         std::alloc::dealloc(decoded_texts as *mut u8, layout);
     }
 }
@@ -498,7 +508,8 @@ pub extern "C" fn trustformers_tokenizer_get_vocab(
 
     // Allocate array for token pointers
     let tokens_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<*mut c_char>(size).unwrap();
+        let layout = std::alloc::Layout::array::<*mut c_char>(size)
+            .expect("Layout::array should succeed for reasonable size");
         let ptr = std::alloc::alloc(layout) as *mut *mut c_char;
         if ptr.is_null() {
             return TrustformersError::OutOfMemory;
@@ -519,7 +530,8 @@ pub extern "C" fn trustformers_tokenizer_get_vocab(
                         let _ = CString::from_raw(ptr);
                     }
                 }
-                let layout = std::alloc::Layout::array::<*mut c_char>(size).unwrap();
+                let layout = std::alloc::Layout::array::<*mut c_char>(size)
+            .expect("Layout::array should succeed for reasonable size");
                 std::alloc::dealloc(tokens_ptr as *mut u8, layout);
             }
             return TrustformersError::OutOfMemory;
@@ -557,7 +569,8 @@ pub extern "C" fn trustformers_vocab_tokens_free(
             }
         }
 
-        let layout = std::alloc::Layout::array::<*mut c_char>(vocab_size).unwrap();
+        let layout = std::alloc::Layout::array::<*mut c_char>(vocab_size)
+            .expect("Layout::array should succeed for reasonable vocab_size");
         std::alloc::dealloc(vocab_tokens as *mut u8, layout);
     }
 }
@@ -614,7 +627,8 @@ pub extern "C" fn trustformers_tokenizer_convert_tokens_to_ids(
 
     // Allocate C array for IDs
     let ids_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<c_uint>(ids.len()).unwrap();
+        let layout = std::alloc::Layout::array::<c_uint>(ids.len())
+            .expect("Layout::array should succeed for reasonable ids length");
         let ptr = std::alloc::alloc(layout) as *mut c_uint;
         if ptr.is_null() {
             return TrustformersError::OutOfMemory;
@@ -665,7 +679,8 @@ pub extern "C" fn trustformers_tokenizer_convert_ids_to_tokens(
 
     // Allocate array for token pointers
     let tokens_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<*mut c_char>(num_ids).unwrap();
+        let layout = std::alloc::Layout::array::<*mut c_char>(num_ids)
+            .expect("Layout::array should succeed for reasonable num_ids");
         let ptr = std::alloc::alloc(layout) as *mut *mut c_char;
         if ptr.is_null() {
             return TrustformersError::OutOfMemory;
@@ -688,7 +703,8 @@ pub extern "C" fn trustformers_tokenizer_convert_ids_to_tokens(
                         let _ = CString::from_raw(ptr);
                     }
                 }
-                let layout = std::alloc::Layout::array::<*mut c_char>(num_ids).unwrap();
+                let layout = std::alloc::Layout::array::<*mut c_char>(num_ids)
+            .expect("Layout::array should succeed for reasonable num_ids");
                 std::alloc::dealloc(tokens_ptr as *mut u8, layout);
             }
             return TrustformersError::OutOfMemory;
@@ -968,7 +984,8 @@ pub extern "C" fn trustformers_batch_encoding_free(batch_encoding: *mut Trustfor
 
             // Free the encodings array
             let layout =
-                std::alloc::Layout::array::<TrustformersEncoding>(batch_enc.num_encodings).unwrap();
+                std::alloc::Layout::array::<TrustformersEncoding>(batch_enc.num_encodings)
+                    .expect("Layout::array should succeed for reasonable num_encodings");
             std::alloc::dealloc(batch_enc.encodings as *mut u8, layout);
             batch_enc.encodings = ptr::null_mut();
         }
@@ -988,21 +1005,24 @@ pub fn trustformers_encoding_free_contents(encoding: *mut TrustformersEncoding) 
 
         // Free input_ids
         if !enc.input_ids.ids.is_null() && enc.input_ids.capacity > 0 {
-            let layout = std::alloc::Layout::array::<c_uint>(enc.input_ids.capacity).unwrap();
+            let layout = std::alloc::Layout::array::<c_uint>(enc.input_ids.capacity)
+                .expect("Layout::array should succeed for reasonable capacity");
             std::alloc::dealloc(enc.input_ids.ids as *mut u8, layout);
             enc.input_ids.ids = ptr::null_mut();
         }
 
         // Free attention_mask
         if !enc.attention_mask.ids.is_null() && enc.attention_mask.capacity > 0 {
-            let layout = std::alloc::Layout::array::<c_uint>(enc.attention_mask.capacity).unwrap();
+            let layout = std::alloc::Layout::array::<c_uint>(enc.attention_mask.capacity)
+                .expect("Layout::array should succeed for reasonable capacity");
             std::alloc::dealloc(enc.attention_mask.ids as *mut u8, layout);
             enc.attention_mask.ids = ptr::null_mut();
         }
 
         // Free token_type_ids if allocated
         if !enc.token_type_ids.ids.is_null() && enc.token_type_ids.capacity > 0 {
-            let layout = std::alloc::Layout::array::<c_uint>(enc.token_type_ids.capacity).unwrap();
+            let layout = std::alloc::Layout::array::<c_uint>(enc.token_type_ids.capacity)
+                .expect("Layout::array should succeed for reasonable capacity");
             std::alloc::dealloc(enc.token_type_ids.ids as *mut u8, layout);
             enc.token_type_ids.ids = ptr::null_mut();
         }
@@ -1010,7 +1030,8 @@ pub fn trustformers_encoding_free_contents(encoding: *mut TrustformersEncoding) 
         // Free special_tokens_mask if allocated
         if !enc.special_tokens_mask.ids.is_null() && enc.special_tokens_mask.capacity > 0 {
             let layout =
-                std::alloc::Layout::array::<c_uint>(enc.special_tokens_mask.capacity).unwrap();
+                std::alloc::Layout::array::<c_uint>(enc.special_tokens_mask.capacity)
+                    .expect("Layout::array should succeed for reasonable capacity");
             std::alloc::dealloc(enc.special_tokens_mask.ids as *mut u8, layout);
             enc.special_tokens_mask.ids = ptr::null_mut();
         }
@@ -1029,7 +1050,8 @@ pub fn fill_encoding_from_token_output(
     // Allocate and fill input_ids
     let input_ids_len = input_ids.len();
     let input_ids_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<c_uint>(input_ids_len).unwrap();
+        let layout = std::alloc::Layout::array::<c_uint>(input_ids_len)
+            .expect("Layout::array should succeed for reasonable input_ids_len");
         let ptr = std::alloc::alloc(layout) as *mut c_uint;
         if ptr.is_null() {
             return TrustformersError::OutOfMemory;
@@ -1043,11 +1065,13 @@ pub fn fill_encoding_from_token_output(
     // Allocate and fill attention_mask
     let attention_mask_len = attention_mask.len();
     let attention_mask_ptr = unsafe {
-        let layout = std::alloc::Layout::array::<c_uint>(attention_mask_len).unwrap();
+        let layout = std::alloc::Layout::array::<c_uint>(attention_mask_len)
+            .expect("Layout::array should succeed for reasonable attention_mask_len");
         let ptr = std::alloc::alloc(layout) as *mut c_uint;
         if ptr.is_null() {
             // Clean up input_ids
-            let layout = std::alloc::Layout::array::<c_uint>(input_ids_len).unwrap();
+            let layout = std::alloc::Layout::array::<c_uint>(input_ids_len)
+            .expect("Layout::array should succeed for reasonable input_ids_len");
             std::alloc::dealloc(input_ids_ptr as *mut u8, layout);
             return TrustformersError::OutOfMemory;
         }

@@ -214,12 +214,22 @@ impl Template {
 
         // Very basic conditional handling: {{#if condition}}...{{/if}}
         // Use (?s) flag to enable single-line mode where . matches newlines
-        let if_regex = regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}").unwrap();
+        let if_regex = regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}")
+            .expect("Regex pattern for if statements should be valid");
 
         while let Some(captures) = if_regex.captures(&result) {
-            let condition_name = captures.get(1).unwrap().as_str();
-            let conditional_content = captures.get(2).unwrap().as_str();
-            let full_match = captures.get(0).unwrap().as_str();
+            let condition_name = captures
+                .get(1)
+                .expect("Capture group 1 should exist in if regex match")
+                .as_str();
+            let conditional_content = captures
+                .get(2)
+                .expect("Capture group 2 should exist in if regex match")
+                .as_str();
+            let full_match = captures
+                .get(0)
+                .expect("Capture group 0 should exist in if regex match")
+                .as_str();
 
             let should_include = if let Some(value) = context.get(condition_name) {
                 match value {
