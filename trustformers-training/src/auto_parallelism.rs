@@ -1140,7 +1140,7 @@ impl AutoParallelismSelector {
         strategies
             .sort_by(|a, b| self.compare_strategies(a, b).unwrap_or(std::cmp::Ordering::Equal));
 
-        Ok(strategies.into_iter().next().unwrap())
+        Ok(strategies.into_iter().next().expect("strategies is not empty"))
     }
 
     /// Compare strategies based on optimization objective

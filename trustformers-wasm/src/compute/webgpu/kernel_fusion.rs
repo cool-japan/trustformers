@@ -248,19 +248,19 @@ impl KernelFusion {
             &"cache_size".into(),
             &self.fusion_cache.len().into(),
         )
-        .unwrap();
+        .expect("Failed to set fusion stats property");
         js_sys::Reflect::set(
             &stats,
             &"max_fusion_depth".into(),
             &self.max_fusion_depth.into(),
         )
-        .unwrap();
+        .expect("Failed to set fusion stats property");
         js_sys::Reflect::set(
             &stats,
             &"max_intermediate_memory".into(),
             &self.max_intermediate_memory.into(),
         )
-        .unwrap();
+        .expect("Failed to set fusion stats property");
         stats
     }
 

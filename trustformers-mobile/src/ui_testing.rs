@@ -1269,7 +1269,9 @@ impl UITestingFramework {
                     last_error = Some(e);
                     attempts += 1;
 
-                    if attempts < max_attempts && self.should_retry(last_error.as_ref().unwrap()) {
+                    if attempts < max_attempts
+                        && self.should_retry(last_error.as_ref().expect("just set above"))
+                    {
                         println!(
                             "Retrying UI test: {} (attempt {}/{})",
                             test_config.test_name,

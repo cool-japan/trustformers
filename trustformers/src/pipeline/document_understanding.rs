@@ -362,9 +362,15 @@ where
             let y_diff = (a.bounding_box.y - b.bounding_box.y).abs();
             if y_diff < 20.0 {
                 // Same line
-                a.bounding_box.x.partial_cmp(&b.bounding_box.x).unwrap()
+                a.bounding_box
+                    .x
+                    .partial_cmp(&b.bounding_box.x)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             } else {
-                a.bounding_box.y.partial_cmp(&b.bounding_box.y).unwrap()
+                a.bounding_box
+                    .y
+                    .partial_cmp(&b.bounding_box.y)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             }
         });
 
@@ -565,20 +571,26 @@ where
     /// Check if value follows a structured format
     fn is_structured_value(&self, value: &str) -> bool {
         // Date patterns
-        if regex::Regex::new(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}").unwrap().is_match(value) {
+        if regex::Regex::new(r"\d{1,2}[/-]\d{1,2}[/-]\d{2,4}")
+            .expect("static regex pattern is valid")
+            .is_match(value)
+        {
             return true;
         }
 
         // Email pattern
         if regex::Regex::new(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b")
-            .unwrap()
+            .expect("static regex pattern is valid")
             .is_match(value)
         {
             return true;
         }
 
         // Phone number pattern
-        if regex::Regex::new(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b").unwrap().is_match(value) {
+        if regex::Regex::new(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b")
+            .expect("static regex pattern is valid")
+            .is_match(value)
+        {
             return true;
         }
 

@@ -618,8 +618,12 @@ impl TokenizerWrapper {
                     "model_type": "WordPiece",
                     "version": "1.0"
                 });
-                std::fs::write(config_path, serde_json::to_string_pretty(&config).unwrap())
-                    .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
+                std::fs::write(
+                    config_path,
+                    serde_json::to_string_pretty(&config)
+                        .expect("hardcoded JSON config must serialize"),
+                )
+                .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
 
                 // Note: Full WordPiece serialization would require implementing
                 // vocabulary and config serialization for WordPieceTokenizer
@@ -633,8 +637,12 @@ impl TokenizerWrapper {
                     "model_type": "BPE",
                     "version": "1.0"
                 });
-                std::fs::write(config_path, serde_json::to_string_pretty(&config).unwrap())
-                    .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
+                std::fs::write(
+                    config_path,
+                    serde_json::to_string_pretty(&config)
+                        .expect("hardcoded JSON config must serialize"),
+                )
+                .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
                 Ok(())
             },
             TokenizerWrapper::Unigram(_) => {
@@ -645,8 +653,12 @@ impl TokenizerWrapper {
                     "model_type": "Unigram",
                     "version": "1.0"
                 });
-                std::fs::write(config_path, serde_json::to_string_pretty(&config).unwrap())
-                    .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
+                std::fs::write(
+                    config_path,
+                    serde_json::to_string_pretty(&config)
+                        .expect("hardcoded JSON config must serialize"),
+                )
+                .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
                 Ok(())
             },
             TokenizerWrapper::Char(_) => {
@@ -657,8 +669,12 @@ impl TokenizerWrapper {
                     "model_type": "Character",
                     "version": "1.0"
                 });
-                std::fs::write(config_path, serde_json::to_string_pretty(&config).unwrap())
-                    .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
+                std::fs::write(
+                    config_path,
+                    serde_json::to_string_pretty(&config)
+                        .expect("hardcoded JSON config must serialize"),
+                )
+                .map_err(|e| TrustformersError::other(format!("I/O error: {}", e)))?;
                 Ok(())
             },
         }

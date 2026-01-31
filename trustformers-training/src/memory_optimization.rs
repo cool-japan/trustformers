@@ -154,7 +154,7 @@ impl MemoryOptimizer {
 
     /// Update memory usage tracking
     pub fn update_memory_usage(&self, delta: isize) {
-        let mut usage = self.memory_usage.lock().unwrap();
+        let mut usage = self.memory_usage.lock().expect("lock should not be poisoned");
         if delta < 0 {
             *usage = usage.saturating_sub((-delta) as usize);
         } else {
@@ -164,7 +164,7 @@ impl MemoryOptimizer {
 
     /// Get current memory usage
     pub fn get_memory_usage(&self) -> usize {
-        *self.memory_usage.lock().unwrap()
+        *self.memory_usage.lock().expect("lock should not be poisoned")
     }
 
     /// Check if memory cleanup is needed

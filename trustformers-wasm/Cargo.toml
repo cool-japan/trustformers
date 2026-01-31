@@ -27,7 +27,6 @@ serde_json = { workspace = true, features = ["alloc"] }
 serde-wasm-bindgen = "0.6.5"
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
 console_error_panic_hook = { version = "0.1.7", optional = true }
-wee_alloc = { version = "0.4.5", optional = true }
 dlmalloc = { version = "0.2.12", features = ["global"], optional = true }
 bytemuck = { workspace = true }
 # SciRS2 dependencies (following SCIRS2 POLICY)
@@ -141,8 +140,8 @@ web-sys = { version = "0.3.85", features = [
 wasm-bindgen-test = "0.3.58"
 
 [features]
-default = ["console_panic", "wee-alloc"]
-size-optimized = ["wee-alloc", "console_panic"] # Minimal feature set for size optimization
+default = ["console_panic", "dlmalloc-alloc"]
+size-optimized = ["dlmalloc-alloc", "console_panic"] # Minimal feature set for size optimization (using dlmalloc instead of unmaintained wee_alloc)
 performance-optimized = ["dlmalloc-alloc", "kernel-fusion", "async-executor", "scirs2"] # Performance-first features with SciRS2
 console_panic = ["console_error_panic_hook"]
 webgpu = []
@@ -161,11 +160,10 @@ web-components = []
 playground = []
 streaming-generation = []
 mobile-optimization = []
-wee-alloc = ["wee_alloc"]
 dlmalloc-alloc = ["dlmalloc"]
 scirs2 = ["scirs2-core"] # SciRS2 integration following SCIRS2 POLICY
-minimal = ["wee-alloc"] # Minimal build with only core features and small allocator
-full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "indexeddb", "memory64", "streaming-loader", "model-splitting", "react-components", "vue-components", "angular-components", "web-components", "playground", "streaming-generation", "mobile-optimization", "scirs2", "wee-alloc"]
+minimal = ["dlmalloc-alloc"] # Minimal build with only core features and small allocator (using dlmalloc instead of unmaintained wee_alloc)
+full = ["web-workers", "shared-memory", "kernel-fusion", "async-executor", "indexeddb", "memory64", "streaming-loader", "model-splitting", "react-components", "vue-components", "angular-components", "web-components", "playground", "streaming-generation", "mobile-optimization", "scirs2", "dlmalloc-alloc"]
 
 # Tell `rustc` to optimize for small code size.
 [package.metadata.wasm-pack]

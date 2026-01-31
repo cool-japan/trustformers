@@ -340,7 +340,11 @@ impl WorkgroupTuner {
             // Insert shared memory after the last binding declaration
             if !inserted && (line.contains("@binding") || line.contains("@group")) {
                 // Look ahead to see if there are more bindings
-                let remaining = shader[shader.find(line).unwrap() + line.len()..].to_string();
+                let remaining = shader[shader
+                    .find(line)
+                    .expect("line from lines iterator must exist in shader")
+                    + line.len()..]
+                    .to_string();
                 if !remaining.contains("@binding") && !remaining.contains("@group") {
                     result.push('\n');
                     result.push_str(&shared_memory_decl);

@@ -679,7 +679,11 @@ impl BanditOptimizer {
                 .arm_stats
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.average_reward.partial_cmp(&b.average_reward).unwrap())
+                .max_by(|(_, a), (_, b)| {
+                    a.average_reward
+                        .partial_cmp(&b.average_reward)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             Ok(best_arm)

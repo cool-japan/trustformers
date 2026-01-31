@@ -595,7 +595,7 @@ impl GradientClipper {
 
     fn compute_median_norm(&self) -> f32 {
         let mut sorted = self.history.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         sorted[sorted.len() / 2]
     }
 }

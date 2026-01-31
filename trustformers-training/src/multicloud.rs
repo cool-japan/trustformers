@@ -336,7 +336,7 @@ impl MultiCloudOrchestrator {
 
     /// Provision training cluster across clouds
     pub async fn provision_cluster(&self, required_nodes: usize) -> Result<Vec<NodeInfo>> {
-        let mut scheduler = self.scheduler.lock().unwrap();
+        let mut scheduler = self.scheduler.lock().expect("lock should not be poisoned");
         let allocation = scheduler.schedule_resources(required_nodes, &self.config)?;
 
         let mut nodes = Vec::new();
@@ -347,7 +347,7 @@ impl MultiCloudOrchestrator {
 
         // Update active nodes
         {
-            let mut active_nodes = self.active_nodes.lock().unwrap();
+            let mut active_nodes = self.active_nodes.lock().expect("lock should not be poisoned");
             for node in &nodes {
                 active_nodes.insert(node.node_id.clone(), node.clone());
             }
@@ -389,7 +389,7 @@ impl MultiCloudOrchestrator {
     pub async fn handle_spot_preemption(&self, node_id: &str) -> Result<()> {
         // Mark node as preempted
         {
-            let mut active_nodes = self.active_nodes.lock().unwrap();
+            let mut active_nodes = self.active_nodes.lock().expect("lock should not be poisoned");
             if let Some(node) = active_nodes.get_mut(node_id) {
                 node.status = NodeStatus::Preempted;
             }
@@ -403,7 +403,7 @@ impl MultiCloudOrchestrator {
 
         // Update active nodes
         {
-            let mut active_nodes = self.active_nodes.lock().unwrap();
+            let mut active_nodes = self.active_nodes.lock().expect("lock should not be poisoned");
             active_nodes.remove(node_id);
             active_nodes.insert(replacement.node_id.clone(), replacement);
         }
@@ -484,8 +484,8 @@ impl MultiCloudOrchestrator {
 
     async fn update_costs(&self) -> Result<()> {
         // Update cost tracking for all active nodes
-        let mut cost_tracker = self.cost_tracker.lock().unwrap();
-        let active_nodes = self.active_nodes.lock().unwrap();
+        let mut cost_tracker = self.cost_tracker.lock().expect("lock should not be poisoned");
+        let active_nodes = self.active_nodes.lock().expect("lock should not be poisoned");
 
         for node in active_nodes.values() {
             let hourly_cost = self.get_node_hourly_cost(node)?;
@@ -497,7 +497,7 @@ impl MultiCloudOrchestrator {
 
     async fn check_budget_alerts(&self) -> Result<()> {
         // Check for budget alerts and take action if needed
-        let mut cost_tracker = self.cost_tracker.lock().unwrap();
+        let mut cost_tracker = self.cost_tracker.lock().expect("lock should not be poisoned");
         let budget_ratio = cost_tracker.total_cost / self.config.cost_config.budget_limit;
 
         if budget_ratio >= 1.0 {

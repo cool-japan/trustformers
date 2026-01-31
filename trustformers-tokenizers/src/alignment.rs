@@ -422,7 +422,10 @@ impl AlignmentEngine {
             return false;
         }
 
-        let word_idx = *word_indices.iter().next().unwrap();
+        let word_idx = *word_indices
+            .iter()
+            .next()
+            .expect("word_indices validated to have exactly 1 element");
 
         // Check if these tokens cover the entire word
         let word_tokens: Vec<usize> = alignments

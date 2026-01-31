@@ -1344,10 +1344,9 @@ impl PatternClassificationEngine {
         );
 
         // Add best classification result
-        if let Some((_, best_result)) = classification_results
-            .iter()
-            .max_by(|a, b| a.1.confidence.partial_cmp(&b.1.confidence).unwrap())
-        {
+        if let Some((_, best_result)) = classification_results.iter().max_by(|a, b| {
+            a.1.confidence.partial_cmp(&b.1.confidence).unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             enhanced_pattern.metadata.insert(
                 "classification_category".to_string(),
                 format!("{:?}", best_result.category),
@@ -2195,7 +2194,9 @@ impl PatternRecommendationEngine {
         }
 
         // Sort by priority (highest first)
-        prioritized.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+        prioritized.sort_by(|a, b| {
+            b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(prioritized)
     }

@@ -1625,7 +1625,7 @@ impl ExecutionTimeStats {
 
         // Calculate percentiles
         let mut sorted_times = times_secs.clone();
-        sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         for &percentile in &[50.0, 90.0, 95.0, 99.0] {
             let index = ((sorted_times.len() - 1) as f32 * percentile / 100.0) as usize;

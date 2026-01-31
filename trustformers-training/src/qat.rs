@@ -249,7 +249,8 @@ impl QATConfig {
                 })
                 .collect();
 
-            layer_importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            layer_importance
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
             // Allocate bits greedily based on importance
             let mut remaining_budget = budget;
@@ -490,7 +491,7 @@ impl Layer for QATLinear {
     type Input = Tensor;
     type Output = Tensor;
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let mut step = self.step.lock().unwrap();
+        let mut step = self.step.lock().expect("lock should not be poisoned");
         *step += 1;
         let current_step = *step;
         drop(step);
@@ -505,14 +506,17 @@ impl Layer for QATLinear {
         let weight = self.get_layer_weights()?;
 
         // Update statistics if not frozen
-        if self.config.freeze_step.is_none() || current_step < self.config.freeze_step.unwrap() {
-            let mut params = self.quant_params.lock().unwrap();
+        if self.config.freeze_step.is_none()
+            || current_step
+                < self.config.freeze_step.expect("freeze_step checked as Some in condition")
+        {
+            let mut params = self.quant_params.lock().expect("lock should not be poisoned");
             params.update_stats(&weight, self.config.observer_momentum)?;
             params.compute_params(self.config.default_bits, self.config.symmetric)?;
         }
 
         // Simulate quantization on weights
-        let params = self.quant_params.lock().unwrap();
+        let params = self.quant_params.lock().expect("lock should not be poisoned");
         let _quantized_weight = fake_quantize(
             &weight,
             &params.scale,
@@ -575,7 +579,7 @@ impl Layer for QATConv2d {
     type Input = Tensor;
     type Output = Tensor;
     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
-        let mut step = self.step.lock().unwrap();
+        let mut step = self.step.lock().expect("lock should not be poisoned");
         *step += 1;
         let current_step = *step;
         drop(step);
@@ -586,14 +590,16 @@ impl Layer for QATConv2d {
 
         // Quantize input activations if configured
         let quantized_input = if let Some(act_params) = &self.activation_params {
-            if self.config.freeze_step.is_none() || current_step < self.config.freeze_step.unwrap()
+            if self.config.freeze_step.is_none()
+                || current_step
+                    < self.config.freeze_step.expect("freeze_step checked as Some in condition")
             {
-                let mut params = act_params.lock().unwrap();
+                let mut params = act_params.lock().expect("lock should not be poisoned");
                 params.update_stats(&input, self.config.observer_momentum)?;
                 params.compute_params(self.config.default_bits, self.config.symmetric)?;
             }
 
-            let params = act_params.lock().unwrap();
+            let params = act_params.lock().expect("lock should not be poisoned");
             fake_quantize(
                 &input,
                 &params.scale,
@@ -943,7 +949,10 @@ impl MixedBitQATTrainer {
             self.init_layer(layer_name.to_string(), &weights.shape())?;
         }
 
-        let params = self.layer_params.get_mut(layer_name).unwrap();
+        let params = self
+            .layer_params
+            .get_mut(layer_name)
+            .expect("layer_params entry exists after initialization check");
 
         // Update statistics if we're in the calibration phase
         if self.current_step < self.config.start_step {

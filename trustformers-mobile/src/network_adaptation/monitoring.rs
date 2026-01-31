@@ -258,7 +258,10 @@ impl NetworkQualityAnalyzer {
         }
 
         let recent: Vec<_> = self.quality_history.iter().rev().take(10).collect();
-        let first_quality = recent.last().unwrap();
+        let first_quality = match recent.last() {
+            Some(q) => q,
+            None => return false,
+        };
 
         recent.iter().all(|&q| q == *first_quality)
     }

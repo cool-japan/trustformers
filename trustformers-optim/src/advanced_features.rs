@@ -112,7 +112,10 @@ impl FusedOptimizer {
             return Ok(());
         }
 
-        let mut fused_params = self.fused_parameters.lock().unwrap();
+        let mut fused_params = self
+            .fused_parameters
+            .lock()
+            .expect("fused_parameters lock should not be poisoned");
         fused_params.clear();
 
         // Group parameters by fusion groups
@@ -190,8 +193,14 @@ impl FusedOptimizer {
         // Use the first optimizer in the group as the representative
         let primary_optimizer_idx = group[0];
 
-        let mut fused_params = self.fused_parameters.lock().unwrap();
-        let fused_gradients = self.fused_gradients.lock().unwrap();
+        let mut fused_params = self
+            .fused_parameters
+            .lock()
+            .expect("fused_parameters lock should not be poisoned");
+        let fused_gradients = self
+            .fused_gradients
+            .lock()
+            .expect("fused_gradients lock should not be poisoned");
 
         let group_name = format!("fused_group_{}", primary_optimizer_idx);
 
@@ -298,7 +307,10 @@ impl FusedOptimizer {
 
     /// Estimate memory savings from fusion
     fn estimate_memory_savings(&self) -> usize {
-        let fused_params = self.fused_parameters.lock().unwrap();
+        let fused_params = self
+            .fused_parameters
+            .lock()
+            .expect("fused_parameters lock should not be poisoned");
         let total_fused_size: usize = fused_params.values()
             .map(|t| t.len() * 4) // Assuming f32 tensors
             .sum();

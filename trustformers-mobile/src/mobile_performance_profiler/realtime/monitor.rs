@@ -169,7 +169,8 @@ impl RealTimeMonitor {
     pub fn update_metrics(&mut self, metrics: MobileMetricsSnapshot) -> Result<()> {
         // Add metrics to live buffer
         {
-            let mut live_metrics = self.live_metrics.write().unwrap();
+            let mut live_metrics = self.live_metrics.write()
+                .expect("live_metrics lock should not be poisoned");
             live_metrics.push_back(metrics.clone());
 
             // Maintain buffer size limit
@@ -201,7 +202,8 @@ impl RealTimeMonitor {
 
     /// Get recent metrics from live buffer
     pub fn get_recent_metrics(&self, limit: usize) -> Vec<MobileMetricsSnapshot> {
-        let live_metrics = self.live_metrics.read().unwrap();
+        let live_metrics = self.live_metrics.read()
+            .expect("live_metrics lock should not be poisoned");
         live_metrics.iter().rev().take(limit).cloned().collect()
     }
 

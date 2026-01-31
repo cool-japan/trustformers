@@ -114,7 +114,9 @@ impl DeviceCharacteristics {
             memory_bandwidth_gbps: 50.0, // ~50 GB/s for DDR4
             cache_size_kb: 32768,        // 32MB L3 cache
             warp_size: 1,                // No warp concept for CPU
-            max_threads_per_block: std::thread::available_parallelism().unwrap().get(),
+            max_threads_per_block: std::thread::available_parallelism()
+                .map(|p| p.get())
+                .unwrap_or(1),
             register_file_size: 16 * 32, // 16 registers * 32 bits
         }
     }

@@ -328,14 +328,14 @@ pub mod monitoring {
 
         /// Start timing an operation by name
         pub fn start_timer(&self, name: &str) {
-            let mut timers = self.timers.lock().unwrap();
+            let mut timers = self.timers.lock().expect("lock should not be poisoned");
             let timer = timers.entry(name.to_string()).or_default();
             timer.start();
         }
 
         /// Stop timing an operation and record the measurement
         pub fn stop_timer(&self, name: &str) -> TrustformersResult<f64> {
-            let mut timers = self.timers.lock().unwrap();
+            let mut timers = self.timers.lock().expect("lock should not be poisoned");
             if let Some(timer) = timers.get_mut(name) {
                 timer.stop()
             } else {
@@ -345,45 +345,45 @@ pub mod monitoring {
 
         /// Increment a counter
         pub fn increment_counter(&self, name: &str, value: u64) {
-            let mut counters = self.counters.lock().unwrap();
+            let mut counters = self.counters.lock().expect("lock should not be poisoned");
             *counters.entry(name.to_string()).or_insert(0) += value;
         }
 
         /// Set a gauge value
         pub fn set_gauge(&self, name: &str, value: f64) {
-            let mut gauges = self.gauges.lock().unwrap();
+            let mut gauges = self.gauges.lock().expect("lock should not be poisoned");
             gauges.insert(name.to_string(), value);
         }
 
         /// Get timer statistics by name
         pub fn get_timer_stats(&self, name: &str) -> Option<TrustformersBenchmarkResult> {
-            let timers = self.timers.lock().unwrap();
+            let timers = self.timers.lock().expect("lock should not be poisoned");
             timers.get(name).map(|timer| timer.get_statistics())
         }
 
         /// Get counter value by name
         pub fn get_counter(&self, name: &str) -> u64 {
-            let counters = self.counters.lock().unwrap();
+            let counters = self.counters.lock().expect("lock should not be poisoned");
             counters.get(name).copied().unwrap_or(0)
         }
 
         /// Get gauge value by name
         pub fn get_gauge(&self, name: &str) -> Option<f64> {
-            let gauges = self.gauges.lock().unwrap();
+            let gauges = self.gauges.lock().expect("lock should not be poisoned");
             gauges.get(name).copied()
         }
 
         /// Get all timer names
         pub fn get_timer_names(&self) -> Vec<String> {
-            let timers = self.timers.lock().unwrap();
+            let timers = self.timers.lock().expect("lock should not be poisoned");
             timers.keys().cloned().collect()
         }
 
         /// Reset all metrics
         pub fn reset_all(&self) {
-            let mut timers = self.timers.lock().unwrap();
-            let mut counters = self.counters.lock().unwrap();
-            let mut gauges = self.gauges.lock().unwrap();
+            let mut timers = self.timers.lock().expect("lock should not be poisoned");
+            let mut counters = self.counters.lock().expect("lock should not be poisoned");
+            let mut gauges = self.gauges.lock().expect("lock should not be poisoned");
 
             for timer in timers.values_mut() {
                 timer.reset();
@@ -420,7 +420,7 @@ pub mod monitoring {
     impl Drop for ScopeTimer {
         fn drop(&mut self) {
             let elapsed = self.start.elapsed().as_secs_f64() * 1000.0;
-            let mut timers = self.monitor.timers.lock().unwrap();
+            let mut timers = self.monitor.timers.lock().expect("lock should not be poisoned");
             let timer = timers.entry(self.name.clone()).or_default();
             timer.add_measurement(elapsed);
         }

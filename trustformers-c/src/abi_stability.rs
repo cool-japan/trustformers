@@ -99,17 +99,17 @@ static WARNING_TRACKER: Lazy<Arc<Mutex<HashMap<String, u32>>>> =
 
 /// Register a deprecated function
 pub fn register_deprecation(info: DeprecationInfo) {
-    let mut registry = DEPRECATION_REGISTRY.lock().unwrap();
+    let mut registry = DEPRECATION_REGISTRY.lock().expect("lock should not be poisoned");
     registry.insert(info.function_name.clone(), info);
 }
 
 /// Check if a function is deprecated and issue warnings
 pub fn check_deprecation(function_name: &str) -> Option<&'static str> {
-    let registry = DEPRECATION_REGISTRY.lock().unwrap();
+    let registry = DEPRECATION_REGISTRY.lock().expect("lock should not be poisoned");
 
     if let Some(info) = registry.get(function_name) {
         // Track warnings to avoid spam
-        let mut tracker = WARNING_TRACKER.lock().unwrap();
+        let mut tracker = WARNING_TRACKER.lock().expect("lock should not be poisoned");
         let count = tracker.entry(function_name.to_string()).or_insert(0);
         *count += 1;
 

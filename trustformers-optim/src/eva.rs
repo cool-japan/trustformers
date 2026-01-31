@@ -406,7 +406,10 @@ impl StatefulOptimizer for EVA {
         for (key, value) in &state_dict {
             if let Some(param_key) = key.strip_prefix("exp_avg_") {
                 if let Tensor::F32(data) = value {
-                    self.exp_avg.insert(param_key.to_string(), data.as_slice().unwrap().to_vec());
+                    self.exp_avg.insert(
+                        param_key.to_string(),
+                        data.as_slice().expect("F32 tensor should have valid slice").to_vec(),
+                    );
                 }
             }
         }
@@ -415,8 +418,10 @@ impl StatefulOptimizer for EVA {
         for (key, value) in &state_dict {
             if let Some(param_key) = key.strip_prefix("exp_avg_sq_") {
                 if let Tensor::F32(data) = value {
-                    self.exp_avg_sq
-                        .insert(param_key.to_string(), data.as_slice().unwrap().to_vec());
+                    self.exp_avg_sq.insert(
+                        param_key.to_string(),
+                        data.as_slice().expect("F32 tensor should have valid slice").to_vec(),
+                    );
                 }
             }
         }
@@ -426,8 +431,10 @@ impl StatefulOptimizer for EVA {
             for (key, value) in &state_dict {
                 if let Some(param_key) = key.strip_prefix("var_adaptation_") {
                     if let Tensor::F32(data) = value {
-                        self.var_adaptation
-                            .insert(param_key.to_string(), data.as_slice().unwrap().to_vec());
+                        self.var_adaptation.insert(
+                            param_key.to_string(),
+                            data.as_slice().expect("F32 tensor should have valid slice").to_vec(),
+                        );
                     }
                 }
             }

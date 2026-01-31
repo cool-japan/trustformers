@@ -1714,6 +1714,7 @@ impl SharingCapabilityAnalyzer {
         // TODO: ResourceSharingCapabilities no longer has sharing_safety_level enum
         // It has safety_assessment: f64 instead (higher = safer)
         // Also no longer has implementation_complexity
+        // Safe: is_empty() check above guarantees capabilities.first() is Some
         let safest_capability = capabilities
             .iter()
             .filter(|c| c.safety_assessment >= 0.7) // Safe or conditionally safe
@@ -1724,7 +1725,7 @@ impl SharingCapabilityAnalyzer {
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .or_else(|| capabilities.first())
-            .unwrap();
+            .expect("capabilities is non-empty after is_empty check");
 
         // Convert String to SharingMode enum
         let sharing_mode = match safest_capability.sharing_mode.as_str() {

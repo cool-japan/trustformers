@@ -12,7 +12,7 @@ static REQUEST_COUNTER: Lazy<IntCounter> = Lazy::new(|| {
         "inference_requests_total",
         "Total number of inference requests"
     ))
-    .unwrap()
+    .expect("failed to register REQUEST_COUNTER metric")
 });
 
 static REQUEST_DURATION: Lazy<Histogram> = Lazy::new(|| {
@@ -20,7 +20,7 @@ static REQUEST_DURATION: Lazy<Histogram> = Lazy::new(|| {
         "inference_request_duration_seconds",
         "Request duration in seconds"
     ))
-    .unwrap()
+    .expect("failed to register REQUEST_DURATION metric")
 });
 
 static BATCH_SIZE: Lazy<Histogram> = Lazy::new(|| {
@@ -29,7 +29,7 @@ static BATCH_SIZE: Lazy<Histogram> = Lazy::new(|| {
         "Batch size for inference requests"
     )
     .buckets(vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]))
-    .unwrap()
+    .expect("failed to register BATCH_SIZE metric")
 });
 
 static ACTIVE_REQUESTS: Lazy<IntGauge> = Lazy::new(|| {
@@ -37,7 +37,7 @@ static ACTIVE_REQUESTS: Lazy<IntGauge> = Lazy::new(|| {
         "inference_active_requests",
         "Number of active inference requests"
     ))
-    .unwrap()
+    .expect("failed to register ACTIVE_REQUESTS metric")
 });
 
 static MODEL_LOADS: Lazy<IntCounter> = Lazy::new(|| {
@@ -45,7 +45,7 @@ static MODEL_LOADS: Lazy<IntCounter> = Lazy::new(|| {
         "inference_model_loads_total",
         "Total number of model loads"
     ))
-    .unwrap()
+    .expect("failed to register MODEL_LOADS metric")
 });
 
 static ERRORS: Lazy<IntCounter> = Lazy::new(|| {
@@ -53,7 +53,7 @@ static ERRORS: Lazy<IntCounter> = Lazy::new(|| {
         "inference_errors_total",
         "Total number of inference errors"
     ))
-    .unwrap()
+    .expect("failed to register ERRORS metric")
 });
 
 static QUEUE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
@@ -61,7 +61,7 @@ static QUEUE_SIZE: Lazy<IntGauge> = Lazy::new(|| {
         "inference_queue_size",
         "Current size of the inference queue"
     ))
-    .unwrap()
+    .expect("failed to register QUEUE_SIZE metric")
 });
 
 #[derive(Clone)]

@@ -93,7 +93,9 @@ impl TextClassificationPipeline {
                 }
 
                 // Sort by score descending
-                results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+                results.sort_by(|a, b| {
+                    b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal)
+                });
 
                 results
             },
@@ -219,8 +221,11 @@ impl TextClassificationPipeline {
                                 }
 
                                 // Sort by score descending
-                                sample_results
-                                    .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+                                sample_results.sort_by(|a, b| {
+                                    b.score
+                                        .partial_cmp(&a.score)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
                                 batch_results.push(sample_results);
                             }
                         } else {

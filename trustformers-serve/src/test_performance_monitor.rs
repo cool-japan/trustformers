@@ -1591,7 +1591,8 @@ impl DashboardServer {
     }
 
     async fn stop(&self) -> Result<()> {
-        if let Some(handle) = self.server_handle.lock().unwrap().take() {
+        if let Some(handle) = self.server_handle.lock().expect("lock should not be poisoned").take()
+        {
             handle.abort();
         }
         info!("Dashboard server stopped");

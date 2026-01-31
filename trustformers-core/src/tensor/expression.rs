@@ -680,7 +680,16 @@ impl TensorExpr {
         let node = &self.nodes[&node_id];
 
         if node.is_leaf {
-            return Ok(node.tensor_data.as_ref().unwrap().as_ref().clone());
+            return node
+                .tensor_data
+                .as_ref()
+                .ok_or_else(|| {
+                    TrustformersError::tensor_op_error(
+                        "Leaf node must have tensor data",
+                        "eval_recursive",
+                    )
+                })
+                .map(|t| t.as_ref().clone());
         }
 
         // Evaluate operands first

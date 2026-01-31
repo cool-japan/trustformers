@@ -104,7 +104,7 @@ impl IntelImpl {
                 Self::create_fallback()
             }))
         });
-        Ok(INTEL_INSTANCE.get().unwrap())
+        Ok(INTEL_INSTANCE.get().expect("Intel instance should exist after initialization"))
     }
 
     /// Create fallback instance when Intel GPU is not available

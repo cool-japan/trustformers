@@ -307,7 +307,10 @@ impl OptimizerState for AggMo {
             let buffers = self.momentum_buffers.entry(param_id).or_insert_with(|| {
                 // Initialize all momentum buffers with zeros
                 (0..self.config.momentum_coefficients.len())
-                    .map(|_| Tensor::zeros(&effective_grad.shape()).unwrap())
+                    .map(|_| {
+                        Tensor::zeros(&effective_grad.shape())
+                            .expect("zeros should always succeed for valid gradient shape")
+                    })
                     .collect()
             });
 
@@ -610,11 +613,12 @@ impl OptimizerState for VarianceReduction {
             // Apply variance reduction
             let variance_reduced_grad = match self.config.method {
                 VarianceReductionMethod::SVRG => {
-                    if self.full_gradients.contains_key(&param_id) {
+                    // Clone full_grad before mutable borrow for compute_average_gradient
+                    let full_grad_opt = self.full_gradients.get(&param_id).cloned();
+                    if let Some(full_grad) = full_grad_opt {
                         let avg_grad = self.compute_average_gradient(param_id)?;
-                        let full_grad = self.full_gradients.get(&param_id).unwrap();
                         // SVRG update: grad - avg_grad + full_grad
-                        effective_grad.sub(&avg_grad)?.add(full_grad)?
+                        effective_grad.sub(&avg_grad)?.add(&full_grad)?
                     } else {
                         effective_grad
                     }

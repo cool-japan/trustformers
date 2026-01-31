@@ -100,7 +100,7 @@ impl SimpleGpuOps {
             self.pipelines.insert(key.clone(), pipeline);
         }
 
-        Ok(self.pipelines.get(&key).unwrap())
+        Ok(self.pipelines.get(&key).expect("pipeline just inserted with key"))
     }
 
     /// Determine if shared memory should be used based on tensor dimensions

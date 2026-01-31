@@ -144,7 +144,9 @@ impl TimeSeriesAggregationStrategy {
         smoothed.push(values[0]);
 
         for &value in values.iter().skip(1) {
-            let last_smoothed = *smoothed.last().unwrap();
+            // Safe: we pushed values[0] above
+            let last_smoothed =
+                *smoothed.last().expect("smoothed should not be empty after initial push");
             let new_smoothed = (self.smoothing_factor as f64) * value
                 + (1.0 - (self.smoothing_factor as f64)) * last_smoothed;
             smoothed.push(new_smoothed);
@@ -506,7 +508,7 @@ impl MultiObjectiveAggregationStrategy {
                 ConstraintType::Resource => objective_values.get(1).copied().unwrap_or(0.0),
                 ConstraintType::Safety => objective_values
                     .iter()
-                    .min_by(|a, b| a.partial_cmp(b).unwrap())
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                     .copied()
                     .unwrap_or(0.0),
                 ConstraintType::Policy => {

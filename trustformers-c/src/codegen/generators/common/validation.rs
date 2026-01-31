@@ -106,7 +106,7 @@ pub fn is_valid_identifier(name: &str) -> bool {
     }
 
     // Must start with letter or underscore
-    let first_char = name.chars().next().unwrap();
+    let first_char = name.chars().next().expect("non-empty name");
     if !first_char.is_alphabetic() && first_char != '_' {
         return false;
     }

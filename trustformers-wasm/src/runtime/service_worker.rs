@@ -175,7 +175,9 @@ impl ServiceWorkerManager {
         // Wait for response
         let response_promise = Promise::new(&mut |resolve, _reject| {
             let closure = Closure::wrap(Box::new(move |event: MessageEvent| {
-                resolve.call1(&JsValue::UNDEFINED, &event.data()).unwrap();
+                resolve
+                    .call1(&JsValue::UNDEFINED, &event.data())
+                    .expect("Failed to call resolve callback with message data");
             }) as Box<dyn FnMut(_)>);
 
             // Set up message listener

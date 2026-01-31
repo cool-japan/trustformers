@@ -202,7 +202,8 @@ impl SparseSGD {
                 // Keep indices with largest gradients
                 let mut indexed_grads: Vec<(usize, f32)> =
                     indices.iter().map(|&i| (i, grad_data[i].abs())).collect();
-                indexed_grads.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                indexed_grads
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 return Ok(indexed_grads.into_iter().take(max_active).map(|(i, _)| i).collect());
             }
         }

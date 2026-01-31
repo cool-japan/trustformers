@@ -486,7 +486,11 @@ impl EfficiencyMetrics {
     /// Identify top optimization opportunities
     pub fn top_optimization_opportunities(&self, limit: usize) -> Vec<&OptimizationSuggestion> {
         let mut opportunities = self.optimization_opportunities.iter().collect::<Vec<_>>();
-        opportunities.sort_by(|a, b| b.priority_score.partial_cmp(&a.priority_score).unwrap());
+        opportunities.sort_by(|a, b| {
+            b.priority_score
+                .partial_cmp(&a.priority_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         opportunities.into_iter().take(limit).collect()
     }
 }

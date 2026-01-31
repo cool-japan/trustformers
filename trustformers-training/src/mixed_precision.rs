@@ -422,12 +422,16 @@ pub mod utils {
                 Ok((min_val, max_val))
             },
             Tensor::F64(arr) => {
-                let min_val =
-                    arr.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).copied().unwrap_or(0.0)
-                        as f32;
-                let max_val =
-                    arr.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).copied().unwrap_or(0.0)
-                        as f32;
+                let min_val = arr
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .copied()
+                    .unwrap_or(0.0) as f32;
+                let max_val = arr
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .copied()
+                    .unwrap_or(0.0) as f32;
                 Ok((min_val, max_val))
             },
             Tensor::F16(arr) => {

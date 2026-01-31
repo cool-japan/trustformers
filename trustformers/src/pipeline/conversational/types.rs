@@ -393,7 +393,9 @@ impl ConversationState {
         self.memories.push(memory);
 
         // Sort by importance and keep only the most important ones
-        self.memories.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap());
+        self.memories.sort_by(|a, b| {
+            b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal)
+        });
         if self.memories.len() > 100 {
             // Max memories limit
             self.memories.truncate(100);
@@ -444,7 +446,7 @@ impl ConversationState {
             })
             .collect();
 
-        scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored_memories.into_iter().take(limit).map(|(memory, _)| memory).collect()
     }
 

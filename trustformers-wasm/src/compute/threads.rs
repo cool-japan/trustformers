@@ -404,7 +404,7 @@ impl ThreadPool {
             return Err("Matrix dimensions don't match for multiplication".into());
         }
 
-        let data_buffer = self.data_buffer.as_ref().unwrap();
+        let data_buffer = self.data_buffer.as_ref().expect("data_buffer should be initialized");
 
         // Copy input data to shared memory
         let a_offset = 0;
@@ -469,7 +469,8 @@ impl ThreadPool {
 
     /// Wait for all threads to complete using atomic operations
     async fn wait_for_completion(&self) -> Result<(), JsValue> {
-        let control_buffer = self.control_buffer.as_ref().unwrap();
+        let control_buffer =
+            self.control_buffer.as_ref().expect("control_buffer should be initialized");
 
         loop {
             let mut all_complete = true;

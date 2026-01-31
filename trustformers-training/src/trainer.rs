@@ -714,11 +714,10 @@ impl<M: Model> Trainer<M> {
             "save_attempted": true,
             "note": "For full model saving, implement ModelSaveLoad trait on your model type"
         });
-        fs::write(
-            model_info_path,
-            serde_json::to_string_pretty(&model_info).unwrap(),
-        )
-        .map_err(|e| file_not_found(format!("Failed to write model config: {}", e)))?;
+        let json_str = serde_json::to_string_pretty(&model_info)
+            .expect("model_info json serialization should not fail");
+        fs::write(model_info_path, json_str)
+            .map_err(|e| file_not_found(format!("Failed to write model config: {}", e)))?;
 
         // Note: Actual model saving would require the model to implement ModelSaveLoad
         // This provides a framework for models that choose to implement the trait

@@ -410,7 +410,8 @@ impl FederatedTrainingCoordinator {
 
     /// Simple federated averaging
     fn federated_averaging(&self, updates: &HashMap<String, Tensor>) -> Result<Tensor> {
-        let first_update = updates.values().next().unwrap();
+        let first_update = updates.values().next()
+            .ok_or_else(|| TrustformersError::other("No updates provided".to_string()))?;
         let mut aggregated_data = vec![0.0f32; first_update.data()?.len()];
 
         for update in updates.values() {
@@ -431,7 +432,8 @@ impl FederatedTrainingCoordinator {
 
     /// Weighted federated averaging
     fn weighted_federated_averaging(&self, updates: &HashMap<String, Tensor>) -> Result<Tensor> {
-        let first_update = updates.values().next().unwrap();
+        let first_update = updates.values().next()
+            .ok_or_else(|| TrustformersError::other("No updates provided".to_string()))?;
         let mut aggregated_data = vec![0.0f32; first_update.data()?.len()];
         let mut total_weight = 0.0;
 

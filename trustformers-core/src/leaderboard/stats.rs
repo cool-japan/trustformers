@@ -285,7 +285,12 @@ impl LeaderboardStats {
             // Highest throughput
             if let Some(throughput) = entry.metrics.throughput {
                 if best.highest_throughput.is_none()
-                    || throughput > best.highest_throughput.as_ref().unwrap().value
+                    || throughput
+                        > best
+                            .highest_throughput
+                            .as_ref()
+                            .expect("highest_throughput must be initialized")
+                            .value
                 {
                     best.highest_throughput = Some(MetricRecord {
                         value: throughput,
@@ -300,7 +305,12 @@ impl LeaderboardStats {
             // Highest tokens per second
             if let Some(tps) = entry.metrics.tokens_per_second {
                 if best.highest_tokens_per_second.is_none()
-                    || tps > best.highest_tokens_per_second.as_ref().unwrap().value
+                    || tps
+                        > best
+                            .highest_tokens_per_second
+                            .as_ref()
+                            .expect("highest_tokens_per_second must be initialized")
+                            .value
                 {
                     best.highest_tokens_per_second = Some(MetricRecord {
                         value: tps,
@@ -315,7 +325,12 @@ impl LeaderboardStats {
             // Lowest memory
             if let Some(memory) = entry.metrics.memory_mb {
                 if best.lowest_memory.is_none()
-                    || memory < best.lowest_memory.as_ref().unwrap().value
+                    || memory
+                        < best
+                            .lowest_memory
+                            .as_ref()
+                            .expect("lowest_memory must be initialized")
+                            .value
                 {
                     best.lowest_memory = Some(MetricRecord {
                         value: memory,
@@ -330,7 +345,12 @@ impl LeaderboardStats {
             // Highest accuracy
             if let Some(accuracy) = entry.metrics.accuracy {
                 if best.highest_accuracy.is_none()
-                    || accuracy > best.highest_accuracy.as_ref().unwrap().value
+                    || accuracy
+                        > best
+                            .highest_accuracy
+                            .as_ref()
+                            .expect("highest_accuracy must be initialized")
+                            .value
                 {
                     best.highest_accuracy = Some(MetricRecord {
                         value: accuracy,
@@ -345,7 +365,12 @@ impl LeaderboardStats {
             // Lowest energy
             if let Some(energy) = entry.metrics.energy_watts {
                 if best.lowest_energy.is_none()
-                    || energy < best.lowest_energy.as_ref().unwrap().value
+                    || energy
+                        < best
+                            .lowest_energy
+                            .as_ref()
+                            .expect("lowest_energy must be initialized")
+                            .value
                 {
                     best.lowest_energy = Some(MetricRecord {
                         value: energy,
@@ -450,8 +475,14 @@ impl TrendAnalysis {
         data_points.sort_by_key(|p| p.timestamp);
 
         // Calculate period
-        let start = data_points.first().unwrap().timestamp;
-        let end = data_points.last().unwrap().timestamp;
+        let start = data_points
+            .first()
+            .expect("data_points must have at least one element")
+            .timestamp;
+        let end = data_points
+            .last()
+            .expect("data_points must have at least one element")
+            .timestamp;
         let period_days = (end - start).num_days() as usize;
 
         // Calculate linear regression
@@ -479,8 +510,10 @@ impl TrendAnalysis {
         };
 
         // Calculate daily change percentage
-        let first_value = data_points.first().unwrap().value;
-        let last_value = data_points.last().unwrap().value;
+        let first_value =
+            data_points.first().expect("data_points must have at least one element").value;
+        let last_value =
+            data_points.last().expect("data_points must have at least one element").value;
         let total_change_percent = ((last_value - first_value) / first_value) * 100.0;
         let daily_change_percent =
             if period_days > 0 { total_change_percent / period_days as f64 } else { 0.0 };

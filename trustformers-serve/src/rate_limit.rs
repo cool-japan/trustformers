@@ -158,11 +158,11 @@ impl SlidingWindowEntry {
     }
 
     fn retry_after(&self) -> Duration {
-        if self.requests.is_empty() {
-            return Duration::from_secs(0);
-        }
-
-        let oldest_request = *self.requests.first().unwrap();
+        // Safe: we check is_empty() above
+        let oldest_request = match self.requests.first() {
+            Some(&req) => req,
+            None => return Duration::from_secs(0),
+        };
         let retry_time = oldest_request + self.window_duration;
         let now = Instant::now();
 
@@ -307,9 +307,10 @@ impl RateLimitService {
 
         // Check per-key rate limit
         let mut limiters = self.limiters.write().await;
-        let limiter = limiters
-            .entry(key.to_string())
-            .or_insert_with(|| RateLimiterState::new(&self.config).unwrap());
+        let limiter = limiters.entry(key.to_string()).or_insert_with(|| {
+            RateLimiterState::new(&self.config)
+                .expect("RateLimiterState::new should not fail with valid config")
+        });
 
         if !limiter.try_consume() {
             let retry_after = limiter.retry_after().as_secs();

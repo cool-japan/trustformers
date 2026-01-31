@@ -549,10 +549,12 @@ impl TensorRTModel {
         } else {
             // Check cache first
             if let Some(ref cache_path) = config.engine_cache_path {
-                let engine_path = cache_path.join(format!(
-                    "{}.engine",
-                    config.model_path.file_stem().unwrap().to_string_lossy()
-                ));
+                let stem = config
+                    .model_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_else(|| std::borrow::Cow::Borrowed("model"));
+                let engine_path = cache_path.join(format!("{}.engine", stem));
                 if engine_path.exists() {
                     backend.load_engine(&engine_path)?
                 } else {
@@ -958,7 +960,13 @@ impl<T: Tokenizer + Clone> Pipeline for TensorRTTextClassificationPipeline<T> {
                 .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap();
+                .ok_or_else(|| TrustformersError::Pipeline {
+                    message: "Cannot find maximum probability: empty classification output"
+                        .to_string(),
+                    pipeline_type: "text-classification".to_string(),
+                    suggestion: Some("Ensure the model produces non-empty logits".to_string()),
+                    recovery_actions: vec![],
+                })?;
             results.push(crate::pipeline::ClassificationOutput {
                 label: format!("LABEL_{}", max_idx),
                 score: max_score,
@@ -1047,7 +1055,13 @@ impl<T: Tokenizer + Clone> Pipeline for TensorRTTextClassificationPipeline<T> {
                     .iter()
                     .enumerate()
                     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                    .unwrap();
+                    .ok_or_else(|| TrustformersError::Pipeline {
+                        message: "Cannot find maximum probability: empty classification output"
+                            .to_string(),
+                        pipeline_type: "text-classification".to_string(),
+                        suggestion: Some("Ensure the model produces non-empty logits".to_string()),
+                        recovery_actions: vec![],
+                    })?;
                 sample_results.push(crate::pipeline::ClassificationOutput {
                     label: format!("LABEL_{}", max_idx),
                     score: max_score,

@@ -82,8 +82,8 @@ impl QuantumNeuralLayer {
             let shift = std::f64::consts::PI / 2.0;
 
             // Create shifted input
-            let mut input_plus = input.data().unwrap();
-            let mut input_minus = input.data().unwrap();
+            let mut input_plus = input.data().expect("input tensor must have valid data");
+            let mut input_minus = input.data().expect("input tensor must have valid data");
 
             if i < input_plus.len() {
                 input_plus[i] += shift as f32;
@@ -99,10 +99,13 @@ impl QuantumNeuralLayer {
                 self.forward(&input_minus_tensor),
             ) {
                 // Compute gradient using finite differences
-                let diff_data = output_plus.data().unwrap();
-                let minus_data = output_minus.data().unwrap();
+                let diff_data =
+                    output_plus.data().expect("output_plus tensor must have valid data");
+                let minus_data =
+                    output_minus.data().expect("output_minus tensor must have valid data");
 
-                let grad_output_data = grad_output.data().unwrap();
+                let grad_output_data =
+                    grad_output.data().expect("grad_output tensor must have valid data");
                 for (j, (&plus_val, &minus_val)) in
                     diff_data.iter().zip(minus_data.iter()).enumerate()
                 {

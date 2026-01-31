@@ -736,7 +736,9 @@ impl NetworkPatternAnalyzer {
             .daily_patterns
             .iter()
             .max_by(|(_, a), (_, b)| {
-                a.hourly_bandwidth[0].partial_cmp(&b.hourly_bandwidth[0]).unwrap()
+                a.hourly_bandwidth[0]
+                    .partial_cmp(&b.hourly_bandwidth[0])
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(hour, _)| hour)
         {

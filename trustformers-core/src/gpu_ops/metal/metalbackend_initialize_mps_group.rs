@@ -1422,10 +1422,10 @@ impl MetalBackend {
         new_seq_len: usize,
         head_dim: usize,
     ) -> Result<BufferId> {
-        if cached_buffer_id.is_none() || cached_seq_len == 0 {
-            return Ok(*new_buffer_id);
-        }
-        let cached_buffer_id = cached_buffer_id.unwrap();
+        let cached_buffer_id = match cached_buffer_id {
+            Some(id) if cached_seq_len > 0 => *id,
+            _ => return Ok(*new_buffer_id),
+        };
         let total_seq_len = cached_seq_len + new_seq_len;
         // eprintln!(
         //     "🔗 GPU KV-cache concat: cached_seq={}, new_seq={}, total={}",

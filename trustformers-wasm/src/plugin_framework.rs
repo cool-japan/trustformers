@@ -292,12 +292,12 @@ impl PluginRegistry {
 
         // Store plugin and configuration
         {
-            let mut plugins = self.plugins.lock().unwrap();
+            let mut plugins = self.plugins.lock().expect("lock should not be poisoned");
             plugins.insert(plugin_id.clone(), plugin);
         }
 
         {
-            let mut configs = self.plugin_configs.lock().unwrap();
+            let mut configs = self.plugin_configs.lock().expect("lock should not be poisoned");
             configs.insert(plugin_id, config);
         }
 
@@ -308,7 +308,7 @@ impl PluginRegistry {
     pub fn enable_plugin(&self, plugin_id: &str) -> Result<(), PluginError> {
         // Check if plugin exists
         {
-            let plugins = self.plugins.lock().unwrap();
+            let plugins = self.plugins.lock().expect("lock should not be poisoned");
             if !plugins.contains_key(plugin_id) {
                 return Err(PluginError {
                     code: PluginErrorCode::DependencyMissing,
@@ -320,8 +320,8 @@ impl PluginRegistry {
 
         // Initialize plugin
         {
-            let mut plugins = self.plugins.lock().unwrap();
-            let configs = self.plugin_configs.lock().unwrap();
+            let mut plugins = self.plugins.lock().expect("lock should not be poisoned");
+            let configs = self.plugin_configs.lock().expect("lock should not be poisoned");
 
             if let (Some(plugin), Some(config)) =
                 (plugins.get_mut(plugin_id), configs.get(plugin_id))
@@ -332,7 +332,7 @@ impl PluginRegistry {
 
         // Add to enabled list
         {
-            let mut enabled = self.enabled_plugins.lock().unwrap();
+            let mut enabled = self.enabled_plugins.lock().expect("lock should not be poisoned");
             if !enabled.contains(&plugin_id.to_string()) {
                 enabled.push(plugin_id.to_string());
             }
@@ -345,13 +345,13 @@ impl PluginRegistry {
     pub fn disable_plugin(&self, plugin_id: &str) -> Result<(), PluginError> {
         // Remove from enabled list
         {
-            let mut enabled = self.enabled_plugins.lock().unwrap();
+            let mut enabled = self.enabled_plugins.lock().expect("lock should not be poisoned");
             enabled.retain(|id| id != plugin_id);
         }
 
         // Cleanup plugin
         {
-            let mut plugins = self.plugins.lock().unwrap();
+            let mut plugins = self.plugins.lock().expect("lock should not be poisoned");
             if let Some(plugin) = plugins.get_mut(plugin_id) {
                 plugin.cleanup();
             }
@@ -366,8 +366,8 @@ impl PluginRegistry {
         plugin_type: PluginType,
         context: &PluginContext,
     ) -> Vec<Result<PluginResult, PluginError>> {
-        let enabled = self.enabled_plugins.lock().unwrap().clone();
-        let plugins = self.plugins.lock().unwrap();
+        let enabled = self.enabled_plugins.lock().expect("lock should not be poisoned").clone();
+        let plugins = self.plugins.lock().expect("lock should not be poisoned");
 
         let mut results = Vec::new();
 
@@ -386,18 +386,18 @@ impl PluginRegistry {
 
     /// Get enabled plugins
     pub fn get_enabled_plugins(&self) -> Vec<String> {
-        self.enabled_plugins.lock().unwrap().clone()
+        self.enabled_plugins.lock().expect("lock should not be poisoned").clone()
     }
 
     /// Get plugin metadata
     pub fn get_plugin_metadata(&self, plugin_id: &str) -> Option<PluginMetadata> {
-        let plugins = self.plugins.lock().unwrap();
+        let plugins = self.plugins.lock().expect("lock should not be poisoned");
         plugins.get(plugin_id).map(|plugin| plugin.metadata())
     }
 
     /// List all registered plugins
     pub fn list_plugins(&self) -> Vec<PluginMetadata> {
-        let plugins = self.plugins.lock().unwrap();
+        let plugins = self.plugins.lock().expect("lock should not be poisoned");
         plugins.values().map(|plugin| plugin.metadata()).collect()
     }
 
@@ -422,7 +422,7 @@ impl PluginRegistry {
     }
 
     fn check_plugin_dependencies(&self, dependencies: &[String]) -> Result<(), PluginError> {
-        let plugins = self.plugins.lock().unwrap();
+        let plugins = self.plugins.lock().expect("lock should not be poisoned");
 
         for dep in dependencies {
             if !plugins.contains_key(dep) {

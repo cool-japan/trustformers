@@ -734,7 +734,7 @@ impl MathTokenizer {
 
 impl Default for MathTokenizer {
     fn default() -> Self {
-        Self::new().unwrap()
+        Self::new().expect("MathTokenizer::new() should not fail with default config")
     }
 }
 

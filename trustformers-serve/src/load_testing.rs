@@ -1089,7 +1089,7 @@ impl LoadTestService {
                 response_times.iter().sum::<f64>() / response_times.len() as f64;
 
             let mut sorted_times = response_times.clone();
-            sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             results.summary.median_response_time_ms = sorted_times[sorted_times.len() / 2];
         }
 

@@ -68,18 +68,18 @@ impl Tensor {
                 // Handle scalar case (0-dimensional tensor)
                 if a.ndim() == 0 && b.ndim() > 0 {
                     // a is scalar, broadcast to b's shape
-                    let scalar_val = a.iter().next().unwrap();
+                    let scalar_val = a.iter().next().expect("array must have at least one element");
                     let result = b.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F32(result))
                 } else if b.ndim() == 0 && a.ndim() > 0 {
                     // b is scalar, broadcast to a's shape
-                    let scalar_val = b.iter().next().unwrap();
+                    let scalar_val = b.iter().next().expect("array must have at least one element");
                     let result = a.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F32(result))
                 } else if a.ndim() == 0 && b.ndim() == 0 {
                     // Both scalars
-                    let a_val = a.iter().next().unwrap();
-                    let b_val = b.iter().next().unwrap();
+                    let a_val = a.iter().next().expect("array must have at least one element");
+                    let b_val = b.iter().next().expect("array must have at least one element");
                     let max_val = a_val.max(*b_val);
                     Ok(Tensor::F32(ArrayD::from_elem(IxDyn(&[]), max_val)))
                 } else {
@@ -92,18 +92,18 @@ impl Tensor {
                 // Handle scalar case (0-dimensional tensor)
                 if a.ndim() == 0 && b.ndim() > 0 {
                     // a is scalar, broadcast to b's shape
-                    let scalar_val = a.iter().next().unwrap();
+                    let scalar_val = a.iter().next().expect("array must have at least one element");
                     let result = b.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F64(result))
                 } else if b.ndim() == 0 && a.ndim() > 0 {
                     // b is scalar, broadcast to a's shape
-                    let scalar_val = b.iter().next().unwrap();
+                    let scalar_val = b.iter().next().expect("array must have at least one element");
                     let result = a.mapv(|x| x.max(*scalar_val));
                     Ok(Tensor::F64(result))
                 } else if a.ndim() == 0 && b.ndim() == 0 {
                     // Both scalars
-                    let a_val = a.iter().next().unwrap();
-                    let b_val = b.iter().next().unwrap();
+                    let a_val = a.iter().next().expect("array must have at least one element");
+                    let b_val = b.iter().next().expect("array must have at least one element");
                     let max_val = a_val.max(*b_val);
                     Ok(Tensor::F64(ArrayD::from_elem(IxDyn(&[]), max_val)))
                 } else {
@@ -216,12 +216,12 @@ impl Tensor {
     pub fn min_max(&self) -> Result<(f32, f32)> {
         match self {
             Tensor::F32(a) => {
-                let data = a.as_slice().unwrap();
+                let data = a.as_slice().expect("array must have contiguous layout");
                 let (min_val, max_val) = simd_min_max_f32(data);
                 Ok((min_val, max_val))
             },
             Tensor::F64(a) => {
-                let data = a.as_slice().unwrap();
+                let data = a.as_slice().expect("array must have contiguous layout");
                 let (min_val, max_val) = simd_min_max_f64(data);
                 Ok((min_val as f32, max_val as f32))
             },
@@ -372,7 +372,9 @@ impl Tensor {
                             "mean_axes",
                         ));
                     }
-                    result = result.mean_axis(Axis(axis)).unwrap();
+                    result = result
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for mean operation");
                 }
                 Ok(Tensor::F32(result))
             },
@@ -389,7 +391,9 @@ impl Tensor {
                             "mean_axes",
                         ));
                     }
-                    result = result.mean_axis(Axis(axis)).unwrap();
+                    result = result
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for mean operation");
                 }
                 Ok(Tensor::F64(result))
             },
@@ -713,7 +717,8 @@ impl Tensor {
                 for dist_idx in 0..num_dists {
                     // Extract probabilities for this distribution
                     let offset = dist_idx * last_dim;
-                    let prob_slice = &probs.as_slice().unwrap()[offset..offset + last_dim];
+                    let prob_slice = &probs.as_slice().expect("array must have contiguous layout")
+                        [offset..offset + last_dim];
 
                     // Compute cumulative distribution
                     let mut cumsum = Vec::with_capacity(last_dim);
@@ -755,7 +760,8 @@ impl Tensor {
 
                 for dist_idx in 0..num_dists {
                     let offset = dist_idx * last_dim;
-                    let prob_slice = &probs.as_slice().unwrap()[offset..offset + last_dim];
+                    let prob_slice = &probs.as_slice().expect("array must have contiguous layout")
+                        [offset..offset + last_dim];
 
                     let mut cumsum = Vec::with_capacity(last_dim);
                     let mut sum = 0.0f64;

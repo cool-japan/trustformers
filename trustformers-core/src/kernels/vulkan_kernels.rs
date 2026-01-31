@@ -375,9 +375,11 @@ impl VulkanKernel {
                     match Instance::new(library.clone(), InstanceCreateInfo::default()) {
                         Ok(instance) => {
                             // Enumerate physical devices
-                            for (idx, physical_device) in
-                                instance.enumerate_physical_devices().unwrap().enumerate()
-                            {
+                            let physical_devices = match instance.enumerate_physical_devices() {
+                                Ok(devices) => devices,
+                                Err(_) => continue,
+                            };
+                            for (idx, physical_device) in physical_devices.enumerate() {
                                 let properties = physical_device.properties();
                                 // Note: In Vulkano 0.35+, limits are part of properties directly
                                 let limits = properties;

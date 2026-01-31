@@ -146,7 +146,8 @@ impl MobilePerformanceProfiler {
 
         // Update profiling state
         {
-            let mut state = self.profiling_state.lock().unwrap();
+            let mut state = self.profiling_state.lock()
+                .expect("profiling_state lock should not be poisoned");
             state.is_active = true;
             state.session_id = Some(session_id.clone());
             state.start_time = Some(Instant::now());
@@ -181,7 +182,8 @@ impl MobilePerformanceProfiler {
 
         // Update profiling state
         {
-            let mut state = self.profiling_state.lock().unwrap();
+            let mut state = self.profiling_state.lock()
+                .expect("profiling_state lock should not be poisoned");
             state.is_active = false;
             state.session_id = None;
 
@@ -292,7 +294,8 @@ impl MobilePerformanceProfiler {
 
     /// Check if profiling is currently active
     pub fn is_profiling_active(&self) -> bool {
-        let state = self.profiling_state.lock().unwrap();
+        let state = self.profiling_state.lock()
+            .expect("profiling_state lock should not be poisoned");
         state.is_active
     }
 }

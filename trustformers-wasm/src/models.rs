@@ -184,7 +184,7 @@ impl MultiHeadAttention {
         }
 
         if head_outputs.len() == 1 {
-            return Ok(head_outputs.into_iter().next().unwrap());
+            return Ok(head_outputs.into_iter().next().expect("len == 1"));
         }
 
         // Get shape of first tensor to validate compatibility
@@ -410,7 +410,7 @@ impl TextGenerator {
                 .data()
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, _)| idx)
                 .unwrap_or(0);
 

@@ -233,7 +233,10 @@ impl ErrorManager {
             error_code: error_code.clone(),
             severity: severity.clone(),
             context,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs(),
             recovery_suggestions: self.get_recovery_suggestions(&error_type, &error_code),
             related_errors: Vec::new(),
         };
@@ -281,7 +284,10 @@ impl ErrorManager {
         *stats.errors_by_component.entry(error.context.component.clone()).or_insert(0) += 1;
 
         // Update trends
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         // Calculate error rate for the last minute
         let errors = self
@@ -342,7 +348,10 @@ impl ErrorManager {
             .read()
             .map_err(|_| anyhow::anyhow!("Failed to acquire read lock on errors"))?;
 
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         let count = errors
             .iter()

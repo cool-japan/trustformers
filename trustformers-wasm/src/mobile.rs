@@ -403,12 +403,26 @@ impl MobileOptimizer {
     }
 
     fn detect_webgl2_support(&self) -> bool {
-        let window = window().unwrap();
-        let document = window.document().unwrap();
-        let canvas = document.create_element("canvas").unwrap();
-        let context =
-            canvas.dyn_into::<web_sys::HtmlCanvasElement>().unwrap().get_context("webgl2");
-        context.is_ok() && context.unwrap().is_some()
+        let window = match window() {
+            Some(w) => w,
+            None => return false,
+        };
+        let document = match window.document() {
+            Some(d) => d,
+            None => return false,
+        };
+        let canvas = match document.create_element("canvas") {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        let html_canvas = match canvas.dyn_into::<web_sys::HtmlCanvasElement>() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        match html_canvas.get_context("webgl2") {
+            Ok(Some(_)) => true,
+            _ => false,
+        }
     }
 
     fn detect_wasm_simd_support(&self) -> bool {

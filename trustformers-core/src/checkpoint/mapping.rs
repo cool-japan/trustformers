@@ -164,7 +164,8 @@ impl WeightMapping {
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.output\.dense\.weight$").unwrap(),
+                pattern: Regex::new(r"^encoder\.layer\.(\d+)\.output\.dense\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "bert/encoder/layer_$1/output/dense/kernel".to_string(),
                 transform: Some(WeightTransform::Transpose(vec![1, 0])),
             },
@@ -279,44 +280,52 @@ impl WeightMapping {
             },
             // Layers
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.q_proj\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.q_proj\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.self_attn.q_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.k_proj\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.k_proj\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.self_attn.k_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.v_proj\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.v_proj\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.self_attn.v_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.self_attn\.o_proj\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.self_attn.o_proj.weight".to_string(),
                 transform: None,
             },
             // MLP
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.gate_proj\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.gate_proj\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.mlp.gate_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.up_proj\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.up_proj\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.mlp.up_proj.weight".to_string(),
                 transform: None,
             },
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.down_proj\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.mlp\.down_proj\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.mlp.down_proj.weight".to_string(),
                 transform: None,
             },
             // RMS Norm
             WeightMappingRule {
-                pattern: Regex::new(r"^model\.layers\.(\d+)\.input_layernorm\.weight$").unwrap(),
+                pattern: Regex::new(r"^model\.layers\.(\d+)\.input_layernorm\.weight$")
+                    .expect("regex pattern must be valid"),
                 replacement: "model.layers.$1.input_layernorm.weight".to_string(),
                 transform: None,
             },

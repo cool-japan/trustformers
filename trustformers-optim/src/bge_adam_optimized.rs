@@ -490,11 +490,13 @@ impl StatefulOptimizer for OptimizedBGEAdam {
                     self.step_count = count as usize;
                 }
             } else if key.ends_with("_momentum") {
-                let param_key = key.strip_suffix("_momentum").unwrap().to_string();
-                self.state.momentum.insert(param_key, data.clone());
+                if let Some(param_key) = key.strip_suffix("_momentum") {
+                    self.state.momentum.insert(param_key.to_string(), data.clone());
+                }
             } else if key.ends_with("_variance") {
-                let param_key = key.strip_suffix("_variance").unwrap().to_string();
-                self.state.variance.insert(param_key, data.clone());
+                if let Some(param_key) = key.strip_suffix("_variance") {
+                    self.state.variance.insert(param_key.to_string(), data.clone());
+                }
             }
         }
         Ok(())

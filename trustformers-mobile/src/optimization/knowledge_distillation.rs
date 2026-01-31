@@ -151,7 +151,10 @@ impl KnowledgeDistiller {
         // Apply mobile-specific optimizations and return
         self.optimize_for_mobile_internal()?;
 
-        Ok(self.student_model.as_ref().unwrap().clone())
+        self.student_model
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| TrustformersError::other("Student model not initialized".to_string()))
     }
 
     /// Soft target distillation (standard KD)

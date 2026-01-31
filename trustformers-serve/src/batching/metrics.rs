@@ -221,7 +221,7 @@ impl LatencyTracker {
             return 0.0;
         }
 
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let index = ((samples.len() - 1) as f32 * percentile) as usize;
         samples[index]
     }

@@ -494,7 +494,9 @@ impl ReasoningEngine {
         // Mathematical patterns
         if content_lower.contains("calculate")
             || content_lower.contains("math")
-            || regex::Regex::new(r"\d+\s*[+\-*/]\s*\d+").unwrap().is_match(&content_lower)
+            || regex::Regex::new(r"\d+\s*[+\-*/]\s*\d+")
+                .expect("static regex pattern is valid")
+                .is_match(&content_lower)
         {
             return ReasoningType::Mathematical;
         }

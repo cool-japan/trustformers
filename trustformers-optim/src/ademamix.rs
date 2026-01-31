@@ -214,10 +214,19 @@ impl Optimizer for AdEMAMix {
         // Get effective learning rate with bias correction
         let effective_lr = self.effective_learning_rate(self.state.step);
 
-        // Get mutable references to buffers
-        let short_momentum = self.short_momentum.get_mut(&param_id).unwrap();
-        let long_momentum = self.long_momentum.get_mut(&param_id).unwrap();
-        let variance = self.variance.get_mut(&param_id).unwrap();
+        // Get mutable references to buffers (safe: init_param_state ensures they exist)
+        let short_momentum = self
+            .short_momentum
+            .get_mut(&param_id)
+            .expect("short_momentum should exist after init_param_state");
+        let long_momentum = self
+            .long_momentum
+            .get_mut(&param_id)
+            .expect("long_momentum should exist after init_param_state");
+        let variance = self
+            .variance
+            .get_mut(&param_id)
+            .expect("variance should exist after init_param_state");
 
         // Apply weight decay
         if self.config.weight_decay > 0.0 {

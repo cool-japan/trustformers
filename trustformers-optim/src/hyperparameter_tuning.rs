@@ -214,7 +214,7 @@ impl BayesianOptimizer {
         let mut performances: Vec<f32> =
             self.samples.iter().filter_map(|s| s.performance_score).collect();
         performances.push(performance);
-        performances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        performances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         if !performances.is_empty() {
             self.performance_threshold = performances[performances.len() / 2];
@@ -235,7 +235,7 @@ impl BayesianOptimizer {
                 b.performance_score
                     .unwrap_or(0.0)
                     .partial_cmp(&a.performance_score.unwrap_or(0.0))
-                    .unwrap()
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
             let keep_count = ((self.samples.len() as f32 * self.gamma).ceil() as usize).max(1);
             self.good_samples.truncate(keep_count);
@@ -326,7 +326,11 @@ impl BayesianOptimizer {
     /// Get best hyperparameters found so far
     pub fn get_best(&self) -> Option<&HyperparameterSample> {
         self.samples.iter().filter(|s| s.performance_score.is_some()).max_by(|a, b| {
-            a.performance_score.unwrap().partial_cmp(&b.performance_score.unwrap()).unwrap()
+            // Safe: filter ensures performance_score is Some
+            a.performance_score
+                .unwrap_or(0.0)
+                .partial_cmp(&b.performance_score.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
     }
 }
@@ -486,10 +490,9 @@ impl HyperparameterTuner {
         }
 
         // Update best configuration
-        if self.best_config.is_none()
-            || metrics.composite_score
-                > self.best_config.as_ref().unwrap().performance_score.unwrap_or(0.0)
-        {
+        let current_best_score =
+            self.best_config.as_ref().and_then(|c| c.performance_score).unwrap_or(0.0);
+        if self.best_config.is_none() || metrics.composite_score > current_best_score {
             let mut best_config = config.clone();
             best_config.performance_score = Some(metrics.composite_score);
             self.best_config = Some(best_config);

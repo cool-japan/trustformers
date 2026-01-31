@@ -587,7 +587,10 @@ pub extern "system" fn Java_com_trustformers_NNAPIEngine_createEngine(
     _class: JClass,
     config_json: JString,
 ) -> jlong {
-    let config_str: String = env.get_string(config_json).unwrap().into();
+    let config_str: String = match env.get_string(config_json) {
+        Ok(s) => s.into(),
+        Err(_) => return 0,
+    };
 
     match serde_json::from_str::<NNAPIConfig>(&config_str) {
         Ok(config) => match NNAPIEngine::new(config) {

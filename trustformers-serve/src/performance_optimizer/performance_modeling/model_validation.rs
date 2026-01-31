@@ -402,7 +402,7 @@ impl ModelValidationOrchestrator {
         }
 
         let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let mean = data.iter().sum::<f64>() / data.len() as f64;
         let variance = data.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / data.len() as f64;
@@ -482,12 +482,15 @@ impl ModelValidationOrchestrator {
         let average_confidence =
             history.iter().map(|r| r.confidence).sum::<f32>() / total_validations as f32;
 
-        let best_result =
-            history.iter().max_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap());
+        let best_result = history.iter().max_by(|a, b| {
+            a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let validation_frequency = if total_validations > 1 {
-            let time_span =
-                history.last().unwrap().validated_at - history.first().unwrap().validated_at;
+            let time_span = match (history.last(), history.first()) {
+                (Some(last), Some(first)) => last.validated_at - first.validated_at,
+                _ => chrono::Duration::zero(),
+            };
             total_validations as f32 / time_span.num_hours().max(1) as f32
         } else {
             0.0

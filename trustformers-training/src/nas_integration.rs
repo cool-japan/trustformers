@@ -744,7 +744,12 @@ impl NASController {
             .iter()
             .rev()
             .take(self.config.early_stopping.patience)
-            .max_by(|a, b| a.metrics.accuracy.partial_cmp(&b.metrics.accuracy).unwrap());
+            .max_by(|a, b| {
+                a.metrics
+                    .accuracy
+                    .partial_cmp(&b.metrics.accuracy)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
         if let Some(current_best) = &self.current_best {
             if let Some(recent_best) = recent_best {
@@ -783,7 +788,12 @@ impl NASController {
 
             let best = tournament
                 .iter()
-                .max_by(|a, b| a.metrics.accuracy.partial_cmp(&b.metrics.accuracy).unwrap())
+                .max_by(|a, b| {
+                    a.metrics
+                        .accuracy
+                        .partial_cmp(&b.metrics.accuracy)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .unwrap();
 
             parents.push((*best).clone());
@@ -848,7 +858,12 @@ impl NASController {
         combined.extend(offspring);
 
         // Select best individuals for next generation
-        combined.sort_by(|a, b| b.metrics.accuracy.partial_cmp(&a.metrics.accuracy).unwrap());
+        combined.sort_by(|a, b| {
+            b.metrics
+                .accuracy
+                .partial_cmp(&a.metrics.accuracy)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         combined.truncate(50); // Keep population size constant
 
         Ok(combined)
@@ -858,7 +873,12 @@ impl NASController {
     fn get_best_from_population(&self, population: &[Architecture]) -> Option<Architecture> {
         population
             .iter()
-            .max_by(|a, b| a.metrics.accuracy.partial_cmp(&b.metrics.accuracy).unwrap())
+            .max_by(|a, b| {
+                a.metrics
+                    .accuracy
+                    .partial_cmp(&b.metrics.accuracy)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned()
     }
 

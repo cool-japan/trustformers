@@ -172,7 +172,8 @@ impl Tensor {
     /// # }
     /// ```
     pub fn randn(shape: &[usize]) -> Result<Self> {
-        let normal = Normal::new(0.0, 1.0).unwrap();
+        let normal =
+            Normal::new(0.0, 1.0).expect("Normal(0.0, 1.0) distribution parameters are valid");
         let mut rng = thread_rng();
         let size = shape.iter().product();
         let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
@@ -593,7 +594,8 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (f16 precision).
     pub fn randn_f16(shape: &[usize]) -> Result<Self> {
-        let normal = Normal::new(0.0, 1.0).unwrap();
+        let normal =
+            Normal::new(0.0, 1.0).expect("Normal(0.0, 1.0) distribution parameters are valid");
         let mut rng = thread_rng();
         let size = shape.iter().product();
         let data: Vec<half::f16> =
@@ -606,7 +608,8 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (bf16 precision).
     pub fn randn_bf16(shape: &[usize]) -> Result<Self> {
-        let normal = Normal::new(0.0, 1.0).unwrap();
+        let normal =
+            Normal::new(0.0, 1.0).expect("Normal(0.0, 1.0) distribution parameters are valid");
         let mut rng = thread_rng();
         let size = shape.iter().product();
         let data: Vec<half::bf16> =

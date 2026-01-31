@@ -628,7 +628,7 @@ impl GraphAlgorithms {
         if v_lowlink == v_index {
             let mut scc = Vec::new();
             loop {
-                let w = stack.pop().unwrap();
+                let w = stack.pop().expect("SCC algorithm invariant: stack not empty");
                 on_stack.remove(&w);
                 scc.push(w.clone());
                 if w == v {

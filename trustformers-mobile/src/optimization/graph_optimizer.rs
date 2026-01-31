@@ -589,9 +589,9 @@ impl GraphAnalyzer {
         let end_node = distances
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(idx, _)| idx)
-            .unwrap();
+            .unwrap_or(0);
 
         // Reconstruct path
         let mut path = Vec::new();

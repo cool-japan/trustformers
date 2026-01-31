@@ -332,7 +332,7 @@ impl SimpleCallback for CheckpointCallback {
         let should_save = if self.save_best_only {
             if let (Some(_monitor), Some(current_value)) = (
                 &self.monitor,
-                state.metrics.get(self.monitor.as_ref().unwrap().as_str()),
+                self.monitor.as_ref().and_then(|m| state.metrics.get(m.as_str())),
             ) {
                 let is_best = match self.best_value {
                     None => true,

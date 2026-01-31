@@ -334,7 +334,8 @@ impl GGUFExporter {
             },
             data: emb_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Position embeddings (if applicable)
@@ -348,7 +349,8 @@ impl GGUFExporter {
             },
             data: pos_emb_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Transformer blocks
@@ -367,7 +369,8 @@ impl GGUFExporter {
             },
             data: final_norm_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Output projection
@@ -405,7 +408,8 @@ impl GGUFExporter {
             },
             data: attn_norm_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Attention weights (combined QKV)
@@ -419,7 +423,8 @@ impl GGUFExporter {
             },
             data: attn_qkv_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Attention output projection
@@ -433,7 +438,8 @@ impl GGUFExporter {
             },
             data: attn_out_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Feed-forward layer norm
@@ -447,7 +453,8 @@ impl GGUFExporter {
             },
             data: ffn_norm_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Feed-forward up projection
@@ -461,7 +468,8 @@ impl GGUFExporter {
             },
             data: ffn_up_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         // Feed-forward down projection
@@ -475,7 +483,8 @@ impl GGUFExporter {
             },
             data: ffn_down_data,
         });
-        offset += tensors.last().unwrap().data.len() as u64;
+        offset +=
+            tensors.last().expect("tensors vector must be non-empty after push").data.len() as u64;
         offset = self.align_offset(offset);
 
         Ok(offset)

@@ -93,14 +93,17 @@ impl KernelFusionEngine {
         // Store generated kernel
         self.generated_kernels
             .write()
-            .unwrap()
+            .expect("generated_kernels lock should not be poisoned")
             .insert(fused_kernel.id.clone(), fused_kernel.clone());
 
         // Calculate memory savings from eliminating intermediate tensors
         let memory_saved = self.calculate_memory_savings(graph, &opportunity.node_ids)?;
 
         // Update statistics
-        let mut stats = self.fusion_statistics.write().unwrap();
+        let mut stats = self
+            .fusion_statistics
+            .write()
+            .expect("fusion_statistics lock should not be poisoned");
         stats.record_successful_fusion(
             &self.pattern_name(&opportunity.pattern),
             opportunity.estimated_benefit,
@@ -224,7 +227,10 @@ impl KernelFusionEngine {
     }
 
     fn initialize_performance_database(&mut self) {
-        let mut db = self.performance_database.write().unwrap();
+        let mut db = self
+            .performance_database
+            .write()
+            .expect("performance_database lock should not be poisoned");
 
         // Add operation costs for common operations
         db.add_operation_cost(
@@ -551,7 +557,10 @@ impl KernelFusionEngine {
         node_ids: &[String],
         graph: &ComputationGraph,
     ) -> Result<f64> {
-        let db = self.performance_database.read().unwrap();
+        let db = self
+            .performance_database
+            .read()
+            .expect("performance_database lock should not be poisoned");
 
         let mut total_individual_cost = 0.0;
         let mut _total_ops = 0u64;

@@ -2,6 +2,7 @@
 
 #![allow(deprecated)] // Using rand legacy API, will migrate to scirs2_core
 
+use crate::errors::TrustformersError;
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -437,7 +438,9 @@ impl ONNXRuntimeSession {
 
         // If no specific outputs were generated, create a generic output
         if outputs.is_empty() {
-            let first_input = inputs.values().next().unwrap();
+            let first_input = inputs.values().next().ok_or_else(|| {
+                TrustformersError::other("Model must have at least one input".to_string())
+            })?;
             let input_shape = first_input.shape();
             let batch_size = input_shape[0];
 

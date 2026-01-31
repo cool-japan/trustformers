@@ -558,11 +558,15 @@ impl AlertingService {
             let result = self.evaluate_rule(rule, metrics).await;
             let evaluation_duration = start_time.elapsed();
 
+            let (condition_met, value) = match &result {
+                Ok((met, val)) => (*met, *val),
+                Err(_) => (false, 0.0),
+            };
             let eval_result = AlertEvaluationResult {
                 rule_id: rule.id.clone(),
                 evaluated_at: SystemTime::now(),
-                condition_met: result.is_ok() && result.as_ref().unwrap().0,
-                value: result.as_ref().map(|(_, v)| *v).unwrap_or(0.0),
+                condition_met,
+                value,
                 evaluation_duration,
                 error: result.err().map(|e| e.to_string()),
             };

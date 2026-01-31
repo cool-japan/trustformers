@@ -124,7 +124,9 @@ impl NMSparsity {
                     .collect();
 
                 // Sort by absolute value (descending)
-                window_vals.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+                window_vals.sort_by(|a, b| {
+                    b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal)
+                });
 
                 // Keep top N values
                 for (col, val) in window_vals.iter().take(self.n) {
@@ -242,7 +244,8 @@ impl BlockSparsity {
                     }
                 }
 
-                row_ptr.push(row_ptr.last().unwrap() + row_nnz);
+                // row_ptr is never empty - initialized with 0 at start
+                row_ptr.push(row_ptr.last().copied().unwrap_or(0) + row_nnz);
             }
         }
 
@@ -586,7 +589,8 @@ pub mod pruning {
         // Sort by magnitude
         let mut indexed_data: Vec<(usize, f32)> =
             data.iter().enumerate().map(|(i, &v)| (i, v)).collect();
-        indexed_data.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap());
+        indexed_data
+            .sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
 
         // Keep top-k
         let num_keep = ((data.len() as f32) * keep_ratio) as usize;

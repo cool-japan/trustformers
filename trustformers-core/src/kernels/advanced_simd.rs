@@ -170,10 +170,18 @@ pub mod optimized_matmul {
                         }
 
                         // Broadcast A elements
-                        let a0_broadcast = _mm256_set1_ps(*a.get([i, current_k]).unwrap());
-                        let a1_broadcast = _mm256_set1_ps(*a.get([i + 1, current_k]).unwrap());
-                        let a2_broadcast = _mm256_set1_ps(*a.get([i + 2, current_k]).unwrap());
-                        let a3_broadcast = _mm256_set1_ps(*a.get([i + 3, current_k]).unwrap());
+                        let a0_broadcast = _mm256_set1_ps(
+                            *a.get([i, current_k]).expect("array index must be in bounds"),
+                        );
+                        let a1_broadcast = _mm256_set1_ps(
+                            *a.get([i + 1, current_k]).expect("array index must be in bounds"),
+                        );
+                        let a2_broadcast = _mm256_set1_ps(
+                            *a.get([i + 2, current_k]).expect("array index must be in bounds"),
+                        );
+                        let a3_broadcast = _mm256_set1_ps(
+                            *a.get([i + 3, current_k]).expect("array index must be in bounds"),
+                        );
 
                         // Load 8 elements from B
                         let b_row = _mm256_loadu_ps(b.as_ptr().add(current_k * n + j));
@@ -200,10 +208,14 @@ pub mod optimized_matmul {
 
                 // Add to existing C values (for tiled multiplication)
                 for jj in 0..8 {
-                    *c.get_mut([i, j + jj]).unwrap() += result_row0[jj];
-                    *c.get_mut([i + 1, j + jj]).unwrap() += result_row1[jj];
-                    *c.get_mut([i + 2, j + jj]).unwrap() += result_row2[jj];
-                    *c.get_mut([i + 3, j + jj]).unwrap() += result_row3[jj];
+                    *c.get_mut([i, j + jj]).expect("array index must be in bounds") +=
+                        result_row0[jj];
+                    *c.get_mut([i + 1, j + jj]).expect("array index must be in bounds") +=
+                        result_row1[jj];
+                    *c.get_mut([i + 2, j + jj]).expect("array index must be in bounds") +=
+                        result_row2[jj];
+                    *c.get_mut([i + 3, j + jj]).expect("array index must be in bounds") +=
+                        result_row3[jj];
                 }
             }
         }

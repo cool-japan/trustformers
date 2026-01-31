@@ -35,9 +35,9 @@ impl StringInterner {
 
     /// Intern a string and return its ID
     pub fn intern(&self, s: &str) -> u32 {
-        let mut string_to_id = self.string_to_id.lock().unwrap();
-        let mut id_to_string = self.id_to_string.lock().unwrap();
-        let mut usage_stats = self.usage_stats.lock().unwrap();
+        let mut string_to_id = self.string_to_id.lock().expect("lock should not be poisoned");
+        let mut id_to_string = self.id_to_string.lock().expect("lock should not be poisoned");
+        let mut usage_stats = self.usage_stats.lock().expect("lock should not be poisoned");
 
         if let Some(&id) = string_to_id.get(s) {
             // String already interned, update usage stats
@@ -48,7 +48,7 @@ impl StringInterner {
         }
 
         // Intern new string
-        let mut next_id = self.next_id.lock().unwrap();
+        let mut next_id = self.next_id.lock().expect("lock should not be poisoned");
         let id = *next_id;
         *next_id += 1;
         drop(next_id);
@@ -65,8 +65,8 @@ impl StringInterner {
 
     /// Get string by ID
     pub fn get(&self, id: u32) -> Option<Arc<String>> {
-        let id_to_string = self.id_to_string.lock().unwrap();
-        let mut usage_stats = self.usage_stats.lock().unwrap();
+        let id_to_string = self.id_to_string.lock().expect("lock should not be poisoned");
+        let mut usage_stats = self.usage_stats.lock().expect("lock should not be poisoned");
 
         if let Some(string_arc) = id_to_string.get(&id) {
             // Update usage stats
@@ -81,20 +81,20 @@ impl StringInterner {
 
     /// Get ID for a string without interning it
     pub fn get_id(&self, s: &str) -> Option<u32> {
-        let string_to_id = self.string_to_id.lock().unwrap();
+        let string_to_id = self.string_to_id.lock().expect("lock should not be poisoned");
         string_to_id.get(s).copied()
     }
 
     /// Check if a string is interned
     pub fn contains(&self, s: &str) -> bool {
-        let string_to_id = self.string_to_id.lock().unwrap();
+        let string_to_id = self.string_to_id.lock().expect("lock should not be poisoned");
         string_to_id.contains_key(s)
     }
 
     /// Get statistics about interned strings
     pub fn get_statistics(&self) -> StringInternerStats {
-        let string_to_id = self.string_to_id.lock().unwrap();
-        let usage_stats = self.usage_stats.lock().unwrap();
+        let string_to_id = self.string_to_id.lock().expect("lock should not be poisoned");
+        let usage_stats = self.usage_stats.lock().expect("lock should not be poisoned");
 
         let total_strings = string_to_id.len();
         let total_memory = usage_stats.values().map(|stats| stats.size_bytes).sum();
@@ -123,9 +123,9 @@ impl StringInterner {
 
     /// Clean up rarely used strings to free memory
     pub fn cleanup_unused(&self, min_access_count: u64, max_age_seconds: u64) -> usize {
-        let mut string_to_id = self.string_to_id.lock().unwrap();
-        let mut id_to_string = self.id_to_string.lock().unwrap();
-        let mut usage_stats = self.usage_stats.lock().unwrap();
+        let mut string_to_id = self.string_to_id.lock().expect("lock should not be poisoned");
+        let mut id_to_string = self.id_to_string.lock().expect("lock should not be poisoned");
+        let mut usage_stats = self.usage_stats.lock().expect("lock should not be poisoned");
 
         let now = std::time::Instant::now();
         let mut cleaned_count = 0;
@@ -153,7 +153,7 @@ impl StringInterner {
 
     /// Get memory usage breakdown
     pub fn get_memory_breakdown(&self) -> MemoryBreakdown {
-        let usage_stats = self.usage_stats.lock().unwrap();
+        let usage_stats = self.usage_stats.lock().expect("lock should not be poisoned");
 
         let mut total_memory = 0;
         let mut small_strings = 0;

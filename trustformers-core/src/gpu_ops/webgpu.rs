@@ -425,7 +425,7 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+            sender.send(result).expect("channel receiver must not be dropped");
         });
 
         // Wait for the async buffer mapping to complete
@@ -435,7 +435,7 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             timeout: None, // Wait indefinitely
         });
 
-        receiver.recv().unwrap().map_err(|e| {
+        receiver.recv().expect("channel sender must send result").map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),
                 "matmul_f32",
@@ -630,7 +630,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+            sender.send(result).expect("channel receiver must not be dropped");
         });
 
         // Wait for the async buffer mapping to complete
@@ -640,7 +640,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             timeout: None,
         });
 
-        receiver.recv().unwrap().map_err(|e| {
+        receiver.recv().expect("channel sender must send result").map_err(|e| {
             TrustformersError::hardware_error(&format!("Failed to map buffer: {:?}", e), "gelu_f32")
         })?;
 
@@ -907,7 +907,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+            sender.send(result).expect("channel receiver must not be dropped");
         });
 
         // Wait for the async buffer mapping to complete
@@ -917,7 +917,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             timeout: None,
         });
 
-        receiver.recv().unwrap().map_err(|e| {
+        receiver.recv().expect("channel sender must send result").map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),
                 "layernorm_f32",
@@ -961,7 +961,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         let buffer_slice = staging_buffer.slice(..);
         let (sender, receiver) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-            sender.send(result).unwrap();
+            sender.send(result).expect("channel receiver must not be dropped");
         });
 
         // Wait for the async buffer mapping to complete
@@ -971,7 +971,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
             timeout: None,
         });
 
-        receiver.recv().unwrap().map_err(|e| {
+        receiver.recv().expect("channel sender must send result").map_err(|e| {
             TrustformersError::hardware_error(
                 &format!("Failed to map buffer: {:?}", e),
                 "buffer_to_cpu",

@@ -1032,7 +1032,7 @@ impl PerformanceMLOptimizer {
 
         // Update ML model with current metrics
         {
-            let mut model = self.performance_model.lock().unwrap();
+            let mut model = self.performance_model.lock().expect("lock should not be poisoned");
             model.update_training_data(current_metrics)?;
         }
 
@@ -1071,7 +1071,7 @@ impl PerformanceMLOptimizer {
             metrics.memory_usage.iter().sum::<f32>() / metrics.memory_usage.len() as f32;
 
         // Predict optimal batch size based on utilization and memory
-        let model = self.performance_model.lock().unwrap();
+        let model = self.performance_model.lock().expect("lock should not be poisoned");
         let predicted_optimal_batch =
             model.predict_optimal_batch_size(avg_utilization, avg_memory)?;
 

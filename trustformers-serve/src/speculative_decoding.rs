@@ -333,7 +333,7 @@ impl SpeculativeDecoder {
         let context_hash = self.compute_context_hash(context);
         let draft_token_ids: Vec<u32> = draft_tokens.iter().map(|t| t.token_id).collect();
 
-        let cache = self.verification_cache.lock().unwrap();
+        let cache = self.verification_cache.lock().expect("lock should not be poisoned");
         for entry in cache.iter() {
             if entry.context_hash == context_hash && entry.draft_tokens == draft_token_ids {
                 // Check if cache entry is still fresh (within 1 minute)
@@ -353,7 +353,7 @@ impl SpeculativeDecoder {
         draft_tokens: &[DraftToken],
         result: &VerificationResult,
     ) {
-        let mut cache = self.verification_cache.lock().unwrap();
+        let mut cache = self.verification_cache.lock().expect("lock should not be poisoned");
 
         let entry = VerificationCacheEntry {
             context_hash: self.compute_context_hash(context),
@@ -410,7 +410,7 @@ impl SpeculativeDecoder {
 
         // Update acceptance history for adaptive speculation
         if self.config.adaptive_speculation {
-            let mut history = self.acceptance_history.lock().unwrap();
+            let mut history = self.acceptance_history.lock().expect("lock should not be poisoned");
             history.push_back(acceptance_rate > 0.5);
 
             if history.len() > self.config.acceptance_rate_window {
@@ -423,7 +423,8 @@ impl SpeculativeDecoder {
                     history.iter().filter(|&&x| x).count() as f32 / history.len() as f32;
                 stats.average_acceptance_rate = current_rate;
 
-                let mut current_length = self.current_speculation_length.lock().unwrap();
+                let mut current_length =
+                    self.current_speculation_length.lock().expect("lock should not be poisoned");
 
                 if current_rate > self.config.target_acceptance_rate + 0.1 {
                     // Acceptance rate is high, try increasing speculation length
@@ -466,7 +467,7 @@ impl SpeculativeDecoder {
 
     /// Get current speculation length
     fn get_current_speculation_length(&self) -> usize {
-        *self.current_speculation_length.lock().unwrap()
+        *self.current_speculation_length.lock().expect("lock should not be poisoned")
     }
 
     /// Get current statistics
@@ -479,10 +480,10 @@ impl SpeculativeDecoder {
         let mut stats = self.stats.write().await;
         *stats = SpeculativeStats::default();
 
-        let mut history = self.acceptance_history.lock().unwrap();
+        let mut history = self.acceptance_history.lock().expect("lock should not be poisoned");
         history.clear();
 
-        let mut cache = self.verification_cache.lock().unwrap();
+        let mut cache = self.verification_cache.lock().expect("lock should not be poisoned");
         cache.clear();
     }
 

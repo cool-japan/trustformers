@@ -930,13 +930,13 @@ impl FfiParser {
 impl RegexCache {
     fn new() -> Self {
         Self {
-            no_mangle: Regex::new(r"#\[no_mangle\]").unwrap(),
-            extern_c: Regex::new(r#"pub extern "C""#).unwrap(),
-            doc_comment: Regex::new(r"///\s*(.*)").unwrap(),
-            feature_attr: Regex::new(r#"#\[cfg\(feature = "([^"]+)"\)\]"#).unwrap(),
-            deprecated_attr: Regex::new(r"#\[deprecated").unwrap(),
-            repr_c: Regex::new(r"#\[repr\(C\)\]").unwrap(),
-            cbindgen_attr: Regex::new(r"#\[cbindgen::").unwrap(),
+            no_mangle: Regex::new(r"#\[no_mangle\]").expect("static regex pattern is valid"),
+            extern_c: Regex::new(r#"pub extern "C""#).expect("static regex pattern is valid"),
+            doc_comment: Regex::new(r"///\s*(.*)").expect("static regex pattern is valid"),
+            feature_attr: Regex::new(r#"#\[cfg\(feature = "([^"]+)"\)\]"#).expect("static regex pattern is valid"),
+            deprecated_attr: Regex::new(r"#\[deprecated").expect("static regex pattern is valid"),
+            repr_c: Regex::new(r"#\[repr\(C\)\]").expect("static regex pattern is valid"),
+            cbindgen_attr: Regex::new(r"#\[cbindgen::").expect("static regex pattern is valid"),
         }
     }
 }

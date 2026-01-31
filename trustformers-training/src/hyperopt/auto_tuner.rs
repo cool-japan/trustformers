@@ -447,7 +447,7 @@ impl HyperparameterTuner for BayesianOptimizationTuner {
         let y_train: Vec<f64> = history.iter().map(|r| r.primary_metric).collect();
 
         {
-            let mut gp = self.gaussian_process.write().unwrap();
+            let mut gp = self.gaussian_process.write().expect("lock should not be poisoned");
             gp.fit(x_train, y_train);
         }
 
@@ -520,7 +520,7 @@ impl BayesianOptimizationTuner {
             let x = config_to_vector(&candidate, space)?;
 
             let (mean, std) = {
-                let gp = self.gaussian_process.read().unwrap();
+                let gp = self.gaussian_process.read().expect("lock should not be poisoned");
                 gp.predict(&x)
             };
 
@@ -626,7 +626,7 @@ impl AutomatedHyperparameterTuner {
             }
 
             let results_snapshot = {
-                let results = self.results.read().unwrap();
+                let results = self.results.read().expect("lock should not be poisoned");
                 results.clone()
             };
 
@@ -732,7 +732,8 @@ impl AutomatedHyperparameterTuner {
 
                         self.tuner.update_with_result(&trial_result)?;
                         {
-                            let mut results = self.results.write().unwrap();
+                            let mut results =
+                                self.results.write().expect("lock should not be poisoned");
                             results.push(trial_result);
                         }
                     },
@@ -753,21 +754,25 @@ impl AutomatedHyperparameterTuner {
         }
 
         // Return best result
-        let results = self.results.read().unwrap();
+        let results = self.results.read().expect("lock should not be poisoned");
         let best_result = match self.config.optimization_direction {
-            OptimizationDirection::Maximize => results
-                .iter()
-                .max_by(|a, b| a.primary_metric.partial_cmp(&b.primary_metric).unwrap()),
-            OptimizationDirection::Minimize => results
-                .iter()
-                .min_by(|a, b| a.primary_metric.partial_cmp(&b.primary_metric).unwrap()),
+            OptimizationDirection::Maximize => results.iter().max_by(|a, b| {
+                a.primary_metric
+                    .partial_cmp(&b.primary_metric)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
+            OptimizationDirection::Minimize => results.iter().min_by(|a, b| {
+                a.primary_metric
+                    .partial_cmp(&b.primary_metric)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
         };
 
         best_result.cloned().ok_or_else(|| "No successful trials completed".into())
     }
 
     fn print_progress(&self, completed_trials: usize) {
-        let results = self.results.read().unwrap();
+        let results = self.results.read().expect("lock should not be poisoned");
         if results.is_empty() {
             return;
         }
@@ -798,12 +803,12 @@ impl AutomatedHyperparameterTuner {
     }
 
     pub fn get_optimization_history(&self) -> Vec<TuningResult> {
-        let results = self.results.read().unwrap();
+        let results = self.results.read().expect("lock should not be poisoned");
         results.clone()
     }
 
     pub fn export_results(&self, path: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let results = self.results.read().unwrap();
+        let results = self.results.read().expect("lock should not be poisoned");
         let json = serde_json::to_string_pretty(&*results)?;
         std::fs::write(path, json)?;
         Ok(())

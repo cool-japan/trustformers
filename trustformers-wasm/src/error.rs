@@ -903,11 +903,13 @@ impl RetryStrategy {
     async fn sleep(&self, ms: u64) {
         let promise = js_sys::Promise::new(&mut |resolve, _| {
             web_sys::window()
-                .unwrap()
+                .expect("window should be available in browser context")
                 .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-                .unwrap();
+                .expect("set_timeout should succeed with valid callback");
         });
-        wasm_bindgen_futures::JsFuture::from(promise).await.unwrap();
+        wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .expect("sleep promise should resolve successfully");
     }
 }
 
@@ -1051,9 +1053,10 @@ impl ErrorRecoverySystem {
                     if let Some(performance) = window.performance() {
                         // Force garbage collection if available
                         if js_sys::Reflect::has(&performance, &"gc".into()).unwrap_or(false) {
-                            let gc_fn = js_sys::Reflect::get(&performance, &"gc".into()).unwrap();
-                            if let Ok(gc_fn) = gc_fn.dyn_into::<js_sys::Function>() {
-                                let _ = gc_fn.call0(&performance);
+                            if let Ok(gc_fn) = js_sys::Reflect::get(&performance, &"gc".into()) {
+                                if let Ok(gc_fn) = gc_fn.dyn_into::<js_sys::Function>() {
+                                    let _ = gc_fn.call0(&performance);
+                                }
                             }
                         }
                     }

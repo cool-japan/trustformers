@@ -524,7 +524,9 @@ impl GraphAnalyzer {
 
     fn count_total_parameters(graph: &ModelGraph) -> usize {
         let mut total = 0;
-        let params_regex = regex::Regex::new(r"(\d+\.?\d*)M params").unwrap();
+        // Static regex pattern - always compiles successfully
+        let params_regex = regex::Regex::new(r"(\d+\.?\d*)M params")
+            .expect("Static regex pattern is always valid");
         for node in &graph.nodes {
             if let Some(params_str) = node.properties.get("params") {
                 if let Ok(params) = params_str.parse::<usize>() {

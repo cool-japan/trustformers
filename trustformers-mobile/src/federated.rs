@@ -563,7 +563,10 @@ impl FederatedLearningClient {
             // iOS battery level detection would use UIDevice.current.batteryLevel
             // For this implementation, we'll simulate based on time patterns
             use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs();
             let cycle = (now % 3600) as f32 / 3600.0; // Hour cycle
             0.2 + 0.7 * (1.0 + (cycle * 2.0 * std::f32::consts::PI).sin()) / 2.0
         }

@@ -244,19 +244,19 @@ impl AsyncExecutor {
             &"queue_length".into(),
             &self.operation_queue.len().into(),
         )
-        .unwrap();
+        .expect("Failed to set executor status property");
         js_sys::Reflect::set(
             &status,
             &"running_operations".into(),
             &self.running_operations.len().into(),
         )
-        .unwrap();
+        .expect("Failed to set executor status property");
         js_sys::Reflect::set(
             &status,
             &"completed_operations".into(),
             &self.completed_operations.len().into(),
         )
-        .unwrap();
+        .expect("Failed to set executor status property");
         status
     }
 

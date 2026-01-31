@@ -29,7 +29,6 @@ tracing-subscriber.workspace = true
 parking_lot.workspace = true
 indexmap = { workspace = true, features = ["serde"] }
 plotters = { workspace = true, optional = true }
-tui = { workspace = true, optional = true }
 crossterm = { workspace = true, optional = true }
 ratatui = { workspace = true, optional = true }
 
@@ -73,7 +72,6 @@ tempfile.workspace = true
 [features]
 default = ["visual"]
 visual = ["plotters", "ratatui", "crossterm"]  # Using ratatui (maintained fork of tui)
-legacy-tui = ["tui", "crossterm"]  # Deprecated: use ratatui instead
 video = ["gif", "image", "ffmpeg-next"]
 gif = ["dep:gif", "image"]
 wasm = ["wasm-bindgen", "wasm-bindgen-futures", "js-sys", "web-sys"]

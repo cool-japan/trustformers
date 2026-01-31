@@ -854,10 +854,11 @@ impl StructuredLogger {
         );
 
         for (key, value) in &metrics {
-            fields.insert(
-                key.clone(),
-                serde_json::Value::Number(serde_json::Number::from_f64(*value).unwrap()),
-            );
+            // from_f64 returns None for NaN/Infinity, use 0.0 as fallback
+            let number = serde_json::Number::from_f64(*value).unwrap_or_else(|| {
+                serde_json::Number::from_f64(0.0).expect("0.0 is always a valid f64")
+            });
+            fields.insert(key.clone(), serde_json::Value::Number(number));
         }
 
         info!(

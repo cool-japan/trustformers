@@ -94,11 +94,13 @@ impl FromStr for SemanticVersion {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let mut parts = s.split('+');
-        let version_part = parts.next().unwrap();
+        // split always returns at least one element
+        let version_part = parts.next().expect("split always returns at least one element");
         let build = parts.next().map(|s| s.to_string());
 
         let mut parts = version_part.split('-');
-        let version_core = parts.next().unwrap();
+        // split always returns at least one element
+        let version_core = parts.next().expect("split always returns at least one element");
         let pre_release = parts.next().map(|s| s.to_string());
 
         let version_nums: Vec<&str> = version_core.split('.').collect();

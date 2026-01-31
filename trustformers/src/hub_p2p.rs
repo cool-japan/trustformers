@@ -862,8 +862,13 @@ impl P2PNode {
 
     fn generate_peer_id() -> String {
         let mut hasher = Sha256::new();
-        hasher
-            .update(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_be_bytes());
+        hasher.update(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_nanos()
+                .to_be_bytes(),
+        );
         hex::encode(hasher.finalize())[..16].to_string()
     }
 

@@ -250,7 +250,7 @@ impl StringOptimizer {
             static ref INTERNED_STRINGS: Mutex<HashSet<&'static str>> = Mutex::new(HashSet::new());
         }
 
-        let mut set = INTERNED_STRINGS.lock().unwrap();
+        let mut set = INTERNED_STRINGS.lock().expect("lock should not be poisoned");
         if let Some(&interned) = set.get(s) {
             interned
         } else {

@@ -305,7 +305,7 @@ impl Tokenizer for CanineTokenizer {
         // CANINE uses hashing, so we can't directly convert tokens to IDs
         // For single characters, we can use the char_to_id method
         if token.len() == 1 {
-            Some(self.hash_char(token.chars().next().unwrap()))
+            token.chars().next().map(|c| self.hash_char(c))
         } else {
             None
         }
@@ -360,7 +360,7 @@ mod tests {
         // With downsampling rate 2, should take every 2nd character (indices 0, 2, 4, ...)
         // Original: "Hello World" (11 chars: H e l l o   W o r l d)
         // Downsampled: H l o W r d (6 chars)
-        let expected_downsampled_chars = (text.len() + 1) / 2; // 6 chars
+        let expected_downsampled_chars = text.len().div_ceil(2); // 6 chars
         let expected_total = expected_downsampled_chars + 2; // + CLS + SEP = 8
 
         assert_eq!(encoded.input_ids.len(), expected_total);

@@ -354,12 +354,18 @@ impl StatefulOptimizer for ScheduleFreeSGD {
         // Load weight buffers
         for (key, tensor) in state {
             if key.starts_with("momentum_weights_") {
-                let param_id = key.strip_prefix("momentum_weights_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("momentum_weights_")
+                    .expect("key must have momentum_weights_ prefix")
+                    .to_string();
                 if let Ok(weights) = tensor.data() {
                     self.momentum_weights.insert(param_id, weights);
                 }
             } else if key.starts_with("average_weights_") {
-                let param_id = key.strip_prefix("average_weights_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("average_weights_")
+                    .expect("key must have average_weights_ prefix")
+                    .to_string();
                 if let Ok(weights) = tensor.data() {
                     self.average_weights.insert(param_id, weights);
                 }
@@ -707,22 +713,34 @@ impl StatefulOptimizer for ScheduleFreeAdam {
         // Load all buffers
         for (key, tensor) in state {
             if key.starts_with("momentum_weights_") {
-                let param_id = key.strip_prefix("momentum_weights_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("momentum_weights_")
+                    .expect("key must have momentum_weights_ prefix")
+                    .to_string();
                 if let Ok(weights) = tensor.data() {
                     self.momentum_weights.insert(param_id, weights);
                 }
             } else if key.starts_with("average_weights_") {
-                let param_id = key.strip_prefix("average_weights_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("average_weights_")
+                    .expect("key must have average_weights_ prefix")
+                    .to_string();
                 if let Ok(weights) = tensor.data() {
                     self.average_weights.insert(param_id, weights);
                 }
             } else if key.starts_with("exp_avg_") && !key.starts_with("exp_avg_sq_") {
-                let param_id = key.strip_prefix("exp_avg_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("exp_avg_")
+                    .expect("key must have exp_avg_ prefix")
+                    .to_string();
                 if let Ok(weights) = tensor.data() {
                     self.exp_avg.insert(param_id, weights);
                 }
             } else if key.starts_with("exp_avg_sq_") {
-                let param_id = key.strip_prefix("exp_avg_sq_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("exp_avg_sq_")
+                    .expect("key must have exp_avg_sq_ prefix")
+                    .to_string();
                 if let Ok(weights) = tensor.data() {
                     self.exp_avg_sq.insert(param_id, weights);
                 }

@@ -137,7 +137,7 @@ impl TextProcessor {
     /// Extract sentences from text
     pub fn extract_sentences(text: &str) -> Vec<String> {
         // Simple sentence splitting on common sentence endings
-        let sentence_regex = Regex::new(r"[.!?]+\s+").unwrap();
+        let sentence_regex = Regex::new(r"[.!?]+\s+").expect("static regex pattern is valid");
         sentence_regex
             .split(text)
             .filter(|s| !s.trim().is_empty())

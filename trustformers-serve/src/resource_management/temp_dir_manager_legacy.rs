@@ -365,7 +365,10 @@ pub async fn get_global_temp_directory_manager() -> Result<Arc<TempDirectoryMana
                 Ok(()) => Ok(manager),
                 Err(_) => {
                     // Another thread set it first, get the existing one
-                    Ok(GLOBAL_MANAGER.get().unwrap().clone())
+                    Ok(GLOBAL_MANAGER
+                        .get()
+                        .expect("another thread must have set the global manager")
+                        .clone())
                 }
             }
         }

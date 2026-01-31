@@ -220,29 +220,45 @@ impl HardwareManager {
 
     /// Check if a device exists
     pub fn has_device(&self, device_id: &str) -> bool {
-        self.device_info.read().unwrap().contains_key(device_id)
+        self.device_info
+            .read()
+            .expect("device_info lock should not be poisoned")
+            .contains_key(device_id)
     }
 
     /// Get device information
     pub fn get_device_info(&self, device_id: &str) -> Option<DeviceInfo> {
-        self.device_info.read().unwrap().get(device_id).cloned()
+        self.device_info
+            .read()
+            .expect("device_info lock should not be poisoned")
+            .get(device_id)
+            .cloned()
     }
 
     /// Get device metrics
     pub fn get_device_metrics(&self, device_id: &str) -> Option<HardwareMetrics> {
-        self.device_metrics.read().unwrap().get(device_id).cloned()
+        self.device_metrics
+            .read()
+            .expect("device_metrics lock should not be poisoned")
+            .get(device_id)
+            .cloned()
     }
 
     /// List all available devices
     pub fn list_devices(&self) -> Vec<DeviceInfo> {
-        self.device_info.read().unwrap().values().cloned().collect()
+        self.device_info
+            .read()
+            .expect("device_info lock should not be poisoned")
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// List devices by hardware type
     pub fn list_devices_by_type(&self, hardware_type: HardwareType) -> Vec<DeviceInfo> {
         self.device_info
             .read()
-            .unwrap()
+            .expect("device_info lock should not be poisoned")
             .values()
             .filter(|info| info.hardware_type == hardware_type)
             .cloned()
@@ -314,7 +330,8 @@ impl HardwareManager {
     /// Update device metrics
     pub fn update_device_metrics(&self, device_id: &str, metrics: HardwareMetrics) {
         {
-            let mut device_metrics = self.device_metrics.write().unwrap();
+            let mut device_metrics =
+                self.device_metrics.write().expect("device_metrics lock should not be poisoned");
             device_metrics.insert(device_id.to_string(), metrics.clone());
         }
 
@@ -352,8 +369,14 @@ impl HardwareManager {
         // Individual devices handle their own cleanup through the shutdown method
 
         // Clear caches
-        self.device_info.write().unwrap().clear();
-        self.device_metrics.write().unwrap().clear();
+        self.device_info
+            .write()
+            .expect("device_info lock should not be poisoned")
+            .clear();
+        self.device_metrics
+            .write()
+            .expect("device_metrics lock should not be poisoned")
+            .clear();
 
         Ok(())
     }

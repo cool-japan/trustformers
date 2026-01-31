@@ -1217,7 +1217,7 @@ impl FrameworkIntegrationManager {
     }
 
     pub fn add_integration(&self, integration_type: IntegrationType) -> Result<()> {
-        let mut integrations = self.integrations.lock().unwrap();
+        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
 
         let tracker: Box<dyn ExperimentTracker> = match integration_type {
             IntegrationType::WandB { config } => Box::new(WandBTracker::new(config)),
@@ -1254,12 +1254,13 @@ impl FrameworkIntegrationManager {
 
         // Update stored metadata
         {
-            let mut stored_metadata = self.experiment_metadata.lock().unwrap();
+            let mut stored_metadata =
+                self.experiment_metadata.lock().expect("lock should not be poisoned");
             *stored_metadata = metadata.clone();
         }
 
         // Start experiment in all integrations
-        let mut integrations = self.integrations.lock().unwrap();
+        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
         for (_, tracker) in integrations.iter_mut() {
             tracker.start_experiment(&metadata)?;
         }
@@ -1270,12 +1271,13 @@ impl FrameworkIntegrationManager {
     pub fn log_hyperparameters(&self, parameters: HashMap<String, ParameterValue>) -> Result<()> {
         // Update metadata
         {
-            let mut metadata = self.experiment_metadata.lock().unwrap();
+            let mut metadata =
+                self.experiment_metadata.lock().expect("lock should not be poisoned");
             metadata.hyperparameters.extend(parameters.clone());
         }
 
         // Log to all integrations
-        let mut integrations = self.integrations.lock().unwrap();
+        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
         for (_, tracker) in integrations.iter_mut() {
             for (name, value) in &parameters {
                 tracker.log_parameter(name, value.clone())?;
@@ -1288,7 +1290,8 @@ impl FrameworkIntegrationManager {
     pub fn log_metrics(&self, metrics: HashMap<String, f64>, step: Option<usize>) -> Result<()> {
         // Update metadata
         {
-            let mut metadata = self.experiment_metadata.lock().unwrap();
+            let mut metadata =
+                self.experiment_metadata.lock().expect("lock should not be poisoned");
             for (name, value) in &metrics {
                 let metric_value = MetricValue {
                     value: *value,
@@ -1301,7 +1304,7 @@ impl FrameworkIntegrationManager {
         }
 
         // Log to all integrations
-        let mut integrations = self.integrations.lock().unwrap();
+        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
         for (_, tracker) in integrations.iter_mut() {
             tracker.log_metrics(metrics.clone(), step)?;
         }
@@ -1322,12 +1325,13 @@ impl FrameworkIntegrationManager {
 
         // Update metadata
         {
-            let mut metadata = self.experiment_metadata.lock().unwrap();
+            let mut metadata =
+                self.experiment_metadata.lock().expect("lock should not be poisoned");
             metadata.artifacts.push(artifact.clone());
         }
 
         // Log to all integrations
-        let mut integrations = self.integrations.lock().unwrap();
+        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
         for (_, tracker) in integrations.iter_mut() {
             tracker.log_artifact(&artifact)?;
         }
@@ -1338,13 +1342,14 @@ impl FrameworkIntegrationManager {
     pub fn end_experiment(&self) -> Result<()> {
         // Update metadata
         {
-            let mut metadata = self.experiment_metadata.lock().unwrap();
+            let mut metadata =
+                self.experiment_metadata.lock().expect("lock should not be poisoned");
             metadata.end_time = Some(SystemTime::now());
             metadata.status = ExperimentStatus::Completed;
         }
 
         // End experiment in all integrations
-        let mut integrations = self.integrations.lock().unwrap();
+        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
         for (_, tracker) in integrations.iter_mut() {
             tracker.end_experiment()?;
         }
@@ -1353,7 +1358,7 @@ impl FrameworkIntegrationManager {
     }
 
     pub fn sync_all(&self) -> Result<()> {
-        let mut integrations = self.integrations.lock().unwrap();
+        let mut integrations = self.integrations.lock().expect("lock should not be poisoned");
         for (_, tracker) in integrations.iter_mut() {
             tracker.sync()?;
         }
@@ -1401,7 +1406,7 @@ mod tests {
         };
 
         let manager = FrameworkIntegrationManager::new(config);
-        assert!(manager.integrations.lock().unwrap().is_empty());
+        assert!(manager.integrations.lock().expect("lock should not be poisoned").is_empty());
     }
 
     #[test]

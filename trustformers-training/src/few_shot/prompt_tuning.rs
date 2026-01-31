@@ -177,7 +177,7 @@ impl SoftPrompt {
     /// Save prompt to file
     pub fn save(&self, path: &str) -> Result<()> {
         let data_to_serialize = (
-            self.embeddings.as_slice().unwrap(),
+            self.embeddings.as_slice().expect("embeddings tensor should have valid slice"),
             self.embeddings.shape(),
             &self.config,
             &self.task_id,

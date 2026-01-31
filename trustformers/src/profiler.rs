@@ -210,7 +210,8 @@ impl Profiler {
         })?;
 
         session.end_time = Some(Instant::now());
-        let total_duration = session.end_time.unwrap() - session.start_time;
+        let total_duration = session.end_time.expect("end_time just set to Some on previous line")
+            - session.start_time;
 
         // Collect results from core profiler
         let operations = self.core_profiler.get_results();
@@ -663,7 +664,7 @@ impl Profiler {
 
 impl Default for Profiler {
     fn default() -> Self {
-        Self::new().unwrap()
+        Self::new().expect("Profiler::new should not fail with default config")
     }
 }
 
@@ -684,7 +685,8 @@ pub type GlobalProfiler = Profiler;
 
 /// Get the global profiler instance
 pub fn get_global_profiler() -> &'static Profiler {
-    GLOBAL_PROFILER.get_or_init(|| Profiler::new().unwrap())
+    GLOBAL_PROFILER
+        .get_or_init(|| Profiler::new().expect("Profiler::new should not fail for global instance"))
 }
 
 /// Convenience macro for profiling operations

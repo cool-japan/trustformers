@@ -778,16 +778,20 @@ impl BatchingStrategy for AdaptiveBatchingStrategy {
             .map(|tracker| tracker.current_load())
             .unwrap_or(0.0);
 
+        // Safe: queue is not empty (checked by caller)
+        let front_time = match queue.front() {
+            Some(req) => req.submitted_at,
+            None => return false,
+        };
+
         if load < self.config.low_load_threshold && queue.len() < config.min_batch_size {
             // Low load: wait a bit longer for better batching
-            let oldest_request_age =
-                current_time.duration_since(queue.front().unwrap().submitted_at);
+            let oldest_request_age = current_time.duration_since(front_time);
             oldest_request_age > self.config.low_load_timeout
         } else {
             // Normal/high load: form batch more aggressively
             queue.len() >= config.min_batch_size
-                || current_time.duration_since(queue.front().unwrap().submitted_at)
-                    > config.max_wait_time
+                || current_time.duration_since(front_time) > config.max_wait_time
         }
     }
 
@@ -880,8 +884,11 @@ impl BatchingStrategy for LoadAwareBatchingStrategy {
             config.max_wait_time
         };
 
-        queue.len() >= config.min_batch_size
-            || current_time.duration_since(queue.front().unwrap().submitted_at) > timeout
+        let front_time = match queue.front() {
+            Some(req) => req.submitted_at,
+            None => return false,
+        };
+        queue.len() >= config.min_batch_size || current_time.duration_since(front_time) > timeout
     }
 
     fn select_requests(
@@ -955,8 +962,10 @@ impl BatchingStrategy for PredictiveBatchingStrategy {
 
         // Form batch if predicted latency is acceptable or timeout exceeded
         let should_wait = predicted_latency < 100.0 && queue.len() < config.max_batch_size;
-        let timeout_exceeded =
-            current_time.duration_since(queue.front().unwrap().submitted_at) > config.max_wait_time;
+        let timeout_exceeded = match queue.front() {
+            Some(req) => current_time.duration_since(req.submitted_at) > config.max_wait_time,
+            None => false,
+        };
 
         !should_wait || timeout_exceeded
     }

@@ -529,10 +529,22 @@ impl Optimizer for LayoutOptimizedAdam {
                     self.state.add_parameter(param_id.clone(), param.len())?;
                 }
 
+                let param_slice = param.as_slice_mut().ok_or_else(|| {
+                    TrustformersError::tensor_op_error(
+                        "Failed to get mutable slice from param tensor",
+                        "update",
+                    )
+                })?;
+                let grad_slice = grad_arr.as_slice().ok_or_else(|| {
+                    TrustformersError::tensor_op_error(
+                        "Failed to get slice from gradient tensor",
+                        "update",
+                    )
+                })?;
                 self.state.update_parameter_soa(
                     &param_id,
-                    param.as_slice_mut().unwrap(),
-                    grad_arr.as_slice().unwrap(),
+                    param_slice,
+                    grad_slice,
                     self.lr,
                     self.betas,
                     self.eps,

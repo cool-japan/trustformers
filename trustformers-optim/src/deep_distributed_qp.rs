@@ -534,7 +534,10 @@ impl DeepDistributedQP {
             self.states.insert(param_key.clone(), new_state);
         }
 
-        let state = self.states.get_mut(&param_key).unwrap();
+        let state = self
+            .states
+            .get_mut(&param_key)
+            .expect("state must exist for param_key after insert");
 
         // Initialize policy network if not present
         let needs_policy_network = state.policy_network.is_none();
@@ -543,17 +546,26 @@ impl DeepDistributedQP {
 
         if needs_policy_network {
             let policy_network = self.create_policy_network(4)?; // 4 features
-            let state = self.states.get_mut(&param_key).unwrap();
+            let state = self
+                .states
+                .get_mut(&param_key)
+                .expect("state must exist for param_key after insert");
             state.policy_network = Some(policy_network);
         }
 
         if needs_consensus_nodes {
             let consensus_nodes = self.initialize_consensus_nodes(problem_size)?;
-            let state = self.states.get_mut(&param_key).unwrap();
+            let state = self
+                .states
+                .get_mut(&param_key)
+                .expect("state must exist for param_key after insert");
             state.consensus_nodes = consensus_nodes;
         }
 
-        let state = self.states.get_mut(&param_key).unwrap();
+        let state = self
+            .states
+            .get_mut(&param_key)
+            .expect("state must exist for param_key after insert");
 
         // Warm start from previous solution
         if let (true, Some(prev_solution)) =
@@ -571,7 +583,10 @@ impl DeepDistributedQP {
         // Main optimization loop
         for iteration in 0..self.config.max_iterations {
             // Update iteration count
-            let state = self.states.get_mut(&param_key).unwrap();
+            let state = self
+                .states
+                .get_mut(&param_key)
+                .expect("state must exist for param_key after insert");
             state.iteration = iteration;
 
             // Extract the data we need to avoid borrowing conflicts
@@ -603,19 +618,28 @@ impl DeepDistributedQP {
             }
 
             // Update state with modified nodes
-            let state = self.states.get_mut(&param_key).unwrap();
+            let state = self
+                .states
+                .get_mut(&param_key)
+                .expect("state must exist for param_key after insert");
             state.consensus_nodes = consensus_nodes;
             let _ = state;
 
             // Consensus update
             if iteration % consensus_frequency == 0 {
-                let state = self.states.get_mut(&param_key).unwrap();
+                let state = self
+                    .states
+                    .get_mut(&param_key)
+                    .expect("state must exist for param_key after insert");
                 let mut nodes = state.consensus_nodes.clone();
                 let _ = state;
 
                 let consensus_error = self.consensus_update(&mut nodes)?;
 
-                let state = self.states.get_mut(&param_key).unwrap();
+                let state = self
+                    .states
+                    .get_mut(&param_key)
+                    .expect("state must exist for param_key after insert");
                 state.consensus_nodes = nodes;
                 state.convergence_history.push(consensus_error);
                 let _ = state;
@@ -629,7 +653,10 @@ impl DeepDistributedQP {
         }
 
         let solve_time = start_time.elapsed().as_secs_f32();
-        let state = self.states.get_mut(&param_key).unwrap();
+        let state = self
+            .states
+            .get_mut(&param_key)
+            .expect("state must exist for param_key after insert");
         state.solve_times.push(solve_time);
 
         // Extract solution (average of all nodes)
@@ -870,7 +897,7 @@ impl DeepDistributedQP {
             self.states.insert(problem_key.clone(), new_state);
         }
 
-        let state = self.states.get_mut(&problem_key).unwrap();
+        let state = self.states.get_mut(&problem_key).expect("state must exist for problem_key");
 
         // Update constraint information
         if let Some(constraint_mat) = g {

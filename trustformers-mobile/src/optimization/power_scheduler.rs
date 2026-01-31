@@ -376,8 +376,10 @@ impl PowerAwareScheduler {
 
         for &op_id in order {
             let op = &graph.operators[op_id];
-            let heat_generated =
-                self.estimate_heat_generation(op, power_modes.get(&op_id).unwrap())?;
+            let power_mode = power_modes
+                .get(&op_id)
+                .ok_or_else(|| anyhow::anyhow!("Power mode not found for operation {}", op_id))?;
+            let heat_generated = self.estimate_heat_generation(op, power_mode)?;
 
             // Check if we need a cooling period
             if accumulated_heat + heat_generated > 5.0 {
@@ -424,7 +426,9 @@ impl PowerAwareScheduler {
 
         for &op_id in order {
             let op = &graph.operators[op_id];
-            let mode = power_modes.get(&op_id).unwrap();
+            let mode = power_modes
+                .get(&op_id)
+                .ok_or_else(|| anyhow::anyhow!("Power mode not found for operation {}", op_id))?;
 
             // Estimate operation time
             let base_time = self.estimate_op_time(op)?;

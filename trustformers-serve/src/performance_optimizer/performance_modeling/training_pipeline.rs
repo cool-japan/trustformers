@@ -584,7 +584,7 @@ impl TrainingPipelineOrchestrator {
             OutlierHandlingStrategy::IQRClipping => {
                 // Apply IQR-based outlier clipping to throughput
                 let mut throughputs: Vec<f64> = data.iter().map(|d| d.throughput).collect();
-                throughputs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                throughputs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
                 let q1 = throughputs[throughputs.len() / 4];
                 let q3 = throughputs[3 * throughputs.len() / 4];
@@ -607,7 +607,7 @@ impl TrainingPipelineOrchestrator {
             },
             OutlierHandlingStrategy::PercentileClipping { lower, upper } => {
                 let mut throughputs: Vec<f64> = data.iter().map(|d| d.throughput).collect();
-                throughputs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                throughputs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
                 let lower_idx = (throughputs.len() as f32 * lower) as usize;
                 let upper_idx = (throughputs.len() as f32 * upper) as usize;
@@ -842,7 +842,10 @@ impl HyperparameterTuner {
             let value = match param_space {
                 ParameterSpace::Continuous { min, max } => {
                     let random_value = thread_rng().random::<f64>() * (max - min) + min;
-                    serde_json::Value::Number(serde_json::Number::from_f64(random_value).unwrap())
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(random_value)
+                            .unwrap_or_else(|| serde_json::Number::from(0)),
+                    )
                 },
                 ParameterSpace::Integer { min, max } => {
                     let random_value = thread_rng().gen_range(*min..=*max);
@@ -851,7 +854,10 @@ impl HyperparameterTuner {
                 ParameterSpace::Boolean => serde_json::Value::Bool(thread_rng().random()),
                 ParameterSpace::Discrete(values) => {
                     let idx = thread_rng().gen_range(0..values.len());
-                    serde_json::Value::Number(serde_json::Number::from_f64(values[idx]).unwrap())
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(values[idx])
+                            .unwrap_or_else(|| serde_json::Number::from(0)),
+                    )
                 },
                 ParameterSpace::Categorical(choices) => {
                     let idx = thread_rng().gen_range(0..choices.len());

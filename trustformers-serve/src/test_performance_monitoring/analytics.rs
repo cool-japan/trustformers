@@ -910,7 +910,7 @@ impl StatisticalAnalyzer {
         }
 
         let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let n = data.len() as f64;
         let mean = data.iter().sum::<f64>() / n;
@@ -947,7 +947,10 @@ impl StatisticalAnalyzer {
             skewness: 0.0, // Would implement skewness calculation
             kurtosis: 0.0, // Would implement kurtosis calculation
             percentiles,
-            range: (*sorted_data.first().unwrap(), *sorted_data.last().unwrap()),
+            range: (
+                *sorted_data.first().expect("data checked non-empty above"),
+                *sorted_data.last().expect("data checked non-empty above"),
+            ),
             interquartile_range,
         })
     }
@@ -982,7 +985,7 @@ impl StatisticalAnalyzer {
         let mean = data.iter().copied().sum::<f64>() / data.len() as f64;
 
         let mut sorted = data.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let median = if sorted.len() % 2 == 0 {
             let mid = sorted.len() / 2;
             (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -1023,7 +1026,7 @@ impl StatisticalAnalyzer {
     fn detect_outliers(&self, data: &[f64]) -> Result<OutlierAnalysis, AnalyticsError> {
         // Simplified outlier detection using IQR method
         let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let q1 = self.percentile(&sorted_data, 0.25);
         let q3 = self.percentile(&sorted_data, 0.75);

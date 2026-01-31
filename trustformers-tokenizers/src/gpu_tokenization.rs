@@ -1462,7 +1462,9 @@ impl GpuTokenizationBenchmark {
         self.results
             .iter()
             .max_by(|a, b| {
-                a.throughput_tokens_per_sec.partial_cmp(&b.throughput_tokens_per_sec).unwrap()
+                a.throughput_tokens_per_sec
+                    .partial_cmp(&b.throughput_tokens_per_sec)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|result| &result.config)
     }

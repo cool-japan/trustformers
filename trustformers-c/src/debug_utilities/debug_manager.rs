@@ -59,7 +59,7 @@ impl DebugUtilities {
             self.sessions.remove(session_id).ok_or(TrustformersError::InvalidParameter)?;
 
         let elapsed = session.start_time.elapsed();
-        let mut profiling_data = session.profiling_data.lock().unwrap();
+        let mut profiling_data = session.profiling_data.lock().expect("lock should not be poisoned");
         profiling_data.total_duration_ms = elapsed.as_secs_f64() * 1000.0;
 
         // Analyze bottlenecks
@@ -225,7 +225,7 @@ impl DebugUtilities {
             flops,
         };
 
-        session.profiling_data.lock().unwrap().tensor_operations.push(operation);
+        session.profiling_data.lock().expect("lock should not be poisoned").tensor_operations.push(operation);
         Ok(())
     }
 
@@ -245,7 +245,7 @@ impl DebugUtilities {
             fragmentation_ratio: 0.0, // Would be calculated if available
         };
 
-        session.profiling_data.lock().unwrap().memory_snapshots.push(snapshot);
+        session.profiling_data.lock().expect("lock should not be poisoned").memory_snapshots.push(snapshot);
         Ok(())
     }
 
@@ -253,7 +253,7 @@ impl DebugUtilities {
     pub fn export_debug_data(&self, session_id: &str, format: &str) -> TrustformersResult<String> {
         let session = self.sessions.get(session_id).ok_or(TrustformersError::InvalidParameter)?;
 
-        let profiling_data = session.profiling_data.lock().unwrap();
+        let profiling_data = session.profiling_data.lock().expect("lock should not be poisoned");
 
         match format.to_lowercase().as_str() {
             "json" => serde_json::to_string_pretty(&*profiling_data)
@@ -268,7 +268,7 @@ impl DebugUtilities {
     pub fn generate_performance_report(&self, session_id: &str) -> TrustformersResult<String> {
         let session = self.sessions.get(session_id).ok_or(TrustformersError::InvalidParameter)?;
 
-        let profiling_data = session.profiling_data.lock().unwrap();
+        let profiling_data = session.profiling_data.lock().expect("lock should not be poisoned");
 
         let mut report = String::new();
         report.push_str("# Performance Analysis Report\n\n");

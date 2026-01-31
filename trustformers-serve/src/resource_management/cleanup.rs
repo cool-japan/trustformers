@@ -246,7 +246,7 @@ impl CleanupManager {
             success: result.is_ok(),
             duration: Duration::from_millis(duration.num_milliseconds().max(0) as u64),
             resources_cleaned: 1, // Would be calculated based on actual cleanup
-            errors: if result.is_err() { vec![result.err().unwrap().to_string()] } else { vec![] },
+            errors: result.err().map(|e| vec![e.to_string()]).unwrap_or_default(),
             details: HashMap::new(),
         };
 

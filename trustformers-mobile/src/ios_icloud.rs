@@ -452,7 +452,7 @@ impl iCloudModelSync {
 
         // Update status
         metadata.sync_status = SyncStatus::Synced;
-        let mut local_models = self.local_models.lock().unwrap();
+        let mut local_models = self.local_models.lock().expect("Lock poisoned");
         local_models.insert(model_id.to_string(), metadata);
 
         Ok(())
@@ -631,7 +631,7 @@ impl iCloudModelSync {
     }
 
     fn update_model_status(&self, model_id: &str, status: SyncStatus) -> MobileResult<()> {
-        let mut local_models = self.local_models.lock().unwrap();
+        let mut local_models = self.local_models.lock().expect("Lock poisoned");
         if let Some(metadata) = local_models.get_mut(model_id) {
             metadata.sync_status = status;
         }

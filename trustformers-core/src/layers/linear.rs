@@ -50,22 +50,28 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
 #[cfg(not(target_os = "macos"))]
 #[inline]
 fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec())
+        .expect("matrix dimensions must match slice length");
     f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
-    c.copy_from_slice(c_arr.as_slice().unwrap());
+    c.copy_from_slice(c_arr.as_slice().expect("Array2 must have contiguous slice"));
 }
 
 /// Fallback for non-macOS: use scirs2-core SIMD GEMM for f64
 #[cfg(not(target_os = "macos"))]
 #[inline]
 fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec())
+        .expect("matrix dimensions must match slice length");
     f64::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
-    c.copy_from_slice(c_arr.as_slice().unwrap());
+    c.copy_from_slice(c_arr.as_slice().expect("Array2 must have contiguous slice"));
 }
 
 /// A linear transformation layer (fully connected layer).
@@ -936,15 +942,13 @@ impl Layer for Linear {
                         inp_2d.dot(&w_2d)
                     } else {
                         // Use direct BLAS GEMM for 10-50x speedup
-                        let inp_slice = inp_2d.as_slice().unwrap_or({
-                            // Fallback if not contiguous
-                            &[]
-                        });
+                        let inp_slice = inp_2d.as_slice().unwrap_or(&[]);
                         let w_slice = w_2d.as_slice().unwrap_or(&[]);
                         if !inp_slice.is_empty() && !w_slice.is_empty() {
                             let mut result_vec = vec![0.0f32; m * n];
                             blas_sgemm(inp_slice, w_slice, &mut result_vec, m, k, n);
-                            Array2::from_shape_vec((m, n), result_vec).unwrap()
+                            Array2::from_shape_vec((m, n), result_vec)
+                                .expect("BLAS result shape must match m x n")
                         } else {
                             // Fallback to ndarray dot if slices aren't contiguous
                             inp_2d.dot(&w_2d)
@@ -1006,7 +1010,8 @@ impl Layer for Linear {
                         if !inp_slice.is_empty() && !w_slice.is_empty() {
                             let mut result_vec = vec![0.0f64; m * n];
                             blas_dgemm(inp_slice, w_slice, &mut result_vec, m, k, n);
-                            Array2::from_shape_vec((m, n), result_vec).unwrap()
+                            Array2::from_shape_vec((m, n), result_vec)
+                                .expect("BLAS result shape must match m x n")
                         } else {
                             // Fallback to ndarray dot if slices aren't contiguous
                             inp_2d.dot(&w_2d)

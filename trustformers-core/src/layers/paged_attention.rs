@@ -314,7 +314,7 @@ impl PagedAttention {
                             })?
                             .get(&sequence_id)
                             .cloned()
-                            .unwrap();
+                            .expect("sequence must have allocated pages");
 
                         // For simplicity, use full attention for now
                         // In practice, this would manage KV cache pages more efficiently

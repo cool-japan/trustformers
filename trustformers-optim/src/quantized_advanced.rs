@@ -412,9 +412,15 @@ impl Optimizer for Adam4bit {
                     self.variance_quantized.insert(param_id.clone(), variance_q);
                 }
 
-                // Get quantized states
-                let momentum_q = self.momentum_quantized.get(&param_id).unwrap();
-                let variance_q = self.variance_quantized.get(&param_id).unwrap();
+                // Get quantized states (safe: we just inserted them above)
+                let momentum_q = self
+                    .momentum_quantized
+                    .get(&param_id)
+                    .expect("momentum_quantized should exist after insert");
+                let variance_q = self
+                    .variance_quantized
+                    .get(&param_id)
+                    .expect("variance_quantized should exist after insert");
 
                 // Dequantize for computation
                 let momentum_tensor = QuantizationUtils::dequantize_nf4(momentum_q)?;

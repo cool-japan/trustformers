@@ -5,6 +5,78 @@ All notable changes to TrustformeRS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-rc.1] - 2026-01-28
+
+### 🎯 Release Candidate 1
+
+This is the first release candidate for TrustformeRS v0.1.0, marking a significant milestone toward production readiness.
+
+### ✨ Improvements
+
+#### Dependencies
+- **Upgraded to latest stable versions**:
+  - `jsonwebtoken`: 10.2 → 10.3
+  - `scirs2-core`: 0.1.2 → 0.1.3
+  - `scirs2-linalg`: 0.1.2 → 0.1.3
+  - `aws-sdk-sagemaker`: 1.178 → 1.179
+  - 15 additional packages updated in Cargo.lock
+
+#### Metadata
+- Fixed invalid crates.io category in `trustformers-client`
+  - Changed `web-programming::http-client` → `web-programming`
+  - All categories now validated against official crates.io slugs
+
+#### Project Structure
+- Version consistency enforced across all workspace members
+- All 12 publishable crates verified with comprehensive READMEs
+- Workspace policy compliance confirmed (110 shared dependencies)
+
+### 🔧 Technical Improvements
+
+- **Build System**: Enhanced publish script with better error handling and resume capability
+- **Documentation**: All entry points have complete crate-level documentation
+- **Policy Compliance**: Maintained Pure Rust policy (no C/Fortran dependencies by default)
+
+### 📊 Project Metrics
+
+- **1,059,876 lines** of Rust code across 1,766 files
+- **12 publishable crates** in workspace
+- **110 workspace dependencies** properly managed
+- Estimated project value: $43.6M, 57.74 months development
+
+### ⚠️ Known Issues
+
+The following issues are being addressed before final 0.1.0 release:
+
+1. **Code Quality** (In Progress):
+   - 4,928 `unwrap()` calls need refactoring to proper error handling
+   - 36 files exceed 2,000 line refactoring policy limit
+   - See [Issue #TBD] for tracking
+
+2. **Dependencies** (Minor):
+   - 4 unmaintained dependencies need replacement:
+     - `tui` → migrate to `ratatui`
+     - `wee_alloc` → remove or replace
+     - `proc-macro-error`, `rustls-pemfile` → update transitive deps
+
+3. **Testing** (In Progress):
+   - Comprehensive test suite validation ongoing
+   - Clippy checks with zero-warnings policy in progress
+   - Documentation build verification pending
+
+### 🚀 Next Steps
+
+- Address known issues listed above
+- Complete final round of testing
+- Perform security audit verification
+- Prepare for 0.1.0 stable release
+
+### 📝 Migration Notes
+
+No breaking changes from 0.1.0-alpha.2. All existing code should work without modifications.
+
+---
+
 ## [0.1.0-alpha.2] - 2025-12-19
 
 ### 🚀 Performance Improvements

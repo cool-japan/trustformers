@@ -403,7 +403,8 @@ fn simulate_streaming_generation(
         // Token callback
         if config.enable_token_callback != 0 {
             if let Some(callback) = config.token_callback {
-                let token_cstr = CString::new(*token).unwrap();
+                let token_cstr = CString::new(*token)
+                    .expect("token text should not contain null bytes");
                 let should_stop = callback(
                     config.user_data,
                     token_cstr.as_ptr(),
@@ -422,7 +423,8 @@ fn simulate_streaming_generation(
         if config.enable_chunk_callback != 0 && (i + 1) % config.chunk_size == 0 {
             if let Some(callback) = config.chunk_callback {
                 let chunk = state.read().accumulated_text.clone();
-                let chunk_cstr = CString::new(chunk.clone()).unwrap();
+                let chunk_cstr = CString::new(chunk.clone())
+                    .expect("chunk text should not contain null bytes");
                 let should_stop = callback(
                     config.user_data,
                     chunk_cstr.as_ptr(),

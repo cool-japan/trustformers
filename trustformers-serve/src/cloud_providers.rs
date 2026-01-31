@@ -583,10 +583,13 @@ impl CloudProviderManager {
                     .provider_stats
                     .iter()
                     .min_by(|(_, a), (_, b)| {
-                        a.average_latency_ms.partial_cmp(&b.average_latency_ms).unwrap()
+                        a.average_latency_ms
+                            .partial_cmp(&b.average_latency_ms)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(name, _)| name.clone())
-                    .unwrap_or_else(|| self.providers.keys().next().unwrap().clone());
+                    .or_else(|| self.providers.keys().next().cloned())
+                    .ok_or_else(|| anyhow::anyhow!("No providers available"))?;
                 Ok(provider_name)
             },
             LoadBalancingStrategy::LowestCost => {
@@ -595,15 +598,22 @@ impl CloudProviderManager {
                     .provider_stats
                     .iter()
                     .min_by(|(_, a), (_, b)| {
-                        a.total_cost_usd.partial_cmp(&b.total_cost_usd).unwrap()
+                        a.total_cost_usd
+                            .partial_cmp(&b.total_cost_usd)
+                            .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(name, _)| name.clone())
-                    .unwrap_or_else(|| self.providers.keys().next().unwrap().clone());
+                    .or_else(|| self.providers.keys().next().cloned())
+                    .ok_or_else(|| anyhow::anyhow!("No providers available"))?;
                 Ok(provider_name)
             },
             _ => {
                 // Default to first available provider
-                Ok(self.providers.keys().next().unwrap().clone())
+                self.providers
+                    .keys()
+                    .next()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("No providers available"))
             },
         }
     }

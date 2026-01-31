@@ -282,8 +282,10 @@ impl BPETokenizer {
         let mut char_val = 256u32;
         for b in 0..=255u8 {
             if let std::collections::hash_map::Entry::Vacant(e) = byte_encoder.entry(b) {
-                e.insert(char::from_u32(char_val).unwrap());
-                byte_decoder.insert(char::from_u32(char_val).unwrap(), b);
+                let ch = char::from_u32(char_val)
+                    .expect("char_val in range 256-511 must be valid Unicode");
+                e.insert(ch);
+                byte_decoder.insert(ch, b);
                 char_val += 1;
             }
         }
@@ -353,7 +355,7 @@ impl BPETokenizer {
                 break;
             }
 
-            let (first, second) = best_pair.unwrap();
+            let (first, second) = best_pair.expect("best_pair must be Some after is_none check");
             let mut new_word = Vec::with_capacity(word.len());
             let mut i = 0;
 

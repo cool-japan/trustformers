@@ -1044,7 +1044,10 @@ impl PerformanceValidator {
     ) -> Result<RegressionAnalysisResults> {
         println!("   🔍 Detecting performance regressions...");
 
-        let baseline = self.baseline_results.as_ref().unwrap();
+        let baseline = self
+            .baseline_results
+            .as_ref()
+            .expect("baseline_results must be set before detecting regressions");
         let mut results = RegressionAnalysisResults::new();
 
         for scenario_result in &current_results.scenario_results {

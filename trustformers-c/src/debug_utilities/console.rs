@@ -284,7 +284,7 @@ impl InteractiveDebugConsole {
 
                     // Add to history
                     {
-                        let mut history = self.command_history.lock().unwrap();
+                        let mut history = self.command_history.lock().expect("lock should not be poisoned");
                         if history.len() >= 100 {
                             history.pop_front();
                         }
@@ -427,7 +427,7 @@ impl InteractiveDebugConsole {
         let location = args[1];
         let condition = if args.len() > 2 { Some(args[2..].join(" ")) } else { None };
 
-        let mut session = self.session_state.lock().unwrap();
+        let mut session = self.session_state.lock().expect("lock should not be poisoned");
         let id = session.breakpoints.len() as u32 + 1;
 
         let bp_location = match bp_type {
@@ -461,7 +461,7 @@ impl InteractiveDebugConsole {
 
     /// Handle list breakpoints command
     fn handle_list_breakpoints(&self, _args: &[&str]) -> ConsoleResult {
-        let session = self.session_state.lock().unwrap();
+        let session = self.session_state.lock().expect("lock should not be poisoned");
         if session.breakpoints.is_empty() {
             return ConsoleResult::Success("No breakpoints set.".to_string());
         }
@@ -500,7 +500,7 @@ impl InteractiveDebugConsole {
         }
 
         let expression = args.join(" ");
-        let mut session = self.session_state.lock().unwrap();
+        let mut session = self.session_state.lock().expect("lock should not be poisoned");
         let id = session.watch_expressions.len() as u32 + 1;
 
         let watch = WatchExpression {
@@ -581,7 +581,7 @@ impl InteractiveDebugConsole {
             ConsoleValue::String(value_str.clone())
         };
 
-        let mut session = self.session_state.lock().unwrap();
+        let mut session = self.session_state.lock().expect("lock should not be poisoned");
         session.variables.insert(name.to_string(), value);
         ConsoleResult::Success(format!("Variable '{}' set to '{}'", name, value_str))
     }
@@ -593,7 +593,7 @@ impl InteractiveDebugConsole {
         }
 
         let name = args[0];
-        let session = self.session_state.lock().unwrap();
+        let session = self.session_state.lock().expect("lock should not be poisoned");
 
         if let Some(value) = session.variables.get(name) {
             let value_str = match value {
@@ -646,7 +646,7 @@ impl InteractiveDebugConsole {
 
     /// Get command history
     pub fn get_history(&self) -> Vec<String> {
-        self.command_history.lock().unwrap().iter().cloned().collect()
+        self.command_history.lock().expect("lock should not be poisoned").iter().cloned().collect()
     }
 
     /// Add custom command

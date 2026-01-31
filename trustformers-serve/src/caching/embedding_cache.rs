@@ -81,7 +81,7 @@ impl VectorIndex {
             similarities.push((key.clone(), similarity));
         }
 
-        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         similarities.truncate(k);
 
         similarities

@@ -535,13 +535,21 @@ impl TokenizationDebugger {
 
         let best_tokenizer = results
             .iter()
-            .min_by(|a, b| a.1.compression_ratio.partial_cmp(&b.1.compression_ratio).unwrap())
+            .min_by(|a, b| {
+                a.1.compression_ratio
+                    .partial_cmp(&b.1.compression_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
         let worst_tokenizer = results
             .iter()
-            .max_by(|a, b| a.1.compression_ratio.partial_cmp(&b.1.compression_ratio).unwrap())
+            .max_by(|a, b| {
+                a.1.compression_ratio
+                    .partial_cmp(&b.1.compression_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -576,13 +584,21 @@ impl TokenizationDebugger {
 
         let fastest_tokenizer = results
             .iter()
-            .min_by(|a, b| a.1.processing_time_ms.partial_cmp(&b.1.processing_time_ms).unwrap())
+            .min_by(|a, b| {
+                a.1.processing_time_ms
+                    .partial_cmp(&b.1.processing_time_ms)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
         let slowest_tokenizer = results
             .iter()
-            .max_by(|a, b| a.1.processing_time_ms.partial_cmp(&b.1.processing_time_ms).unwrap())
+            .max_by(|a, b| {
+                a.1.processing_time_ms
+                    .partial_cmp(&b.1.processing_time_ms)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 

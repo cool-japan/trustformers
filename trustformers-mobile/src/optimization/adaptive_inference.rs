@@ -157,7 +157,11 @@ impl AdaptiveInferenceEngine {
         let start_time = Instant::now();
 
         // Get current device capabilities
-        let capabilities = self.device_monitor.lock().unwrap().get_capabilities()?;
+        let capabilities = self
+            .device_monitor
+            .lock()
+            .expect("device_monitor lock should not be poisoned")
+            .get_capabilities()?;
 
         // Check cache first
         if self.config.enable_caching {
@@ -454,7 +458,11 @@ impl AdaptiveInferenceEngine {
     ) -> Result<InferenceResult> {
         // Determine optimal quality level based on constraints
         let target_quality = self.quality_controller.determine_target_quality(
-            &self.device_monitor.lock().unwrap().get_capabilities()?,
+            &self
+                .device_monitor
+                .lock()
+                .expect("device_monitor lock should not be poisoned")
+                .get_capabilities()?,
             context,
         )?;
 

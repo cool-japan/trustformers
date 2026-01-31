@@ -439,7 +439,7 @@ impl PerformanceProfiler {
             .map(|p| (p.operation_name.clone(), p.duration_ms))
             .collect();
 
-        operations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        operations.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         operations.truncate(limit);
         operations
     }
@@ -848,7 +848,9 @@ impl PerformanceProfiler {
                 trend_strength: 0.0,
                 predicted_next_value: value,
             });
-            self.performance_trends.last_mut().unwrap()
+            self.performance_trends
+                .last_mut()
+                .expect("trend just pushed to performance_trends")
         };
 
         // Add new data point

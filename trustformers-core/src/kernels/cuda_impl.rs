@@ -115,10 +115,12 @@ impl CudaImpl {
                 INIT_RESULT = Some(Self::new().map(Arc::new));
             });
 
-            match INIT_RESULT.as_ref().unwrap() {
+            match INIT_RESULT.as_ref()
+                .expect("INIT_RESULT must be initialized by ONCE.call_once") {
                 Ok(instance) => {
                     CUDA_INSTANCE.set(instance.clone()).ok();
-                    Ok(CUDA_INSTANCE.get().unwrap())
+                    Ok(CUDA_INSTANCE.get()
+                        .expect("CUDA_INSTANCE must be set after successful initialization"))
                 },
                 Err(e) => Err(e.clone()),
             }

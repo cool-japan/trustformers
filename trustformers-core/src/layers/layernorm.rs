@@ -69,7 +69,8 @@ impl LayerNorm {
 
     /// Creates a simple 1D LayerNorm on CPU
     pub fn new_simple(normalized_shape: usize, eps: f32) -> Self {
-        Self::new(vec![normalized_shape], eps).unwrap()
+        Self::new(vec![normalized_shape], eps)
+            .expect("LayerNorm::new should not fail with valid shape")
     }
 
     /// Sets the weight tensor
@@ -280,14 +281,20 @@ impl Layer for LayerNorm {
                 // Compute mean
                 let mut mean = input_arr.clone();
                 for &axis in axes.iter().rev() {
-                    mean = mean.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                    mean = mean
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for normalization")
+                        .insert_axis(Axis(axis));
                 }
 
                 // Compute variance
                 let diff = &input_arr - &mean;
                 let mut var = (&diff * &diff).to_owned();
                 for &axis in axes.iter().rev() {
-                    var = var.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                    var = var
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for normalization")
+                        .insert_axis(Axis(axis));
                 }
 
                 // Normalize
@@ -405,14 +412,20 @@ impl Layer for LayerNorm {
                 // Compute mean
                 let mut mean = input_arr.clone();
                 for &axis in axes.iter().rev() {
-                    mean = mean.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                    mean = mean
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for normalization")
+                        .insert_axis(Axis(axis));
                 }
 
                 // Compute variance
                 let diff = &input_arr - &mean;
                 let mut var = (&diff * &diff).to_owned();
                 for &axis in axes.iter().rev() {
-                    var = var.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                    var = var
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for normalization")
+                        .insert_axis(Axis(axis));
                 }
 
                 // Normalize
@@ -592,14 +605,20 @@ impl Layer for LayerNorm {
                 // Compute mean across the normalized dimensions
                 let mut mean = arr.clone();
                 for &axis in axes.iter().rev() {
-                    mean = mean.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                    mean = mean
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for normalization")
+                        .insert_axis(Axis(axis));
                 }
 
                 // Compute variance
                 let diff = arr - &mean;
                 let mut var = (&diff * &diff).to_owned();
                 for &axis in axes.iter().rev() {
-                    var = var.mean_axis(Axis(axis)).unwrap().insert_axis(Axis(axis));
+                    var = var
+                        .mean_axis(Axis(axis))
+                        .expect("axis must be valid for normalization")
+                        .insert_axis(Axis(axis));
                 }
 
                 // Normalize
@@ -852,8 +871,10 @@ impl Layer for RMSNorm {
                 // Fallback to standard implementation
                 // Compute RMS: sqrt(mean(x^2))
                 let squares = arr.mapv(|x| x * x);
-                let mean_squares =
-                    squares.mean_axis(Axis(last_dim)).unwrap().insert_axis(Axis(last_dim));
+                let mean_squares = squares
+                    .mean_axis(Axis(last_dim))
+                    .expect("last_dim must be valid axis")
+                    .insert_axis(Axis(last_dim));
                 let rms = mean_squares.mapv(|x| (x + self.eps).sqrt());
 
                 // Normalize: x / rms

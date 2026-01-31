@@ -379,7 +379,7 @@ impl KernelFusion {
         }
 
         let first_node = &graph.nodes[group.nodes[0]];
-        let last_node = &graph.nodes[*group.nodes.last().unwrap()];
+        let last_node = &graph.nodes[*group.nodes.last().expect("group is not empty")];
 
         // Create fused operation name
         let op_types: Vec<String> =
@@ -433,7 +433,7 @@ impl KernelFusion {
 
         // Find edges that need to be updated
         let first_node = group.nodes[0];
-        let last_node = *group.nodes.last().unwrap();
+        let last_node = *group.nodes.last().expect("group is not empty");
 
         // Update fused node ID
         fused_node.id = first_node;

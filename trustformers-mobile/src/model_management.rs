@@ -490,7 +490,10 @@ impl ModelManager {
             .filter(|model| {
                 // Remove deprecated models
                 if let Some(deprecation_time) = model.deprecation_timestamp {
-                    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("SystemTime should be after UNIX_EPOCH")
+                        .as_secs();
                     now > deprecation_time
                 } else {
                     false
@@ -923,7 +926,10 @@ mod tests {
         }
 
         fn set_response(&self, url: &str, response: &str) {
-            self.responses.lock().unwrap().insert(url.to_string(), response.to_string());
+            self.responses
+                .lock()
+                .expect("lock should not be poisoned")
+                .insert(url.to_string(), response.to_string());
         }
     }
 
@@ -943,7 +949,7 @@ mod tests {
         }
 
         fn get_metadata(&self, url: &str) -> Result<String> {
-            let responses = self.responses.lock().unwrap();
+            let responses = self.responses.lock().expect("lock should not be poisoned");
             responses
                 .get(url)
                 .cloned()

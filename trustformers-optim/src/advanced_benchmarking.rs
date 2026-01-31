@@ -1211,7 +1211,7 @@ impl AdvancedStatisticalAnalyzer {
             .map(|(name, profile)| (name.clone(), 1.0 / profile.detailed_timing.total_time.as_secs_f64()))
             .collect();
 
-        rankings.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        rankings.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         analysis.performance_rankings = rankings;
 
         Ok(analysis)

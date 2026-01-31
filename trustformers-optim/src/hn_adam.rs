@@ -319,13 +319,22 @@ impl StatefulOptimizer for HNAdam {
         // Load optimizer states - convert Tensor to Vec<f32>
         for (key, tensor) in state_dict {
             if key.starts_with("momentum_") {
-                let param_id = key.strip_prefix("momentum_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("momentum_")
+                    .expect("key must have momentum_ prefix")
+                    .to_string();
                 self.state.momentum.insert(param_id, tensor.data()?);
             } else if key.starts_with("variance_") {
-                let param_id = key.strip_prefix("variance_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("variance_")
+                    .expect("key must have variance_ prefix")
+                    .to_string();
                 self.state.variance.insert(param_id, tensor.data()?);
             } else if key.starts_with("max_variance_") && self.config.amsgrad {
-                let param_id = key.strip_prefix("max_variance_").unwrap().to_string();
+                let param_id = key
+                    .strip_prefix("max_variance_")
+                    .expect("key must have max_variance_ prefix")
+                    .to_string();
                 self.max_variance.insert(param_id, tensor.data()?);
             }
         }
@@ -392,8 +401,10 @@ impl Optimizer for HNAdam {
                 let mut update_values = Vec::with_capacity(param_size);
 
                 // Get momentum and variance values for computation
-                let momentum_values = self.state.momentum.get(&param_id).unwrap();
-                let variance_values = self.state.variance.get(&param_id).unwrap();
+                let momentum_values =
+                    self.state.momentum.get(&param_id).expect("momentum must exist for param_id");
+                let variance_values =
+                    self.state.variance.get(&param_id).expect("variance must exist for param_id");
 
                 let mut new_momentum = vec![0.0; param_size];
                 let mut new_variance = vec![0.0; param_size];

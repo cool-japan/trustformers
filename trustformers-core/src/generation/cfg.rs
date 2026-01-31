@@ -32,11 +32,10 @@ impl CFGGenerator {
             Option<&KVCache>,
         ) -> Result<(Tensor, Option<KVCache>)>,
     ) -> Result<Vec<Vec<usize>>> {
-        if self.cfg_config.is_none() {
-            return self.base_generator.generate(input_ids, conditional_logits_fn);
-        }
-
-        let cfg_config = self.cfg_config.as_ref().unwrap();
+        let cfg_config = match self.cfg_config.as_ref() {
+            Some(config) => config,
+            None => return self.base_generator.generate(input_ids, conditional_logits_fn),
+        };
         let mut sequences = vec![input_ids.to_vec()];
         let mut conditional_cache =
             if self.base_generator.config.use_cache { Some(KVCache::new()) } else { None };

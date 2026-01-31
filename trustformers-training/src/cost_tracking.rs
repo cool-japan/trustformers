@@ -282,7 +282,10 @@ impl CostTracker {
         tags: HashMap<String, String>,
     ) -> Result<String> {
         let entry_id = uuid::Uuid::new_v4().to_string();
-        let start_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let start_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         // Calculate cost based on billing model and rates
         let cost_per_unit =
@@ -413,7 +416,10 @@ impl CostTracker {
         }
 
         // Update daily and monthly costs (simplified)
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         let day_start = current_time - (current_time % 86400);
         let month_start = current_time - (current_time % (86400 * 30));
@@ -471,7 +477,10 @@ impl CostTracker {
             .write()
             .map_err(|_| anyhow::anyhow!("Failed to acquire write lock on budgets"))?;
 
-        let current_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let current_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         for budget in budgets.values_mut() {
             let usage_percentage = (budget.spent_amount / budget.total_amount) * 100.0;
@@ -621,7 +630,8 @@ impl CostTracker {
             })
             .collect();
 
-        sorted_drivers.sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap());
+        sorted_drivers
+            .sort_by(|a, b| b.cost.partial_cmp(&a.cost).unwrap_or(std::cmp::Ordering::Equal));
         sorted_drivers.truncate(10); // Top 10 cost drivers
 
         sorted_drivers
@@ -939,8 +949,15 @@ mod tests {
             spent_amount: 0.0,
             remaining_amount: 1000.0,
             period: BudgetPeriod::Monthly,
-            start_date: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-            end_date: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 2592000, // 30 days
+            start_date: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs(),
+            end_date: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs()
+                + 2592000, // 30 days
             alert_thresholds: vec![AlertThreshold {
                 threshold_id: "alert-1".to_string(),
                 percentage: 80.0,
@@ -999,7 +1016,11 @@ mod tests {
 
         let time_range = TimeRange {
             start: 0,
-            end: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + 86400,
+            end: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs()
+                + 86400,
         };
 
         let report = tracker.generate_cost_report(ReportType::Daily, time_range).unwrap();
@@ -1029,7 +1050,7 @@ mod tests {
             .unwrap();
 
         let spot_cost = {
-            let entries = tracker.cost_entries.read().unwrap();
+            let entries = tracker.cost_entries.read().expect("lock should not be poisoned");
             entries.iter().find(|e| e.entry_id == entry_id).unwrap().total_cost
         };
 
@@ -1048,7 +1069,7 @@ mod tests {
             .unwrap();
 
         let regular_cost = {
-            let entries = tracker.cost_entries.read().unwrap();
+            let entries = tracker.cost_entries.read().expect("lock should not be poisoned");
             entries.iter().find(|e| e.entry_id == regular_entry_id).unwrap().total_cost
         };
 

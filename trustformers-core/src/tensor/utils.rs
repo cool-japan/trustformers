@@ -783,7 +783,12 @@ impl Tensor {
     /// A Result containing a mutable slice of the tensor data.
     pub fn data_mut(&mut self) -> Result<&mut [f32]> {
         match self {
-            Tensor::F32(a) => Ok(a.as_slice_mut().unwrap()),
+            Tensor::F32(a) => a.as_slice_mut().ok_or_else(|| {
+                TrustformersError::tensor_op_error(
+                    "Tensor data must be contiguous for mutable access",
+                    "data_mut",
+                )
+            }),
             _ => Err(TrustformersError::tensor_op_error(
                 "Mutable data access only supported for F32 tensors",
                 "data_mut",

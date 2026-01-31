@@ -187,7 +187,7 @@ impl Tensor {
                 }
 
                 // Calculate mean along the axis
-                let _mean = a.mean_axis(Axis(axis)).unwrap();
+                let _mean = a.mean_axis(Axis(axis)).expect("axis must be valid for mean operation");
 
                 // Simple layer normalization for last dimension
                 let last_dim = a.ndim() - 1;
@@ -199,7 +199,7 @@ impl Tensor {
                 }
 
                 // Calculate statistics along the last axis
-                let mean = a.mean_axis(Axis(axis)).unwrap();
+                let mean = a.mean_axis(Axis(axis)).expect("axis must be valid for mean operation");
                 let var = a.map_axis(Axis(axis), |lane| {
                     let lane_mean = lane.mean().expect("Mean calculation failed");
                     lane.mapv(|x| (x - lane_mean).powi(2)).mean().expect("Mean calculation failed")
@@ -311,10 +311,14 @@ impl Tensor {
                 // Expand max_vals to match original tensor shape for broadcasting
                 let mut max_shape = a.shape().to_vec();
                 max_shape[axis] = 1;
-                let max_expanded = max_vals.into_shape_with_order(max_shape.clone()).unwrap();
+                let max_expanded = max_vals
+                    .into_shape_with_order(max_shape.clone())
+                    .expect("reshape must be valid for max values");
 
                 // Subtract max for numerical stability
-                let shifted = a - &max_expanded.broadcast(a.raw_dim()).unwrap();
+                let shifted = a - &max_expanded
+                    .broadcast(a.raw_dim())
+                    .expect("broadcast must succeed with compatible shapes");
 
                 // Calculate log sum exp
                 let exp_shifted = shifted.mapv(|x| x.exp());
@@ -322,10 +326,15 @@ impl Tensor {
                 let log_sum_exp = sum_exp.mapv(|x| x.ln());
 
                 // Expand log_sum_exp for broadcasting
-                let log_sum_exp_expanded = log_sum_exp.into_shape_with_order(max_shape).unwrap();
+                let log_sum_exp_expanded = log_sum_exp
+                    .into_shape_with_order(max_shape)
+                    .expect("reshape must be valid for log_sum_exp");
 
                 // Final result
-                let result = shifted - log_sum_exp_expanded.broadcast(a.raw_dim()).unwrap();
+                let result = shifted
+                    - log_sum_exp_expanded
+                        .broadcast(a.raw_dim())
+                        .expect("broadcast must succeed with compatible shapes");
                 Ok(Tensor::F32(result))
             },
             _ => Err(TrustformersError::tensor_op_error(

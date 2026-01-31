@@ -293,7 +293,10 @@ pub struct DownloadManager {
 
 impl DownloadManager {
     pub fn new(config: DownloadConfig) -> Self {
-        let client = AsyncClient::builder().timeout(config.timeout).build().unwrap();
+        let client = AsyncClient::builder()
+            .timeout(config.timeout)
+            .build()
+            .expect("Failed to build HTTP client with timeout config");
 
         Self {
             config,
@@ -326,7 +329,7 @@ impl DownloadManager {
                 pb.set_style(
                     ProgressStyle::default_bar()
                         .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} {msg}")
-                        .unwrap()
+                        .expect("Progress bar template is valid")
                         .progress_chars("#>-"),
                 );
                 pb.set_message(task.filename.clone());
@@ -344,7 +347,8 @@ impl DownloadManager {
                 let token = token.map(|s| s.to_string());
 
                 async move {
-                    let _permit = semaphore.acquire().await.unwrap();
+                    let _permit =
+                        semaphore.acquire().await.expect("semaphore should not be closed");
                     Self::download_single_file_async(client, task, token.as_deref(), config, pb)
                         .await
                 }
@@ -760,7 +764,9 @@ fn download_file(
     expected_sha: Option<&str>,
 ) -> Result<()> {
     // Create a basic download task and use the async implementation
-    let rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+        TrustformersError::runtime_error(format!("Failed to create tokio runtime: {}", e))
+    })?;
     rt.block_on(async {
         let client = AsyncClient::new();
         let config = DownloadConfig::default();
@@ -820,7 +826,9 @@ pub fn download_model(model_id: &str, options: Option<HubOptions>) -> Result<Pat
     let revision = opts.revision.as_deref().unwrap_or("main");
 
     // Get cache directory
-    let cache_dir = opts.cache_dir.unwrap_or_else(|| get_cache_dir().unwrap());
+    let cache_dir = opts.cache_dir.unwrap_or_else(|| {
+        get_cache_dir().expect("Failed to get cache directory from environment")
+    });
     let model_dir = cache_dir.join("models").join(model_id.replace('/', "--")).join(revision);
 
     // Check if already cached and not forcing download
@@ -894,7 +902,9 @@ pub async fn download_model_enhanced(
     let revision = opts.revision.as_deref().unwrap_or("main");
 
     // Get cache directory
-    let cache_dir = opts.cache_dir.unwrap_or_else(|| get_cache_dir().unwrap());
+    let cache_dir = opts.cache_dir.unwrap_or_else(|| {
+        get_cache_dir().expect("Failed to get cache directory from environment")
+    });
     let model_dir = cache_dir.join("models").join(model_id.replace('/', "--")).join(revision);
 
     // Check if already cached and not forcing download
@@ -1243,7 +1253,9 @@ pub fn download_file_from_hub(
     let revision = opts.revision.as_deref().unwrap_or("main");
 
     // Get cache directory
-    let cache_dir = opts.cache_dir.unwrap_or_else(|| get_cache_dir().unwrap());
+    let cache_dir = opts.cache_dir.unwrap_or_else(|| {
+        get_cache_dir().expect("Failed to get cache directory from environment")
+    });
     let model_dir = cache_dir.join("models").join(model_id.replace('/', "--")).join(revision);
 
     let file_path = model_dir.join(filename);

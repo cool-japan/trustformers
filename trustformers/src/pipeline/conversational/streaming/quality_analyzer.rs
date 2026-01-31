@@ -679,7 +679,9 @@ impl QualityAnalyzer {
         }
 
         // Sort by priority
-        recommendations.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+        recommendations.sort_by(|a, b| {
+            b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal)
+        });
         recommendations
     }
 
@@ -1206,7 +1208,7 @@ impl QualityAnalyzer {
             return 0.0;
         }
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let index = ((percentile * (sorted.len() - 1) as f32) as usize).min(sorted.len() - 1);
         sorted[index]
     }
@@ -1258,7 +1260,7 @@ impl QualityAnalyzer {
         }
 
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let index = ((sorted.len() - 1) as f32 * p) as usize;
         sorted[index]

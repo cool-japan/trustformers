@@ -851,7 +851,10 @@ impl ARKitInferenceEngine {
         tracing::info!("Starting ARKit session");
 
         self.session_manager.start()?;
-        self.performance_monitor.lock().unwrap().start_session()?;
+        self.performance_monitor
+            .lock()
+            .expect("performance_monitor lock should not be poisoned")
+            .start_session()?;
 
         tracing::info!("ARKit session started successfully");
         Ok(())
@@ -862,7 +865,10 @@ impl ARKitInferenceEngine {
         tracing::info!("Stopping ARKit session");
 
         self.session_manager.stop()?;
-        self.performance_monitor.lock().unwrap().stop_session()?;
+        self.performance_monitor
+            .lock()
+            .expect("performance_monitor lock should not be poisoned")
+            .stop_session()?;
 
         tracing::info!("ARKit session stopped");
         Ok(())
@@ -1066,7 +1072,7 @@ impl ARSessionManager {
             data: vec![1, 2, 3, 4], // Placeholder
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
             quality_score: 0.85,
             metadata: HashMap::new(),

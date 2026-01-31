@@ -227,7 +227,10 @@ impl Muon {
             self.momentum_2d.insert(param_id.to_string(), momentum);
         }
 
-        let momentum = self.momentum_2d.get_mut(param_id).unwrap();
+        let momentum = self
+            .momentum_2d
+            .get_mut(param_id)
+            .expect("momentum_2d should contain param_id after insert");
 
         // Reshape flat arrays to 2D views
         let mut param_matrix = vec![vec![0.0; cols]; rows];
@@ -292,7 +295,10 @@ impl Muon {
             self.momentum_1d.insert(param_id.to_string(), vec![0.0; param_size]);
         }
 
-        let momentum = self.momentum_1d.get_mut(param_id).unwrap();
+        let momentum = self
+            .momentum_1d
+            .get_mut(param_id)
+            .expect("momentum_1d should contain param_id after insert");
 
         // Apply momentum SGD update
         for i in 0..param_size {

@@ -182,44 +182,50 @@ async fn main() -> Result<()> {
 
     match matches.subcommand() {
         Some(("version", sub_matches)) => {
-            let from = sub_matches.get_one::<String>("from").unwrap();
-            let to = sub_matches.get_one::<String>("to").unwrap();
-            let path = sub_matches.get_one::<String>("path").unwrap();
+            let from = sub_matches.get_one::<String>("from").expect("from argument is required");
+            let to = sub_matches.get_one::<String>("to").expect("to argument is required");
+            let path = sub_matches.get_one::<String>("path").expect("path argument is required");
             let dry_run = sub_matches.get_flag("dry-run");
 
             migrate_version(from, to, path, dry_run).await?;
         },
         Some(("config", sub_matches)) => {
-            let from = sub_matches.get_one::<String>("from").unwrap();
-            let to = sub_matches.get_one::<String>("to").unwrap();
-            let config_file = sub_matches.get_one::<String>("config").unwrap();
+            let from = sub_matches.get_one::<String>("from").expect("from argument is required");
+            let to = sub_matches.get_one::<String>("to").expect("to argument is required");
+            let config_file =
+                sub_matches.get_one::<String>("config").expect("config argument is required");
 
             migrate_config(from, to, config_file).await?;
         },
         Some(("data", sub_matches)) => {
-            let from = sub_matches.get_one::<String>("from").unwrap();
-            let to = sub_matches.get_one::<String>("to").unwrap();
-            let data_path = sub_matches.get_one::<String>("data-path").unwrap();
+            let from = sub_matches.get_one::<String>("from").expect("from argument is required");
+            let to = sub_matches.get_one::<String>("to").expect("to argument is required");
+            let data_path = sub_matches
+                .get_one::<String>("data-path")
+                .expect("data-path argument is required");
 
             migrate_data(from, to, data_path).await?;
         },
         Some(("models", sub_matches)) => {
-            let from = sub_matches.get_one::<String>("from").unwrap();
-            let to = sub_matches.get_one::<String>("to").unwrap();
-            let models_path = sub_matches.get_one::<String>("models-path").unwrap();
+            let from = sub_matches.get_one::<String>("from").expect("from argument is required");
+            let to = sub_matches.get_one::<String>("to").expect("to argument is required");
+            let models_path = sub_matches
+                .get_one::<String>("models-path")
+                .expect("models-path argument is required");
             let optimize = sub_matches.get_flag("optimize");
 
             migrate_models(from, to, models_path, optimize).await?;
         },
         Some(("info", sub_matches)) => {
-            let from = sub_matches.get_one::<String>("from").unwrap();
-            let to = sub_matches.get_one::<String>("to").unwrap();
+            let from = sub_matches.get_one::<String>("from").expect("from argument is required");
+            let to = sub_matches.get_one::<String>("to").expect("to argument is required");
 
             show_migration_info(from, to).await?;
         },
         Some(("validate", sub_matches)) => {
-            let path = sub_matches.get_one::<String>("path").unwrap();
-            let version = sub_matches.get_one::<String>("version").unwrap();
+            let path = sub_matches.get_one::<String>("path").expect("path argument is required");
+            let version =
+                sub_matches.get_one::<String>("version").expect("version argument is required");
 
             validate_migration(path, version).await?;
         },

@@ -439,7 +439,9 @@ impl AllocationCoordinator {
         allocation_queue.push(request);
 
         // Sort by priority (highest first)
-        allocation_queue.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+        allocation_queue.sort_by(|a, b| {
+            b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(())
     }

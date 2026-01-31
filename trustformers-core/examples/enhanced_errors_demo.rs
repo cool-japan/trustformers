@@ -102,6 +102,7 @@ fn demo_compute_error() {
     println!("{}", error);
 }
 
+#[allow(clippy::result_large_err)]
 fn demo_chained_context() -> Result<(), TrustformersError> {
     // Simulate a chain of operations that might fail
     load_model("gpt-5")
@@ -111,6 +112,7 @@ fn demo_chained_context() -> Result<(), TrustformersError> {
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn load_model(name: &str) -> Result<(), TrustformersError> {
     // Simulate model loading that fails
     Err(model_not_found(name)
@@ -136,6 +138,7 @@ fn create_custom_error() -> TrustformersError {
 
 // Example of error handling in a function
 #[allow(dead_code)]
+#[allow(clippy::result_large_err)]
 fn process_batch(batch_size: usize) -> Result<(), TrustformersError> {
     const MAX_BATCH_SIZE: usize = 64;
 

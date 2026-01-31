@@ -1289,7 +1289,12 @@ impl MultiModelServer {
         }
 
         // Select the first active experiment (in production, you might want more sophisticated selection)
-        let experiment = state.active_experiments.values().next().unwrap();
+        // Safe: we just checked active_experiments is not empty
+        let experiment = state
+            .active_experiments
+            .values()
+            .next()
+            .expect("active_experiments should not be empty after emptiness check");
 
         // Determine which variant to use for this request
         let selected_variant = self.select_ab_test_variant(request_id, user_id, experiment).await?;
@@ -1522,7 +1527,9 @@ impl MultiModelServer {
                         && r.statistical_significance < significance_thresholds.p_value
                 })
                 .min_by(|a, b| {
-                    a.statistical_significance.partial_cmp(&b.statistical_significance).unwrap()
+                    a.statistical_significance
+                        .partial_cmp(&b.statistical_significance)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|r| r.model_id.clone())
         } else {

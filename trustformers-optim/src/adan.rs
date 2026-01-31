@@ -384,7 +384,10 @@ impl StatefulOptimizer for Adan {
         for (key, value) in &state_dict {
             if let Some(param_key) = key.strip_prefix("exp_avg_") {
                 if let Tensor::F32(data) = value {
-                    self.exp_avg.insert(param_key.to_string(), data.as_slice().unwrap().to_vec());
+                    self.exp_avg.insert(
+                        param_key.to_string(),
+                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                    );
                 }
             }
         }
@@ -393,8 +396,10 @@ impl StatefulOptimizer for Adan {
         for (key, value) in &state_dict {
             if let Some(param_key) = key.strip_prefix("exp_avg_sq_") {
                 if let Tensor::F32(data) = value {
-                    self.exp_avg_sq
-                        .insert(param_key.to_string(), data.as_slice().unwrap().to_vec());
+                    self.exp_avg_sq.insert(
+                        param_key.to_string(),
+                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                    );
                 }
             }
         }
@@ -403,8 +408,10 @@ impl StatefulOptimizer for Adan {
         for (key, value) in &state_dict {
             if let Some(param_key) = key.strip_prefix("exp_avg_diff_") {
                 if let Tensor::F32(data) = value {
-                    self.exp_avg_diff
-                        .insert(param_key.to_string(), data.as_slice().unwrap().to_vec());
+                    self.exp_avg_diff.insert(
+                        param_key.to_string(),
+                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                    );
                 }
             }
         }
@@ -413,7 +420,10 @@ impl StatefulOptimizer for Adan {
         for (key, value) in &state_dict {
             if let Some(param_key) = key.strip_prefix("prev_grad_") {
                 if let Tensor::F32(data) = value {
-                    self.prev_grad.insert(param_key.to_string(), data.as_slice().unwrap().to_vec());
+                    self.prev_grad.insert(
+                        param_key.to_string(),
+                        data.as_slice().expect("array must have contiguous layout").to_vec(),
+                    );
                 }
             }
         }

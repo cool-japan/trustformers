@@ -136,14 +136,20 @@ impl ParallelOptimizerState {
     pub fn get_or_create_state(&self, param_id: String, size: usize) -> Arc<Mutex<ParameterState>> {
         // Try read-only access first
         {
-            let states = self.parameter_states.read().unwrap();
+            let states = self
+                .parameter_states
+                .read()
+                .expect("parameter_states lock should not be poisoned");
             if let Some(state) = states.get(&param_id) {
                 return state.clone();
             }
         }
 
         // Need to create new state - upgrade to write lock
-        let mut states = self.parameter_states.write().unwrap();
+        let mut states = self
+            .parameter_states
+            .write()
+            .expect("parameter_states lock should not be poisoned");
         // Double-check pattern in case another thread created it
         if let Some(state) = states.get(&param_id) {
             return state.clone();
@@ -166,7 +172,10 @@ impl ParallelOptimizerState {
 
     /// Gets memory usage statistics.
     pub fn memory_usage(&self) -> StateMemoryStats {
-        let states = self.parameter_states.read().unwrap();
+        let states = self
+            .parameter_states
+            .read()
+            .expect("parameter_states lock should not be poisoned");
         let mut total_momentum = 0;
         let mut total_variance = 0;
         let num_params = states.len();
@@ -189,7 +198,10 @@ impl ParallelOptimizerState {
 
     /// Clears all parameter states.
     pub fn clear(&self) {
-        let mut states = self.parameter_states.write().unwrap();
+        let mut states = self
+            .parameter_states
+            .write()
+            .expect("parameter_states lock should not be poisoned");
         states.clear();
         self.global_step.store(0, std::sync::atomic::Ordering::Relaxed);
     }
@@ -451,8 +463,8 @@ impl Optimizer for ParallelAdam {
                 let param_id = format!("{:p}", param.as_ptr());
                 self.update_single_parameter(
                     param_id,
-                    param.as_slice_mut().unwrap(),
-                    grad_arr.as_slice().unwrap(),
+                    param.as_slice_mut().expect("array must have contiguous layout"),
+                    grad_arr.as_slice().expect("array must have contiguous layout"),
                 )
             },
             _ => Err(TrustformersError::tensor_op_error(
@@ -551,7 +563,11 @@ impl BatchUpdate for ParallelAdam {
             match (param, grad) {
                 (Tensor::F32(p), Tensor::F32(g)) => {
                     let param_id = format!("{:p}", p.as_ptr());
-                    updates.push((param_id, p.as_slice_mut().unwrap(), g.as_slice().unwrap()));
+                    updates.push((
+                        param_id,
+                        p.as_slice_mut().expect("array must have contiguous layout"),
+                        g.as_slice().expect("array must have contiguous layout"),
+                    ));
                 },
                 _ => {
                     return Err(TrustformersError::tensor_op_error(

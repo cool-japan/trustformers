@@ -1131,7 +1131,7 @@ impl RobustScaler {
 
         for j in 0..n_features {
             let mut values: Vec<f64> = features.iter().map(|sample| sample[j]).collect();
-            values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             let n = values.len();
             let median = if n % 2 == 0 {
@@ -1403,7 +1403,8 @@ impl FeatureSelector for ImportanceBasedSelector {
         }
 
         // Sort by importance (descending)
-        feature_importance.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        feature_importance
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Select features above threshold
         let max_importance = feature_importance[0].1;

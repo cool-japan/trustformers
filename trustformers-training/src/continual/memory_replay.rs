@@ -218,11 +218,12 @@ impl ExperienceBuffer {
         let mut samples = Vec::new();
         for _ in 0..num_samples {
             let rand_val: f32 = self.rng.random();
-            let selected_idx =
-                match cumulative_probs.binary_search_by(|&x| x.partial_cmp(&rand_val).unwrap()) {
-                    Ok(idx) => idx,
-                    Err(idx) => idx.min(cumulative_probs.len() - 1),
-                };
+            let selected_idx = match cumulative_probs.binary_search_by(|&x| {
+                x.partial_cmp(&rand_val).unwrap_or(std::cmp::Ordering::Equal)
+            }) {
+                Ok(idx) => idx,
+                Err(idx) => idx.min(cumulative_probs.len() - 1),
+            };
 
             if let Some((task_id, idx, _)) = all_samples_info.get(selected_idx) {
                 if let Some(buffer) = self.tasks.get_mut(task_id) {

@@ -214,7 +214,7 @@ impl ContinuousProfiler {
     }
 
     pub fn start(&self) -> TrustformersResult<()> {
-        let mut running = self.is_running.lock().unwrap();
+        let mut running = self.is_running.lock().expect("lock should not be poisoned");
         if *running {
             return Err(TrustformersError::RuntimeError);
         }
@@ -227,7 +227,7 @@ impl ContinuousProfiler {
         let start_time = self.start_time;
 
         thread::spawn(move || {
-            while *is_running.lock().unwrap() {
+            while *is_running.lock().expect("lock should not be poisoned") {
                 let timestamp_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
                 // Sample system metrics
@@ -245,7 +245,7 @@ impl ContinuousProfiler {
                     custom_metrics: HashMap::new(),
                 };
 
-                let mut points_lock = points.lock().unwrap();
+                let mut points_lock = points.lock().expect("lock should not be poisoned");
                 if points_lock.len() >= max_points {
                     points_lock.pop_front();
                 }
@@ -260,12 +260,12 @@ impl ContinuousProfiler {
     }
 
     pub fn stop(&self) {
-        let mut running = self.is_running.lock().unwrap();
+        let mut running = self.is_running.lock().expect("lock should not be poisoned");
         *running = false;
     }
 
     pub fn add_point(&self, point: ProfilePoint) {
-        let mut points = self.points.lock().unwrap();
+        let mut points = self.points.lock().expect("lock should not be poisoned");
         if points.len() >= self.max_points {
             points.pop_front();
         }
@@ -273,7 +273,7 @@ impl ContinuousProfiler {
     }
 
     pub fn get_points(&self) -> Vec<ProfilePoint> {
-        self.points.lock().unwrap().iter().cloned().collect()
+        self.points.lock().expect("lock should not be poisoned").iter().cloned().collect()
     }
 
     pub fn export_timeline(&self, format: &str) -> TrustformersResult<String> {

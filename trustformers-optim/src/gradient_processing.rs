@@ -299,7 +299,7 @@ impl GradientProcessor {
         if self.gradient_norm_history.len() >= 10 {
             // Compute target percentile of gradient norms
             let mut sorted_norms = self.gradient_norm_history.clone();
-            sorted_norms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted_norms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             let percentile_idx = (sorted_norms.len() as f32
                 * self.config.adaptive_clipping.target_percentile)
                 as usize;

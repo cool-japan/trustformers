@@ -566,7 +566,13 @@ impl<T: Tokenizer + Clone> Pipeline for ONNXTextClassificationPipeline<T> {
                 .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap();
+                .ok_or_else(|| crate::error::TrustformersError::Pipeline {
+                    message: "Cannot find maximum probability: empty classification output"
+                        .to_string(),
+                    pipeline_type: "text-classification".to_string(),
+                    suggestion: Some("Ensure the model produces non-empty logits".to_string()),
+                    recovery_actions: vec![],
+                })?;
             results.push(crate::pipeline::ClassificationOutput {
                 label: format!("LABEL_{}", max_idx),
                 score: max_score,
@@ -696,7 +702,15 @@ impl<T: Tokenizer + Clone> Pipeline for ONNXTextGenerationPipeline<T> {
                     .enumerate()
                     .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                     .map(|(idx, _)| idx as u32)
-                    .unwrap()
+                    .ok_or_else(|| crate::error::TrustformersError::Pipeline {
+                        message: "Cannot find maximum logit: empty token logits".to_string(),
+                        pipeline_type: "text-generation".to_string(),
+                        suggestion: Some(
+                            "Ensure the model produces non-empty logits for greedy decoding"
+                                .to_string(),
+                        ),
+                        recovery_actions: vec![],
+                    })?
             };
 
             input_ids.push(next_token);

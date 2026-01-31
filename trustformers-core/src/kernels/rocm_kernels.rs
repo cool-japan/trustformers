@@ -226,7 +226,9 @@ impl RocmKernel {
         // Allocate GPU memory
         let a_gpu = self.allocate_and_copy(a)?;
         let b_gpu = self.allocate_and_copy(b)?;
-        let c_gpu = self.allocate_gpu_memory(c.memory_usage().try_into().unwrap())?;
+        let c_gpu = self.allocate_gpu_memory(
+            c.memory_usage().try_into().expect("memory_usage must fit in usize"),
+        )?;
 
         // Launch kernel
         self.launch_kernel(&kernel, &[a_gpu, b_gpu, c_gpu], config)?;
@@ -283,7 +285,9 @@ impl RocmKernel {
         let q_gpu = self.allocate_and_copy(query)?;
         let k_gpu = self.allocate_and_copy(key)?;
         let v_gpu = self.allocate_and_copy(value)?;
-        let o_gpu = self.allocate_gpu_memory(output.memory_usage().try_into().unwrap())?;
+        let o_gpu = self.allocate_gpu_memory(
+            output.memory_usage().try_into().expect("memory_usage must fit in usize"),
+        )?;
 
         // Launch kernel
         self.launch_kernel(&kernel, &[q_gpu, k_gpu, v_gpu, o_gpu], config)?;
@@ -322,7 +326,9 @@ impl RocmKernel {
         let input_gpu = self.allocate_and_copy(input)?;
         let gamma_gpu = self.allocate_and_copy(gamma)?;
         let beta_gpu = self.allocate_and_copy(beta)?;
-        let output_gpu = self.allocate_gpu_memory(output.memory_usage().try_into().unwrap())?;
+        let output_gpu = self.allocate_gpu_memory(
+            output.memory_usage().try_into().expect("memory_usage must fit in usize"),
+        )?;
 
         // Launch kernel
         self.launch_kernel(
@@ -357,7 +363,9 @@ impl RocmKernel {
 
         // Allocate GPU memory
         let input_gpu = self.allocate_and_copy(input)?;
-        let output_gpu = self.allocate_gpu_memory(output.memory_usage().try_into().unwrap())?;
+        let output_gpu = self.allocate_gpu_memory(
+            output.memory_usage().try_into().expect("memory_usage must fit in usize"),
+        )?;
 
         // Launch kernel
         self.launch_kernel(&kernel, &[input_gpu, output_gpu], config)?;
@@ -390,7 +398,9 @@ impl RocmKernel {
 
         // Allocate GPU memory
         let input_gpu = self.allocate_and_copy(input)?;
-        let output_gpu = self.allocate_gpu_memory(output.memory_usage().try_into().unwrap())?;
+        let output_gpu = self.allocate_gpu_memory(
+            output.memory_usage().try_into().expect("memory_usage must fit in usize"),
+        )?;
 
         // Launch kernel
         self.launch_kernel(&kernel, &[input_gpu, output_gpu], config)?;

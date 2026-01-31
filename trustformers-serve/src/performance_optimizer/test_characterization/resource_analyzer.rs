@@ -649,11 +649,14 @@ impl ResourceIntensityAnalyzer {
             return 0.0;
         }
 
-        let total_duration = usage_data
-            .last()
-            .unwrap()
+        // Safe: len >= 2 is checked above
+        let (first, last) = match (usage_data.first(), usage_data.last()) {
+            (Some(f), Some(l)) => (f, l),
+            _ => return 0.0,
+        };
+        let total_duration = last
             .timestamp
-            .checked_duration_since(usage_data.first().unwrap().timestamp)
+            .checked_duration_since(first.timestamp)
             .unwrap_or(Duration::ZERO)
             .as_millis() as f64;
 

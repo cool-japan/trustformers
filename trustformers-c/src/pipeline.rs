@@ -618,7 +618,8 @@ pub extern "C" fn trustformers_pipeline_stream_generate(
 
     for (i, token) in simulated_tokens.iter().enumerate() {
         let is_final = if i == simulated_tokens.len() - 1 { 1 } else { 0 };
-        let c_token = CString::new(token.as_str()).unwrap();
+        let c_token = CString::new(token.as_str())
+            .expect("token text should not contain null bytes");
 
         let should_continue = callback(c_token.as_ptr(), is_final, user_data);
         if should_continue == 0 {

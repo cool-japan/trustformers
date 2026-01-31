@@ -167,7 +167,7 @@ impl PerformanceMonitor {
             }
 
             let mut sorted_times = times.clone();
-            sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             let index = ((percentile / 100.0) * (sorted_times.len() - 1) as f32) as usize;
             sorted_times[index.min(sorted_times.len() - 1)]

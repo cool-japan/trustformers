@@ -150,7 +150,8 @@ impl Template {
         let mut placeholders = Vec::new();
 
         // Simple regex to find {{placeholder}} patterns
-        let placeholder_regex = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+        let placeholder_regex = regex::Regex::new(r"\{\{([^}]+)\}\}")
+            .expect("static regex pattern is valid");
 
         for captures in placeholder_regex.captures_iter(content) {
             if let Some(placeholder) = captures.get(1) {

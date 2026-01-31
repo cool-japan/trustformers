@@ -164,7 +164,10 @@ impl DeviceFarmManager {
     /// Start a new device farm session
     pub async fn start_session(&mut self, test_tasks: Vec<TestTask>) -> Result<String> {
         let session_id = {
-            let mut counter = self.session_counter.lock().unwrap();
+            let mut counter = self
+                .session_counter
+                .lock()
+                .expect("session_counter lock should not be poisoned");
             *counter += 1;
             format!("session_{:08}", *counter)
         };
@@ -646,7 +649,7 @@ impl ResultAggregator {
         }
 
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let mean = values.iter().sum::<f32>() / values.len() as f32;
         let median = sorted_values[values.len() / 2];

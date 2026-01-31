@@ -613,7 +613,7 @@ impl MultiModelManager {
         candidates.sort_by(|a, b| {
             let a_score = (a.usage_count as f32) * (a.priority as u8 as f32);
             let b_score = (b.usage_count as f32) * (b.priority as u8 as f32);
-            b_score.partial_cmp(&a_score).unwrap()
+            b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Preload top candidates if we have capacity

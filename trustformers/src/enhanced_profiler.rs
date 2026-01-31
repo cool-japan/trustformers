@@ -586,7 +586,7 @@ impl EnhancedProfiler {
     /// Calculate percentile from a sorted list
     fn percentile(&self, data: &[f32], percentile: f32) -> f32 {
         let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let index = ((data.len() as f32 - 1.0) * percentile) as usize;
         sorted_data.get(index).copied().unwrap_or(0.0)
     }
