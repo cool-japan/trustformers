@@ -253,13 +253,26 @@ impl Template {
         // Handle {{#if condition}}...{{else}}...{{/if}}
         // Use (?s) flag to enable single-line mode where . matches newlines
         let if_else_regex =
-            regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}").unwrap();
+            regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}")
+                .expect("Regex pattern for if-else statements should be valid");
 
         while let Some(captures) = if_else_regex.captures(&result) {
-            let condition_name = captures.get(1).unwrap().as_str();
-            let if_content = captures.get(2).unwrap().as_str();
-            let else_content = captures.get(3).unwrap().as_str();
-            let full_match = captures.get(0).unwrap().as_str();
+            let condition_name = captures
+                .get(1)
+                .expect("Capture group 1 should exist in if-else regex match")
+                .as_str();
+            let if_content = captures
+                .get(2)
+                .expect("Capture group 2 should exist in if-else regex match")
+                .as_str();
+            let else_content = captures
+                .get(3)
+                .expect("Capture group 3 should exist in if-else regex match")
+                .as_str();
+            let full_match = captures
+                .get(0)
+                .expect("Capture group 0 should exist in if-else regex match")
+                .as_str();
 
             let should_include_if = if let Some(value) = context.get(condition_name) {
                 match value {
@@ -291,13 +304,22 @@ impl Template {
 
         // Basic loop handling: {{#each list_name}}...{{/each}}
         // Use (?s) flag to enable single-line mode where . matches newlines
-        let each_regex =
-            regex::Regex::new(r"(?s)\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}").unwrap();
+        let each_regex = regex::Regex::new(r"(?s)\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}")
+            .expect("Regex pattern for each loops should be valid");
 
         while let Some(captures) = each_regex.captures(&result) {
-            let list_name = captures.get(1).unwrap().as_str();
-            let loop_content = captures.get(2).unwrap().as_str();
-            let full_match = captures.get(0).unwrap().as_str();
+            let list_name = captures
+                .get(1)
+                .expect("Capture group 1 should exist in each regex match")
+                .as_str();
+            let loop_content = captures
+                .get(2)
+                .expect("Capture group 2 should exist in each regex match")
+                .as_str();
+            let full_match = captures
+                .get(0)
+                .expect("Capture group 0 should exist in each regex match")
+                .as_str();
 
             let replacement = if let Some(value) = context.get(list_name) {
                 match value {

@@ -550,7 +550,10 @@ impl AnomalyDetector {
             return Ok(());
         }
 
-        let baseline = self.weight_baseline.get(layer_name).unwrap();
+        let baseline = self
+            .weight_baseline
+            .get(layer_name)
+            .expect("baseline should exist after contains_key check");
         if baseline.len() != current_weights.len() {
             return Ok(()); // Skip if dimensions don't match
         }

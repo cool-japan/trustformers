@@ -20,9 +20,7 @@ fn request_to_promise(request: &IdbRequest) -> js_sys::Promise {
             let target = event.target().expect("Event should have a target");
             let request: IdbRequest = target.dyn_into().expect("Target should be IdbRequest");
             let result = request.result().expect("Request should have a result");
-            resolve
-                .call1(&JsValue::NULL, &result)
-                .expect("Resolve callback should succeed");
+            resolve.call1(&JsValue::NULL, &result).expect("Resolve callback should succeed");
         }) as Box<dyn FnMut(_)>);
 
         let error_callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
@@ -32,9 +30,7 @@ fn request_to_promise(request: &IdbRequest) -> js_sys::Promise {
                 .error()
                 .expect("Request should have error method")
                 .expect("Error should be present in error event");
-            reject
-                .call1(&JsValue::NULL, &error)
-                .expect("Reject callback should succeed");
+            reject.call1(&JsValue::NULL, &error).expect("Reject callback should succeed");
         }) as Box<dyn FnMut(_)>);
 
         request.set_onsuccess(Some(success_callback.as_ref().unchecked_ref()));
@@ -50,27 +46,21 @@ fn open_request_to_promise(request: &IdbOpenDbRequest) -> js_sys::Promise {
     js_sys::Promise::new(&mut |resolve, reject| {
         let success_callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let target = event.target().expect("Event should have a target");
-            let request: IdbOpenDbRequest = target
-                .dyn_into()
-                .expect("Target should be IdbOpenDbRequest");
+            let request: IdbOpenDbRequest =
+                target.dyn_into().expect("Target should be IdbOpenDbRequest");
             let result = request.result().expect("Request should have a result");
-            resolve
-                .call1(&JsValue::NULL, &result)
-                .expect("Resolve callback should succeed");
+            resolve.call1(&JsValue::NULL, &result).expect("Resolve callback should succeed");
         }) as Box<dyn FnMut(_)>);
 
         let error_callback = Closure::wrap(Box::new(move |event: web_sys::Event| {
             let target = event.target().expect("Event should have a target");
-            let request: IdbOpenDbRequest = target
-                .dyn_into()
-                .expect("Target should be IdbOpenDbRequest");
+            let request: IdbOpenDbRequest =
+                target.dyn_into().expect("Target should be IdbOpenDbRequest");
             let error = request
                 .error()
                 .expect("Request should have error method")
                 .expect("Error should be present in error event");
-            reject
-                .call1(&JsValue::NULL, &error)
-                .expect("Reject callback should succeed");
+            reject.call1(&JsValue::NULL, &error).expect("Reject callback should succeed");
         }) as Box<dyn FnMut(_)>);
 
         request.set_onsuccess(Some(success_callback.as_ref().unchecked_ref()));
@@ -184,9 +174,8 @@ impl ModelStorage {
         // Set up database upgrade handler
         let upgrade_callback = Closure::wrap(Box::new(move |event: IdbVersionChangeEvent| {
             let target = event.target().expect("Event should have a target");
-            let request: IdbOpenDbRequest = target
-                .dyn_into()
-                .expect("Target should be IdbOpenDbRequest");
+            let request: IdbOpenDbRequest =
+                target.dyn_into().expect("Target should be IdbOpenDbRequest");
             let db = request
                 .result()
                 .expect("Request should have a result")
@@ -217,13 +206,13 @@ impl ModelStorage {
 
             if !has_models {
                 // IdbObjectStoreParameters not available in web-sys 0.3.81 - using default
-                let model_store = db
-                    .create_object_store("models")
-                    .expect("Failed to create models object store");
+                let model_store =
+                    db.create_object_store("models").expect("Failed to create models object store");
 
                 // Create indices - use Reflect to call createIndex
-                let create_index_fn = js_sys::Reflect::get(&model_store, &JsValue::from_str("createIndex"))
-                    .expect("Object store should have createIndex method");
+                let create_index_fn =
+                    js_sys::Reflect::get(&model_store, &JsValue::from_str("createIndex"))
+                        .expect("Object store should have createIndex method");
                 let create_index_fn: &js_sys::Function = create_index_fn.unchecked_ref();
                 let _ = create_index_fn.call2(
                     &model_store,

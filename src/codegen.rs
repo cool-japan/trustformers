@@ -115,7 +115,9 @@ impl CodeGenerator {
                         "        let rms_norm_{idx} = RMSNorm::new(\n            {hidden_size},\n            {eps}\n        );\n",
                         idx = idx,
                         hidden_size = layer.params.get("hidden_size").unwrap_or(&serde_json::Value::Number(serde_json::Number::from(768))),
-                        eps = layer.params.get("eps").unwrap_or(&serde_json::Value::Number(serde_json::Number::from_f64(1e-5).unwrap()))
+                        eps = layer.params.get("eps").unwrap_or(&serde_json::Value::Number(
+                            serde_json::Number::from_f64(1e-5)
+                                .expect("1e-5 is a valid finite f64")))
                     ));
                 }
                 "swiglu" => {
@@ -141,7 +143,9 @@ impl CodeGenerator {
                         idx = idx,
                         num_groups = layer.params.get("num_groups").unwrap_or(&serde_json::Value::Number(serde_json::Number::from(32))),
                         num_channels = layer.params.get("num_channels").unwrap_or(&serde_json::Value::Number(serde_json::Number::from(768))),
-                        eps = layer.params.get("eps").unwrap_or(&serde_json::Value::Number(serde_json::Number::from_f64(1e-5).unwrap()))
+                        eps = layer.params.get("eps").unwrap_or(&serde_json::Value::Number(
+                            serde_json::Number::from_f64(1e-5)
+                                .expect("1e-5 is a valid finite f64")))
                     ));
                 }
                 "slstm" => {

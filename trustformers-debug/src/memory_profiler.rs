@@ -314,7 +314,8 @@ impl MemoryProfiler {
 
         *running = false;
         let end_time = SystemTime::now();
-        let start_time = self.start_time.unwrap();
+        let start_time =
+            self.start_time.expect("start_time should be set when profiler is running");
         let duration =
             end_time.duration_since(UNIX_EPOCH)?.as_secs_f64() - start_time.elapsed().as_secs_f64();
 

@@ -142,27 +142,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match matches.subcommand() {
         ("model", Some(model_matches)) => {
-            let config_file = model_matches.value_of("config").unwrap();
-            let output_dir = model_matches.value_of("output").unwrap();
+            let config_file = model_matches
+                .value_of("config")
+                .expect("config argument is required by clap");
+            let output_dir = model_matches
+                .value_of("output")
+                .expect("output has default value in clap");
             generate_model(config_file, output_dir)?;
         }
         ("pipeline", Some(pipeline_matches)) => {
-            let name = pipeline_matches.value_of("name").unwrap();
-            let model_type = pipeline_matches.value_of("model-type").unwrap();
-            let task = pipeline_matches.value_of("task").unwrap();
-            let output_dir = pipeline_matches.value_of("output").unwrap();
+            let name = pipeline_matches
+                .value_of("name")
+                .expect("name argument is required by clap");
+            let model_type = pipeline_matches
+                .value_of("model-type")
+                .expect("model-type argument is required by clap");
+            let task = pipeline_matches
+                .value_of("task")
+                .expect("task argument is required by clap");
+            let output_dir = pipeline_matches
+                .value_of("output")
+                .expect("output has default value in clap");
             generate_pipeline(name, model_type, task, output_dir)?;
         }
         ("training", Some(training_matches)) => {
-            let model = training_matches.value_of("model").unwrap();
-            let optimizer = training_matches.value_of("optimizer").unwrap();
-            let loss = training_matches.value_of("loss").unwrap();
-            let output_dir = training_matches.value_of("output").unwrap();
+            let model = training_matches
+                .value_of("model")
+                .expect("model argument is required by clap");
+            let optimizer = training_matches
+                .value_of("optimizer")
+                .expect("optimizer has default value in clap");
+            let loss = training_matches
+                .value_of("loss")
+                .expect("loss has default value in clap");
+            let output_dir = training_matches
+                .value_of("output")
+                .expect("output has default value in clap");
             generate_training(model, optimizer, loss, output_dir)?;
         }
         ("init", Some(init_matches)) => {
-            let name = init_matches.value_of("name").unwrap();
-            let template = init_matches.value_of("template").unwrap();
+            let name = init_matches
+                .value_of("name")
+                .expect("name argument is required by clap");
+            let template = init_matches
+                .value_of("template")
+                .expect("template has default value in clap");
             initialize_project(name, template)?;
         }
         ("list", Some(_)) => {
@@ -285,7 +309,11 @@ tokio = {{ version = "1.0", features = ["full"] }}
 [lib]
 name = "custom_model"
 path = "src/lib.rs"
-"#, Path::new(project_dir).file_name().unwrap().to_str().unwrap());
+"#, Path::new(project_dir)
+        .file_name()
+        .expect("project_dir should have a filename")
+        .to_str()
+        .expect("filename should be valid UTF-8"));
 
     fs::write(Path::new(project_dir).join("Cargo.toml"), cargo_toml)?;
 
@@ -365,7 +393,9 @@ fn generate_sample_config(project_dir: &str, template: &str) -> Result<(), Box<d
                     params: {
                         let mut params = HashMap::new();
                         params.insert("hidden_size".to_string(), serde_json::Value::Number(serde_json::Number::from(768)));
-                        params.insert("eps".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(1e-5).unwrap()));
+                        params.insert("eps".to_string(), serde_json::Value::Number(
+                            serde_json::Number::from_f64(1e-5)
+                                .expect("1e-5 is a valid finite f64")));
                         params
                     },
                 },

@@ -1188,7 +1188,10 @@ impl Profiler {
 
         if recent_snapshots.len() >= 5 {
             let initial_memory = recent_snapshots[0].heap_allocated;
-            let final_memory = recent_snapshots.last().unwrap().heap_allocated;
+            let final_memory = recent_snapshots
+                .last()
+                .expect("recent_snapshots has at least 5 elements")
+                .heap_allocated;
 
             if final_memory > initial_memory * 2 {
                 let mut metrics = HashMap::new();
