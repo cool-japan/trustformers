@@ -27,7 +27,7 @@ class TrustformersWasm {
 **Example:**
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version); // "0.1.0-alpha.1"
+console.log(tf.version); // "0.1.0-rc.1"
 ```
 
 ### InferenceSession
@@ -575,4 +575,4 @@ To contribute to TrustformeRS WASM:
 
 ## License
 
-TrustformeRS WASM is licensed under the [MIT License](../LICENSE).
+TrustformeRS WASM is licensed under the [Apache-2.0 License](../LICENSE).

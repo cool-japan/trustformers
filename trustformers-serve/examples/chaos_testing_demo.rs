@@ -645,8 +645,10 @@ async fn analyze_experiment_configurations(experiments: &[ChaosExperiment]) {
     let durations: Vec<u64> = experiments.iter().map(|e| e.config.duration_seconds).collect();
     if !durations.is_empty() {
         let avg_duration = durations.iter().sum::<u64>() as f64 / durations.len() as f64;
-        let min_duration = *durations.iter().min().unwrap();
-        let max_duration = *durations.iter().max().unwrap();
+        let min_duration =
+            *durations.iter().min().expect("Duration list should not be empty after check");
+        let max_duration =
+            *durations.iter().max().expect("Duration list should not be empty after check");
 
         println!("⏱️  Duration Analysis:");
         println!("  • Average: {:.1}s", avg_duration);

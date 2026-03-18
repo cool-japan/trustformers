@@ -310,7 +310,8 @@ impl<T: Tokenizer + Clone> Pipeline for CoreMLTextClassificationPipeline<T> {
             }
 
             // Sort by score (descending)
-            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+            results
+                .sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
             Ok(PipelineOutput::Classification(results))
         } else {
@@ -375,7 +376,7 @@ impl<T: Tokenizer + Clone> Pipeline for CoreMLTextGenerationPipeline<T> {
             let next_token_id = logits
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(index, _)| index as u32)
                 .unwrap_or(0);
 
@@ -570,7 +571,7 @@ mod tests {
         let output_path = Path::new("output.mlmodel");
         let input_shapes = HashMap::new();
 
-        let result = CoreMLModelConverter::from_pytorch(&input_path, &output_path, input_shapes);
+        let result = CoreMLModelConverter::from_pytorch(input_path, output_path, input_shapes);
         assert!(result.is_ok());
     }
 }

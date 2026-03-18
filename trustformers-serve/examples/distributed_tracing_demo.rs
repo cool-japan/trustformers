@@ -485,7 +485,8 @@ mod tests {
     #[tokio::test]
     async fn test_model_service_inference() {
         let config = TracingConfig::default();
-        let tracing_manager = TracingManager::new(config).await.unwrap();
+        let tracing_manager =
+            TracingManager::new(config).await.expect("Async operation should succeed");
 
         let model_service = ModelService::new(tracing_manager);
 
@@ -496,7 +497,8 @@ mod tests {
             max_tokens: 50,
         };
 
-        let response = model_service.inference(request).await.unwrap();
+        let response =
+            model_service.inference(request).await.expect("Async operation should succeed");
         assert_eq!(response.request_id, "test-001");
         assert!(!response.generated_text.is_empty());
     }
@@ -504,9 +506,12 @@ mod tests {
     #[tokio::test]
     async fn test_trace_context_propagation() {
         let config = TracingConfig::default();
-        let tracing_manager = TracingManager::new(config).await.unwrap();
+        let tracing_manager =
+            TracingManager::new(config).await.expect("Async operation should succeed");
 
-        let span = tracing_manager.start_http_span("GET", "/test").unwrap();
+        let span = tracing_manager
+            .start_http_span("GET", "/test")
+            .expect("Failed to start HTTP span");
         let context = span.get_context();
 
         let mut headers = HashMap::new();
@@ -517,7 +522,7 @@ mod tests {
         let extracted_context = tracing_manager.extract_context(&headers);
         assert!(extracted_context.is_some());
 
-        let extracted = extracted_context.unwrap();
+        let extracted = extracted_context.expect("Extracted context should exist after injection");
         assert_eq!(extracted.trace_id, context.trace_id);
     }
 }

@@ -322,28 +322,28 @@
 //! ## Multi-Node Training
 //!
 //! Scale training across multiple machines:
-//! ```rust,ignore
-//! // Multi-node distributed training setup
-//! // Configuration and training would require distributed environment
-//! // Example: MultiNodeTrainer::new(config)
+//! ```text
+//! Multi-node distributed training setup
+//! Configuration and training would require distributed environment
+//! Example: MultiNodeTrainer::new(config)
 //! ```
 //!
 //! ## Advanced Features
 //!
 //! ### Gradient Accumulation
-//! ```rust,ignore
-//! // Example: Accumulate gradients over multiple batches before stepping
-//! // if (step + 1) % accumulation_steps == 0 {
-//! //     optimizer.step(&mut model.parameters())?;
-//! //     optimizer.zero_grad();
-//! // }
+//! ```text
+//! Example: Accumulate gradients over multiple batches before stepping
+//! if (step + 1) % accumulation_steps == 0 {
+//!     optimizer.step(&mut model.parameters())?;
+//!     optimizer.zero_grad();
+//! }
 //! ```
 //!
 //! ### Mixed Precision Training
-//! ```rust,ignore
-//! // Mixed precision optimizers can provide memory savings and speed improvements
-//! // Configuration example:
-//! // MixedPrecisionOptimizer::new(base_optimizer, scale_config)
+//! ```text
+//! Mixed precision optimizers can provide memory savings and speed improvements
+//! Configuration example:
+//! MixedPrecisionOptimizer::new(base_optimizer, scale_config)
 //! ```
 //!
 //! ## Performance Tips

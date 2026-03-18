@@ -10,7 +10,7 @@ repository.workspace = true
 documentation = "https://docs.rs/trustformers-client"
 readme = "README.md"
 keywords = ["machine-learning", "transformers", "ai", "client", "trustformers"]
-categories = ["api-bindings", "web-programming::http-client"]
+categories = ["api-bindings", "web-programming"]
 
 [dependencies]
 # HTTP Client

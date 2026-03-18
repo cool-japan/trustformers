@@ -100,7 +100,7 @@ async fn main() -> Result<()> {
     println!("--------------------------------------");
 
     // Deploy v1.1.0 using canary strategy
-    let v11_model = version_manager.get_version(gpt2_v11_id).await?.unwrap();
+    let v11_model = version_manager.get_version(gpt2_v11_id).await?.expect("Version should exist");
     let deployment_config = DeploymentConfig {
         environment: Environment::Production,
         strategy: DeploymentStrategy::Canary,
@@ -251,7 +251,8 @@ async fn main() -> Result<()> {
         .get_active_deployment("gpt2").await?;
 
     if let Some(deployment) = current_deployment {
-        let current_version = version_manager.get_version(deployment.version_id).await?.unwrap();
+        let current_version = version_manager.get_version(deployment.version_id).await?
+            .expect("Version should exist for active deployment");
         println!("  📦 Current production version: {}:{}",
                  current_version.model_name(), current_version.version());
     }

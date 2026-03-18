@@ -757,20 +757,14 @@ impl MobileNAS {
 
         // Adjust based on user preferences
         match context.preferences.primary_target {
-            OptimizationTarget::Latency => {
-                if metrics.latency_ms > 50.0 {
-                    adjusted_score *= 0.8; // Penalize high latency
-                }
+            OptimizationTarget::Latency if metrics.latency_ms > 50.0 => {
+                adjusted_score *= 0.8; // Penalize high latency
             },
-            OptimizationTarget::Memory => {
-                if metrics.memory_mb > 256.0 {
-                    adjusted_score *= 0.8; // Penalize high memory usage
-                }
+            OptimizationTarget::Memory if metrics.memory_mb > 256.0 => {
+                adjusted_score *= 0.8; // Penalize high memory usage
             },
-            OptimizationTarget::Power => {
-                if metrics.power_mw > 500.0 {
-                    adjusted_score *= 0.8; // Penalize high power consumption
-                }
+            OptimizationTarget::Power if metrics.power_mw > 500.0 => {
+                adjusted_score *= 0.8; // Penalize high power consumption
             },
             _ => {},
         }

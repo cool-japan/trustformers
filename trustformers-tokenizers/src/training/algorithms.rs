@@ -122,7 +122,7 @@ impl BPETrainer {
                 .iter()
                 .max_by_key(|(_, &freq)| freq)
                 .map(|(pair, _)| pair.clone())
-                .unwrap();
+                .expect("pair_freqs should be non-empty in training loop");
 
             // Add merged token to vocabulary
             let merged_token = format!("{}{}", best_pair.0, best_pair.1);
@@ -257,9 +257,9 @@ impl WordPieceTrainer {
             // Add best scoring subword to vocabulary
             let best_subword = subword_scores
                 .iter()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(subword, _)| subword.clone())
-                .unwrap();
+                .expect("subword_scores should be non-empty");
 
             vocab.insert(best_subword, next_id);
             next_id += 1;
@@ -479,7 +479,7 @@ impl UnigramTrainer {
             })
             .collect();
 
-        scored_subwords.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored_subwords.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored_subwords
     }
 
@@ -508,7 +508,7 @@ impl UnigramTrainer {
         }
 
         // Sort by loss (ascending - remove tokens with least loss first)
-        loss_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        loss_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Remove tokens with lowest loss
         let target_size = ((vocab.len() as f64) * self.shrinking_factor)

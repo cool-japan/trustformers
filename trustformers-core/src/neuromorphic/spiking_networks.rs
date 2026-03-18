@@ -325,7 +325,7 @@ impl SpikingNeuralNetwork {
         }
 
         for idx in synapses_to_rewire {
-            let new_target = rng.gen_range(0..n);
+            let new_target = rng.random_range(0..n);
             self.synapses[idx].post_neuron = new_target;
         }
     }

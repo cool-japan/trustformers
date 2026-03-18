@@ -197,7 +197,7 @@ https://jitpack.io/#trustformers/trustformers-mobile
 
 ## License
 
-TrustformeRS Mobile is released under the MIT License. See [LICENSE](LICENSE) for details.
+TrustformeRS Mobile is released under the Apache-2.0 License. See [LICENSE](LICENSE) for details.
 
 ## Contributing
 

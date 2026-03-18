@@ -183,7 +183,7 @@ impl FedAvg {
             ClientSelectionStrategy::Random => {
                 let mut indices: Vec<usize> = (0..available.len()).collect();
                 for i in 0..num_clients {
-                    let j = self.rng.gen_range(i..indices.len());
+                    let j = self.rng.random_range(i..indices.len());
                     indices.swap(i, j);
                 }
                 indices[..num_clients].iter().map(|&i| available[i].client_id.clone()).collect()
@@ -197,7 +197,9 @@ impl FedAvg {
             ClientSelectionStrategy::ComputeCapacity => {
                 let mut clients_with_capacity: Vec<_> =
                     available.iter().map(|c| (c.client_id.clone(), c.compute_capacity)).collect();
-                clients_with_capacity.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
+                clients_with_capacity.sort_by(|(_, a), (_, b)| {
+                    b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 clients_with_capacity[..num_clients].iter().map(|(id, _)| id.clone()).collect()
             },
             ClientSelectionStrategy::CommunicationQuality => {
@@ -205,7 +207,9 @@ impl FedAvg {
                     .iter()
                     .map(|c| (c.client_id.clone(), c.communication_quality))
                     .collect();
-                clients_with_quality.sort_by(|(_, a), (_, b)| b.partial_cmp(a).unwrap());
+                clients_with_quality.sort_by(|(_, a), (_, b)| {
+                    b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal)
+                });
                 clients_with_quality[..num_clients].iter().map(|(id, _)| id.clone()).collect()
             },
         };
@@ -233,12 +237,19 @@ impl FedAvg {
         }
 
         // Initialize aggregated parameters with zeros
-        let param_count = client_updates.values().next().unwrap().len();
+        let param_count = client_updates
+            .values()
+            .next()
+            .expect("client_updates must have at least one entry")
+            .len();
         let mut aggregated = Vec::with_capacity(param_count);
 
         for i in 0..param_count {
             // Get shape from first client's parameter
-            let first_param = &client_updates.values().next().unwrap()[i];
+            let first_param = &client_updates
+                .values()
+                .next()
+                .expect("client_updates must have at least one entry")[i];
             aggregated.push(Tensor::zeros_like(first_param)?);
         }
 
@@ -488,7 +499,7 @@ impl SecureAggregation {
 
             for _ in 0..mask_size {
                 // Generate random float in range [-1.0, 1.0] for better numerical stability
-                mask_data.push(rng.gen_range(-1.0..1.0));
+                mask_data.push(rng.random_range(-1.0..1.0));
             }
 
             let mask = Tensor::from_data(mask_data, &shape)?;
@@ -560,7 +571,9 @@ impl SecureAggregation {
             }
 
             // Sum all client updates for this parameter
-            let mut aggregated_param = Tensor::zeros(&expected_shape.unwrap())?;
+            let shape = expected_shape
+                .ok_or_else(|| anyhow!("No client updates found for parameter {}", param_idx))?;
+            let mut aggregated_param = Tensor::zeros(&shape)?;
             for param_update in parameter_updates {
                 aggregated_param = aggregated_param.add(param_update)?;
             }

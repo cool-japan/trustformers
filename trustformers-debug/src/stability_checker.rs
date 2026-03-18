@@ -377,7 +377,7 @@ impl StabilityChecker {
 
         let mut problematic_layers: Vec<_> =
             issues_by_layer.iter().map(|(k, &v)| (k.clone(), v)).collect();
-        problematic_layers.sort_by(|a, b| b.1.cmp(&a.1));
+        problematic_layers.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         let total_issues = self.get_all_issues().len();
 

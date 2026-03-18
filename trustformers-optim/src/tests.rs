@@ -51,7 +51,7 @@ pub mod test_utils {
         let mut total_elements = 0;
 
         for _step in 0..num_steps {
-            for (_param_idx, &size) in param_sizes.iter().enumerate() {
+            for &size in param_sizes.iter() {
                 let mut param = create_test_tensor(&[size], 1.0);
                 let grad = create_test_gradient(&[size]);
 
@@ -360,7 +360,7 @@ mod memory_tests {
         let mut optimizer = ParallelAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.01);
 
         // Create parameters that stay in scope to have different memory addresses
-        let param_sizes = vec![1000, 1500, 2000, 1200, 1800];
+        let param_sizes = [1000, 1500, 2000, 1200, 1800];
         let mut params = Vec::new();
         let mut grads = Vec::new();
 

@@ -1,4 +1,5 @@
 //! Comprehensive demonstration of model compression techniques
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example shows how to use pruning, distillation, and compression pipelines

@@ -203,4 +203,4 @@ The library supports all models implemented in `trustformers-models`:
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0

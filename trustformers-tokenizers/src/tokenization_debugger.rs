@@ -535,13 +535,21 @@ impl TokenizationDebugger {
 
         let best_tokenizer = results
             .iter()
-            .min_by(|a, b| a.1.compression_ratio.partial_cmp(&b.1.compression_ratio).unwrap())
+            .min_by(|a, b| {
+                a.1.compression_ratio
+                    .partial_cmp(&b.1.compression_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
         let worst_tokenizer = results
             .iter()
-            .max_by(|a, b| a.1.compression_ratio.partial_cmp(&b.1.compression_ratio).unwrap())
+            .max_by(|a, b| {
+                a.1.compression_ratio
+                    .partial_cmp(&b.1.compression_ratio)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -576,13 +584,21 @@ impl TokenizationDebugger {
 
         let fastest_tokenizer = results
             .iter()
-            .min_by(|a, b| a.1.processing_time_ms.partial_cmp(&b.1.processing_time_ms).unwrap())
+            .min_by(|a, b| {
+                a.1.processing_time_ms
+                    .partial_cmp(&b.1.processing_time_ms)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
         let slowest_tokenizer = results
             .iter()
-            .max_by(|a, b| a.1.processing_time_ms.partial_cmp(&b.1.processing_time_ms).unwrap())
+            .max_by(|a, b| {
+                a.1.processing_time_ms
+                    .partial_cmp(&b.1.processing_time_ms)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(name, _)| name.clone())
             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -654,11 +670,11 @@ impl TokenizationDebugger {
         }
 
         let mut common_prefixes: Vec<_> = prefix_counts.into_iter().collect();
-        common_prefixes.sort_by(|a, b| b.1.cmp(&a.1));
+        common_prefixes.sort_by_key(|item| std::cmp::Reverse(item.1));
         common_prefixes.truncate(10);
 
         let mut common_suffixes: Vec<_> = suffix_counts.into_iter().collect();
-        common_suffixes.sort_by(|a, b| b.1.cmp(&a.1));
+        common_suffixes.sort_by_key(|item| std::cmp::Reverse(item.1));
         common_suffixes.truncate(10);
 
         // Simple subword pattern detection
@@ -670,7 +686,7 @@ impl TokenizationDebugger {
         }
 
         let mut subword_patterns: Vec<_> = subword_patterns.into_iter().collect();
-        subword_patterns.sort_by(|a, b| b.1.cmp(&a.1));
+        subword_patterns.sort_by_key(|item| std::cmp::Reverse(item.1));
         subword_patterns.truncate(20);
 
         PatternAnalysis {

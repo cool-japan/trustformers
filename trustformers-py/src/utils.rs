@@ -450,7 +450,7 @@ impl PyProgressBar {
             println!();
         } else {
             use std::io::{self, Write};
-            io::stdout().flush().unwrap();
+            let _ = io::stdout().flush(); // Ignore flush errors in progress display
         }
     }
 

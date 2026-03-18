@@ -397,9 +397,11 @@ impl KernelTuner {
 
                     // Benchmark this configuration
                     if let Ok(result) = self.benchmark_config(&params, m, n, k) {
-                        if best_result.is_none()
-                            || result.mean_time < best_result.as_ref().unwrap().mean_time
-                        {
+                        let is_better = match &best_result {
+                            None => true,
+                            Some(best) => result.mean_time < best.mean_time,
+                        };
+                        if is_better {
                             best_result = Some(result);
                         }
                     }
@@ -663,7 +665,7 @@ pub fn get_kernel_tuner() -> &'static mut KernelTuner {
             );
         });
 
-        GLOBAL_TUNER.as_mut().unwrap()
+        GLOBAL_TUNER.as_mut().expect("GLOBAL_TUNER initialized in call_once")
     }
 }
 

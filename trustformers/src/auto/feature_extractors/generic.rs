@@ -464,11 +464,12 @@ impl GenericFeatureConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let config = serde_json::json!({
+    /// let config = serde_json::json!({
     ///     "hidden_size": 1024,
     ///     "max_batch_size": 64
     /// });
     /// let feature_config = GenericFeatureConfig::from_config(&config)?;
+    /// ```
 
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         let feature_size = config

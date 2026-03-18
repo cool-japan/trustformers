@@ -545,7 +545,7 @@ impl ModelProfiler {
         }
 
         // Sort slowest layers by total time
-        slowest_layers.sort_by(|a, b| b.1.cmp(&a.1));
+        slowest_layers.sort_by_key(|item| std::cmp::Reverse(item.1));
         slowest_layers.truncate(10); // Keep top 10
 
         Ok(LayerPerformanceReport {
@@ -619,7 +619,7 @@ impl ModelProfiler {
         }
 
         // Sort slowest operations
-        slowest_operations.sort_by(|a, b| b.1.cmp(&a.1));
+        slowest_operations.sort_by_key(|item| std::cmp::Reverse(item.1));
         slowest_operations.truncate(10);
 
         Ok(OperationPerformanceReport {

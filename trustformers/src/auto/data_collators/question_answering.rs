@@ -529,7 +529,7 @@ impl QuestionAnsweringCollatorConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let model_config = serde_json::json!({
+    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "pad_token_id": 0,
     ///     "vocab_size": 30522
@@ -540,6 +540,7 @@ impl QuestionAnsweringCollatorConfig {
     /// assert_eq!(config.pad_token_id, 0);
     /// assert_eq!(config.doc_stride, 128);
     /// assert_eq!(config.max_answer_length, 30);
+    /// ```
 
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {

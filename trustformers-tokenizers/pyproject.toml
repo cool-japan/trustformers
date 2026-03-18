@@ -10,13 +10,12 @@ authors = [
     {name = "COOLJAPAN Team (Team KitaSan)", email = "info@kitasan.io"},
 ]
 readme = "README.md"
-license = {text = "MIT OR Apache-2.0"}
+license = {text = "Apache-2.0"}
 keywords = ["tokenization", "transformers", "nlp", "rust", "machine-learning"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",

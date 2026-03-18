@@ -2,7 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/trustformers-client.svg)](https://crates.io/crates/trustformers-client)
 [![Documentation](https://docs.rs/trustformers-client/badge.svg)](https://docs.rs/trustformers-client)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](../../LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](../../LICENSE)
 
 A comprehensive Rust client library for TrustformeRS serving infrastructure.
 
@@ -248,7 +248,7 @@ Full API documentation is available at [docs.rs/trustformers-client](https://doc
 
 ## License
 
-Dual-licensed under MIT OR Apache-2.0, at your option.
+Licensed under Apache-2.0.
 
 ## Related Projects
 

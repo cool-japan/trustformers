@@ -131,7 +131,8 @@ fn run_custom_benchmark() -> Result<()> {
         .save_raw_data(true)
         .with_progress(|update| {
             print!("\rProgress: {}/{}", update.current_iteration, update.total_iterations);
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            std::io::Write::flush(&mut std::io::stdout())
+                .expect("Failed to flush stdout");
         })
         .add_benchmark(benchmark)
         .run()?;

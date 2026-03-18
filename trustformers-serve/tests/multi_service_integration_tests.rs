@@ -255,7 +255,7 @@ async fn create_multi_service_test_server() -> TestServer {
 
     // Create router - the server is responsible for initializing its own services
     let router = server.create_test_router().await;
-    TestServer::new(router).unwrap()
+    TestServer::new(router)
 }
 
 /// Helper function to get authentication token

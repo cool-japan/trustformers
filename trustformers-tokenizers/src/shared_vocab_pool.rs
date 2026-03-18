@@ -279,11 +279,8 @@ impl SharedVocabPool {
             let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.vocabulary_count -= 1;
             stats.memory_usage_bytes = stats.memory_usage_bytes.saturating_sub(entry.size_bytes);
-            stats.average_vocab_size = if stats.vocabulary_count > 0 {
-                stats.memory_usage_bytes / stats.vocabulary_count
-            } else {
-                0
-            };
+            stats.average_vocab_size =
+                stats.memory_usage_bytes.checked_div(stats.vocabulary_count).unwrap_or(0);
 
             Some(entry.vocab)
         } else {
@@ -340,11 +337,8 @@ impl SharedVocabPool {
         let mut stats = self.stats.write().expect("lock should not be poisoned");
         stats.vocabulary_count = pool.len();
         stats.memory_usage_bytes = stats.memory_usage_bytes.saturating_sub(memory_freed);
-        stats.average_vocab_size = if stats.vocabulary_count > 0 {
-            stats.memory_usage_bytes / stats.vocabulary_count
-        } else {
-            0
-        };
+        stats.average_vocab_size =
+            stats.memory_usage_bytes.checked_div(stats.vocabulary_count).unwrap_or(0);
 
         // Update last cleanup time
         *self.last_cleanup.write().expect("lock should not be poisoned") =
@@ -398,11 +392,8 @@ impl SharedVocabPool {
             let mut stats = self.stats.write().expect("lock should not be poisoned");
             stats.vocabulary_count -= 1;
             stats.memory_usage_bytes = stats.memory_usage_bytes.saturating_sub(oldest_size);
-            stats.average_vocab_size = if stats.vocabulary_count > 0 {
-                stats.memory_usage_bytes / stats.vocabulary_count
-            } else {
-                0
-            };
+            stats.average_vocab_size =
+                stats.memory_usage_bytes.checked_div(stats.vocabulary_count).unwrap_or(0);
         }
 
         Ok(())

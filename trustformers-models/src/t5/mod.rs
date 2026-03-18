@@ -26,9 +26,9 @@
 //!
 //! All tasks are framed as text-to-text:
 //! - **Translation**: "translate English to French: Hello" → "Bonjour"
-//! - **Summarization**: "summarize: [article]" → "[summary]"
+//! - **Summarization**: "summarize: \[article\]" → "\[summary\]"
 //! - **Classification**: "sentiment: Great movie!" → "positive"
-//! - **Question Answering**: "question: What is T5? context: [text]" → "[answer]"
+//! - **Question Answering**: "question: What is T5? context: \[text\]" → "\[answer\]"
 //!
 //! ## Usage Examples
 //!

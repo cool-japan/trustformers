@@ -8,7 +8,7 @@ from .numpy_integration import *
 from .async_support import *
 from .utils import *
 
-__version__ = "0.1.0"
+__version__ = "0.1.0rc1"
 __author__ = "Cool Japan"
 __email__ = "info@cool-japan.com"
 __description__ = "Python bindings for TrustformeRS transformer library"

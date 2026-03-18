@@ -1,310 +1,272 @@
-//! Core Types and Definitions for Test Independence Analysis
+//! Auto-generated module
 //!
-//! This module contains all the fundamental types, enums, and configuration structures
-//! used throughout the test independence analysis system.
+//! 🤖 Generated with [SplitRS](https://github.com/cool-japan/splitrs)
 
+use super::analysis_cache;
+pub use super::analysis_cache::{AnalysisCache, CacheConfig};
+use super::conflict_detector;
+pub use super::conflict_detector::{
+    ConflictDetectionConfig, ConflictDetectionDetails, ConflictDetectionStatistics,
+    ConflictDetector, ConflictImpactAnalysis, ConflictResolutionOption, ConflictSensitivity,
+    DetectedConflict,
+};
+use super::dependency_graph;
+pub use super::dependency_graph::{DependencyGraph, GraphAlgorithms};
+use super::functions::DurationExt;
+use super::resource_database;
+pub use super::resource_database::{
+    CleanupResult, DatabaseConfig, ResourceAllocationEvent, ResourceTypeDefinition,
+    ResourceUsageDatabase, ResourceUsageRecord, TestUsageSummary, UsageReport,
+};
+use super::test_grouping_engine;
+pub use super::test_grouping_engine::{
+    GroupCharacteristics, GroupRequirements, GroupingEngineConfig, GroupingMetrics,
+    GroupingStrategy, GroupingStrategyType, TestGroup, TestGroupingEngine,
+};
+use crate::test_parallelization::{
+    IsolationRequirements, ParallelizationHints, TestDependency, TestParallelizationMetadata,
+    TestResourceUsage,
+};
+use crate::test_timeout_optimization::{TestCategory, TestExecutionContext};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, time::Duration};
-
-use crate::test_parallelization::TestDependency;
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tracing::{info, warn};
 
 // ================================================================================================
-// Core Analysis Types
+// Error types for the test independence analyzer
 // ================================================================================================
 
-/// Analysis result type alias
-pub type AnalysisResult<T> = Result<T, AnalysisError>;
-
-/// Comprehensive error types for test independence analysis
-#[derive(Debug, thiserror::Error)]
+/// Error type for analysis operations
+#[derive(Debug, Clone)]
 pub enum AnalysisError {
-    /// Cache operation failed
-    #[error("Cache operation failed: {message}")]
-    CacheError { message: String },
-
-    /// Dependency analysis failed
-    #[error("Dependency analysis failed for test '{test_id}': {message}")]
-    DependencyAnalysisError { test_id: String, message: String },
-
-    /// Conflict detection failed
-    #[error("Conflict detection failed: {message}")]
-    ConflictDetectionError { message: String },
-
-    /// Resource database error
-    #[error("Resource database error: {message}")]
-    ResourceDatabaseError { message: String },
-
-    /// Graph operation failed
-    #[error("Graph operation failed: {message}")]
-    GraphError { message: String },
-
-    /// Test grouping failed
-    #[error("Test grouping failed: {message}")]
-    GroupingError { message: String },
-
-    /// Configuration error
-    #[error("Configuration error: {message}")]
-    ConfigurationError { message: String },
-
-    /// Validation error
-    #[error("Validation error: {message}")]
-    ValidationError { message: String },
-
-    /// Internal system error
-    #[error("Internal system error: {message}")]
+    /// Internal error
     InternalError { message: String },
-
-    /// Invalid usage record
-    #[error("Invalid usage record: {reason}")]
-    InvalidUsageRecord { reason: String },
-
-    /// Invalid allocation event
-    #[error("Invalid allocation event: {reason}")]
-    InvalidAllocationEvent { reason: String },
-
+    /// Graph-related error
+    GraphError { message: String },
+    /// Cache-related error
+    CacheError { message: String },
     /// Analysis timeout
-    #[error("Analysis timeout during {operation} (timeout: {timeout:?})")]
-    AnalysisTimeout {
-        operation: String,
-        timeout: Duration,
-    },
-
-    /// Time conversion error
-    #[error("Time conversion error: {source}")]
-    TimeConversionError {
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-
+    AnalysisTimeout { message: String },
     /// Strategy not found
-    #[error("Strategy not found: {message}")]
     StrategyNotFound { message: String },
-
-    /// Resource type already exists
-    #[error("Resource type already exists: {type_id}")]
-    ResourceTypeAlreadyExists { type_id: String },
-
     /// Invalid grouping
-    #[error("Invalid grouping: {message}")]
     InvalidGrouping { message: String },
+    /// Resource type already exists
+    ResourceTypeAlreadyExists { message: String },
+    /// Invalid usage record
+    InvalidUsageRecord { message: String },
+    /// Invalid allocation event
+    InvalidAllocationEvent { message: String },
+    /// Time conversion error
+    TimeConversionError { message: String },
 }
 
-// ================================================================================================
-// Cache Types
-// ================================================================================================
-
-/// Cached dependency analysis
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedDependencyAnalysis {
-    /// Test identifier
-    pub test_id: String,
-
-    /// Dependencies found
-    pub dependencies: Vec<TestDependency>,
-
-    /// Analysis timestamp
-    #[serde(skip)]
-
-    /// Analysis version
-    pub version: u64,
-
-    /// Analysis confidence score (0.0 to 1.0)
-    pub confidence: f32,
-
-    /// Cache metadata
-    pub metadata: CacheMetadata,
-}
-
-/// Cached conflict analysis
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedConflictAnalysis {
-    /// Test pairs analyzed
-    pub test_pairs: Vec<(String, String)>,
-
-    /// Conflicts found
-    pub conflicts: Vec<ResourceConflict>,
-
-    /// Analysis timestamp
-    #[serde(skip)]
-
-    /// Analysis confidence score (0.0 to 1.0)
-    pub confidence: f32,
-
-    /// Cache metadata
-    pub metadata: CacheMetadata,
-}
-
-/// Cached grouping analysis
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedGroupingAnalysis {
-    /// Test groups
-    pub groups: Vec<TestGroup>,
-
-    /// Grouping strategy used
-    pub strategy: GroupingStrategy,
-
-    /// Analysis timestamp
-    #[serde(skip)]
-
-    /// Group formation quality score (0.0 to 1.0)
-    pub quality_score: f32,
-
-    /// Cache metadata
-    pub metadata: CacheMetadata,
-}
-
-/// Cache metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CacheMetadata {
-    /// Entry creation time
-    pub created_at: DateTime<Utc>,
-
-    /// Last access time
-    pub last_accessed: DateTime<Utc>,
-
-    /// Access count
-    pub access_count: u64,
-
-    /// Entry size in bytes
-    pub size_bytes: u64,
-
-    /// Cache key
-    pub cache_key: String,
-
-    /// Cache tags for categorization
-    pub tags: Vec<String>,
-}
-
-/// Cache statistics
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct CacheStatistics {
-    /// Cache hits
-    pub hits: u64,
-
-    /// Cache misses
-    pub misses: u64,
-
-    /// Cache evictions
-    pub evictions: u64,
-
-    /// Cache memory usage (bytes)
-    pub memory_usage: u64,
-
-    /// Hit ratio (0.0 to 1.0)
-    pub hit_ratio: f32,
-
-    /// Average access time
-    pub average_access_time: Duration,
-
-    /// Cache entries by type
-    pub entries_by_type: HashMap<String, u64>,
-}
-
-impl CacheStatistics {
-    /// Update statistics after a cache operation
-    pub fn update_after_access(&mut self, hit: bool, access_time: Duration) {
-        if hit {
-            self.hits += 1;
-        } else {
-            self.misses += 1;
+impl fmt::Display for AnalysisError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AnalysisError::InternalError { message } => write!(f, "Internal error: {}", message),
+            AnalysisError::GraphError { message } => write!(f, "Graph error: {}", message),
+            AnalysisError::CacheError { message } => write!(f, "Cache error: {}", message),
+            AnalysisError::AnalysisTimeout { message } => {
+                write!(f, "Analysis timeout: {}", message)
+            },
+            AnalysisError::StrategyNotFound { message } => {
+                write!(f, "Strategy not found: {}", message)
+            },
+            AnalysisError::InvalidGrouping { message } => {
+                write!(f, "Invalid grouping: {}", message)
+            },
+            AnalysisError::ResourceTypeAlreadyExists { message } => {
+                write!(f, "Resource type already exists: {}", message)
+            },
+            AnalysisError::InvalidUsageRecord { message } => {
+                write!(f, "Invalid usage record: {}", message)
+            },
+            AnalysisError::InvalidAllocationEvent { message } => {
+                write!(f, "Invalid allocation event: {}", message)
+            },
+            AnalysisError::TimeConversionError { message } => {
+                write!(f, "Time conversion error: {}", message)
+            },
         }
-
-        // Update hit ratio
-        let total_accesses = self.hits + self.misses;
-        if total_accesses > 0 {
-            self.hit_ratio = self.hits as f32 / total_accesses as f32;
-        }
-
-        // Update average access time
-        let total_time = self.average_access_time.as_nanos() as f64 * (total_accesses - 1) as f64;
-        let new_average = (total_time + access_time.as_nanos() as f64) / total_accesses as f64;
-        self.average_access_time = Duration::from_nanos(new_average as u64);
     }
 }
 
+impl std::error::Error for AnalysisError {}
+
+// Note: anyhow's blanket impl `From<E: Error>` covers AnalysisError -> anyhow::Error
+
+/// Result type alias for analysis operations
+pub type AnalysisResult<T> = std::result::Result<T, AnalysisError>;
+
 // ================================================================================================
-// Dependency Graph Types
+// Conflict types
 // ================================================================================================
 
-/// Dependency edge in the graph
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DependencyEdge {
-    /// Target test
-    pub target: String,
-
-    /// Dependency information
-    pub dependency: TestDependency,
-
-    /// Edge weight for algorithms (0.0 to 1.0)
-    pub weight: f32,
-
-    /// Edge metadata
-    pub metadata: EdgeMetadata,
+/// Resource conflict severity levels
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ConflictSeverity {
+    /// Low severity conflict
+    Low,
+    /// Medium severity conflict
+    Medium,
+    /// High severity conflict
+    High,
+    /// Critical severity conflict
+    Critical,
 }
 
-/// Edge metadata
+impl PartialOrd for ConflictSeverity {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        let self_val = match self {
+            ConflictSeverity::Low => 0,
+            ConflictSeverity::Medium => 1,
+            ConflictSeverity::High => 2,
+            ConflictSeverity::Critical => 3,
+        };
+        let other_val = match other {
+            ConflictSeverity::Low => 0,
+            ConflictSeverity::Medium => 1,
+            ConflictSeverity::High => 2,
+            ConflictSeverity::Critical => 3,
+        };
+        Some(self_val.cmp(&other_val))
+    }
+}
+
+/// Types of resource conflicts
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ConflictType {
+    /// Capacity limit exceeded
+    CapacityLimit,
+    /// Exclusive access required
+    ExclusiveAccess,
+    /// Port conflict
+    PortConflict,
+    /// File system overlap
+    FileSystemOverlap,
+    /// Database contention
+    DatabaseContention,
+    /// GPU device conflict
+    GpuDeviceConflict,
+    /// Data corruption conflict
+    DataCorruption,
+    /// Custom conflict type
+    Custom(String),
+}
+
+/// Metadata for a detected conflict
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EdgeMetadata {
-    /// Edge creation time
-    pub created_at: DateTime<Utc>,
-
-    /// Last validation time
-    pub last_validated: DateTime<Utc>,
-
-    /// Validation confidence (0.0 to 1.0)
+pub struct ConflictMetadata {
+    /// When the conflict was detected
+    pub detected_at: DateTime<Utc>,
+    /// Detection method used
+    pub detection_method: String,
+    /// Confidence in the detection
     pub confidence: f32,
+    /// Historical occurrence count
+    pub historical_occurrences: u64,
+    /// Last known occurrence
+    pub last_occurrence: Option<DateTime<Utc>>,
+}
 
-    /// Edge tags
+/// Resource conflict between two tests
+#[derive(Debug, Clone)]
+pub struct ResourceConflict {
+    /// Conflict unique identifier
+    pub id: String,
+    /// First test involved
+    pub test1: String,
+    /// Second test involved
+    pub test2: String,
+    /// Type of resource involved
+    pub resource_type: String,
+    /// Specific resource identifier
+    pub resource_id: String,
+    /// Type of conflict
+    pub conflict_type: ConflictType,
+    /// Severity of the conflict
+    pub severity: ConflictSeverity,
+    /// Human-readable description
+    pub description: String,
+    /// Resolution strategies
+    pub resolution_strategies: Vec<String>,
+    /// Conflict metadata
+    pub metadata: ConflictMetadata,
+}
+
+// ================================================================================================
+// Dependency graph types
+// ================================================================================================
+
+/// Metadata for dependency graph edges
+#[derive(Debug, Clone)]
+pub struct EdgeMetadata {
+    /// When the edge was created
+    pub created_at: DateTime<Utc>,
+    /// When the edge was last validated
+    pub last_validated: DateTime<Utc>,
+    /// Confidence in the dependency
+    pub confidence: f32,
+    /// Tags associated with the edge
     pub tags: Vec<String>,
-
     /// Additional properties
     pub properties: HashMap<String, String>,
 }
 
-/// Graph metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GraphMetadata {
-    /// Number of nodes (tests)
-    pub node_count: usize,
-
-    /// Number of edges (dependencies)
-    pub edge_count: usize,
-
-    /// Graph density (0.0 to 1.0)
-    pub density: f32,
-
-    /// Strongly connected components
-    pub strongly_connected_components: Vec<Vec<String>>,
-
-    /// Topological ordering (if DAG)
-    pub topological_order: Option<Vec<String>>,
-
-    /// Graph analysis timestamp
-    pub last_analysis: DateTime<Utc>,
-
-    /// Graph properties
-    pub properties: GraphProperties,
+/// Dependency edge in the graph
+#[derive(Debug, Clone)]
+pub struct DependencyEdge {
+    /// Target node of the edge
+    pub target: String,
+    /// Dependency information
+    pub dependency: crate::test_parallelization::TestDependency,
+    /// Edge weight
+    pub weight: f32,
+    /// Edge metadata
+    pub metadata: EdgeMetadata,
 }
 
-/// Graph properties
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Properties of the dependency graph
+#[derive(Debug, Clone, Default)]
 pub struct GraphProperties {
-    /// Is the graph a DAG (Directed Acyclic Graph)
-    pub is_dag: bool,
-
-    /// Has cycles
+    /// Whether the graph has cycles
     pub has_cycles: bool,
-
+    /// Whether the graph is a DAG
+    pub is_dag: bool,
     /// Maximum path length
     pub max_path_length: usize,
-
     /// Average degree
     pub average_degree: f32,
-
     /// Clustering coefficient
     pub clustering_coefficient: f32,
+}
+
+/// Metadata for the dependency graph
+#[derive(Debug, Clone)]
+pub struct GraphMetadata {
+    /// Number of nodes in the graph
+    pub node_count: usize,
+    /// Number of edges in the graph
+    pub edge_count: usize,
+    /// Graph density
+    pub density: f32,
+    /// Last time the graph was analyzed
+    pub last_analysis: DateTime<Utc>,
+    /// Graph properties
+    pub properties: GraphProperties,
+    /// Strongly connected components
+    pub strongly_connected_components: Vec<Vec<String>>,
+    /// Topological order (if DAG)
+    pub topological_order: Vec<String>,
 }
 
 impl Default for GraphMetadata {
@@ -313,950 +275,1066 @@ impl Default for GraphMetadata {
             node_count: 0,
             edge_count: 0,
             density: 0.0,
-            strongly_connected_components: Vec::new(),
-            topological_order: None,
             last_analysis: Utc::now(),
-            properties: GraphProperties {
-                is_dag: true,
-                has_cycles: false,
-                max_path_length: 0,
-                average_degree: 0.0,
-                clustering_coefficient: 0.0,
-            },
+            properties: GraphProperties::default(),
+            strongly_connected_components: Vec::new(),
+            topological_order: Vec::new(),
         }
     }
 }
 
 // ================================================================================================
-// Resource Usage Types
+// Cache types
 // ================================================================================================
 
-/// Resource usage record
+/// Metadata for cached entries
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceUsageRecord {
-    /// Test identifier
-    pub test_id: String,
-
-    /// Resource type
-    pub resource_type: String,
-
-    /// Resource identifier
-    pub resource_id: String,
-
-    /// Usage start time
-    #[serde(skip)]
-
-    /// Usage duration
-    pub duration: Duration,
-
-    /// Usage amount/intensity
-    pub usage_amount: f64,
-
-    /// Usage efficiency (0.0 to 1.0)
-    pub efficiency: f32,
-
-    /// Concurrent users
-    pub concurrent_users: usize,
-
-    /// Usage metadata
-    pub metadata: UsageMetadata,
+pub struct CacheMetadata {
+    /// Cache key
+    pub cache_key: String,
+    /// When the entry was created
+    pub created_at: DateTime<Utc>,
+    /// When the entry was last accessed
+    pub last_accessed: DateTime<Utc>,
+    /// Number of times the entry was accessed
+    pub access_count: u64,
 }
 
-/// Usage metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UsageMetadata {
-    /// Usage category
-    pub category: UsageCategory,
-
-    /// Usage priority
-    pub priority: UsagePriority,
-
-    /// Usage tags
-    pub tags: Vec<String>,
-
-    /// Additional properties
-    pub properties: HashMap<String, String>,
-}
-
-/// Usage categories
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum UsageCategory {
-    /// CPU usage
-    Cpu,
-    /// Memory usage
-    Memory,
-    /// Disk I/O usage
-    DiskIo,
-    /// Network I/O usage
-    NetworkIo,
-    /// Database usage
-    Database,
-    /// File system usage
-    FileSystem,
-    /// Custom resource usage
-    Custom(String),
-}
-
-/// Usage priority levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum UsagePriority {
-    /// Low priority
-    Low = 0,
-    /// Normal priority
-    Normal = 1,
-    /// High priority
-    High = 2,
-    /// Critical priority
-    Critical = 3,
-}
-
-impl Default for UsagePriority {
+impl Default for CacheMetadata {
     fn default() -> Self {
-        UsagePriority::Normal
+        Self {
+            cache_key: String::new(),
+            created_at: Utc::now(),
+            last_accessed: Utc::now(),
+            access_count: 0,
+        }
     }
 }
 
-/// Resource type definition
+/// Cached dependency analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceTypeDefinition {
-    /// Resource type name
-    pub name: String,
-
-    /// Resource description
-    pub description: String,
-
-    /// Maximum concurrent users
-    pub max_concurrent_users: Option<usize>,
-
-    /// Sharing capabilities
-    pub sharing_capabilities: ResourceSharingSpec,
-
-    /// Conflict detection rules
-    pub conflict_rules: Vec<ConflictRule>,
-
-    /// Performance characteristics
-    pub performance_characteristics: PerformanceCharacteristics,
-
-    /// Resource configuration
-    pub config: ResourceConfig,
+pub struct CachedDependencyAnalysis {
+    /// Cache metadata
+    pub metadata: CacheMetadata,
+    /// Analysis version
+    pub version: u64,
+    /// Serialized analysis data
+    pub data: Vec<u8>,
 }
 
-/// Resource sharing specification
+/// Cached conflict analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceSharingSpec {
-    /// Can be shared among tests
-    pub shareable: bool,
-
-    /// Maximum sharing level
-    pub max_sharing_level: Option<usize>,
-
-    /// Sharing overhead (0.0 to 1.0)
-    pub sharing_overhead: f32,
-
-    /// Sharing constraints
-    pub constraints: Vec<SharingConstraint>,
+pub struct CachedConflictAnalysis {
+    /// Cache metadata
+    pub metadata: CacheMetadata,
+    /// Analysis version
+    pub version: u64,
+    /// Serialized analysis data
+    pub data: Vec<u8>,
 }
 
-/// Sharing constraint
+/// Cached grouping analysis result
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SharingConstraint {
-    /// Constraint type
-    pub constraint_type: SharingConstraintType,
-
-    /// Constraint value
-    pub value: String,
-
-    /// Constraint severity
-    pub severity: ConstraintSeverity,
-
-    /// Constraint description
-    pub description: String,
+pub struct CachedGroupingAnalysis {
+    /// Cache metadata
+    pub metadata: CacheMetadata,
+    /// Analysis version
+    pub version: u64,
+    /// Serialized analysis data
+    pub data: Vec<u8>,
 }
 
-/// Sharing constraint types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SharingConstraintType {
-    /// Memory limit constraint
-    MemoryLimit,
-    /// CPU usage constraint
-    CpuUsage,
-    /// Network bandwidth constraint
-    NetworkBandwidth,
-    /// Filesystem access constraint
-    FilesystemAccess,
-    /// Database connection constraint
-    DatabaseConnection,
-    /// Port range constraint
-    PortRange,
-    /// Custom constraint
-    Custom(String),
+/// Cache statistics
+#[derive(Debug, Clone, Default)]
+pub struct CacheStatistics {
+    /// Total hits
+    pub hits: u64,
+    /// Total misses
+    pub misses: u64,
+    /// Total evictions
+    pub evictions: u64,
+    /// Current memory usage in bytes
+    pub memory_usage: u64,
+    /// Entries by type
+    pub entries_by_type: HashMap<String, u64>,
+    /// Average access time
+    pub average_access_time: Duration,
+    /// Total accesses
+    pub total_accesses: u64,
 }
 
-/// Constraint severity levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ConstraintSeverity {
-    /// Soft constraint (preference)
-    Soft = 0,
-    /// Hard constraint (requirement)
-    Hard = 1,
-    /// Critical constraint (violation causes failure)
-    Critical = 2,
-}
-
-/// Performance characteristics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PerformanceCharacteristics {
-    /// Throughput characteristics
-    pub throughput: ThroughputCharacteristics,
-
-    /// Latency characteristics
-    pub latency: LatencyCharacteristics,
-
-    /// Scalability characteristics
-    pub scalability: ScalabilityCharacteristics,
-}
-
-/// Throughput characteristics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThroughputCharacteristics {
-    /// Base throughput
-    pub base_throughput: f64,
-
-    /// Peak throughput
-    pub peak_throughput: f64,
-
-    /// Throughput unit (e.g., "requests/second", "MB/s")
-    pub unit: String,
-}
-
-/// Latency characteristics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LatencyCharacteristics {
-    /// Base latency
-    pub base_latency: Duration,
-
-    /// Latency under load
-    pub load_latency: Duration,
-
-    /// Latency variance
-    pub variance: Duration,
-}
-
-/// Scalability characteristics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ScalabilityCharacteristics {
-    /// Maximum scale factor
-    pub max_scale_factor: f32,
-
-    /// Scale efficiency (0.0 to 1.0)
-    pub scale_efficiency: f32,
-
-    /// Bottleneck points
-    pub bottlenecks: Vec<String>,
-}
-
-/// Resource configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceConfig {
-    /// Configuration parameters
-    pub parameters: HashMap<String, String>,
-
-    /// Configuration version
-    pub version: String,
-
-    /// Configuration validation rules
-    pub validation_rules: Vec<ValidationRule>,
-}
-
-/// Validation rule
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidationRule {
-    /// Rule name
-    pub name: String,
-
-    /// Rule description
-    pub description: String,
-
-    /// Rule expression
-    pub expression: String,
-
-    /// Rule severity
-    pub severity: ValidationSeverity,
-}
-
-/// Validation severity levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ValidationSeverity {
-    /// Warning level
-    Warning = 0,
-    /// Error level
-    Error = 1,
-    /// Critical level
-    Critical = 2,
+impl CacheStatistics {
+    /// Update statistics after a cache access
+    pub fn update_after_access(&mut self, hit: bool, access_time: Duration) {
+        self.total_accesses += 1;
+        if hit {
+            self.hits += 1;
+        } else {
+            self.misses += 1;
+        }
+        // Update average access time using running average
+        if self.total_accesses == 1 {
+            self.average_access_time = access_time;
+        } else {
+            let total_nanos = self.average_access_time.as_nanos() as u64
+                * (self.total_accesses - 1)
+                + access_time.as_nanos() as u64;
+            self.average_access_time = Duration::from_nanos(total_nanos / self.total_accesses);
+        }
+    }
 }
 
 // ================================================================================================
-// Conflict Types
+// Resource requirement types
 // ================================================================================================
 
-/// Resource conflict information
+/// Priority level for resource usage
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResourceConflict {
-    /// Conflict identifier
-    pub id: String,
-
-    /// First test in conflict
-    pub test1: String,
-
-    /// Second test in conflict
-    pub test2: String,
-
-    /// Resource type involved
-    pub resource_type: String,
-
-    /// Resource identifier
-    pub resource_id: String,
-
-    /// Conflict type
-    pub conflict_type: ConflictType,
-
-    /// Conflict severity
-    pub severity: ConflictSeverity,
-
-    /// Conflict description
-    pub description: String,
-
-    /// Resolution strategies
-    pub resolution_strategies: Vec<ResolutionStrategy>,
-
-    /// Conflict metadata
-    pub metadata: ConflictMetadata,
+pub enum UsagePriority {
+    /// Low priority
+    Low,
+    /// Normal priority
+    Normal,
+    /// High priority
+    High,
+    /// Critical priority
+    Critical,
 }
 
-/// Types of resource conflicts
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
-pub enum ConflictType {
-    /// Exclusive access conflict
-    ExclusiveAccess,
-    /// Capacity limit conflict
-    CapacityLimit,
-    /// Performance degradation conflict
-    PerformanceDegradation,
-    /// Data corruption risk
-    DataCorruption,
-    /// Race condition risk
-    RaceCondition,
-    /// Deadlock risk
-    DeadlockRisk,
-    /// Custom conflict type
-    Custom(String),
-}
-
-/// Conflict severity levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ConflictSeverity {
-    /// Low severity (minor performance impact)
-    Low = 0,
-    /// Medium severity (noticeable impact)
-    Medium = 1,
-    /// High severity (significant impact)
-    High = 2,
-    /// Critical severity (prevents execution)
-    Critical = 3,
-}
-
-/// Conflict metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConflictMetadata {
-    /// Detection timestamp
-    pub detected_at: DateTime<Utc>,
-
-    /// Detection method
-    pub detection_method: String,
-
-    /// Detection confidence (0.0 to 1.0)
-    pub confidence: f32,
-
-    /// Historical occurrences
-    pub historical_occurrences: u64,
-
-    /// Last occurrence
-    pub last_occurrence: Option<DateTime<Utc>>,
-}
-
-/// Conflict resolution strategies
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResolutionStrategy {
-    /// Strategy name
-    pub name: String,
-
-    /// Strategy description
-    pub description: String,
-
-    /// Implementation difficulty
-    pub difficulty: ResolutionDifficulty,
-
-    /// Expected effectiveness (0.0 to 1.0)
-    pub effectiveness: f32,
-
-    /// Implementation cost
-    pub cost: ResolutionCost,
-
-    /// Strategy parameters
-    pub parameters: HashMap<String, String>,
-
-    /// Strategy metadata
-    pub metadata: StrategyMetadata,
-}
-
-/// Resolution difficulty levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResolutionDifficulty {
-    /// Easy (configuration change)
-    Easy = 0,
-    /// Medium (code modification)
-    Medium = 1,
-    /// Hard (significant refactoring)
-    Hard = 2,
-    /// Very Hard (architectural change)
-    VeryHard = 3,
-}
-
-/// Resolution cost levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ResolutionCost {
-    /// Low cost
-    Low = 0,
-    /// Medium cost
-    Medium = 1,
-    /// High cost
-    High = 2,
-    /// Very High cost
-    VeryHigh = 3,
-}
-
-/// Strategy metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StrategyMetadata {
-    /// Strategy version
-    pub version: String,
-
-    /// Author information
-    pub author: String,
-
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
-
-    /// Success rate in previous applications (0.0 to 1.0)
-    pub success_rate: f32,
-
-    /// Strategy tags
-    pub tags: Vec<String>,
-}
-
-// ================================================================================================
-// Test Grouping Types
-// ================================================================================================
-
-/// Test group for parallel execution
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TestGroup {
-    /// Group identifier
-    pub id: String,
-
-    /// Group name
-    pub name: String,
-
-    /// Tests in group
-    pub tests: Vec<String>,
-
-    /// Group characteristics
-    pub characteristics: GroupCharacteristics,
-
-    /// Execution requirements
-    pub requirements: GroupRequirements,
-
-    /// Group priority (0.0 to 1.0)
-    pub priority: f32,
-
-    /// Estimated execution time
-    pub estimated_duration: Duration,
-
-    /// Group tags
-    pub tags: Vec<String>,
-
-    /// Group metadata
-    pub metadata: GroupMetadata,
-}
-
-/// Group characteristics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupCharacteristics {
-    /// Group homogeneity score (0.0 to 1.0)
-    pub homogeneity: f32,
-
-    /// Resource compatibility score (0.0 to 1.0)
-    pub resource_compatibility: f32,
-
-    /// Performance predictability (0.0 to 1.0)
-    pub performance_predictability: f32,
-
-    /// Isolation level
-    pub isolation_level: IsolationLevel,
-
-    /// Parallelization efficiency (0.0 to 1.0)
-    pub parallelization_efficiency: f32,
-}
-
-/// Isolation levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum IsolationLevel {
-    /// No isolation required
-    None = 0,
-    /// Minimal isolation (shared resources OK)
-    Minimal = 1,
-    /// Moderate isolation (some resource separation)
-    Moderate = 2,
-    /// High isolation (strong resource separation)
-    High = 3,
-    /// Complete isolation (no shared resources)
-    Complete = 4,
-}
-
-/// Group execution requirements
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupRequirements {
-    /// Resource requirements
-    pub resource_requirements: Vec<ResourceRequirement>,
-
-    /// Environment requirements
-    pub environment_requirements: EnvironmentRequirements,
-
-    /// Timing constraints
-    pub timing_constraints: TimingConstraints,
-
-    /// Dependency constraints
-    pub dependency_constraints: DependencyConstraints,
-}
-
-/// Resource requirement
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ResourceRequirement {
-    /// Resource type
-    pub resource_type: String,
-
-    /// Minimum required amount
-    pub min_amount: f64,
-
-    /// Maximum required amount
-    pub max_amount: f64,
-
-    /// Requirement priority
-    pub priority: UsagePriority,
-
-    /// Requirement flexibility
-    pub flexibility: RequirementFlexibility,
-}
-
-/// Requirement flexibility levels
+/// Flexibility level for resource requirements
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequirementFlexibility {
-    /// Strict requirement (must be met exactly)
+    /// Strict - exact requirements must be met
     Strict,
-    /// Flexible requirement (can be adjusted)
+    /// Flexible - some variation is acceptable
     Flexible,
-    /// Optional requirement (nice to have)
+    /// Optional - resource is nice to have but not required
     Optional,
 }
 
-impl Default for RequirementFlexibility {
+/// Resource requirement for test execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceRequirement {
+    /// Type of resource required
+    pub resource_type: String,
+    /// Minimum amount needed
+    pub min_amount: f64,
+    /// Maximum amount that can be used
+    pub max_amount: f64,
+    /// Priority of this requirement
+    pub priority: UsagePriority,
+    /// Flexibility of the requirement
+    pub flexibility: RequirementFlexibility,
+}
+
+impl Default for ResourceRequirement {
     fn default() -> Self {
-        RequirementFlexibility::Flexible
+        Self {
+            resource_type: "cpu".to_string(),
+            min_amount: 0.0,
+            max_amount: 0.0,
+            priority: UsagePriority::Normal,
+            flexibility: RequirementFlexibility::Flexible,
+        }
     }
 }
 
-/// Environment requirements
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvironmentRequirements {
-    /// Required environment variables
-    pub environment_variables: HashMap<String, String>,
-
-    /// Required system properties
-    pub system_properties: HashMap<String, String>,
-
-    /// Required services
-    pub required_services: Vec<String>,
-
-    /// Incompatible services
-    pub incompatible_services: Vec<String>,
-}
-
-/// Timing constraints
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TimingConstraints {
-    /// Maximum execution time
-    pub max_execution_time: Duration,
-
-    /// Preferred execution time
-    pub preferred_execution_time: Duration,
-
-    /// Setup time requirements
-    pub setup_time: Duration,
-
-    /// Teardown time requirements
-    pub teardown_time: Duration,
-}
-
-/// Dependency constraints
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DependencyConstraints {
-    /// Tests that must run before this group
-    pub prerequisites: Vec<String>,
-
-    /// Tests that cannot run concurrently with this group
-    pub exclusions: Vec<String>,
-
-    /// Tests that should run after this group
-    pub dependents: Vec<String>,
-}
-
-/// Group metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupMetadata {
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
-
-    /// Creation method
-    pub created_by: String,
-
-    /// Group version
-    pub version: u64,
-
-    /// Quality metrics
-    pub quality_metrics: GroupQualityMetrics,
-
-    /// Historical performance
-    pub historical_performance: Vec<GroupPerformanceRecord>,
-}
-
-/// Group quality metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupQualityMetrics {
-    /// Cohesion score (0.0 to 1.0)
-    pub cohesion: f32,
-
-    /// Coupling score (0.0 to 1.0, lower is better)
-    pub coupling: f32,
-
-    /// Stability score (0.0 to 1.0)
-    pub stability: f32,
-
-    /// Maintainability score (0.0 to 1.0)
-    pub maintainability: f32,
-}
-
-/// Group performance record
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupPerformanceRecord {
-    /// Execution timestamp
-    pub executed_at: DateTime<Utc>,
-
-    /// Actual execution time
-    pub execution_time: Duration,
-
-    /// Success rate (0.0 to 1.0)
-    pub success_rate: f32,
-
-    /// Resource utilization
-    pub resource_utilization: HashMap<String, f32>,
-
-    /// Performance notes
-    pub notes: String,
-}
-
 // ================================================================================================
-// Configuration and Management Types
+// Analysis statistics
 // ================================================================================================
 
-/// Grouping strategy enumeration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum GroupingStrategy {
-    /// Group by test category
-    ByCategory,
-    /// Group by resource usage patterns
-    ByResourceUsage,
-    /// Group by execution time
-    ByExecutionTime,
-    /// Group by dependencies
-    ByDependencies,
-    /// Optimal grouping using ML algorithms
-    OptimalMl,
-    /// Custom grouping strategy
-    Custom(String),
+/// Statistics for independence analyses
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisStatistics {
+    /// Total number of analyses performed
+    pub total_analyses: u64,
+    /// Total number of tests analyzed
+    pub total_tests_analyzed: u64,
+    /// Total dependencies found
+    pub total_dependencies_found: u64,
+    /// Total conflicts detected
+    pub total_conflicts_detected: u64,
+    /// Total groups created
+    pub total_groups_created: u64,
+    /// Average analysis time
+    pub average_analysis_time: Duration,
 }
 
-/// Conflict detection rule
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConflictRule {
-    /// Rule name
-    pub name: String,
-
-    /// Rule description
+/// Implementation effort estimates
+#[derive(Debug, Clone)]
+pub enum ImplementationEffort {
+    /// Minimal effort (configuration change)
+    Minimal,
+    /// Low effort (simple changes)
+    Low,
+    /// Medium effort (moderate changes)
+    Medium,
+    /// High effort (significant changes)
+    High,
+    /// Very High effort (major overhaul)
+    VeryHigh,
+}
+/// Quality issues identified during analysis
+#[derive(Debug, Clone)]
+pub struct QualityIssue {
+    /// Issue type
+    pub issue_type: QualityIssueType,
+    /// Issue severity
+    pub severity: QualitySeverity,
+    /// Issue description
     pub description: String,
-
-    /// Rule pattern
-    pub pattern: ConflictPattern,
-
-    /// Rule action
-    pub action: ConflictAction,
-
-    /// Rule confidence (0.0 to 1.0)
-    pub confidence: f32,
-
-    /// Rule metadata
-    pub metadata: RuleMetadata,
+    /// Suggested remediation
+    pub remediation: Option<String>,
 }
-
-/// Conflict pattern specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ConflictPattern {
-    /// Resource ID collision
-    ResourceIdCollision,
-    /// Port range overlap
-    PortRangeOverlap,
-    /// File path overlap
-    FilePathOverlap,
-    /// Database table conflict
-    DatabaseTableConflict,
-    /// Memory region conflict
-    MemoryRegionConflict,
-    /// Custom pattern
-    Custom(String),
-}
-
-/// Conflict action specification
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ConflictAction {
-    /// Log the conflict
-    Log,
-    /// Warn about the conflict
-    Warn,
-    /// Prevent concurrent execution
-    Prevent,
-    /// Suggest resolution
-    Suggest,
-    /// Auto-resolve if possible
-    AutoResolve,
+/// Types of recommendation actions
+#[derive(Debug, Clone)]
+pub enum ActionType {
+    /// Configuration change
+    Configuration,
+    /// Code modification
+    CodeModification,
+    /// Infrastructure change
+    Infrastructure,
+    /// Process improvement
+    ProcessImprovement,
+    /// Tool integration
+    ToolIntegration,
     /// Custom action
     Custom(String),
 }
-
-/// Rule metadata
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuleMetadata {
-    /// Rule version
-    pub version: String,
-
-    /// Rule author
-    pub author: String,
-
-    /// Creation timestamp
-    pub created_at: DateTime<Utc>,
-
-    /// Last modified timestamp
-    pub modified_at: DateTime<Utc>,
-
-    /// Rule effectiveness (0.0 to 1.0)
-    pub effectiveness: f32,
-
-    /// Usage statistics
-    pub usage_stats: RuleUsageStats,
+/// Quality issue severity levels
+#[derive(Debug, Clone)]
+pub enum QualitySeverity {
+    /// Low severity (minor impact)
+    Low,
+    /// Medium severity (noticeable impact)
+    Medium,
+    /// High severity (significant impact)
+    High,
+    /// Critical severity (major impact)
+    Critical,
 }
-
-/// Rule usage statistics
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RuleUsageStats {
-    /// Number of times rule was triggered
-    pub trigger_count: u64,
-
-    /// Number of true positives
-    pub true_positives: u64,
-
-    /// Number of false positives
-    pub false_positives: u64,
-
-    /// Number of true negatives
-    pub true_negatives: u64,
-
-    /// Number of false negatives
-    pub false_negatives: u64,
-
-    /// Precision score (0.0 to 1.0)
-    pub precision: f32,
-
-    /// Recall score (0.0 to 1.0)
-    pub recall: f32,
+/// Comprehensive analysis configuration
+#[derive(Debug, Clone)]
+pub struct AnalysisConfig {
+    /// Enable advanced dependency analysis
+    pub enable_advanced_dependency_analysis: bool,
+    /// Enable machine learning-based conflict prediction
+    pub enable_ml_conflict_prediction: bool,
+    /// Enable adaptive test grouping
+    pub enable_adaptive_grouping: bool,
+    /// Maximum analysis time per test set
+    pub max_analysis_time: Duration,
+    /// Cache configuration
+    pub cache_config: analysis_cache::CacheConfig,
+    /// Conflict detection configuration
+    pub conflict_detection_config: conflict_detector::ConflictDetectionConfig,
+    /// Test grouping configuration
+    pub grouping_config: test_grouping_engine::GroupingEngineConfig,
+    /// Resource database configuration
+    pub database_config: resource_database::DatabaseConfig,
+    /// Enable detailed performance metrics
+    pub enable_performance_metrics: bool,
+    /// Analysis quality thresholds
+    pub quality_thresholds: AnalysisQualityThresholds,
 }
-
-impl RuleUsageStats {
-    /// Update statistics after rule execution
-    pub fn update(&mut self, true_positive: bool, false_positive: bool) {
-        self.trigger_count += 1;
-
-        if true_positive {
-            self.true_positives += 1;
-        }
-
-        if false_positive {
-            self.false_positives += 1;
-        }
-
-        // Update precision and recall
-        if self.true_positives + self.false_positives > 0 {
-            self.precision =
-                self.true_positives as f32 / (self.true_positives + self.false_positives) as f32;
-        }
-
-        if self.true_positives + self.false_negatives > 0 {
-            self.recall =
-                self.true_positives as f32 / (self.true_positives + self.false_negatives) as f32;
-        }
+/// Quality assessment of the analysis
+#[derive(Debug, Clone)]
+pub struct AnalysisQualityAssessment {
+    /// Overall quality score (0.0-1.0)
+    pub overall_score: f32,
+    /// Dependency detection quality
+    pub dependency_quality: f32,
+    /// Conflict detection quality
+    pub conflict_quality: f32,
+    /// Grouping quality
+    pub grouping_quality: f32,
+    /// Completeness score
+    pub completeness_score: f32,
+    /// Confidence level
+    pub confidence_level: f32,
+    /// Quality issues found
+    pub quality_issues: Vec<QualityIssue>,
+}
+/// Performance metrics for individual analysis steps
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisStepMetrics {
+    /// Step execution time
+    pub execution_time: Duration,
+    /// Number of items processed
+    pub items_processed: usize,
+    /// Processing throughput
+    pub throughput: f32,
+    /// Cache hit rate for this step
+    pub cache_hit_rate: f32,
+    /// Error rate during processing
+    pub error_rate: f32,
+}
+/// Quality thresholds for analysis validation
+#[derive(Debug, Clone)]
+pub struct AnalysisQualityThresholds {
+    /// Minimum acceptable dependency detection accuracy
+    pub min_dependency_accuracy: f32,
+    /// Minimum acceptable conflict detection accuracy
+    pub min_conflict_accuracy: f32,
+    /// Minimum acceptable grouping quality score
+    pub min_grouping_quality: f32,
+    /// Maximum acceptable analysis time
+    pub max_analysis_time: Duration,
+}
+/// Recommendation action
+#[derive(Debug, Clone)]
+pub struct RecommendationAction {
+    /// Action description
+    pub description: String,
+    /// Action type
+    pub action_type: ActionType,
+    /// Estimated time to complete
+    pub estimated_time: Duration,
+    /// Required resources
+    pub required_resources: Vec<String>,
+}
+/// Memory usage metrics
+#[derive(Debug, Clone, Default)]
+pub struct MemoryUsageMetrics {
+    /// Peak memory usage during analysis
+    pub peak_usage_mb: f32,
+    /// Average memory usage
+    pub average_usage_mb: f32,
+    /// Memory allocation rate
+    pub allocation_rate_mb_per_sec: f32,
+    /// Memory efficiency score
+    pub efficiency_score: f32,
+}
+/// Main Test Independence Analyzer with comprehensive capabilities
+#[derive(Debug)]
+pub struct TestIndependenceAnalyzer {
+    /// Analysis configuration
+    config: Arc<RwLock<AnalysisConfig>>,
+    /// Analysis cache for storing computed results
+    _analysis_cache: Arc<AnalysisCache>,
+    /// Dependency graph management
+    dependency_graph: Arc<dependency_graph::DependencyGraph>,
+    /// Resource usage database
+    resource_database: Arc<resource_database::ResourceUsageDatabase>,
+    /// Conflict detection engine
+    conflict_detector: Arc<conflict_detector::ConflictDetector>,
+    /// Test grouping engine
+    grouping_engine: Arc<test_grouping_engine::TestGroupingEngine>,
+    /// Analysis statistics and metrics
+    analysis_stats: Arc<Mutex<AnalysisStatistics>>,
+    /// Performance metrics tracking
+    performance_metrics: Arc<Mutex<AnalysisPerformanceMetrics>>,
+}
+impl TestIndependenceAnalyzer {
+    /// Create a new test independence analyzer with default configuration
+    pub fn new() -> Self {
+        Self::with_config(AnalysisConfig::default())
     }
-}
-
-// ================================================================================================
-// Analysis Statistics Types
-// ================================================================================================
-
-/// Analysis statistics
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct AnalysisStatistics {
-    /// Total analyses performed
-    pub total_analyses: u64,
-
-    /// Successful analyses
-    pub successful_analyses: u64,
-
-    /// Failed analyses
-    pub failed_analyses: u64,
-
-    /// Average analysis time
-    pub average_analysis_time: Duration,
-
-    /// Analysis performance by type
-    pub performance_by_type: HashMap<String, AnalysisPerformanceMetrics>,
-
-    /// Cache performance
-    pub cache_statistics: CacheStatistics,
-}
-
-/// Analysis performance metrics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AnalysisPerformanceMetrics {
-    /// Total executions
-    pub total_executions: u64,
-
-    /// Average execution time
-    pub average_execution_time: Duration,
-
-    /// Minimum execution time
-    pub min_execution_time: Duration,
-
-    /// Maximum execution time
-    pub max_execution_time: Duration,
-
-    /// Success rate (0.0 to 1.0)
-    pub success_rate: f32,
-
-    /// Confidence distribution
-    pub confidence_distribution: ConfidenceDistribution,
-}
-
-/// Confidence distribution
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConfidenceDistribution {
-    /// Very low confidence (0.0-0.2)
-    pub very_low: u64,
-
-    /// Low confidence (0.2-0.4)
-    pub low: u64,
-
-    /// Medium confidence (0.4-0.6)
-    pub medium: u64,
-
-    /// High confidence (0.6-0.8)
-    pub high: u64,
-
-    /// Very high confidence (0.8-1.0)
-    pub very_high: u64,
-}
-
-impl ConfidenceDistribution {
-    /// Add a confidence score to the distribution
-    pub fn add_confidence(&mut self, confidence: f32) {
-        match confidence {
-            c if c < 0.2 => self.very_low += 1,
-            c if c < 0.4 => self.low += 1,
-            c if c < 0.6 => self.medium += 1,
-            c if c < 0.8 => self.high += 1,
-            _ => self.very_high += 1,
-        }
-    }
-}
-
-// ============================================================================
-// Additional Test Independence Analyzer Types
-// ============================================================================
-
-/// Database statistics for resource database
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DatabaseStatistics {
-    /// Total resources tracked
-    pub total_resources: u64,
-    /// Active resources
-    pub active_resources: u32,
-    /// Database size in bytes
-    pub database_size: u64,
-    /// Query count
-    pub query_count: u64,
-    /// Average query time
-    pub avg_query_time: Duration,
-    /// Cache hit rate
-    pub cache_hit_rate: f64,
-}
-
-impl Default for DatabaseStatistics {
-    fn default() -> Self {
+    /// Create a new test independence analyzer with custom configuration
+    pub fn with_config(config: AnalysisConfig) -> Self {
+        let analysis_cache = Arc::new(AnalysisCache::with_config(config.cache_config.clone()));
+        let dependency_graph = Arc::new(dependency_graph::DependencyGraph::new());
+        let resource_database = Arc::new(resource_database::ResourceUsageDatabase::with_config(
+            config.database_config.clone(),
+        ));
+        let conflict_detector = Arc::new(conflict_detector::ConflictDetector::with_config(
+            config.conflict_detection_config.clone(),
+        ));
+        let grouping_engine = Arc::new(test_grouping_engine::TestGroupingEngine::with_config(
+            config.grouping_config.clone(),
+        ));
         Self {
-            total_resources: 0,
-            active_resources: 0,
-            database_size: 0,
-            query_count: 0,
-            avg_query_time: Duration::from_secs(0),
-            cache_hit_rate: 0.0,
+            config: Arc::new(RwLock::new(config)),
+            _analysis_cache: analysis_cache,
+            dependency_graph,
+            resource_database,
+            conflict_detector,
+            grouping_engine,
+            analysis_stats: Arc::new(Mutex::new(AnalysisStatistics::default())),
+            performance_metrics: Arc::new(Mutex::new(AnalysisPerformanceMetrics::default())),
         }
     }
+    /// Analyze test independence for a set of tests
+    pub async fn analyze_test_independence(
+        &self,
+        tests: &[TestExecutionContext],
+    ) -> Result<TestIndependenceAnalysis> {
+        let start_time = Instant::now();
+        let analysis_started_at = Utc::now();
+        info!(
+            "Starting comprehensive independence analysis for {} tests",
+            tests.len()
+        );
+        let config = self.config.read();
+        if start_time.elapsed() > config.max_analysis_time {
+            return Err(AnalysisError::InternalError {
+                message: format!(
+                    "Analysis timeout: test independence analysis exceeded {:?}",
+                    config.max_analysis_time
+                ),
+            }
+            .into());
+        }
+        let step_start = Instant::now();
+        let metadata = self.build_comprehensive_test_metadata(tests).await?;
+        let _metadata_step_metrics = AnalysisStepMetrics {
+            execution_time: step_start.elapsed(),
+            items_processed: tests.len(),
+            throughput: tests.len() as f32 / step_start.elapsed().as_secs_f32(),
+            cache_hit_rate: 0.0,
+            error_rate: 0.0,
+        };
+        let step_start = Instant::now();
+        let dependencies = if config.enable_advanced_dependency_analysis {
+            self.perform_advanced_dependency_analysis(&metadata).await?
+        } else {
+            self.perform_basic_dependency_analysis(&metadata).await?
+        };
+        let dependency_step_metrics = AnalysisStepMetrics {
+            execution_time: step_start.elapsed(),
+            items_processed: metadata.len(),
+            throughput: metadata.len() as f32 / step_start.elapsed().as_secs_f32(),
+            cache_hit_rate: 0.0,
+            error_rate: 0.0,
+        };
+        let step_start = Instant::now();
+        let conflicts = self.detect_comprehensive_conflicts(&metadata).await?;
+        let conflict_step_metrics = AnalysisStepMetrics {
+            execution_time: step_start.elapsed(),
+            items_processed: metadata.len(),
+            throughput: metadata.len() as f32 / step_start.elapsed().as_secs_f32(),
+            cache_hit_rate: 0.0,
+            error_rate: 0.0,
+        };
+        let step_start = Instant::now();
+        let groups = self
+            .create_intelligent_test_groups(&metadata, &dependencies, &conflicts)
+            .await?;
+        let grouping_step_metrics = AnalysisStepMetrics {
+            execution_time: step_start.elapsed(),
+            items_processed: metadata.len(),
+            throughput: metadata.len() as f32 / step_start.elapsed().as_secs_f32(),
+            cache_hit_rate: 0.0,
+            error_rate: 0.0,
+        };
+        let total_duration = start_time.elapsed();
+        let analysis_completed_at = Utc::now();
+        let performance_metrics = AnalysisPerformanceMetrics {
+            dependency_analysis: dependency_step_metrics,
+            conflict_detection: conflict_step_metrics,
+            test_grouping: grouping_step_metrics,
+            cache_performance: self.get_cache_performance_metrics(),
+            overall_throughput: tests.len() as f32 / total_duration.as_secs_f32(),
+            memory_usage: self.get_memory_usage_metrics(),
+        };
+        let quality_assessment =
+            self.assess_analysis_quality(&dependencies, &conflicts, &groups).await;
+        let recommendations = self
+            .generate_comprehensive_recommendations(
+                &metadata,
+                &dependencies,
+                &conflicts,
+                &groups,
+                &quality_assessment,
+            )
+            .await;
+        let analysis_metadata = AnalysisMetadata {
+            started_at: analysis_started_at,
+            completed_at: analysis_completed_at,
+            analysis_duration: total_duration,
+            analyzer_version: env!("CARGO_PKG_VERSION").to_string(),
+            configuration_summary: self.create_configuration_summary(&config),
+            analysis_quality: quality_assessment.overall_score,
+            recommendations: recommendations.clone(),
+        };
+        let analysis = TestIndependenceAnalysis {
+            tests: metadata,
+            dependencies,
+            conflicts,
+            groups,
+            analysis_metadata,
+            performance_metrics,
+            quality_assessment,
+        };
+        self.update_comprehensive_analysis_statistics(&analysis).await;
+        info!(
+            "Independence analysis completed in {:?} with quality score {:.2}",
+            total_duration, analysis.quality_assessment.overall_score
+        );
+        Ok(analysis)
+    }
+    /// Build comprehensive test metadata with enhanced analysis
+    async fn build_comprehensive_test_metadata(
+        &self,
+        tests: &[TestExecutionContext],
+    ) -> Result<Vec<TestParallelizationMetadata>> {
+        let mut metadata = Vec::new();
+        for test in tests {
+            let test_metadata = self.build_enhanced_test_metadata(test).await?;
+            let test_metadata_clone = test_metadata.clone();
+            metadata.push(test_metadata);
+            let usage_record =
+                self.create_resource_usage_record(test, &test_metadata_clone).await?;
+            self.resource_database
+                .record_usage(usage_record)
+                .map_err(|e| anyhow::anyhow!(e))?;
+        }
+        Ok(metadata)
+    }
+    /// Build enhanced metadata for a single test
+    async fn build_enhanced_test_metadata(
+        &self,
+        test: &TestExecutionContext,
+    ) -> Result<TestParallelizationMetadata> {
+        let resource_usage = self.analyze_comprehensive_resource_usage(test).await?;
+        let dependencies = self.detect_enhanced_test_dependencies(test).await?;
+        let isolation_requirements = self.determine_enhanced_isolation_requirements(test).await?;
+        let parallelization_hints = self.generate_enhanced_parallelization_hints(test).await?;
+        let tags = self.extract_comprehensive_test_tags(test).await?;
+        let priority = self.calculate_enhanced_test_priority(test).await?;
+        let metadata = TestParallelizationMetadata {
+            base_context: test.clone(),
+            dependencies,
+            resource_usage,
+            isolation_requirements,
+            tags,
+            priority,
+            parallelization_hints,
+        };
+        Ok(metadata)
+    }
+    /// Perform advanced dependency analysis
+    async fn perform_advanced_dependency_analysis(
+        &self,
+        metadata: &[TestParallelizationMetadata],
+    ) -> Result<Vec<TestDependency>> {
+        let mut all_dependencies = Vec::new();
+        for test_metadata in metadata {
+            for dependency in &test_metadata.dependencies {
+                self.dependency_graph
+                    .add_edge(
+                        &dependency.dependent_test,
+                        &dependency.dependency_test,
+                        dependency.clone(),
+                        dependency.strength,
+                    )
+                    .map_err(|e| anyhow::anyhow!(e))?;
+            }
+        }
+        let cycles = self.dependency_graph.detect_cycles().map_err(|e| anyhow::anyhow!(e))?;
+        if !cycles.is_empty() {
+            warn!("Detected {} dependency cycles", cycles.len());
+        }
+        for test_metadata in metadata {
+            all_dependencies.extend(test_metadata.dependencies.clone());
+        }
+        Ok(all_dependencies)
+    }
+    /// Perform basic dependency analysis
+    async fn perform_basic_dependency_analysis(
+        &self,
+        metadata: &[TestParallelizationMetadata],
+    ) -> Result<Vec<TestDependency>> {
+        let mut all_dependencies = Vec::new();
+        for test_metadata in metadata {
+            all_dependencies.extend(test_metadata.dependencies.clone());
+        }
+        Ok(all_dependencies)
+    }
+    /// Detect comprehensive conflicts using all available methods
+    async fn detect_comprehensive_conflicts(
+        &self,
+        metadata: &[TestParallelizationMetadata],
+    ) -> Result<Vec<ResourceConflict>> {
+        let detected_conflicts = self
+            .conflict_detector
+            .detect_conflicts_in_test_set(metadata)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        let conflicts: Vec<ResourceConflict> =
+            detected_conflicts.into_iter().map(|dc| dc.conflict_info).collect();
+        Ok(conflicts)
+    }
+    /// Create intelligent test groups using advanced algorithms
+    async fn create_intelligent_test_groups(
+        &self,
+        metadata: &[TestParallelizationMetadata],
+        dependencies: &[TestDependency],
+        conflicts: &[ResourceConflict],
+    ) -> Result<Vec<TestGroup>> {
+        let groups = self
+            .grouping_engine
+            .create_test_groups(metadata, dependencies, conflicts)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(groups)
+    }
+    /// Generate comprehensive recommendations based on analysis results
+    async fn generate_comprehensive_recommendations(
+        &self,
+        _metadata: &[TestParallelizationMetadata],
+        dependencies: &[TestDependency],
+        conflicts: &[ResourceConflict],
+        groups: &[TestGroup],
+        quality_assessment: &AnalysisQualityAssessment,
+    ) -> Vec<AnalysisRecommendation> {
+        let mut recommendations = Vec::new();
+        if !conflicts.is_empty() {
+            recommendations
+                .push(AnalysisRecommendation {
+                    recommendation_type: AnalysisRecommendationType::ResolveConflicts,
+                    priority: RecommendationPriority::High,
+                    title: "Resolve Resource Conflicts".to_string(),
+                    description: format!(
+                        "Found {} resource conflicts that may impact test execution. Consider implementing conflict resolution strategies.",
+                        conflicts.len()
+                    ),
+                    expected_impact: 0.3,
+                    implementation_effort: ImplementationEffort::Medium,
+                    actions: vec![
+                        RecommendationAction { description :
+                        "Review conflicting tests and implement resource isolation"
+                        .to_string(), action_type : ActionType::CodeModification,
+                        estimated_time : < Duration as DurationExt >::from_hours(8),
+                        required_resources : vec!["Developer time".to_string()], },
+                    ],
+                });
+        }
+        if dependencies.len() > groups.len() * 2 {
+            recommendations.push(AnalysisRecommendation {
+                recommendation_type: AnalysisRecommendationType::AddDependencies,
+                priority: RecommendationPriority::Medium,
+                title: "Optimize Test Dependencies".to_string(),
+                description: "High dependency count may limit parallelization effectiveness"
+                    .to_string(),
+                expected_impact: 0.2,
+                implementation_effort: ImplementationEffort::Medium,
+                actions: vec![],
+            });
+        }
+        let avg_group_quality =
+            groups.iter().map(|g| g.characteristics.overall_quality).sum::<f32>()
+                / groups.len() as f32;
+        if avg_group_quality < 0.7 {
+            recommendations.push(AnalysisRecommendation {
+                recommendation_type: AnalysisRecommendationType::OptimizeGrouping,
+                priority: RecommendationPriority::Medium,
+                title: "Improve Test Grouping Quality".to_string(),
+                description: "Current test groups have suboptimal quality scores".to_string(),
+                expected_impact: 0.25,
+                implementation_effort: ImplementationEffort::Low,
+                actions: vec![],
+            });
+        }
+        if quality_assessment.overall_score < 0.8 {
+            recommendations.push(AnalysisRecommendation {
+                recommendation_type: AnalysisRecommendationType::ImproveTestDesign,
+                priority: RecommendationPriority::Medium,
+                title: "Improve Overall Test Design".to_string(),
+                description: "Analysis quality suggests opportunities for test design improvements"
+                    .to_string(),
+                expected_impact: 0.3,
+                implementation_effort: ImplementationEffort::High,
+                actions: vec![],
+            });
+        }
+        recommendations
+    }
+    /// Assess the quality of the analysis results
+    async fn assess_analysis_quality(
+        &self,
+        dependencies: &[TestDependency],
+        conflicts: &[ResourceConflict],
+        groups: &[TestGroup],
+    ) -> AnalysisQualityAssessment {
+        let dependency_quality = self.assess_dependency_quality(dependencies);
+        let conflict_quality = self.assess_conflict_quality(conflicts);
+        let grouping_quality = self.assess_grouping_quality(groups);
+        let completeness_score = 0.8;
+        let confidence_level = 0.75;
+        let overall_score = (dependency_quality * 0.25
+            + conflict_quality * 0.3
+            + grouping_quality * 0.3
+            + completeness_score * 0.1
+            + confidence_level * 0.05)
+            .min(1.0)
+            .max(0.0);
+        let mut quality_issues = Vec::new();
+        if dependency_quality < 0.7 {
+            quality_issues.push(QualityIssue {
+                issue_type: QualityIssueType::IncompleteDependencyDetection,
+                severity: QualitySeverity::Medium,
+                description: "Dependency detection quality is below threshold".to_string(),
+                remediation: Some("Review and enhance dependency detection algorithms".to_string()),
+            });
+        }
+        if conflict_quality < 0.8 {
+            quality_issues.push(QualityIssue {
+                issue_type: QualityIssueType::FalsePositiveConflicts,
+                severity: QualitySeverity::Low,
+                description: "Potential false positive conflicts detected".to_string(),
+                remediation: Some("Refine conflict detection rules and thresholds".to_string()),
+            });
+        }
+        AnalysisQualityAssessment {
+            overall_score,
+            dependency_quality,
+            conflict_quality,
+            grouping_quality,
+            completeness_score,
+            confidence_level,
+            quality_issues,
+        }
+    }
+    /// Helper methods for quality assessment
+    fn assess_dependency_quality(&self, dependencies: &[TestDependency]) -> f32 {
+        if dependencies.is_empty() {
+            return 1.0;
+        }
+        let avg_strength =
+            dependencies.iter().map(|d| d.strength).sum::<f32>() / dependencies.len() as f32;
+        avg_strength.clamp(0.0, 1.0)
+    }
+    fn assess_conflict_quality(&self, conflicts: &[ResourceConflict]) -> f32 {
+        if conflicts.is_empty() {
+            return 1.0;
+        }
+        let high_severity_conflicts = conflicts
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.severity,
+                    ConflictSeverity::High | ConflictSeverity::Critical
+                )
+            })
+            .count();
+        let quality = 1.0 - (high_severity_conflicts as f32 / conflicts.len() as f32 * 0.5);
+        quality.clamp(0.0, 1.0)
+    }
+    fn assess_grouping_quality(&self, groups: &[TestGroup]) -> f32 {
+        if groups.is_empty() {
+            return 0.0;
+        }
+        groups.iter().map(|g| g.characteristics.overall_quality).sum::<f32>() / groups.len() as f32
+    }
+    /// Helper methods for resource analysis (stub implementations)
+    async fn analyze_comprehensive_resource_usage(
+        &self,
+        test: &TestExecutionContext,
+    ) -> Result<TestResourceUsage> {
+        let hints = &test.complexity_hints;
+        let cpu_cores = match test.category {
+            TestCategory::Unit => 0.1,
+            TestCategory::Integration => 0.5,
+            TestCategory::Stress => hints.concurrency_level.unwrap_or(4) as f32 * 0.8,
+            TestCategory::Property => 0.3,
+            TestCategory::Chaos => 1.0,
+            _ => 0.5,
+        };
+        let memory_mb = hints.memory_usage.unwrap_or_else(|| match test.category {
+            TestCategory::Unit => 64,
+            TestCategory::Integration => 256,
+            TestCategory::Stress => 1024,
+            TestCategory::Property => 128,
+            TestCategory::Chaos => 512,
+            _ => 256,
+        });
+        let duration = test.expected_duration.unwrap_or_else(|| match test.category {
+            TestCategory::Unit => Duration::from_secs(5),
+            TestCategory::Integration => Duration::from_secs(30),
+            TestCategory::Stress => Duration::from_secs(300),
+            TestCategory::Property => Duration::from_secs(60),
+            TestCategory::Chaos => Duration::from_secs(180),
+            _ => Duration::from_secs(30),
+        });
+        Ok(TestResourceUsage {
+            test_id: test.test_name.clone(),
+            cpu_cores,
+            memory_mb,
+            gpu_devices: if hints.gpu_operations { vec![0] } else { vec![] },
+            network_ports: if hints.network_operations { vec![8080] } else { vec![] },
+            temp_directories: if hints.file_operations {
+                vec![format!("/tmp/test_{}", test.test_name)]
+            } else {
+                vec![]
+            },
+            database_connections: if hints.database_operations { 1 } else { 0 },
+            duration,
+            priority: test.category.optimization_priority(),
+        })
+    }
+    async fn detect_enhanced_test_dependencies(
+        &self,
+        _test: &TestExecutionContext,
+    ) -> Result<Vec<TestDependency>> {
+        Ok(vec![])
+    }
+    async fn determine_enhanced_isolation_requirements(
+        &self,
+        test: &TestExecutionContext,
+    ) -> Result<IsolationRequirements> {
+        let hints = &test.complexity_hints;
+        Ok(IsolationRequirements {
+            process_isolation: matches!(test.category, TestCategory::Chaos | TestCategory::Stress),
+            network_isolation: hints.network_operations && test.category != TestCategory::Unit,
+            filesystem_isolation: hints.file_operations,
+            database_isolation: hints.database_operations,
+            gpu_isolation: hints.gpu_operations,
+            custom_isolation: HashMap::new(),
+        })
+    }
+    async fn generate_enhanced_parallelization_hints(
+        &self,
+        test: &TestExecutionContext,
+    ) -> Result<ParallelizationHints> {
+        let hints = &test.complexity_hints;
+        use crate::test_parallelization::ResourceSharingCapabilities;
+        Ok(ParallelizationHints {
+            parallel_within_category: matches!(
+                test.category,
+                TestCategory::Unit | TestCategory::Property
+            ),
+            parallel_with_any: matches!(test.category, TestCategory::Unit)
+                && !hints.gpu_operations
+                && !hints.database_operations,
+            sequential_only: matches!(test.category, TestCategory::Chaos)
+                || (hints.database_operations && hints.network_operations),
+            preferred_batch_size: hints.concurrency_level.map(|c| c.min(8)),
+            optimal_concurrency: hints.concurrency_level,
+            resource_sharing: ResourceSharingCapabilities {
+                cpu_sharing: !matches!(test.category, TestCategory::Stress),
+                memory_sharing: false,
+                gpu_sharing: false,
+                network_sharing: !hints.network_operations,
+                filesystem_sharing: !hints.file_operations,
+            },
+        })
+    }
+    async fn extract_comprehensive_test_tags(
+        &self,
+        test: &TestExecutionContext,
+    ) -> Result<Vec<String>> {
+        let mut tags = vec![
+            format!("category:{:?}", test.category),
+            format!("environment:{}", test.environment),
+        ];
+        let hints = &test.complexity_hints;
+        if let Some(concurrency) = hints.concurrency_level {
+            tags.push(format!("concurrency:{}", concurrency));
+        }
+        if let Some(memory) = hints.memory_usage {
+            tags.push(format!("memory:{}mb", memory));
+        }
+        if hints.network_operations {
+            tags.push("network".to_string());
+        }
+        if hints.gpu_operations {
+            tags.push("gpu".to_string());
+        }
+        if hints.database_operations {
+            tags.push("database".to_string());
+        }
+        if hints.file_operations {
+            tags.push("filesystem".to_string());
+        }
+        Ok(tags)
+    }
+    async fn calculate_enhanced_test_priority(&self, test: &TestExecutionContext) -> Result<f32> {
+        let base_priority = test.category.optimization_priority();
+        let mut priority = base_priority;
+        if let Some(concurrency) = test.complexity_hints.concurrency_level {
+            if concurrency > 10 {
+                priority *= 0.8;
+            }
+        }
+        if let Some(memory) = test.complexity_hints.memory_usage {
+            if memory > 1000 {
+                priority *= 0.9;
+            }
+        }
+        Ok(priority)
+    }
+    async fn create_resource_usage_record(
+        &self,
+        test: &TestExecutionContext,
+        _metadata: &TestParallelizationMetadata,
+    ) -> Result<resource_database::ResourceUsageRecord> {
+        Ok(resource_database::ResourceUsageRecord {
+            id: format!("record_{}_{}", test.test_name, Utc::now().timestamp()),
+            test_id: test.test_name.clone(),
+            resource_type: "CPU".to_string(),
+            resource_id: "cpu_0".to_string(),
+            start_time: Utc::now(),
+            duration: test.expected_duration.unwrap_or(Duration::from_secs(30)),
+            usage_amount: 0.5,
+            efficiency: 0.8,
+            concurrent_users: 1,
+            peak_usage: 0.6,
+            average_usage: 0.5,
+            usage_variance: 0.1,
+            performance_metrics: resource_database::UsagePerformanceMetrics::default(),
+            tags: vec![],
+            metadata: HashMap::new(),
+        })
+    }
+    fn get_cache_performance_metrics(&self) -> CachePerformanceMetrics {
+        CachePerformanceMetrics::default()
+    }
+    fn get_memory_usage_metrics(&self) -> MemoryUsageMetrics {
+        MemoryUsageMetrics::default()
+    }
+    fn create_configuration_summary(&self, _config: &AnalysisConfig) -> String {
+        "Advanced analysis with ML conflict prediction and adaptive grouping".to_string()
+    }
+    async fn update_comprehensive_analysis_statistics(&self, _analysis: &TestIndependenceAnalysis) {
+        let mut stats = self.analysis_stats.lock();
+        stats.total_analyses += 1;
+    }
+    /// Get analysis statistics
+    pub fn get_analysis_statistics(&self) -> AnalysisStatistics {
+        (*self.analysis_stats.lock()).clone()
+    }
+    /// Get performance metrics
+    pub fn get_performance_metrics(&self) -> AnalysisPerformanceMetrics {
+        (*self.performance_metrics.lock()).clone()
+    }
+    /// Update analyzer configuration
+    pub fn update_config(&self, new_config: AnalysisConfig) {
+        *self.config.write() = new_config;
+    }
+    /// Get current configuration
+    pub fn get_config(&self) -> AnalysisConfig {
+        (*self.config.read()).clone()
+    }
 }
-
-/// Comparison operator for test grouping rules
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ComparisonOperator {
-    /// Equal to
-    Equal,
-    /// Not equal to
-    NotEqual,
-    /// Greater than
-    GreaterThan,
-    /// Less than
-    LessThan,
-    /// Greater than or equal
-    GreaterThanOrEqual,
-    /// Less than or equal
-    LessThanOrEqual,
-    /// Contains
-    Contains,
-    /// Not contains
-    NotContains,
-    /// Matches regex
-    Matches,
+/// Analysis recommendation
+#[derive(Debug, Clone)]
+pub struct AnalysisRecommendation {
+    /// Recommendation type
+    pub recommendation_type: AnalysisRecommendationType,
+    /// Recommendation priority
+    pub priority: RecommendationPriority,
+    /// Recommendation title
+    pub title: String,
+    /// Detailed description
+    pub description: String,
+    /// Expected impact
+    pub expected_impact: f32,
+    /// Implementation effort
+    pub implementation_effort: ImplementationEffort,
+    /// Specific actions to take
+    pub actions: Vec<RecommendationAction>,
+}
+/// Complete test independence analysis result
+#[derive(Debug, Clone)]
+pub struct TestIndependenceAnalysis {
+    /// Test metadata for all analyzed tests
+    pub tests: Vec<TestParallelizationMetadata>,
+    /// Detected dependencies between tests
+    pub dependencies: Vec<TestDependency>,
+    /// Detected resource conflicts
+    pub conflicts: Vec<ResourceConflict>,
+    /// Recommended test groups for parallel execution
+    pub groups: Vec<TestGroup>,
+    /// Analysis metadata and statistics
+    pub analysis_metadata: AnalysisMetadata,
+    /// Performance metrics for this analysis
+    pub performance_metrics: AnalysisPerformanceMetrics,
+    /// Quality assessment of the analysis
+    pub quality_assessment: AnalysisQualityAssessment,
+}
+/// Analysis performance metrics
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisPerformanceMetrics {
+    /// Dependency analysis performance
+    pub dependency_analysis: AnalysisStepMetrics,
+    /// Conflict detection performance
+    pub conflict_detection: AnalysisStepMetrics,
+    /// Test grouping performance
+    pub test_grouping: AnalysisStepMetrics,
+    /// Cache performance metrics
+    pub cache_performance: CachePerformanceMetrics,
+    /// Overall analysis throughput
+    pub overall_throughput: f32,
+    /// Memory usage during analysis
+    pub memory_usage: MemoryUsageMetrics,
+}
+/// Cache performance metrics
+#[derive(Debug, Clone, Default)]
+pub struct CachePerformanceMetrics {
+    /// Overall cache hit rate
+    pub hit_rate: f32,
+    /// Cache miss rate
+    pub miss_rate: f32,
+    /// Cache eviction rate
+    pub eviction_rate: f32,
+    /// Average cache lookup time
+    pub average_lookup_time: Duration,
+    /// Memory usage by cache
+    pub memory_usage_bytes: u64,
+}
+/// Types of analysis recommendations
+#[derive(Debug, Clone)]
+pub enum AnalysisRecommendationType {
+    /// Optimize test grouping
+    OptimizeGrouping,
+    /// Resolve resource conflicts
+    ResolveConflicts,
+    /// Improve test isolation
+    ImproveIsolation,
+    /// Add missing dependencies
+    AddDependencies,
+    /// Optimize resource usage
+    OptimizeResourceUsage,
+    /// Improve test design
+    ImproveTestDesign,
+    /// Infrastructure improvements
+    InfrastructureImprovements,
+    /// Custom recommendation
+    Custom(String),
+}
+/// Analysis metadata and information
+#[derive(Debug, Clone)]
+pub struct AnalysisMetadata {
+    /// Analysis start timestamp
+    pub started_at: DateTime<Utc>,
+    /// Analysis completion timestamp
+    pub completed_at: DateTime<Utc>,
+    /// Total analysis duration
+    pub analysis_duration: Duration,
+    /// Analyzer version and configuration
+    pub analyzer_version: String,
+    /// Analysis configuration used
+    pub configuration_summary: String,
+    /// Analysis quality score (0.0-1.0)
+    pub analysis_quality: f32,
+    /// Generated recommendations
+    pub recommendations: Vec<AnalysisRecommendation>,
+}
+/// Recommendation priority levels
+#[derive(Debug, Clone)]
+pub enum RecommendationPriority {
+    /// Low priority
+    Low,
+    /// Medium priority
+    Medium,
+    /// High priority
+    High,
+    /// Critical priority
+    Critical,
+}
+/// Types of quality issues
+#[derive(Debug, Clone)]
+pub enum QualityIssueType {
+    /// Incomplete dependency detection
+    IncompleteDependencyDetection,
+    /// False positive conflicts
+    FalsePositiveConflicts,
+    /// Suboptimal grouping
+    SuboptimalGrouping,
+    /// Insufficient data quality
+    InsufficientDataQuality,
+    /// Performance issues
+    PerformanceIssues,
+    /// Custom issue type
+    Custom(String),
 }

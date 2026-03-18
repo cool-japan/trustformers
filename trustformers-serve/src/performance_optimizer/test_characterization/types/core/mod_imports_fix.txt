@@ -1,0 +1,7 @@
+# Fix imports in mod.rs - remove incorrect imports and use local definitions
+
+Remove these lines from mod.rs imports (around line 54-67):
+- CycleDetectionAlgorithm, OrderedLockingStrategy, PredictiveDeadlockAlgorithm from locking imports
+- ForkJoinDetection, MasterWorkerDetection, PipelineDetection, ProducerConsumerDetection from patterns imports
+
+These types are now defined locally in mod.rs where they're used.

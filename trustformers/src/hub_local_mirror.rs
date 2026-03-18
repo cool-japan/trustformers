@@ -267,7 +267,14 @@ impl HubMirror {
             .join(version)
             .join("model.safetensors");
 
-        fs::create_dir_all(local_path.parent().unwrap()).map_err(|e| {
+        let parent_dir = local_path.parent().ok_or_else(|| {
+            TrustformersError::Core(CoreTrustformersError::other(format!(
+                "Failed to get parent directory for path: {}",
+                local_path.display()
+            )))
+        })?;
+
+        fs::create_dir_all(parent_dir).map_err(|e| {
             TrustformersError::Core(CoreTrustformersError::other(format!(
                 "Failed to create model directory: {}",
                 e

@@ -272,7 +272,7 @@ impl PruningStrategy for UnstructuredPruner {
 
             // Fisher-Yates shuffle
             for i in (1..indices.len()).rev() {
-                let j = rng.gen_range(0..=i);
+                let j = rng.random_range(0..=i);
                 indices.swap(i, j);
             }
 
@@ -299,7 +299,7 @@ impl PruningStrategy for UnstructuredPruner {
             let mut indices: Vec<usize> = (0..data.len()).collect();
 
             for i in (1..indices.len()).rev() {
-                let j = rng.gen_range(0..=i);
+                let j = rng.random_range(0..=i);
                 indices.swap(i, j);
             }
 

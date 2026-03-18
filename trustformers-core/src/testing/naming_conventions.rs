@@ -776,7 +776,7 @@ impl NamingReport {
         }
 
         let mut sorted_patterns: Vec<(String, usize)> = violation_patterns.into_iter().collect();
-        sorted_patterns.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_patterns.sort_by_key(|item| std::cmp::Reverse(item.1));
         self.summary.most_common_violations = sorted_patterns.into_iter().take(10).collect();
     }
 
@@ -933,11 +933,9 @@ impl NamingCli {
         let mut i = 2;
         while i < args.len() {
             match args[i].as_str() {
-                "--config" => {
-                    if i + 1 < args.len() {
-                        // Load custom config (implementation omitted for brevity)
-                        i += 1;
-                    }
+                "--config" if i + 1 < args.len() => {
+                    // Load custom config (implementation omitted for brevity)
+                    i += 1;
                 },
                 "--json" => {
                     json_output = true;

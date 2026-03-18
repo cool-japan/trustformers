@@ -90,7 +90,7 @@ impl MetalBackend {
         let result = unsafe { std::slice::from_raw_parts(result_ptr, result_size) }.to_vec();
         Ok(result)
     }
-    /// Download a GPU buffer to CPU as a Vec<f32>
+    /// Download a GPU buffer to CPU as a `Vec<f32>`
     pub fn download_buffer_to_vec(&self, buffer_id: &BufferId) -> Result<Vec<f32>> {
         let buffer = self.get_persistent_buffer(buffer_id)?;
         let size = buffer.length() as usize / mem::size_of::<f32>();

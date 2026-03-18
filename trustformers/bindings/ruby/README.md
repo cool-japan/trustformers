@@ -2,7 +2,7 @@
 
 [![Ruby](https://img.shields.io/badge/Ruby-3.0+-red.svg)](https://ruby-lang.org)
 [![Gem Version](https://badge.fury.io/rb/trustformers.svg)](https://badge.fury.io/rb/trustformers)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 Ruby bindings for TrustFormeRS, providing high-performance transformer models with an idiomatic Ruby interface.
 
@@ -577,7 +577,7 @@ bundle exec rake test
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](../../LICENSE) file for details.
+This project is licensed under the Apache-2.0 License - see the [LICENSE](../../LICENSE) file for details.
 
 ## Acknowledgments
 

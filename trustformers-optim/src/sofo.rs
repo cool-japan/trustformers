@@ -338,15 +338,17 @@ impl SOFO {
             // Compute curvature estimate using multiple forward passes
             for directions in &direction_sets {
                 if let Some(direction) = directions.get(param_name) {
-                    // Compute Hessian-vector product approximation
-                    let hvp = self.compute_hessian_vector_product(
-                        parameters.get(param_name).unwrap(),
-                        gradient,
-                        direction
-                    )?;
+                    if let Some(parameter) = parameters.get(param_name) {
+                        // Compute Hessian-vector product approximation
+                        let hvp = self.compute_hessian_vector_product(
+                            parameter,
+                            gradient,
+                            direction
+                        )?;
 
-                    curvature_sum = curvature_sum.add(&hvp)?;
-                    valid_estimates += 1;
+                        curvature_sum = curvature_sum.add(&hvp)?;
+                        valid_estimates += 1;
+                    }
                 }
             }
 

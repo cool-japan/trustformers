@@ -148,8 +148,14 @@ impl Adam8bit {
                 self.variance_states.insert(name.clone(), QuantizedState::new(&zeros));
             }
 
-            let momentum_state = self.momentum_states.get_mut(name).unwrap();
-            let variance_state = self.variance_states.get_mut(name).unwrap();
+            let momentum_state = self
+                .momentum_states
+                .get_mut(name)
+                .expect("momentum_state should exist after initialization");
+            let variance_state = self
+                .variance_states
+                .get_mut(name)
+                .expect("variance_state should exist after initialization");
 
             let mut momentum = momentum_state.to_f32();
             let mut variance = variance_state.to_f32();
@@ -284,8 +290,14 @@ impl AdamW8bit {
                 self.variance_states.insert(name.clone(), QuantizedState::new(&zeros));
             }
 
-            let momentum_state = self.momentum_states.get_mut(name).unwrap();
-            let variance_state = self.variance_states.get_mut(name).unwrap();
+            let momentum_state = self
+                .momentum_states
+                .get_mut(name)
+                .expect("momentum_state should exist after initialization");
+            let variance_state = self
+                .variance_states
+                .get_mut(name)
+                .expect("variance_state should exist after initialization");
 
             let mut momentum = momentum_state.to_f32();
             let mut variance = variance_state.to_f32();
@@ -348,7 +360,7 @@ mod tests {
 
         // Test middle value
         let mid_quantized = config.quantize(0.0);
-        assert!(mid_quantized >= -1 && mid_quantized <= 1);
+        assert!((-1..=1).contains(&mid_quantized));
 
         // Test round-trip accuracy
         let original = 0.5;

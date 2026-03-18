@@ -295,7 +295,7 @@ impl FederatedLearningClient {
         match self.config.client_selection {
             ClientSelectionStrategy::Random => {
                 // Random selection with probability based on resources
-                DefaultRng::new().gen::<f32>() < self.estimate_participation_probability()
+                DefaultRng::new().random::<f32>() < self.estimate_participation_probability()
             },
             ClientSelectionStrategy::ResourceBased => self.has_sufficient_resources(),
             ClientSelectionStrategy::QualityBased => self.has_quality_data(),
@@ -563,7 +563,10 @@ impl FederatedLearningClient {
             // iOS battery level detection would use UIDevice.current.batteryLevel
             // For this implementation, we'll simulate based on time patterns
             use std::time::{SystemTime, UNIX_EPOCH};
-            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs();
             let cycle = (now % 3600) as f32 / 3600.0; // Hour cycle
             0.2 + 0.7 * (1.0 + (cycle * 2.0 * std::f32::consts::PI).sin()) / 2.0
         }
@@ -578,7 +581,7 @@ impl FederatedLearningClient {
                 3..=4 => 0.75, // Mid-range
                 _ => 0.85,     // High-end devices have better battery management
             };
-            base_level + (DefaultRng::new().gen::<f32>() - 0.5) * 0.2 // Add some randomness
+            base_level + (DefaultRng::new().random::<f32>() - 0.5) * 0.2 // Add some randomness
         }
 
         #[cfg(not(any(target_os = "ios", target_os = "android")))]

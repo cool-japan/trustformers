@@ -586,7 +586,7 @@ impl EnhancedProfiler {
     /// Calculate percentile from a sorted list
     fn percentile(&self, data: &[f32], percentile: f32) -> f32 {
         let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let index = ((data.len() as f32 - 1.0) * percentile) as usize;
         sorted_data.get(index).copied().unwrap_or(0.0)
     }
@@ -772,22 +772,23 @@ macro_rules! enhanced_profile_operation {
             $operation_name,
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("System time is before UNIX_EPOCH")
                 .as_nanos()
         );
 
         profiler
             .start_session(session_id.clone(), $operation_name.to_string())
             .await
-            .unwrap();
+            .expect("Failed to start profiler session");
 
         let result = $block;
 
         profiler
             .record_sample(&session_id, std::collections::HashMap::new())
             .await
-            .unwrap();
-        let _analysis = profiler.end_session(&session_id).await.unwrap();
+            .expect("Failed to record profiler sample");
+        let _analysis =
+            profiler.end_session(&session_id).await.expect("Failed to end profiler session");
 
         result
     }};

@@ -511,7 +511,9 @@ impl QualityAnalyzer {
         }
 
         // Penalize awkward breaks mid-word
-        if !chunk.content.is_empty() && !chunk.content.chars().last().unwrap().is_whitespace() {
+        if !chunk.content.is_empty()
+            && !chunk.content.chars().last().expect("non-empty content").is_whitespace()
+        {
             let words: Vec<&str> = chunk.content.split_whitespace().collect();
             if let Some(last_word) = words.last() {
                 if last_word.len() > 2 && !last_word.ends_with('.') && !last_word.ends_with(',') {
@@ -541,18 +543,15 @@ impl QualityAnalyzer {
 
         // Check chunk type consistency
         match chunk.chunk_type {
-            ChunkType::Sentence => {
-                if chunk.content.contains('.')
+            ChunkType::Sentence
+                if (chunk.content.contains('.')
                     || chunk.content.contains('!')
-                    || chunk.content.contains('?')
-                {
-                    coherence += 0.1;
-                }
+                    || chunk.content.contains('?')) =>
+            {
+                coherence += 0.1;
             },
-            ChunkType::Semantic => {
-                if chunk.content.contains('\n') || chunk.content.len() > 50 {
-                    coherence += 0.1;
-                }
+            ChunkType::Semantic if (chunk.content.contains('\n') || chunk.content.len() > 50) => {
+                coherence += 0.1;
             },
             _ => {},
         }

@@ -148,8 +148,10 @@ mod tests {
 
     #[test]
     fn test_max_tasks_limit() {
-        let mut config = ContinualLearningConfig::default();
-        config.max_tasks = 2;
+        let config = ContinualLearningConfig {
+            max_tasks: 2,
+            ..ContinualLearningConfig::default()
+        };
         let mut manager = ContinualLearningManager::new(config);
 
         for i in 0..3 {

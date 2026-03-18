@@ -685,7 +685,7 @@ impl RealtimeMetricsCollector {
                 unit: "milliseconds".to_string(),
                 timestamp: SystemTime::now()
                     .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
+                    .unwrap_or_else(|_| Duration::from_secs(0))
                     .as_secs(),
                 confidence: 0.95,
                 trend: TrendDirection::Stable,

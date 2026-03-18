@@ -1,4 +1,5 @@
 //! Ensemble Models Example
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example demonstrates ensemble learning techniques including
@@ -475,7 +476,10 @@ async fn performance_comparison_example() -> Result<()> {
     println!("\nPerformance Analysis:");
 
     // Find best accuracy
-    let best_accuracy = approaches.iter().max_by(|a, b| a.1.partial_cmp(&b.1).unwrap()).unwrap();
+    let best_accuracy = approaches
+        .iter()
+        .max_by(|a, b| a.1.partial_cmp(&b.1).expect("Accuracy values should be comparable"))
+        .expect("At least one approach should be available");
     println!(
         "  Best accuracy: {} ({:.1}%)",
         best_accuracy.0,
@@ -483,7 +487,8 @@ async fn performance_comparison_example() -> Result<()> {
     );
 
     // Find lowest latency
-    let best_latency = approaches.iter().min_by_key(|a| a.2).unwrap();
+    let best_latency =
+        approaches.iter().min_by_key(|a| a.2).expect("Collection should not be empty");
     println!(
         "  Lowest latency: {} ({}ms)",
         best_latency.0, best_latency.2
@@ -707,8 +712,12 @@ fn simulate_voting_strategy(
             }
         },
         EnsembleStrategy::Maximum => {
-            let best_prediction =
-                predictions.iter().max_by(|a, b| a.2.partial_cmp(&b.2).unwrap()).unwrap();
+            let best_prediction = predictions
+                .iter()
+                .max_by(|a, b| {
+                    a.2.partial_cmp(&b.2).expect("Confidence values should be comparable")
+                })
+                .expect("At least one prediction should be available");
             (best_prediction.1.to_string(), best_prediction.2)
         },
         EnsembleStrategy::Average => {

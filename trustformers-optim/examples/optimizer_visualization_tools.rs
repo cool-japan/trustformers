@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use std::collections::HashMap;
 use std::time::Instant;
 use trustformers_core::TrustformersError;
@@ -102,10 +103,26 @@ fn generate_performance_comparison_chart() -> Result<(), TrustformersError> {
 
     for param_size in &param_sizes {
         if let Some(data) = performance_data.get(param_size) {
-            let adam_ns = data.iter().find(|(name, _)| *name == "Adam").unwrap().1;
-            let adamw_ns = data.iter().find(|(name, _)| *name == "AdamW").unwrap().1;
-            let sgd_ns = data.iter().find(|(name, _)| *name == "SGD").unwrap().1;
-            let bge_ns = data.iter().find(|(name, _)| *name == "BGE-Adam").unwrap().1;
+            let adam_ns = data
+                .iter()
+                .find(|(name, _)| *name == "Adam")
+                .expect("Adam optimizer data should exist")
+                .1;
+            let adamw_ns = data
+                .iter()
+                .find(|(name, _)| *name == "AdamW")
+                .expect("AdamW optimizer data should exist")
+                .1;
+            let sgd_ns = data
+                .iter()
+                .find(|(name, _)| *name == "SGD")
+                .expect("SGD optimizer data should exist")
+                .1;
+            let bge_ns = data
+                .iter()
+                .find(|(name, _)| *name == "BGE-Adam")
+                .expect("BGE-Adam optimizer data should exist")
+                .1;
 
             println!(
                 "{:>8} | {:>12.0} | {:>12.0} | {:>12.0} | {:>12.0}",
@@ -120,7 +137,11 @@ fn generate_performance_comparison_chart() -> Result<(), TrustformersError> {
     println!("\n📈 Performance Scaling Visualization:");
     for param_size in &param_sizes {
         if let Some(data) = performance_data.get(param_size) {
-            let adam_ns = data.iter().find(|(name, _)| *name == "Adam").unwrap().1;
+            let adam_ns = data
+                .iter()
+                .find(|(name, _)| *name == "Adam")
+                .expect("Adam optimizer data should exist")
+                .1;
             let scale = (adam_ns / 1000.0).min(50.0) as usize; // Scale for visualization
             let bar = "█".repeat(scale);
             println!(
@@ -170,10 +191,11 @@ fn generate_convergence_analysis() -> Result<(), TrustformersError> {
     println!("{}", "─".repeat(50));
 
     for &step in &milestones {
-        let adam_loss = loss_history.get("Adam").unwrap()[step];
-        let adamw_loss = loss_history.get("AdamW").unwrap()[step];
-        let sgd_loss = loss_history.get("SGD").unwrap()[step];
-        let bge_loss = loss_history.get("BGE-Adam").unwrap()[step];
+        let adam_loss = loss_history.get("Adam").expect("Adam loss history should exist")[step];
+        let adamw_loss = loss_history.get("AdamW").expect("AdamW loss history should exist")[step];
+        let sgd_loss = loss_history.get("SGD").expect("SGD loss history should exist")[step];
+        let bge_loss =
+            loss_history.get("BGE-Adam").expect("BGE-Adam loss history should exist")[step];
 
         println!(
             "{:>8} | {:>8.4} | {:>8.4} | {:>8.4} | {:>8.4}",
@@ -183,7 +205,7 @@ fn generate_convergence_analysis() -> Result<(), TrustformersError> {
 
     // Generate ASCII plot for Adam convergence
     println!("\n📉 Adam Loss Curve (ASCII plot):");
-    let adam_losses = loss_history.get("Adam").unwrap();
+    let adam_losses = loss_history.get("Adam").expect("Adam loss history should exist");
     let max_loss = adam_losses.iter().fold(0.0f32, |a, &b| a.max(b));
 
     for (i, &loss) in adam_losses.iter().enumerate() {
@@ -191,7 +213,7 @@ fn generate_convergence_analysis() -> Result<(), TrustformersError> {
             // Show every 20th step
             let normalized = ((1.0 - loss / max_loss) * 40.0) as usize;
             let spaces = " ".repeat(normalized);
-            let marker = if i == 0 { "●" } else { "●" };
+            let marker = "●";
             println!("Step {:>3}: {}{}  ({:.4})", i, spaces, marker, loss);
         }
     }
@@ -339,7 +361,7 @@ fn generate_optimizer_heatmap() -> Result<(), TrustformersError> {
     println!("{}", "─".repeat(50));
 
     // Create a performance heatmap across different scenarios
-    let scenarios = vec![
+    let scenarios = [
         ("Small Model", "1M params"),
         ("Medium Model", "100M params"),
         ("Large Model", "1B+ params"),
@@ -363,18 +385,18 @@ fn generate_optimizer_heatmap() -> Result<(), TrustformersError> {
     println!("{}", "─".repeat(70));
 
     // Performance ratings (simulated based on typical use cases)
-    let ratings = vec![
-        vec!["██", "██", "▓▓", "▓▓", "░░", "▓▓"], // Small Model
-        vec!["██", "██", "▓▓", "██", "▓▓", "██"], // Medium Model
-        vec!["▓▓", "██", "░░", "██", "▓▓", "██"], // Large Model
-        vec!["██", "██", "██", "▓▓", "▓▓", "▓▓"], // Vision Task
-        vec!["██", "██", "▓▓", "██", "██", "▓▓"], // NLP Task
-        vec!["░░", "░░", "▓▓", "▓▓", "░░", "██"], // Memory Limited
+    let ratings: &[&[&str]] = &[
+        &["██", "██", "▓▓", "▓▓", "░░", "▓▓"], // Small Model
+        &["██", "██", "▓▓", "██", "▓▓", "██"], // Medium Model
+        &["▓▓", "██", "░░", "██", "▓▓", "██"], // Large Model
+        &["██", "██", "██", "▓▓", "▓▓", "▓▓"], // Vision Task
+        &["██", "██", "▓▓", "██", "██", "▓▓"], // NLP Task
+        &["░░", "░░", "▓▓", "▓▓", "░░", "██"], // Memory Limited
     ];
 
     for (i, (scenario, description)) in scenarios.iter().enumerate() {
         print!("{:>15} |", scenario);
-        for (_j, &rating) in ratings[i].iter().enumerate() {
+        for &rating in ratings[i].iter() {
             print!(" {:^8} |", rating);
         }
         println!(" {}", description);

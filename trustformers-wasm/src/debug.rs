@@ -326,8 +326,10 @@ impl DebugLogger {
         let slowest = self
             .performance_metrics
             .iter()
-            .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
-            .unwrap();
+            .max_by(|a, b| {
+                a.duration_ms.partial_cmp(&b.duration_ms).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("performance_metrics is not empty after length check");
 
         format!(
             "Performance Summary:\n\

@@ -1031,7 +1031,10 @@ impl ModernPlottingEngine {
     }
 
     fn generate_realtime_plot(&self, data: &InteractivePlotData) -> Result<String> {
-        let realtime_config = data.realtime_config.as_ref().unwrap();
+        let realtime_config = data
+            .realtime_config
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Realtime config is required for realtime plots"))?;
 
         let html = format!(
             r#"

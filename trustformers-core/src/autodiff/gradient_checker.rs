@@ -372,7 +372,10 @@ impl GradientChecker {
                         "Function must return a scalar (single element tensor)".into(),
                     ));
                 }
-                Ok(*arr.iter().next().unwrap())
+                arr.iter()
+                    .next()
+                    .copied()
+                    .ok_or_else(|| TrustformersError::autodiff_error("Empty tensor".into()))
             },
             _ => Err(TrustformersError::tensor_op_error(
                 "Function output must be F32 tensor",

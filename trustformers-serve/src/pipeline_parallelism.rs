@@ -468,7 +468,10 @@ impl PipelineParallelismManager {
                 let stage_guard = stage.read().await;
                 stage_guard.concurrency_limit.clone()
             };
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = semaphore
+                .acquire()
+                .await
+                .expect("pipeline stage semaphore should not be closed");
 
             // Record stage start
             let stage_id = {

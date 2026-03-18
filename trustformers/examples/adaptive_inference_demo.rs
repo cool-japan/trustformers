@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use std::time::Instant;
 #[allow(unused_variables)]
 use trustformers::pipeline::{

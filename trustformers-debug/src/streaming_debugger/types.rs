@@ -347,12 +347,10 @@ impl EnhancedStreamingDebugger {
             .max(self.adaptive_config.min_quality)
             .min(self.adaptive_config.max_quality);
         match &mut event {
-            StreamEvent::TensorData { values, .. } => {
-                if adjusted_quality < 1.0 {
-                    let sample_rate = adjusted_quality as usize;
-                    if sample_rate > 0 && values.len() > sample_rate {
-                        values.truncate(values.len() / sample_rate + 1);
-                    }
+            StreamEvent::TensorData { values, .. } if adjusted_quality < 1.0 => {
+                let sample_rate = adjusted_quality as usize;
+                if sample_rate > 0 && values.len() > sample_rate {
+                    values.truncate(values.len() / sample_rate + 1);
                 }
             },
             StreamEvent::PerformanceMetrics { .. } => {},

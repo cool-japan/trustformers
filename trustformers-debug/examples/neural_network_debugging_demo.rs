@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
 }
 
 /// Demonstrate attention mechanism debugging
+#[allow(clippy::excessive_nesting)]
 async fn demo_attention_debugging() -> Result<()> {
     println!("\n📊 Demo 1: Attention Mechanism Debugging");
     println!("----------------------------------------");
@@ -153,6 +154,7 @@ async fn demo_attention_debugging() -> Result<()> {
 }
 
 /// Demonstrate full transformer debugging
+#[allow(clippy::excessive_nesting)]
 async fn demo_transformer_debugging() -> Result<()> {
     println!("\n🔍 Demo 2: Full Transformer Debugging");
     println!("-------------------------------------");

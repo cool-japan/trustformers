@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Comprehensive Performance Validation Demo
 //!
 //! This example demonstrates the **HIGH PRIORITY** Performance Validation Framework
@@ -113,7 +114,7 @@ fn demo_basic_validation_suite() -> Result<()> {
         println!("   📋 {}:", scenario_result.scenario_name);
 
         let mut optimizer_results: Vec<_> = scenario_result.optimizer_results.iter().collect();
-        optimizer_results.sort_by(|a, b| a.1.avg_step_time.cmp(&b.1.avg_step_time));
+        optimizer_results.sort_by_key(|item| item.1.avg_step_time);
 
         for (name, result) in optimizer_results.iter().take(3) {
             println!(
@@ -265,7 +266,7 @@ fn demo_advanced_statistical_analysis() -> Result<()> {
         println!("\\n📊 {} - Top Performers:", scenario_result.scenario_name);
 
         let mut ranked_optimizers: Vec<_> = scenario_result.optimizer_results.iter().collect();
-        ranked_optimizers.sort_by(|a, b| a.1.avg_step_time.cmp(&b.1.avg_step_time));
+        ranked_optimizers.sort_by_key(|item| item.1.avg_step_time);
 
         for (rank, (name, result)) in ranked_optimizers.iter().enumerate() {
             let rank_emoji = match rank {

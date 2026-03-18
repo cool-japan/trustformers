@@ -377,7 +377,7 @@ impl {{MODEL_NAME}}Output {
         }
 
         // Sort by probability (descending)
-        class_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        class_probs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Return top k
         Ok(class_probs.into_iter().take(k).collect())

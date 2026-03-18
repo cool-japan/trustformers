@@ -506,9 +506,9 @@ impl StreamingGenerator {
     async fn sleep(&self, ms: u32) -> Result<(), JsValue> {
         let promise = Promise::new(&mut |resolve, _reject| {
             let timeout_id = web_sys::window()
-                .unwrap()
+                .expect("window should be available in browser context")
                 .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, ms as i32)
-                .unwrap();
+                .expect("set_timeout should succeed with valid callback");
             let _ = timeout_id;
         });
 

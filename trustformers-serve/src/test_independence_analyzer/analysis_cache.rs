@@ -16,10 +16,8 @@ use std::{
 };
 use tracing::{debug, info, warn};
 
-// Re-export types needed by other modules
-pub use super::types::{
-    CacheStatistics, CachedConflictAnalysis, CachedDependencyAnalysis, CachedGroupingAnalysis,
-};
+// Types CacheStatistics, CachedConflictAnalysis, CachedDependencyAnalysis, CachedGroupingAnalysis
+// are defined in super::types and imported via `use super::types::*` above.
 
 // ================================================================================================
 // Analysis Cache Implementation
@@ -119,7 +117,8 @@ impl AnalysisCache {
         let access_time = start_time.elapsed();
         let mut stats = self.statistics.lock();
         stats.update_after_access(false, access_time); // Store operation is a miss
-        stats.memory_usage += self.estimate_entry_size(&cache.get(key).unwrap());
+        stats.memory_usage +=
+            self.estimate_entry_size(&cache.get(key).expect("Entry just inserted"));
         *stats.entries_by_type.entry("dependency".to_string()).or_insert(0) += 1;
 
         debug!(
@@ -206,7 +205,8 @@ impl AnalysisCache {
         let access_time = start_time.elapsed();
         let mut stats = self.statistics.lock();
         stats.update_after_access(false, access_time);
-        stats.memory_usage += self.estimate_entry_size(&cache.get(key).unwrap());
+        stats.memory_usage +=
+            self.estimate_entry_size(&cache.get(key).expect("Entry just inserted"));
         *stats.entries_by_type.entry("conflict".to_string()).or_insert(0) += 1;
 
         debug!(
@@ -293,7 +293,8 @@ impl AnalysisCache {
         let access_time = start_time.elapsed();
         let mut stats = self.statistics.lock();
         stats.update_after_access(false, access_time);
-        stats.memory_usage += self.estimate_entry_size(&cache.get(key).unwrap());
+        stats.memory_usage +=
+            self.estimate_entry_size(&cache.get(key).expect("Entry just inserted"));
         *stats.entries_by_type.entry("grouping".to_string()).or_insert(0) += 1;
 
         debug!(
@@ -764,12 +765,12 @@ impl CacheEvictionPolicy for LfuEvictionPolicy {
 /// TTL eviction policy
 #[derive(Debug)]
 struct TtlEvictionPolicy {
-    ttl: Duration,
+    _ttl: Duration,
 }
 
 impl TtlEvictionPolicy {
     fn new(ttl: Duration) -> Self {
-        Self { ttl }
+        Self { _ttl: ttl }
     }
 }
 
@@ -924,17 +925,19 @@ pub fn generate_conflict_cache_key(test1: &str, test2: &str, version: u64) -> St
 
 /// Generate cache key for grouping analysis
 pub fn generate_grouping_cache_key(
-    strategy: &GroupingStrategy,
+    strategy: &GroupingStrategyType,
     test_count: usize,
     version: u64,
 ) -> String {
     let strategy_str = match strategy {
-        GroupingStrategy::ByCategory => "by_category",
-        GroupingStrategy::ByResourceUsage => "by_resource_usage",
-        GroupingStrategy::ByExecutionTime => "by_execution_time",
-        GroupingStrategy::ByDependencies => "by_dependencies",
-        GroupingStrategy::OptimalMl => "optimal_ml",
-        GroupingStrategy::Custom(name) => name,
+        GroupingStrategyType::Balanced => "balanced",
+        GroupingStrategyType::ResourceOptimal => "resource_optimal",
+        GroupingStrategyType::TimeOptimal => "time_optimal",
+        GroupingStrategyType::DependencyAware => "dependency_aware",
+        GroupingStrategyType::CategoryBased => "category_based",
+        GroupingStrategyType::ConflictMinimizing => "conflict_minimizing",
+        GroupingStrategyType::MachineLearning => "machine_learning",
+        GroupingStrategyType::Custom(name) => name,
     };
     format!("grouping_{}_{}tests_v{}", strategy_str, test_count, version)
 }

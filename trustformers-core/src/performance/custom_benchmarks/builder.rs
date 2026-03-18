@@ -169,7 +169,7 @@ impl CustomBenchmark for BuiltBenchmark {
         use scirs2_core::random::*;
         let mut rng = thread_rng();
         let total_weight: f64 = self.stages.iter().map(|s| s.weight).sum();
-        let random_value: f64 = rng.gen_range(0.0..total_weight);
+        let random_value: f64 = rng.random_range(0.0..total_weight);
 
         let mut cumulative_weight = 0.0;
         for (i, stage) in self.stages.iter().enumerate() {

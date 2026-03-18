@@ -526,8 +526,8 @@ impl MobileMemoryPool {
         let total_free_blocks: usize = free_blocks.values().map(|blocks| blocks.len()).sum();
 
         let total_free_memory: usize = free_blocks
-            .iter()
-            .flat_map(|(_, blocks)| blocks.iter())
+            .values()
+            .flat_map(|blocks| blocks.iter())
             .map(|block| block.size)
             .sum();
 
@@ -537,8 +537,8 @@ impl MobileMemoryPool {
 
         // Fragmentation = 1 - (largest_free_block / total_free_memory)
         let largest_free_block = free_blocks
-            .iter()
-            .flat_map(|(_, blocks)| blocks.iter())
+            .values()
+            .flat_map(|blocks| blocks.iter())
             .map(|block| block.size)
             .max()
             .unwrap_or(0);

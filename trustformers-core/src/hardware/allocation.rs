@@ -313,7 +313,7 @@ impl LoadBalancer {
         devices
             .iter()
             .min_by_key(|device| self.connections.get(*device).unwrap_or(&0))
-            .unwrap()
+            .expect("devices slice must be non-empty (checked by caller)")
             .clone()
     }
 

@@ -230,7 +230,7 @@ impl AdaptiveBatchOptimizer {
 
         // Calculate percentiles
         let mut latencies: Vec<f64> = sample_vec.iter().map(|s| s.latency_ms).collect();
-        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        latencies.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let p95_index = ((latencies.len() as f64) * 0.95) as usize;
         let p99_index = ((latencies.len() as f64) * 0.99) as usize;
@@ -316,7 +316,7 @@ impl AdaptiveBatchOptimizer {
             tracing::info!(
                 "Updated optimal batch size to {}: score {:.3}",
                 optimal_size,
-                stats.get(&optimal_size).unwrap().score
+                stats.get(&optimal_size).expect("optimal_size came from stats").score
             );
         }
 
@@ -387,7 +387,7 @@ impl PerformanceReport {
     /// Get the best performing batch sizes (top N)
     pub fn get_top_performers(&self, n: usize) -> Vec<&BatchSizeStats> {
         let mut sorted = self.batch_performances.iter().collect::<Vec<_>>();
-        sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
         sorted.into_iter().take(n).collect()
     }
 

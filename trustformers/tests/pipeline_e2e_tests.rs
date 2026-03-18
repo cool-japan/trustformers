@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use rstest::*;
 use std::time::Duration;
 use trustformers::error::TrustformersError;

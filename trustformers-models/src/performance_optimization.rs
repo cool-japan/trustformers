@@ -214,24 +214,21 @@ impl MemoryOptimizer {
     /// Optimize memory layout for a single tensor
     fn optimize_single_tensor_layout(tensor: &mut Tensor) -> Result<()> {
         match tensor {
-            Tensor::F32(ref mut data) => {
+            Tensor::F32(ref mut data)
                 // For multidimensional tensors, consider reshaping for better cache locality
                 // This is a simplified optimization - in practice, you'd analyze access patterns
-                if data.ndim() > 2 {
+                if data.ndim() > 2
                     // Ensure the tensor is in contiguous memory layout
-                    if !data.is_standard_layout() {
+                    && !data.is_standard_layout() => {
                         let owned = data.to_owned();
                         *data = owned;
-                    }
-                }
-            },
-            Tensor::I64(ref mut data) => {
+                    },
+            Tensor::I64(ref mut data)
                 // Similar optimization for integer tensors
-                if data.ndim() > 2 && !data.is_standard_layout() {
+                if data.ndim() > 2 && !data.is_standard_layout() => {
                     let owned = data.to_owned();
                     *data = owned;
-                }
-            },
+                },
             _ => {
                 // For other tensor types, ensure standard layout if possible
             },
@@ -406,7 +403,7 @@ impl DynamicBatchManager {
     pub fn add_tensor(&mut self, tensor: Tensor, priority: usize) -> Result<()> {
         self.pending_tensors.push((tensor, priority));
         // Sort by priority (higher priority first)
-        self.pending_tensors.sort_by(|a, b| b.1.cmp(&a.1));
+        self.pending_tensors.sort_by_key(|item| std::cmp::Reverse(item.1));
         Ok(())
     }
 

@@ -750,10 +750,8 @@ impl MobileDeviceDetector {
                     config.backend = backend;
                     return;
                 },
-                MobileBackend::GPU => {
-                    if config.backend == MobileBackend::CPU {
-                        config.backend = backend;
-                    }
+                MobileBackend::GPU if config.backend == MobileBackend::CPU => {
+                    config.backend = backend;
                 },
                 _ => {},
             }

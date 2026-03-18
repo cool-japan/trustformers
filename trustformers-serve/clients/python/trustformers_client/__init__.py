@@ -29,7 +29,7 @@ from .auth import AuthConfig, APIKeyAuth, JWTAuth, OAuth2Auth
 from .monitoring import MonitoringClient, PerformanceMonitor
 from .batch import BatchManager, AsyncBatchManager
 
-__version__ = "0.1.0"
+__version__ = "0.1.0rc1"
 __author__ = "TrustformeRS Team"
 __email__ = "support@trustformers.ai"
 __description__ = "Python client library for TrustformeRS serving infrastructure"

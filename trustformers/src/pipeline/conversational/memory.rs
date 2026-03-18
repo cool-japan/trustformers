@@ -387,7 +387,7 @@ impl MemoryManager {
             return Ok(());
         }
 
-        let storage_path = self.storage_path.as_ref().unwrap();
+        let storage_path = self.storage_path.as_ref().expect("storage_path checked as Some above");
         let file_path = format!("{}/memories_{}.json", storage_path, conversation_id);
 
         // Filter important memories to persist
@@ -435,7 +435,7 @@ impl MemoryManager {
             return Ok(Vec::new());
         }
 
-        let storage_path = self.storage_path.as_ref().unwrap();
+        let storage_path = self.storage_path.as_ref().expect("storage_path checked as Some above");
         let file_path = format!("{}/memories_{}.json", storage_path, conversation_id);
 
         if !Path::new(&file_path).exists() {
@@ -475,7 +475,7 @@ impl MemoryManager {
             return Ok(());
         }
 
-        let storage_path = self.storage_path.as_ref().unwrap();
+        let storage_path = self.storage_path.as_ref().expect("storage_path checked as Some above");
         let file_path = format!("{}/memories_{}.json", storage_path, conversation_id);
 
         if Path::new(&file_path).exists() {

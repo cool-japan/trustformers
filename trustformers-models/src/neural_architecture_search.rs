@@ -274,7 +274,7 @@ impl DimensionRange {
     #[allow(deprecated)]
     pub fn sample(&self, rng: &mut impl Rng) -> i32 {
         let steps = (self.max - self.min) / self.step + 1;
-        let step_idx = rng.gen_range(0..steps);
+        let step_idx = rng.random_range(0..steps);
         self.min + step_idx * self.step
     }
 
@@ -530,7 +530,7 @@ impl Architecture {
         // Sample choices
         for (name, options) in &search_space.choices {
             if !options.is_empty() {
-                let choice = options[rng.gen_range(0..options.len())].clone();
+                let choice = options[rng.random_range(0..options.len())].clone();
                 architecture.choices.insert(name.clone(), choice);
             }
         }
@@ -543,7 +543,7 @@ impl Architecture {
     pub fn mutate(&mut self, search_space: &SearchSpace, mutation_rate: f32, rng: &mut impl Rng) {
         // Mutate dimensions
         for (name, value) in &mut self.dimensions {
-            if rng.gen::<f32>() < mutation_rate {
+            if rng.random::<f32>() < mutation_rate {
                 if let Some(range) = search_space.dimensions.get(name) {
                     *value = range.sample(rng);
                 }
@@ -552,10 +552,10 @@ impl Architecture {
 
         // Mutate choices
         for (name, value) in &mut self.choices {
-            if rng.gen::<f32>() < mutation_rate {
+            if rng.random::<f32>() < mutation_rate {
                 if let Some(options) = search_space.choices.get(name) {
                     if !options.is_empty() {
-                        *value = options[rng.gen_range(0..options.len())].clone();
+                        *value = options[rng.random_range(0..options.len())].clone();
                     }
                 }
             }
@@ -571,7 +571,7 @@ impl Architecture {
 
         // Crossover dimensions
         for name in self.dimensions.keys() {
-            let value = if rng.gen::<f32>() < 0.5 {
+            let value = if rng.random::<f32>() < 0.5 {
                 self.dimensions[name]
             } else {
                 other.dimensions.get(name).copied().unwrap_or(self.dimensions[name])
@@ -581,7 +581,7 @@ impl Architecture {
 
         // Crossover choices
         for name in self.choices.keys() {
-            let value = if rng.gen::<f32>() < 0.5 {
+            let value = if rng.random::<f32>() < 0.5 {
                 self.choices[name].clone()
             } else {
                 other.choices.get(name).cloned().unwrap_or_else(|| self.choices[name].clone())
@@ -722,8 +722,8 @@ impl NeuralArchitectureSearcher {
             // Create offspring through crossover and mutation
             let mut offspring = Vec::new();
             for _ in 0..self.config.population_size / 2 {
-                let parent1_idx = self.rng.gen_range(0..parents.len());
-                let parent2_idx = self.rng.gen_range(0..parents.len());
+                let parent1_idx = self.rng.random_range(0..parents.len());
+                let parent2_idx = self.rng.random_range(0..parents.len());
                 let parent1 = &parents[parent1_idx];
                 let parent2 = &parents[parent2_idx];
 
@@ -889,8 +889,8 @@ impl NeuralArchitectureSearcher {
             let mut offspring = Vec::new();
 
             for _ in 0..self.config.population_size {
-                let parent1_idx = self.rng.gen_range(0..parents.len());
-                let parent2_idx = self.rng.gen_range(0..parents.len());
+                let parent1_idx = self.rng.random_range(0..parents.len());
+                let parent2_idx = self.rng.random_range(0..parents.len());
                 let parent1 = &parents[parent1_idx];
                 let parent2 = &parents[parent2_idx];
 
@@ -947,7 +947,7 @@ impl NeuralArchitectureSearcher {
         for _ in 0..self.config.population_size {
             let mut tournament = Vec::new();
             for _ in 0..tournament_size {
-                let idx = self.rng.gen_range(0..self.population.len());
+                let idx = self.rng.random_range(0..self.population.len());
                 tournament.push(self.population[idx].clone());
             }
 

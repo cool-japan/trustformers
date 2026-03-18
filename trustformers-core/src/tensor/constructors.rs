@@ -7,6 +7,7 @@ use super::{DType, Tensor};
 use crate::errors::{Result, TrustformersError};
 use scirs2_core::ndarray::{ArrayD, IxDyn}; // SciRS2 Policy compliant
 use scirs2_core::random::{thread_rng, Distribution, Normal};
+use scirs2_core::RngExt;
 use scirs2_core::{Complex, Complex32, Complex64}; // SciRS2 Policy compliant (root level)
 
 impl Tensor {
@@ -172,7 +173,8 @@ impl Tensor {
     /// # }
     /// ```
     pub fn randn(shape: &[usize]) -> Result<Self> {
-        let normal = Normal::new(0.0, 1.0).unwrap();
+        let normal =
+            Normal::new(0.0, 1.0).expect("Normal(0.0, 1.0) distribution parameters are valid");
         let mut rng = thread_rng();
         let size = shape.iter().product();
         let data: Vec<f32> = (0..size).map(|_| normal.sample(&mut rng)).collect();
@@ -457,7 +459,7 @@ impl Tensor {
     ///
     /// # Arguments
     ///
-    /// * `data` - The data as a Vec<f64>
+    /// * `data` - The data as a `Vec<f64>`
     /// * `shape` - The desired shape
     /// * `dtype` - The desired data type
     pub fn from_vec_with_dtype(data: Vec<f64>, shape: &[usize], dtype: DType) -> Result<Self> {
@@ -593,7 +595,8 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (f16 precision).
     pub fn randn_f16(shape: &[usize]) -> Result<Self> {
-        let normal = Normal::new(0.0, 1.0).unwrap();
+        let normal =
+            Normal::new(0.0, 1.0).expect("Normal(0.0, 1.0) distribution parameters are valid");
         let mut rng = thread_rng();
         let size = shape.iter().product();
         let data: Vec<half::f16> =
@@ -606,7 +609,8 @@ impl Tensor {
 
     /// Creates a tensor filled with random values from a normal distribution (bf16 precision).
     pub fn randn_bf16(shape: &[usize]) -> Result<Self> {
-        let normal = Normal::new(0.0, 1.0).unwrap();
+        let normal =
+            Normal::new(0.0, 1.0).expect("Normal(0.0, 1.0) distribution parameters are valid");
         let mut rng = thread_rng();
         let size = shape.iter().product();
         let data: Vec<half::bf16> =
@@ -886,7 +890,7 @@ impl Tensor {
     ///
     /// A tensor filled with random integers.
     pub fn randint(low: i64, high: i64, shape: &[usize], dtype: DType) -> Result<Self> {
-        use scirs2_core::random::{rng, Rng}; // SciRS2 Policy compliant (updated API)
+        use scirs2_core::random::rng; // SciRS2 Policy compliant (updated API)
 
         if low >= high {
             return Err(TrustformersError::tensor_op_error(

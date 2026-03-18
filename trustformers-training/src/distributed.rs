@@ -439,7 +439,7 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DataParallelTrainer<M> {
 
     /// Forward pass through the model
     pub fn forward(&self, input: Tensor) -> Result<Tensor> {
-        let model = self.model.lock().unwrap();
+        let model = self.model.lock().expect("lock should not be poisoned");
         model.forward(input).map_err(|e| anyhow::anyhow!(e))
     }
 

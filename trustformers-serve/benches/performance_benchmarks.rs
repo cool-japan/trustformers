@@ -81,7 +81,7 @@ fn bench_server_creation(c: &mut Criterion) {
     });
 
     group.bench_function("create_server_with_router", |b| {
-        let rt = Runtime::new().unwrap();
+        let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
         b.to_async(&rt).iter(|| async {
             let config = create_benchmark_config();
             let server = TrustformerServer::new(black_box(config));
@@ -96,7 +96,7 @@ fn bench_server_creation(c: &mut Criterion) {
 /// Benchmark batching service performance
 fn bench_batching_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("batching_service");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     // Benchmark single request processing
     group.bench_function("single_request", |b| {
@@ -161,7 +161,7 @@ fn bench_batching_service(c: &mut Criterion) {
 /// Benchmark caching service performance
 fn bench_caching_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("caching_service");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     // Benchmark cache operations
     group.bench_function("cache_set", |b| {
@@ -297,7 +297,7 @@ fn bench_caching_service(c: &mut Criterion) {
 /// Benchmark streaming service performance
 fn bench_streaming_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("streaming_service");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     group.bench_function("stream_creation", |b| {
         let streaming_config = StreamingConfig::default();
@@ -348,10 +348,11 @@ fn bench_streaming_service(c: &mut Criterion) {
 /// Benchmark validation service performance
 fn bench_validation_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("validation_service");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     let validation_config = ValidationConfig::default();
-    let service = ValidationService::new(validation_config).unwrap();
+    let service = ValidationService::new(validation_config)
+        .expect("Failed to create ValidationService for benchmark");
 
     // Benchmark input validation with different input sizes
     for input_size in [100, 500, 1000, 5000, 10000].iter() {
@@ -396,11 +397,12 @@ fn bench_validation_service(c: &mut Criterion) {
 /// Benchmark rate limiting service performance
 fn bench_rate_limiting_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("rate_limiting_service");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     group.bench_function("rate_limit_check", |b| {
         let rate_limit_config = RateLimitConfig::default();
-        let service = RateLimitService::new(rate_limit_config).unwrap();
+        let service = RateLimitService::new(rate_limit_config)
+            .expect("Failed to create RateLimitService for benchmark");
 
         b.to_async(&rt).iter(|| async {
             let client_id = format!("client-{}", random::<u64>() % 100);
@@ -416,7 +418,8 @@ fn bench_rate_limiting_service(c: &mut Criterion) {
             num_clients,
             |b, &num_clients| {
                 let rate_limit_config = RateLimitConfig::default();
-                let service = RateLimitService::new(rate_limit_config).unwrap();
+                let service = RateLimitService::new(rate_limit_config)
+                    .expect("Failed to create RateLimitService for benchmark");
 
                 b.to_async(&rt).iter(|| async {
                     for i in 0..num_clients {
@@ -434,7 +437,7 @@ fn bench_rate_limiting_service(c: &mut Criterion) {
 /// Benchmark metrics collection performance
 fn bench_metrics_service(c: &mut Criterion) {
     let mut group = c.benchmark_group("metrics_service");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     group.bench_function("metrics_collection", |b| {
         let service = MetricsService::new();
@@ -470,7 +473,7 @@ fn bench_metrics_service(c: &mut Criterion) {
 /// Comprehensive end-to-end benchmark
 fn bench_end_to_end_performance(c: &mut Criterion) {
     let mut group = c.benchmark_group("end_to_end");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     group.bench_function("complete_request_flow", |b| {
         let config = create_benchmark_config();
@@ -526,7 +529,7 @@ fn bench_memory_usage(c: &mut Criterion) {
 /// Stress test benchmark
 fn bench_stress_test(c: &mut Criterion) {
     let mut group = c.benchmark_group("stress_test");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     group.sample_size(10); // Fewer samples for stress tests
     group.measurement_time(Duration::from_secs(10));

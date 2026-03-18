@@ -628,7 +628,7 @@ impl TensorParallelism {
 
         // Update statistics
         {
-            let mut stats = self.statistics.lock().unwrap();
+            let mut stats = self.statistics.lock().expect("statistics lock should not be poisoned");
             stats.computation_time += start_time.elapsed();
             *stats.operation_count.entry(operation.operation_type.clone()).or_insert(0) += 1;
         }
@@ -796,7 +796,7 @@ impl TensorParallelism {
 
         // Update communication statistics
         {
-            let mut stats = self.statistics.lock().unwrap();
+            let mut stats = self.statistics.lock().expect("statistics lock should not be poisoned");
             stats.total_communication_time += start_time.elapsed();
             stats.communication_volume +=
                 requirements.iter().map(|r| r.data_size as u64).sum::<u64>();
@@ -1077,7 +1077,7 @@ impl TensorParallelism {
 
     /// Get tensor parallelism statistics
     pub fn get_statistics(&self) -> TensorParallelismStatistics {
-        let stats = self.statistics.lock().unwrap();
+        let stats = self.statistics.lock().expect("lock should not be poisoned");
 
         TensorParallelismStatistics {
             total_partitions: self.tensor_partitions.values().map(|v| v.len()).sum(),

@@ -142,7 +142,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             params.insert(
                 "temperature".to_string(),
-                serde_json::Value::Number(serde_json::Number::from_f64(0.7).unwrap()),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(0.7)
+                        .expect("Valid temperature value for inference"),
+                ),
             );
             params
         },

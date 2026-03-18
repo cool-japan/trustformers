@@ -266,8 +266,9 @@ impl MixedBitQuantizer {
                             total_elements - allocated_bits / (*max_bits as usize);
                         let remaining_budget = target_total_bits.saturating_sub(allocated_bits);
 
-                        if remaining_elements > 0 {
-                            let avg_bits_remaining = remaining_budget / remaining_elements;
+                        let avg_bits_remaining =
+                            remaining_budget.checked_div(remaining_elements).unwrap_or(0);
+                        if avg_bits_remaining > 0 {
                             let bits = (avg_bits_remaining as u8).clamp(*min_bits, *max_bits);
                             bit_allocation[idx] = bits;
                             allocated_bits += bits as usize;

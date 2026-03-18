@@ -158,7 +158,8 @@ impl DirectoryCleanupScheduler {
             let mut scheduled_tasks = self.scheduled_tasks.lock();
             while let Some(task) = scheduled_tasks.front() {
                 if task.is_ready(now) && tasks_to_execute.len() < self.max_concurrent_operations {
-                    tasks_to_execute.push(scheduled_tasks.pop_front().unwrap());
+                    tasks_to_execute
+                        .push(scheduled_tasks.pop_front().expect("Task exists from front() check"));
                 } else {
                     break;
                 }

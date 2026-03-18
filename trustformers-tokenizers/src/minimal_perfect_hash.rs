@@ -305,7 +305,9 @@ impl MinimalPerfectHash {
     /// Generate a random u64 (simple implementation)
     fn random_u64() -> u64 {
         use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH");
         let mut x = now.as_nanos() as u64;
         x ^= x << 13;
         x ^= x >> 7;

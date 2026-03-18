@@ -90,8 +90,10 @@ fn simulate_experiment(manager: &ABTestManager, experiment_id: &str, num_request
     use rand::thread_rng;
 
     // Define performance characteristics for each variant
-    let control_latency = Normal::new(100.0, 15.0).unwrap(); // mean=100ms, std=15ms
-    let treatment_latency = Normal::new(85.0, 12.0).unwrap(); // mean=85ms, std=12ms (15% improvement)
+    let control_latency = Normal::new(100.0, 15.0)
+        .expect("Failed to create normal distribution for control variant"); // mean=100ms, std=15ms
+    let treatment_latency = Normal::new(85.0, 12.0)
+        .expect("Failed to create normal distribution for treatment variant"); // mean=85ms, std=12ms (15% improvement)
 
     let mut rng = thread_rng();
 

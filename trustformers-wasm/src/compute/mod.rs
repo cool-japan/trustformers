@@ -212,13 +212,22 @@ impl ComputeCapabilities {
     }
 
     fn detect_webgl() -> bool {
-        let window = web_sys::window().unwrap();
-        let document = window.document().unwrap();
-        let canvas = document
-            .create_element("canvas")
-            .unwrap()
-            .dyn_into::<web_sys::HtmlCanvasElement>()
-            .unwrap();
+        let window = match web_sys::window() {
+            Some(w) => w,
+            None => return false,
+        };
+        let document = match window.document() {
+            Some(d) => d,
+            None => return false,
+        };
+        let canvas_element = match document.create_element("canvas") {
+            Ok(e) => e,
+            Err(_) => return false,
+        };
+        let canvas = match canvas_element.dyn_into::<web_sys::HtmlCanvasElement>() {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
 
         canvas.get_context("webgl").unwrap_or(None).is_some()
             || canvas.get_context("webgl2").unwrap_or(None).is_some()

@@ -60,6 +60,7 @@ fn test_cogvideo_full_config() {
 }
 
 #[test]
+#[allow(clippy::field_reassign_with_default)]
 fn test_config_validation() {
     let mut config = CogVlmConfig::default();
 
@@ -151,10 +152,12 @@ fn test_cogvlm_model_creation() {
 #[test]
 fn test_cogvideo_model_creation() {
     // Use small config for fast model creation
-    let mut config = CogVideoConfig::default();
-    config.base_config = CogVlmConfig::small_test_config();
-    config.temporal_hidden_size = 64;
-    config.temporal_num_layers = 1;
+    let config = CogVideoConfig {
+        base_config: CogVlmConfig::small_test_config(),
+        temporal_hidden_size: 64,
+        temporal_num_layers: 1,
+        ..CogVideoConfig::default()
+    };
     let result = CogVideoModel::new(config);
     assert!(
         result.is_ok(),
@@ -166,11 +169,13 @@ fn test_cogvideo_model_creation() {
 #[test]
 fn test_vision_transformer_creation() {
     // Use small config for fast creation
-    let mut config = CogVlmVisionConfig::default();
-    config.hidden_size = 64;
-    config.num_hidden_layers = 1;
-    config.num_attention_heads = 4;
-    config.image_size = 56;
+    let config = CogVlmVisionConfig {
+        hidden_size: 64,
+        num_hidden_layers: 1,
+        num_attention_heads: 4,
+        image_size: 56,
+        ..CogVlmVisionConfig::default()
+    };
     let result = CogVlmVisionTransformer::new(config);
     assert!(
         result.is_ok(),
@@ -194,9 +199,11 @@ fn test_visual_expert_creation() {
 #[test]
 fn test_temporal_encoder_creation() {
     // Use small config for fast creation
-    let mut config = CogVideoConfig::default();
-    config.temporal_hidden_size = 64;
-    config.temporal_num_layers = 1;
+    let config = CogVideoConfig {
+        temporal_hidden_size: 64,
+        temporal_num_layers: 1,
+        ..CogVideoConfig::default()
+    };
     let result = TemporalEncoder::new(config);
     assert!(
         result.is_ok(),
@@ -286,10 +293,12 @@ fn test_cogvlm_forward_with_vision() {
 #[test]
 fn test_cogvideo_forward() {
     // Use small config for fast forward pass
-    let mut config = CogVideoConfig::default();
-    config.base_config = CogVlmConfig::small_test_config();
-    config.temporal_hidden_size = 64;
-    config.temporal_num_layers = 1;
+    let config = CogVideoConfig {
+        base_config: CogVlmConfig::small_test_config(),
+        temporal_hidden_size: 64,
+        temporal_num_layers: 1,
+        ..CogVideoConfig::default()
+    };
     let model = CogVideoModel::new(config.clone()).expect("operation failed");
 
     // Use much smaller inputs for fast testing
@@ -319,11 +328,13 @@ fn test_cogvideo_forward() {
 #[test]
 fn test_vision_transformer_forward() {
     // Use smaller vision config for fast testing
-    let mut config = CogVlmVisionConfig::default();
-    config.hidden_size = 128;
-    config.num_attention_heads = 8;
-    config.image_size = 56; // Much smaller than default 490
-    config.patch_size = 14; // Ensure proper patch calculation
+    let config = CogVlmVisionConfig {
+        hidden_size: 128,
+        num_attention_heads: 8,
+        image_size: 56, // Much smaller than default 490
+        patch_size: 14, // Ensure proper patch calculation
+        ..CogVlmVisionConfig::default()
+    };
     let vision_model = CogVlmVisionTransformer::new(config.clone()).expect("operation failed");
 
     let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).expect("operation failed"); // batch=1, smaller image
@@ -368,9 +379,11 @@ fn test_visual_expert_forward() {
 #[test]
 fn test_temporal_encoder_forward() {
     // Use small config for fast forward pass
-    let mut config = CogVideoConfig::default();
-    config.temporal_hidden_size = 64;
-    config.temporal_num_layers = 1;
+    let config = CogVideoConfig {
+        temporal_hidden_size: 64,
+        temporal_num_layers: 1,
+        ..CogVideoConfig::default()
+    };
     let temporal_encoder = TemporalEncoder::new(config.clone()).expect("operation failed");
 
     // Use much smaller video input for fast testing
@@ -429,11 +442,13 @@ fn test_convenience_functions() {
 #[test]
 fn test_vision_encoder_standalone() {
     // Use small config for fast testing
-    let mut config = CogVlmVisionConfig::default();
-    config.hidden_size = 64;
-    config.num_hidden_layers = 1;
-    config.num_attention_heads = 4;
-    config.image_size = 56; // Much smaller image
+    let config = CogVlmVisionConfig {
+        hidden_size: 64,
+        num_hidden_layers: 1,
+        num_attention_heads: 4,
+        image_size: 56, // Much smaller image
+        ..CogVlmVisionConfig::default()
+    };
     let vision_encoder = vision_encoder(config).expect("operation failed");
 
     let pixel_values = Tensor::zeros(&[1, 3, 56, 56]).expect("operation failed"); // Smaller image

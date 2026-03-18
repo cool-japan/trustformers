@@ -177,7 +177,7 @@ impl SoftPrompt {
     /// Save prompt to file
     pub fn save(&self, path: &str) -> Result<()> {
         let data_to_serialize = (
-            self.embeddings.as_slice().unwrap(),
+            self.embeddings.as_slice().expect("embeddings tensor should have valid slice"),
             self.embeddings.shape(),
             &self.config,
             &self.task_id,
@@ -346,7 +346,10 @@ impl PromptTuner {
             if path.extension().and_then(|s| s.to_str()) == Some("bin") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     if let Some(task_id) = stem.strip_suffix("_prompt") {
-                        let prompt = SoftPrompt::load(path.to_str().unwrap())?;
+                        let path_str = path.to_str().ok_or_else(|| {
+                            anyhow::anyhow!("Invalid UTF-8 in path: {}", path.display())
+                        })?;
+                        let prompt = SoftPrompt::load(path_str)?;
                         self.prompts.insert(task_id.to_string(), prompt);
                     }
                 }

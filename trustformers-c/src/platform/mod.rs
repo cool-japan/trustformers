@@ -237,12 +237,18 @@ pub extern "C" fn trustformers_free_platform_info(info: *mut PlatformInfo) {
 
 #[no_mangle]
 pub extern "C" fn trustformers_get_architecture() -> *const std::os::raw::c_char {
-    std::ffi::CString::new(std::env::consts::ARCH).unwrap().into_raw()
+    match std::ffi::CString::new(std::env::consts::ARCH) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null(),
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn trustformers_get_os() -> *const std::os::raw::c_char {
-    std::ffi::CString::new(std::env::consts::OS).unwrap().into_raw()
+    match std::ffi::CString::new(std::env::consts::OS) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null(),
+    }
 }
 
 #[no_mangle]

@@ -376,7 +376,7 @@ impl DifferentialPrivacyEngine {
 
         for i in 0..data.len() {
             let j = (i + 1) % data.len(); // Pair with next sample
-            let lambda = DefaultRng::new().gen::<f32>().powf(1.0 / alpha);
+            let lambda = DefaultRng::new().random::<f32>().powf(1.0 / alpha);
 
             let mixed_input =
                 data[i].0.scalar_mul(lambda)?.add(&data[j].0.scalar_mul(1.0 - lambda)?)?;
@@ -595,7 +595,7 @@ impl GradientClipper {
 
     fn compute_median_norm(&self) -> f32 {
         let mut sorted = self.history.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         sorted[sorted.len() / 2]
     }
 }
@@ -796,10 +796,7 @@ mod tests {
 
         // Test gradient privatization
         let mut gradients: HashMap<String, Tensor> = HashMap::new();
-        gradients.insert(
-            "weight".to_string(),
-            Tensor::randn(&[10, 10]).unwrap().into(),
-        );
+        gradients.insert("weight".to_string(), Tensor::randn(&[10, 10]).unwrap());
 
         // Note: This would fail in real implementation due to budget checks
         // let report = engine.privatize_gradients(&mut gradients, 32, 1);

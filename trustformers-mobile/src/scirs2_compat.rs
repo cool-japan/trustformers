@@ -174,7 +174,7 @@ impl StatisticalOps {
 
     pub fn simd_quantile(&self, tensor: &Tensor<f32>, quantile: f32) -> Result<f32> {
         let mut sorted_data = tensor.data.clone();
-        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let index = ((sorted_data.len() - 1) as f32 * quantile) as usize;
         Ok(sorted_data[index.min(sorted_data.len() - 1)])
     }
@@ -211,6 +211,14 @@ impl DefaultRng {
 
     /// Generate a random value of the specified type
     pub fn gen<T>(&mut self) -> T
+    where
+        T: RandomGenerate,
+    {
+        T::generate()
+    }
+
+    /// Generate a random value (rand 0.10 compatible name)
+    pub fn random<T>(&mut self) -> T
     where
         T: RandomGenerate,
     {

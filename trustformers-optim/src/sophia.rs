@@ -605,10 +605,23 @@ mod tests {
         // Should update Hessian every 5 steps
         assert_eq!(optimizer.config.hessian_update_freq, 5);
 
-        // Test logic
-        assert!(!((0 + 1) % 5 == 0)); // Step 0 -> 1: no update
-        assert!((4 + 1) % 5 == 0); // Step 4 -> 5: update (5 % 5 == 0)
-        assert!((5 % 5 == 0)); // Step 5: update
-        assert!((10 % 5 == 0)); // Step 10: update
+        // Verify update frequency logic
+        // Step 0 -> 1: no update (1 % 5 != 0)
+        // Step 4 -> 5: update ((4 + 1) % 5 == 0)
+        // Step 5: update (5 % 5 == 0)
+        // Step 10: update (10 % 5 == 0)
+        let steps_to_check: Vec<(usize, bool)> = vec![
+            (1, false), // Step 1: no update
+            (5, true),  // Step 5: update
+            (10, true), // Step 10: update
+            (3, false), // Step 3: no update
+        ];
+        for (step, should_update) in steps_to_check {
+            assert_eq!(
+                step % 5 == 0,
+                should_update,
+                "Step {step} update check failed"
+            );
+        }
     }
 }

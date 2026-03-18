@@ -44,7 +44,7 @@ chrono.workspace = true
 uuid.workspace = true
 axum = { workspace = true, optional = true }
 num_cpus.workspace = true
-flate2.workspace = true
+oxiarc-deflate.workspace = true
 tar.workspace = true
 tokio-stream.workspace = true
 url.workspace = true

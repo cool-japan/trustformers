@@ -45,8 +45,10 @@ fn create_mock_dataset() -> Vec<DatasetEntry> {
     // Create a small mock dataset for demonstration
     (0..100)
         .map(|i| DatasetEntry {
-            input: Tensor::randn(&[1, 10]).unwrap(),
-            target: Tensor::from_f32((i % 2) as f32).unwrap(),
+            input: Tensor::randn(&[1, 10])
+                .expect("Failed to create random tensor for mock dataset"),
+            target: Tensor::from_f32((i % 2) as f32)
+                .expect("Failed to create tensor from f32 value"),
         })
         .collect()
 }
@@ -407,7 +409,7 @@ mod tests {
         hyperparams.insert("batch_size".to_string(), ParameterValue::Int(32));
         hyperparams.insert("optimizer".to_string(), ParameterValue::String("adam".to_string()));
 
-        let result = simulate_training(hyperparams).unwrap();
+        let result = simulate_training(hyperparams).expect("Simulated training should succeed");
         assert!(result.is_success());
         assert!(result.metrics.objective_value >= 0.0 && result.metrics.objective_value <= 1.0);
         assert!(!result.metrics.intermediate_values.is_empty());

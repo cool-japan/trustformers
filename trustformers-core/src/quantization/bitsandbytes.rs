@@ -476,9 +476,15 @@ fn traverse_tree(value: f32, node: &TreeNode) -> u8 {
     if let Some(leaf_value) = node.value {
         leaf_value
     } else if value < node.threshold {
-        traverse_tree(value, node.left.as_ref().unwrap())
+        traverse_tree(
+            value,
+            node.left.as_ref().expect("non-leaf node must have left child"),
+        )
     } else {
-        traverse_tree(value, node.right.as_ref().unwrap())
+        traverse_tree(
+            value,
+            node.right.as_ref().expect("non-leaf node must have right child"),
+        )
     }
 }
 

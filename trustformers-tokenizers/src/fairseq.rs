@@ -11,10 +11,10 @@ use trustformers_core::traits::{TokenizedInput, Tokenizer};
 /// token frequency_count
 ///
 /// Special tokens:
-/// - <pad> 0 (padding token)
-/// - </s> 1 (end of sentence)
-/// - <unk> 2 (unknown token)
-/// - <s> 3 (start of sentence)
+/// - `<pad>` 0 (padding token)
+/// - `</s>` 1 (end of sentence)
+/// - `<unk>` 2 (unknown token)
+/// - `<s>` 3 (start of sentence)
 #[derive(Debug, Clone)]
 pub struct FairseqTokenizer {
     /// Token to ID mapping
@@ -165,7 +165,7 @@ impl FairseqTokenizer {
             .iter()
             .map(|(token, freq)| (token.clone(), *freq))
             .collect();
-        tokens.sort_by(|a, b| b.1.cmp(&a.1));
+        tokens.sort_by_key(|item| std::cmp::Reverse(item.1));
         tokens
     }
 
@@ -362,7 +362,7 @@ impl FairseqDictionaryBuilder {
             .collect();
 
         // Sort by frequency (descending)
-        tokens.sort_by(|a, b| b.1.cmp(&a.1));
+        tokens.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         // Apply vocabulary size limit
         if let Some(max_size) = self.max_vocab_size {

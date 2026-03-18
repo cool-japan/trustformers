@@ -53,7 +53,7 @@ impl FailoverManager {
                         node_health.last_failure = Some(
                             std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
+                                .expect("SystemTime should be after UNIX_EPOCH")
                                 .as_secs(),
                         );
                         failed_nodes.push(node_id.clone());
@@ -87,7 +87,7 @@ impl FailoverManager {
             status: NodeStatus::Healthy,
             last_health_check: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
             last_failure: None,
             response_time_ms: 0.0,
@@ -188,7 +188,7 @@ impl FailoverManager {
             node.active_connections = active_connections;
             node.last_health_check = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs();
         }
 
@@ -200,7 +200,7 @@ impl FailoverManager {
         // Simple health check based on last update time and metrics
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should be after UNIX_EPOCH")
             .as_secs();
         let time_since_last_check = Duration::from_secs(now.saturating_sub(node.last_health_check));
 
@@ -414,7 +414,7 @@ mod tests {
             status: NodeStatus::Healthy,
             last_health_check: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
             last_failure: None,
             response_time_ms: 100.0,
@@ -431,7 +431,7 @@ mod tests {
             status: NodeStatus::Healthy,
             last_health_check: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
             last_failure: None,
             response_time_ms: 150.0,

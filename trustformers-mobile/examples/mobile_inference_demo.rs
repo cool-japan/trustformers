@@ -1,4 +1,5 @@
 //! Mobile Inference Demo
+#![allow(clippy::all)]
 //!
 //! Demonstrates optimized inference on mobile devices with real-world use cases
 
@@ -84,7 +85,9 @@ fn run_performance_benchmark(
 
         if i % 10 == 0 {
             print!(".");
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            {
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
         }
     }
     println!();
@@ -94,8 +97,8 @@ fn run_performance_benchmark(
 
     // Calculate statistics
     let avg_latency = latencies.iter().sum::<Duration>() / latencies.len() as u32;
-    let min_latency = *latencies.iter().min().unwrap();
-    let max_latency = *latencies.iter().max().unwrap();
+    let min_latency = *latencies.iter().min().expect("Collection should not be empty");
+    let max_latency = *latencies.iter().max().expect("Collection should not be empty");
 
     // Calculate percentiles
     latencies.sort();

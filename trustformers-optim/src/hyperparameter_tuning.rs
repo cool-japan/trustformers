@@ -214,7 +214,7 @@ impl BayesianOptimizer {
         let mut performances: Vec<f32> =
             self.samples.iter().filter_map(|s| s.performance_score).collect();
         performances.push(performance);
-        performances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        performances.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         if !performances.is_empty() {
             self.performance_threshold = performances[performances.len() / 2];
@@ -235,7 +235,7 @@ impl BayesianOptimizer {
                 b.performance_score
                     .unwrap_or(0.0)
                     .partial_cmp(&a.performance_score.unwrap_or(0.0))
-                    .unwrap()
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
             let keep_count = ((self.samples.len() as f32 * self.gamma).ceil() as usize).max(1);
             self.good_samples.truncate(keep_count);
@@ -251,24 +251,24 @@ impl BayesianOptimizer {
             let log_max = self.space.learning_rate.1.ln();
             (rng.random::<f32>() * (log_max - log_min) + log_min).exp()
         } else {
-            rng.gen_range(self.space.learning_rate.0..=self.space.learning_rate.1)
+            rng.random_range(self.space.learning_rate.0..=self.space.learning_rate.1)
         };
 
         HyperparameterSample {
             learning_rate,
-            beta1: rng.gen_range(self.space.beta1.0..=self.space.beta1.1),
-            beta2: rng.gen_range(self.space.beta2.0..=self.space.beta2.1),
-            weight_decay: rng.gen_range(self.space.weight_decay.0..=self.space.weight_decay.1),
-            epsilon: rng.gen_range(self.space.epsilon.0..=self.space.epsilon.1),
+            beta1: rng.random_range(self.space.beta1.0..=self.space.beta1.1),
+            beta2: rng.random_range(self.space.beta2.0..=self.space.beta2.1),
+            weight_decay: rng.random_range(self.space.weight_decay.0..=self.space.weight_decay.1),
+            epsilon: rng.random_range(self.space.epsilon.0..=self.space.epsilon.1),
             batch_size: {
-                let idx = rng.gen_range(0..self.space.batch_sizes.len());
+                let idx = rng.random_range(0..self.space.batch_sizes.len());
                 self.space.batch_sizes[idx]
             },
             custom_params: self
                 .space
                 .custom_params
                 .iter()
-                .map(|(k, &(min, max))| (k.clone(), rng.gen_range(min..=max)))
+                .map(|(k, &(min, max))| (k.clone(), rng.random_range(min..=max)))
                 .collect(),
             performance_score: None,
             training_time: None,
@@ -287,18 +287,18 @@ impl BayesianOptimizer {
         }
 
         // Sample from good samples with some noise
-        let idx = rng.gen_range(0..self.good_samples.len());
+        let idx = rng.random_range(0..self.good_samples.len());
         let good_sample = &self.good_samples[idx];
         let noise_factor = 0.1;
 
         let learning_rate = if self.space.log_scale_lr {
             let log_lr = good_sample.learning_rate.ln();
-            let noise = rng.gen_range(-noise_factor..=noise_factor);
+            let noise = rng.random_range(-noise_factor..=noise_factor);
             (log_lr + noise)
                 .exp()
                 .clamp(self.space.learning_rate.0, self.space.learning_rate.1)
         } else {
-            let noise = rng.gen_range(-noise_factor..=noise_factor)
+            let noise = rng.random_range(-noise_factor..=noise_factor)
                 * (self.space.learning_rate.1 - self.space.learning_rate.0);
             (good_sample.learning_rate + noise)
                 .clamp(self.space.learning_rate.0, self.space.learning_rate.1)
@@ -306,12 +306,12 @@ impl BayesianOptimizer {
 
         HyperparameterSample {
             learning_rate,
-            beta1: (good_sample.beta1 + rng.gen_range(-0.01..=0.01))
+            beta1: (good_sample.beta1 + rng.random_range(-0.01..=0.01))
                 .clamp(self.space.beta1.0, self.space.beta1.1),
-            beta2: (good_sample.beta2 + rng.gen_range(-0.001..=0.001))
+            beta2: (good_sample.beta2 + rng.random_range(-0.001..=0.001))
                 .clamp(self.space.beta2.0, self.space.beta2.1),
             weight_decay: (good_sample.weight_decay
-                + rng.gen_range(-noise_factor..=noise_factor)
+                + rng.random_range(-noise_factor..=noise_factor)
                     * (self.space.weight_decay.1 - self.space.weight_decay.0))
                 .clamp(self.space.weight_decay.0, self.space.weight_decay.1),
             epsilon: good_sample.epsilon,
@@ -326,7 +326,11 @@ impl BayesianOptimizer {
     /// Get best hyperparameters found so far
     pub fn get_best(&self) -> Option<&HyperparameterSample> {
         self.samples.iter().filter(|s| s.performance_score.is_some()).max_by(|a, b| {
-            a.performance_score.unwrap().partial_cmp(&b.performance_score.unwrap()).unwrap()
+            // Safe: filter ensures performance_score is Some
+            a.performance_score
+                .unwrap_or(0.0)
+                .partial_cmp(&b.performance_score.unwrap_or(0.0))
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
     }
 }
@@ -486,10 +490,9 @@ impl HyperparameterTuner {
         }
 
         // Update best configuration
-        if self.best_config.is_none()
-            || metrics.composite_score
-                > self.best_config.as_ref().unwrap().performance_score.unwrap_or(0.0)
-        {
+        let current_best_score =
+            self.best_config.as_ref().and_then(|c| c.performance_score).unwrap_or(0.0);
+        if self.best_config.is_none() || metrics.composite_score > current_best_score {
             let mut best_config = config.clone();
             best_config.performance_score = Some(metrics.composite_score);
             self.best_config = Some(best_config);
@@ -520,7 +523,7 @@ impl HyperparameterTuner {
         let regularization_factor = if config.weight_decay > 1e-2 { 0.8_f64 } else { 1.0_f64 };
 
         let base_performance = 0.8_f64;
-        let noise = rng.gen_range(-0.1_f64..=0.1_f64);
+        let noise = rng.random_range(-0.1_f64..=0.1_f64);
         let final_loss = (1.0_f64
             - base_performance
                 * lr_factor
@@ -532,12 +535,12 @@ impl HyperparameterTuner {
 
         let convergence_epoch = (50.0 / lr_factor) as usize;
         let training_time = Duration::from_secs((convergence_epoch as f32 * 0.1) as u64);
-        let memory_peak = (config.batch_size * 1024 * 1024) + rng.gen_range(0..1024 * 1024);
+        let memory_peak = (config.batch_size * 1024 * 1024) + rng.random_range(0..1024 * 1024);
 
         let stability_score = momentum_factor * variance_factor;
         let throughput =
             (config.batch_size as f32) / (training_time.as_secs_f32() / convergence_epoch as f32);
-        let gradient_norm_variance = rng.gen_range(0.01..=0.5);
+        let gradient_norm_variance = rng.random_range(0.01..=0.5);
 
         // Composite score combining multiple factors
         let composite_score = (1.0_f64 / final_loss) * 0.4_f64

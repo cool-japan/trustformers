@@ -739,7 +739,7 @@ impl ExperimentManager {
             });
         }
 
-        experiments.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        experiments.sort_by_key(|exp| std::cmp::Reverse(exp.created_at));
         experiments
     }
 

@@ -76,7 +76,7 @@
 //! ### Masked Language Modeling (MLM)
 //!
 //! In MLM, approximately 15% of tokens are randomly selected and:
-//! - 80% are replaced with [MASK] token
+//! - 80% are replaced with `[MASK]` token
 //! - 10% are replaced with a random token
 //! - 10% are left unchanged
 //!
@@ -123,7 +123,7 @@ use std::collections::HashMap;
 ///
 /// When `mlm_probability` > 0, the collator applies the standard BERT masking strategy:
 /// - Select random tokens based on `mlm_probability` (typically 15%)
-/// - For selected tokens: 80% → [MASK], 10% → random token, 10% → unchanged
+/// - For selected tokens: 80% → `[MASK]`, 10% → random token, 10% → unchanged
 /// - Create labels with -100 for non-masked positions (ignored in loss)
 ///
 /// ## Usage Examples
@@ -363,7 +363,7 @@ impl DataCollator for LanguageModelingDataCollator {
 /// - `padding`: Strategy for padding sequences in batch
 /// - `truncation`: Whether to truncate sequences exceeding max_length
 /// - `pad_token_id`: Token ID used for padding positions
-/// - `mask_token_id`: Token ID used for masking (typically [MASK])
+/// - `mask_token_id`: Token ID used for masking (typically `[MASK]`)
 /// - `mlm_probability`: Probability of masking tokens (0.0 to disable)
 ///
 /// ## Default Values
@@ -385,7 +385,7 @@ pub struct LanguageModelingCollatorConfig {
     pub truncation: bool,
     /// Token ID used for padding
     pub pad_token_id: u32,
-    /// Token ID used for masking (e.g., [MASK] token)
+    /// Token ID used for masking (e.g., `[MASK]` token)
     pub mask_token_id: u32,
     /// Probability of masking tokens for MLM training (0.0 to disable)
     pub mlm_probability: f32,
@@ -410,7 +410,7 @@ impl LanguageModelingCollatorConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let model_config = serde_json::json!({
+    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "pad_token_id": 0,
     ///     "mask_token_id": 103,
@@ -422,6 +422,7 @@ impl LanguageModelingCollatorConfig {
     /// assert_eq!(config.pad_token_id, 0);
     /// assert_eq!(config.mask_token_id, 103);
     /// assert_eq!(config.mlm_probability, 0.15);
+    /// ```
 
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
@@ -716,7 +717,7 @@ impl CausalLanguageModelingCollatorConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let model_config = serde_json::json!({
+    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 1024,
     ///     "pad_token_id": 50256,
     ///     "vocab_size": 50257
@@ -725,6 +726,7 @@ impl CausalLanguageModelingCollatorConfig {
     /// let config = CausalLanguageModelingCollatorConfig::from_config(&model_config)?;
     /// assert_eq!(config.max_length, Some(1024));
     /// assert_eq!(config.pad_token_id, 50256);
+    /// ```
 
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {

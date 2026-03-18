@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use std::collections::HashMap;
 use std::time::Instant;
 use trustformers_core::Tensor;
@@ -72,7 +73,9 @@ fn test_gradient_compression() -> Result<(), TrustformersError> {
 
             // Calculate compression efficiency
             let original_bytes = param_size * 4; // f32 = 4 bytes
-            let compressed_grad = compressed.get("test_param").unwrap();
+            let compressed_grad = compressed
+                .get("test_param")
+                .expect("test_param should exist in compressed gradients");
             let compressed_bytes =
                 compressed_grad.indices.len() * 4 + compressed_grad.values.len() * 4;
             let compression_ratio = 1.0 - (compressed_bytes as f32 / original_bytes as f32);
@@ -86,7 +89,9 @@ fn test_gradient_compression() -> Result<(), TrustformersError> {
             );
 
             // Verify decompression quality (basic check)
-            let decompressed_tensor = decompressed.get("test_param").unwrap();
+            let decompressed_tensor = decompressed
+                .get("test_param")
+                .expect("test_param should exist in decompressed gradients");
             let decompressed_data = decompressed_tensor.data()?;
 
             if decompressed_data.len() == grad_data.len() {

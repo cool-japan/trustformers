@@ -100,7 +100,7 @@ impl RegexTokenizer {
             token_type,
         });
 
-        self.patterns.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.patterns.sort_by_key(|item| std::cmp::Reverse(item.priority));
         self.compile_patterns()?;
         Ok(())
     }
@@ -183,7 +183,7 @@ impl RegexTokenizer {
             });
         }
 
-        self.patterns.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.patterns.sort_by_key(|item| std::cmp::Reverse(item.priority));
         Ok(())
     }
 

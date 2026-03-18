@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! # Advanced Benchmark Analysis System
 //!
 //! This example demonstrates a comprehensive benchmark analysis system that helps users
@@ -473,9 +474,11 @@ impl AdvancedBenchmarkSystem {
         let fastest = results
             .iter()
             .min_by(|a, b| {
-                a.mean_time_per_iteration.partial_cmp(&b.mean_time_per_iteration).unwrap()
+                a.mean_time_per_iteration
+                    .partial_cmp(&b.mean_time_per_iteration)
+                    .expect("Cannot compare NaN values in iteration times")
             })
-            .unwrap();
+            .expect("Results should not be empty");
 
         println!(
             "   🏆 Fastest: {} ({:.3}ms/iter)",
@@ -500,7 +503,7 @@ impl AdvancedBenchmarkSystem {
 
         println!("\n📈 **Scalability Ranking:**");
         let mut scalability_vec: Vec<_> = analysis.scalability_analysis.iter().collect();
-        scalability_vec.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        scalability_vec.sort_by(|a, b| b.1.partial_cmp(a.1).expect("Values should be comparable"));
 
         for (i, (optimizer, score)) in scalability_vec.iter().enumerate() {
             let medal = match i {

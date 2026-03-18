@@ -9,6 +9,7 @@ use crate::performance_optimizer::test_characterization::pattern_engine::Severit
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::fmt::Debug;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -67,7 +68,7 @@ pub struct ResourceUsageSnapshot {
 }
 
 /// Trait for metric collection components
-pub trait MetricCollector {
+pub trait MetricCollector: Debug {
     fn collect_metrics(&self, test_id: &str) -> Result<StreamingMetrics, MonitoringError>;
     fn get_collector_name(&self) -> &str;
     fn is_enabled(&self) -> bool;

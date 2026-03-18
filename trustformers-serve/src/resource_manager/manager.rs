@@ -18,7 +18,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::test_independence_analyzer::ResourceRequirement;
+use crate::parallel_execution_engine::ResourceRequirement;
 use crate::test_parallelization::{ResourceAllocation, ResourceManagementConfig};
 
 /// Comprehensive resource management system

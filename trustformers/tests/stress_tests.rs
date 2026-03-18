@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 // Stress Testing Infrastructure for TrustformeRS
 // Comprehensive stress testing framework for validating system stability under load
 
@@ -181,6 +182,12 @@ pub struct StressTestMetrics {
     pub cpu_samples: Arc<tokio::sync::Mutex<Vec<CpuSample>>>,
     /// Test start time
     pub start_time: Instant,
+}
+
+impl Default for StressTestMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StressTestMetrics {

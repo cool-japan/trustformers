@@ -96,7 +96,7 @@ impl HardwareAccelerator {
                 Self::new_cpu_fallback()
             })
         });
-        Ok(ACCELERATOR.get().unwrap())
+        Ok(ACCELERATOR.get().expect("accelerator should be initialized after get_or_init"))
     }
 
     /// Get global hardware accelerator instance

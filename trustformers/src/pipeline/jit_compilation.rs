@@ -535,8 +535,12 @@ impl PipelineJitCompiler {
         // Check cache size limit
         if cache.len() >= self.config.cache_size {
             // Remove oldest entries
-            let oldest_key =
-                cache.keys().min_by_key(|k| cache.get(*k).unwrap().compilation_time).cloned();
+            let oldest_key = cache
+                .keys()
+                .min_by_key(|k| {
+                    cache.get(*k).map(|v| v.compilation_time).unwrap_or(std::time::Instant::now())
+                })
+                .cloned();
 
             if let Some(key) = oldest_key {
                 cache.remove(&key);

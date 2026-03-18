@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::llama::config::LlamaConfig;
     use crate::llama::model::{LlamaForCausalLM, LlamaModel, RMSNorm, RotaryEmbedding};
@@ -82,8 +83,10 @@ mod tests {
 
     #[test]
     fn test_invalid_llama_config() {
-        let mut config = LlamaConfig::default();
-        config.hidden_size = 4095; // Not divisible by num_attention_heads (32)
+        let config = LlamaConfig {
+            hidden_size: 4095, // Not divisible by num_attention_heads (32)
+            ..LlamaConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 

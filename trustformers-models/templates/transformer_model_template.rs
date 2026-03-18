@@ -782,18 +782,18 @@ mod tests {
             ..Default::default()
         };
 
-        let model = {{ModelName}}::new(config).unwrap();
+        let model = {{ModelName}}::new(config).expect("Failed to create model");
 
         // Create dummy input
         let batch_size = 2;
         let seq_len = 10;
-        let input_ids = Tensor::randint(0, 100, &[batch_size, seq_len]).unwrap();
+        let input_ids = Tensor::randint(0, 100, &[batch_size, seq_len]).expect("Failed to create random tensor");
 
         // Forward pass
         let output = model.forward(&input_ids, None);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.last_hidden_state.shape(), &[batch_size, seq_len, 32]);
     }
 }

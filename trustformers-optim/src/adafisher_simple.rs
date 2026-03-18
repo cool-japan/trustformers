@@ -105,8 +105,10 @@ impl Optimizer for AdaFisher {
         );
 
         let state = self.states.entry(param_id).or_insert_with(|| AdaFisherState {
-            momentum: Tensor::zeros_like(parameter).unwrap(),
-            variance: Tensor::zeros_like(parameter).unwrap(),
+            momentum: Tensor::zeros_like(parameter)
+                .expect("zeros_like should always succeed for valid parameter"),
+            variance: Tensor::zeros_like(parameter)
+                .expect("zeros_like should always succeed for valid parameter"),
             step: 0,
         });
 

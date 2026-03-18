@@ -732,14 +732,14 @@ mod tests {
 
     #[test]
     fn test_language_model_creation() {
-        let model = LanguageModel::new(1000, 256, 4).unwrap();
+        let model = LanguageModel::new(1000, 256, 4).expect("Failed to create model");
         assert!(model.num_parameters() > 0);
         assert_eq!(model.vocab_size, 1000);
     }
 
     #[test]
     fn test_reward_model_creation() {
-        let reward_model = RewardModel::new(1000, 256, 4).unwrap();
+        let reward_model = RewardModel::new(1000, 256, 4).expect("Failed to create model");
         assert!(reward_model.backbone.num_parameters() > 0);
     }
 

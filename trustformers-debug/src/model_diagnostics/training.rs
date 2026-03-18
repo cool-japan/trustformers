@@ -198,8 +198,16 @@ impl TrainingDynamicsAnalyzer {
             return 0.0;
         }
 
-        let initial_loss = self.metrics_history.front().unwrap().loss;
-        let current_loss = self.metrics_history.back().unwrap().loss;
+        let initial_loss = self
+            .metrics_history
+            .front()
+            .expect("metrics_history has at least 2 elements")
+            .loss;
+        let current_loss = self
+            .metrics_history
+            .back()
+            .expect("metrics_history has at least 2 elements")
+            .loss;
         let steps = self.metrics_history.len();
 
         if initial_loss <= current_loss {
@@ -377,7 +385,9 @@ impl TrainingDynamicsAnalyzer {
 
         // Check if loss is consistently increasing
         losses.windows(2).all(|w| w[1] >= w[0])
-            && (losses.last().unwrap() / losses.first().unwrap()) > 1.1
+            && (losses.last().expect("losses has at least 3 elements")
+                / losses.first().expect("losses has at least 3 elements"))
+                > 1.1
     }
 
     fn is_oscillating(&self, losses: &[f64]) -> bool {

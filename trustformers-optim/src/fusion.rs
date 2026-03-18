@@ -785,8 +785,10 @@ mod tests {
 
     #[test]
     fn test_batch_fusion() {
-        let mut config = FusionConfig::default();
-        config.batch_size = 2;
+        let config = FusionConfig {
+            batch_size: 2,
+            ..FusionConfig::default()
+        };
         let mut optimizer = FusedOptimizer::new(config).unwrap();
 
         // Queue multiple operations

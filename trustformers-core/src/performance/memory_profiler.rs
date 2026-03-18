@@ -178,7 +178,7 @@ impl MemoryProfiler {
                 )
             })
             .collect();
-        largest.sort_by(|a, b| b.0.cmp(&a.0));
+        largest.sort_by_key(|item| std::cmp::Reverse(item.0));
         largest.truncate(10);
 
         MemorySnapshot {
@@ -204,7 +204,7 @@ impl MemoryProfiler {
         let count = allocations.len();
 
         let sizes: Vec<usize> = allocations.values().map(|a| a.size).collect();
-        let avg_size = if count > 0 { total_size / count } else { 0 };
+        let avg_size = total_size.checked_div(count).unwrap_or(0);
         let max_size = sizes.iter().max().copied().unwrap_or(0);
         let min_size = sizes.iter().min().copied().unwrap_or(0);
 

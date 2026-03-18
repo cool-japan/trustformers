@@ -507,7 +507,7 @@ impl LifecycleStats {
     pub fn new() -> Self {
         let start_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should be after UNIX_EPOCH")
             .as_secs();
 
         Self {
@@ -597,7 +597,7 @@ impl LifecycleStats {
     pub fn get_collection_period_hours(&self) -> f32 {
         let current_timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should be after UNIX_EPOCH")
             .as_secs();
         (current_timestamp - self.start_timestamp) as f32 / 3600.0
     }

@@ -244,7 +244,7 @@ impl TrustformersWasm {
 
     #[wasm_bindgen(getter)]
     pub fn version(&self) -> String {
-        "0.1.0-alpha.1".to_string()
+        "0.1.0-rc.1".to_string()
     }
 
     #[wasm_bindgen(getter)]
@@ -1375,6 +1375,6 @@ mod tests {
     fn test_initialization() {
         let tf = TrustformersWasm::new();
         assert!(tf.initialized());
-        assert_eq!(tf.version(), "0.1.0-alpha.1");
+        assert_eq!(tf.version(), "0.1.0-rc.1");
     }
 }

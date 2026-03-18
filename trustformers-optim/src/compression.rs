@@ -100,7 +100,7 @@ impl GradientCompressor {
             gradient.iter().enumerate().map(|(i, &val)| (i, val.abs())).collect();
 
         // Sort by absolute value in descending order
-        indexed_grads.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed_grads.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let k = k.min(gradient.len());
         let mut indices = Vec::with_capacity(k);

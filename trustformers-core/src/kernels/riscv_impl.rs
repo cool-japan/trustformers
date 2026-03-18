@@ -13,6 +13,7 @@
 use crate::errors::compute_error;
 use crate::hardware::{DataType, HardwareCapabilities, HardwareMetrics, HardwareResult};
 use crate::tensor::Tensor;
+use crate::TrustformersError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -472,7 +473,12 @@ impl RiscVBackend {
         let inputs = vec![a.clone(), b.clone()];
         let outputs = self.execute_vector_operation(&op_id, &inputs)?;
 
-        Ok(outputs.into_iter().next().unwrap())
+        outputs.into_iter().next().ok_or_else(|| {
+            TrustformersError::hardware_error(
+                "Vector operation produced no outputs",
+                "RiscvVectorBackend::execute_vector_matmul",
+            )
+        })
     }
 
     /// Execute vector convolution
@@ -518,7 +524,12 @@ impl RiscVBackend {
         let inputs = vec![input.clone(), kernel.clone()];
         let outputs = self.execute_vector_operation(&op_id, &inputs)?;
 
-        Ok(outputs.into_iter().next().unwrap())
+        outputs.into_iter().next().ok_or_else(|| {
+            TrustformersError::hardware_error(
+                "Vector operation produced no outputs",
+                "RiscvVectorBackend::execute_vector_matmul",
+            )
+        })
     }
 
     /// Get backend capabilities

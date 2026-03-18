@@ -525,7 +525,7 @@ impl<T: Tokenizer> CoverageAnalyzer<T> {
             .iter()
             .map(|(token, &freq)| (token.clone(), freq))
             .collect();
-        sorted_tokens.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_tokens.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         let most_frequent_tokens = sorted_tokens.iter().take(20).cloned().collect();
 
@@ -634,7 +634,7 @@ impl<T: Tokenizer> CoverageAnalyzer<T> {
         }
 
         let mut common_patterns: Vec<_> = pattern_counts.into_iter().collect();
-        common_patterns.sort_by(|a, b| b.1.cmp(&a.1));
+        common_patterns.sort_by_key(|item| std::cmp::Reverse(item.1));
         common_patterns.truncate(20);
 
         TokenDistribution {

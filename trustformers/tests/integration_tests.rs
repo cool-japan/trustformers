@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use rstest::*;
 use std::time::Duration;
 use trustformers::config_management::ConfigurationManager;
@@ -263,7 +264,7 @@ mod performance_tests {
     fn benchmark_error_creation() {
         let start = Instant::now();
         for i in 0..10000 {
-            let _error = TrustformersError::pipeline(&format!("Test error {}", i), "benchmark");
+            let _error = TrustformersError::pipeline(format!("Test error {}", i), "benchmark");
         }
         let duration = start.elapsed();
 

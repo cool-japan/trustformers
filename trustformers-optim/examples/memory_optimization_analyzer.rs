@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Advanced Memory Optimization Analyzer for TrustformeRS Optimizers
 //!
 //! This tool provides comprehensive memory analysis with:
@@ -72,6 +73,12 @@ pub struct MemoryOptimizationAnalyzer {
     memory_threshold_mb: f64,
 }
 
+impl Default for MemoryOptimizationAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MemoryOptimizationAnalyzer {
     /// Create a new memory optimization analyzer
     pub fn new() -> Self {
@@ -128,7 +135,7 @@ impl MemoryOptimizationAnalyzer {
             // Progress indicator
             if (i + 1) % (iterations / 10).max(1) == 0 {
                 print!(".");
-                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                std::io::Write::flush(&mut std::io::stdout()).expect("Failed to flush stdout");
             }
         }
 
@@ -153,7 +160,7 @@ impl MemoryOptimizationAnalyzer {
         // Simulate memory measurements (in practice, would use actual memory tracking)
         let param_data_size = params.data()?.len() * 4; // f32 = 4 bytes
         let grad_data_size = gradients.data()?.len() * 4;
-        let optimizer_memory = self.estimate_optimizer_memory(&params);
+        let optimizer_memory = self.estimate_optimizer_memory(params);
 
         let sample = MemorySample {
             timestamp,
@@ -190,7 +197,8 @@ impl MemoryOptimizationAnalyzer {
         let samples: Vec<_> = self.memory_samples.iter().collect();
 
         // Calculate basic statistics
-        let total_memory_usage = samples.last().unwrap().total_memory_mb;
+        let total_memory_usage =
+            samples.last().expect("Memory samples should not be empty").total_memory_mb;
         let peak_memory_usage = samples.iter().map(|s| s.total_memory_mb).fold(0.0, f64::max);
 
         // Analyze memory patterns
@@ -253,8 +261,14 @@ impl MemoryOptimizationAnalyzer {
         if avg_growth_rate > leak_threshold {
             let leak_samples = samples.len() / 4; // Check last quarter
             let recent_samples = &samples[samples.len() - leak_samples..];
-            let recent_growth = (recent_samples.last().unwrap().total_memory_mb
-                - recent_samples.first().unwrap().total_memory_mb)
+            let recent_growth = (recent_samples
+                .last()
+                .expect("Recent samples should not be empty")
+                .total_memory_mb
+                - recent_samples
+                    .first()
+                    .expect("Recent samples should not be empty")
+                    .total_memory_mb)
                 / leak_samples as f64;
 
             if recent_growth > leak_threshold {
@@ -323,7 +337,7 @@ impl MemoryOptimizationAnalyzer {
             .collect();
 
         let avg_change = memory_changes.iter().sum::<f64>() / memory_changes.len() as f64;
-        let total_memory = samples.last().unwrap().total_memory_mb;
+        let total_memory = samples.last().expect("Samples should not be empty").total_memory_mb;
 
         // Higher ratio indicates more fragmentation
         avg_change / total_memory.max(1.0)
@@ -462,7 +476,9 @@ impl MemoryOptimizationAnalyzer {
 
         let mut sorted_reports: Vec<_> = self.optimization_reports.values().collect();
         sorted_reports.sort_by(|a, b| {
-            b.memory_efficiency_score.partial_cmp(&a.memory_efficiency_score).unwrap()
+            b.memory_efficiency_score
+                .partial_cmp(&a.memory_efficiency_score)
+                .expect("Cannot compare NaN values in memory efficiency scores")
         });
 
         for report_data in &sorted_reports {
@@ -520,7 +536,7 @@ impl MemoryOptimizationAnalyzer {
         // Simulate heap memory based on current time for demo purposes
         60.0 + (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime is before UNIX EPOCH")
             .as_millis()
             % 50) as f64
             * 0.2

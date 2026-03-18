@@ -402,7 +402,7 @@ pub fn generate_leaderboard_submission() -> LeaderboardSubmission {
         software: detect_software_info(),
         timestamp: SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("System time should be after UNIX_EPOCH")
             .as_secs(),
         git_hash: std::env::var("TRUSTFORMERS_GIT_HASH").ok(),
     };

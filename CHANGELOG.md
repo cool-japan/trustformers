@@ -5,6 +5,50 @@ All notable changes to TrustformeRS will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0-RC.1] - 2026-03-18
+
+### Release Candidate 1
+
+First release candidate for TrustformeRS v0.1.0.
+
+### Changes
+
+#### Pure Rust Compliance
+- **Replaced banned compression dependencies** with OxiARC (COOLJAPAN Pure Rust Policy):
+  - `flate2` → `oxiarc-deflate`
+  - `zstd` → `oxiarc-zstd`
+  - `lz4` → `oxiarc-lz4`
+- License updated to Apache-2.0 only (COOLJAPAN Policy 2026+)
+
+#### Code Quality
+- **Zero clippy warnings** with `-D warnings` across entire workspace
+- Fixed ~100+ clippy lints: `sort_by` → `sort_by_key`, `field_reassign_with_default`, `manual_checked_ops`, `module_inception`, `result_large_err`, and more
+- Fixed slow `test_failover_trigger` test (180s → instant) by disabling gradual failover in test config
+
+#### Dependencies
+- Upgraded to latest stable versions (scirs2-core 0.3.3, scirs2-linalg 0.3.3, etc.)
+- All workspace dependencies consolidated (110+ shared)
+
+#### Python Bindings
+- Version format updated to PEP 440 compliance (`0.1.0rc1`)
+
+#### Project Structure
+- Version consistency enforced across all workspace members
+- All 12 publishable crates verified with comprehensive READMEs
+- 4940 tests passing, 134 skipped
+
+### Known Issues
+
+1. ~4,928 `unwrap()` calls need refactoring to proper error handling
+2. 18 files exceed 2,000 line refactoring policy limit
+3. 4 unmaintained transitive dependencies (`tui`, `wee_alloc`, `proc-macro-error`, `rustls-pemfile`)
+
+### Migration Notes
+
+No breaking changes from 0.1.0-alpha.2.
+
+---
+
 ## [0.1.0-alpha.2] - 2025-12-19
 
 ### 🚀 Performance Improvements
@@ -146,5 +190,6 @@ Initial alpha release of TrustformeRS.
 
 ---
 
+[0.1.0-RC.1]: https://github.com/cool-japan/trustformers/compare/0.1.0-alpha.2...0.1.0-RC.1
 [0.1.0-alpha.2]: https://github.com/cool-japan/trustformers/compare/0.1.0-alpha.1...0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/cool-japan/trustformers/releases/tag/0.1.0-alpha.1

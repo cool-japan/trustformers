@@ -249,7 +249,7 @@ impl TPESampler {
         }
 
         // Sample a random good trial and add noise
-        let base_trial_index = self.rng.gen_range(0..self.good_trials.len());
+        let base_trial_index = self.rng.random_range(0..self.good_trials.len());
         let base_trial = self.good_trials[base_trial_index].clone();
         let mut result = HashMap::new();
 
@@ -319,8 +319,10 @@ impl TPESampler {
                     // Add Gaussian noise
                     let noise_std = (p.high - p.low) * 0.1; // 10% of range
                                                             // Distribution and Normal already available via scirs2_core::random::*
-                    let normal = Normal::new(0.0, noise_std)
-                        .unwrap_or_else(|_| Normal::new(0.0, 1.0).unwrap());
+                    let normal = Normal::new(0.0, noise_std).unwrap_or_else(|_| {
+                        Normal::new(0.0, 1.0)
+                            .expect("Standard normal distribution should always be valid")
+                    });
                     let noisy_value = base_float + normal.sample(&mut self.rng);
                     let clamped_value = noisy_value.clamp(p.low, p.high);
                     ParameterValue::Float(clamped_value)
@@ -347,7 +349,7 @@ impl TPESampler {
                 if let Some(base_int) = base_value.as_int() {
                     // Add discrete noise
                     let noise_range = ((p.high - p.low) / 10).max(p.step); // 10% of range
-                    let noise = self.rng.gen_range(-noise_range..=noise_range);
+                    let noise = self.rng.random_range(-noise_range..=noise_range);
                     let noisy_value = base_int + noise;
                     let clamped_value = noisy_value.clamp(p.low, p.high);
                     // Round to nearest valid step
@@ -381,8 +383,10 @@ impl TPESampler {
                     let noise_std = (log_high - log_low) * 0.1;
 
                     // Distribution and Normal already available via scirs2_core::random::*
-                    let normal = Normal::new(0.0, noise_std)
-                        .unwrap_or_else(|_| Normal::new(0.0, 1.0).unwrap());
+                    let normal = Normal::new(0.0, noise_std).unwrap_or_else(|_| {
+                        Normal::new(0.0, 1.0)
+                            .expect("Standard normal distribution should always be valid")
+                    });
                     let noisy_log = log_base + normal.sample(&mut self.rng);
                     let clamped_log = noisy_log.clamp(log_low, log_high);
                     let new_value = p.base.powf(clamped_log);
@@ -464,20 +468,8 @@ impl TPESampler {
                         let diff = (a - b).abs() as f64;
                         1.0 / (1.0 + diff)
                     },
-                    (ParameterValue::String(a), ParameterValue::String(b)) => {
-                        if a == b {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    },
-                    (ParameterValue::Bool(a), ParameterValue::Bool(b)) => {
-                        if a == b {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    },
+                    (ParameterValue::String(a), ParameterValue::String(b)) if a == b => 1.0,
+                    (ParameterValue::Bool(a), ParameterValue::Bool(b)) if a == b => 1.0,
                     _ => 0.0, // Type mismatch
                 };
 
@@ -648,20 +640,8 @@ impl GPSampler {
                         let diff = (a - b).abs() as f64;
                         (-diff).exp()
                     },
-                    (ParameterValue::String(a), ParameterValue::String(b)) => {
-                        if a == b {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    },
-                    (ParameterValue::Bool(a), ParameterValue::Bool(b)) => {
-                        if a == b {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    },
+                    (ParameterValue::String(a), ParameterValue::String(b)) if a == b => 1.0,
+                    (ParameterValue::Bool(a), ParameterValue::Bool(b)) if a == b => 1.0,
                     _ => 0.0,
                 };
 

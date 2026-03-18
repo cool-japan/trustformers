@@ -448,10 +448,10 @@ mod tests {
     #[test]
     fn test_staleness_compensation() {
         let compensation = StalenessCompensation::Linear;
-        match compensation {
-            StalenessCompensation::Linear => assert!(true),
-            _ => assert!(false),
-        }
+        assert!(
+            matches!(compensation, StalenessCompensation::Linear),
+            "Expected Linear staleness compensation"
+        );
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
             total_memory: 16 * 1024 * 1024 * 1024,    // 16 GB
             used_memory: 8 * 1024 * 1024 * 1024,      // 8 GB
             available_memory: 8 * 1024 * 1024 * 1024, // 8 GB
-            optimizer_memory: 1 * 1024 * 1024 * 1024, // 1 GB
+            optimizer_memory: 1024 * 1024 * 1024,     // 1 GB
         };
 
         assert_eq!(stats.total_memory, 16 * 1024 * 1024 * 1024);

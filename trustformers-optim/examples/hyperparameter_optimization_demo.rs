@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Comprehensive Hyperparameter Optimization Demo
 //!
 //! This example demonstrates the automated hyperparameter tuning framework
@@ -235,7 +236,9 @@ fn demo_comparative_optimization() -> Result<()> {
     println!("================================");
 
     // Sort by performance score
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    results.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1).expect("Cannot compare NaN values in performance scores")
+    });
 
     for (i, (name, score, lr, time)) in results.iter().enumerate() {
         println!(
@@ -400,8 +403,10 @@ fn demo_advanced_custom_optimization() -> Result<()> {
     let history = tuner.get_history();
     if !history.is_empty() {
         let scores: Vec<f32> = history.iter().map(|(_, m)| m.composite_score).collect();
-        let improvement =
-            (scores.last().unwrap() - scores.first().unwrap()) / scores.first().unwrap() * 100.0;
+        let improvement = (scores.last().expect("Collection should not be empty")
+            - scores.first().expect("Collection should not be empty"))
+            / scores.first().expect("Collection should not be empty")
+            * 100.0;
         println!("\n📈 Optimization Progress:");
         println!("   Total Trials: {}", history.len());
         println!("   Performance Improvement: {:.1}%", improvement);

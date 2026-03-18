@@ -452,14 +452,14 @@ impl ConceptDriftDetector {
         // Sort both datasets
         let mut sorted_ref = ref_data.clone();
         let mut sorted_det = det_data.clone();
-        sorted_ref.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        sorted_det.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_ref.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted_det.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         // Calculate empirical CDFs and find maximum difference
         let mut max_diff = 0.0_f64;
         let all_values = [sorted_ref.clone(), sorted_det.clone()].concat();
         let mut unique_values = all_values;
-        unique_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        unique_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         unique_values.dedup();
 
         for value in unique_values {
@@ -1048,9 +1048,11 @@ pub struct AdaptationScheduler {
 impl AdaptationScheduler {
     /// Create new adaptation scheduler
     pub fn new(update_frequency: Duration) -> Self {
+        let chrono_duration = ChronoDuration::from_std(update_frequency)
+            .unwrap_or_else(|_| ChronoDuration::seconds(60));
         Self {
             update_frequency,
-            last_adaptation: Utc::now() - ChronoDuration::from_std(update_frequency).unwrap(),
+            last_adaptation: Utc::now() - chrono_duration,
             adaptation_count: 0,
         }
     }
@@ -1060,7 +1062,9 @@ impl AdaptationScheduler {
         let now = Utc::now();
         let time_since_last = now - self.last_adaptation;
 
-        if time_since_last > ChronoDuration::from_std(self.update_frequency).unwrap() {
+        let threshold = ChronoDuration::from_std(self.update_frequency)
+            .unwrap_or_else(|_| ChronoDuration::seconds(60));
+        if time_since_last > threshold {
             self.last_adaptation = now;
             self.adaptation_count += 1;
             true

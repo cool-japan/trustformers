@@ -174,7 +174,7 @@ impl ElasticTrainingCoordinator {
         worker_id: String,
         hardware_info: HardwareInfo,
     ) -> Result<usize> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().expect("lock should not be poisoned");
 
         let rank = workers.len();
         let worker_info = WorkerInfo {
@@ -200,7 +200,7 @@ impl ElasticTrainingCoordinator {
         worker_id: &str,
         metrics: WorkerPerformanceMetrics,
     ) -> Result<()> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().expect("lock should not be poisoned");
 
         if let Some(worker) = workers.get_mut(worker_id) {
             worker.last_heartbeat = Instant::now();
@@ -224,7 +224,7 @@ impl ElasticTrainingCoordinator {
         let now = Instant::now();
 
         {
-            let mut workers = self.workers.lock().unwrap();
+            let mut workers = self.workers.lock().expect("lock should not be poisoned");
 
             for (worker_id, worker) in workers.iter_mut() {
                 // Check heartbeat timeout
@@ -262,7 +262,7 @@ impl ElasticTrainingCoordinator {
 
         // Remove failed worker from active set
         {
-            let mut workers = self.workers.lock().unwrap();
+            let mut workers = self.workers.lock().expect("lock should not be poisoned");
             workers.remove(worker_id);
         }
 
@@ -280,7 +280,7 @@ impl ElasticTrainingCoordinator {
             return Ok(None);
         }
 
-        let workers = self.workers.lock().unwrap();
+        let workers = self.workers.lock().expect("lock should not be poisoned");
         let active_workers =
             workers.iter().filter(|(_, w)| matches!(w.status, WorkerStatus::Active)).count();
 
@@ -355,7 +355,7 @@ impl ElasticTrainingCoordinator {
 
     /// Calculate system performance metrics
     fn calculate_system_performance(&self) -> SystemPerformanceSnapshot {
-        let workers = self.workers.lock().unwrap();
+        let workers = self.workers.lock().expect("lock should not be poisoned");
         let active_workers: Vec<_> = workers
             .iter()
             .filter(|(_, w)| matches!(w.status, WorkerStatus::Active))
@@ -404,7 +404,7 @@ impl ElasticTrainingCoordinator {
             return false;
         }
 
-        let workers = self.workers.lock().unwrap();
+        let workers = self.workers.lock().expect("lock should not be poisoned");
         let workloads: Vec<f32> = workers
             .iter()
             .filter(|(_, w)| matches!(w.status, WorkerStatus::Active))
@@ -450,7 +450,7 @@ impl ElasticTrainingCoordinator {
 
     /// Scale up workers
     fn scale_up(&mut self, target_workers: usize) -> Result<()> {
-        let current_workers = self.workers.lock().unwrap().len();
+        let current_workers = self.workers.lock().expect("lock should not be poisoned").len();
         let workers_to_add = target_workers.saturating_sub(current_workers);
 
         println!("Scaling up: adding {} workers", workers_to_add);
@@ -466,7 +466,7 @@ impl ElasticTrainingCoordinator {
 
     /// Scale down workers
     fn scale_down(&mut self, target_workers: usize) -> Result<()> {
-        let mut workers = self.workers.lock().unwrap();
+        let mut workers = self.workers.lock().expect("lock should not be poisoned");
         let current_workers = workers.len();
         let workers_to_remove = current_workers.saturating_sub(target_workers);
 
@@ -549,7 +549,7 @@ impl ElasticTrainingCoordinator {
         let performance = self.calculate_system_performance();
 
         // Now acquire workers lock for remaining stats
-        let workers = self.workers.lock().unwrap();
+        let workers = self.workers.lock().expect("lock should not be poisoned");
         let active_count =
             workers.iter().filter(|(_, w)| matches!(w.status, WorkerStatus::Active)).count();
 
@@ -715,7 +715,10 @@ mod tests {
         let config = ElasticTrainingConfig::default();
         let coordinator = ElasticTrainingCoordinator::new(config);
 
-        assert_eq!(coordinator.workers.lock().unwrap().len(), 0);
+        assert_eq!(
+            coordinator.workers.lock().expect("lock should not be poisoned").len(),
+            0
+        );
         assert_eq!(coordinator.checkpoints.len(), 0);
     }
 
@@ -736,7 +739,10 @@ mod tests {
         let result = coordinator.register_worker("worker1".to_string(), hardware_info);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 0);
-        assert_eq!(coordinator.workers.lock().unwrap().len(), 1);
+        assert_eq!(
+            coordinator.workers.lock().expect("lock should not be poisoned").len(),
+            1
+        );
     }
 
     #[test]

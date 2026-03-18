@@ -68,7 +68,7 @@ impl KVCacheEntry {
             num_heads,
             last_accessed: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("System time before UNIX_EPOCH")
                 .as_secs(),
             access_count: 0,
             ref_count: 1,
@@ -81,7 +81,7 @@ impl KVCacheEntry {
         self.access_count += 1;
         self.last_accessed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("System time before UNIX_EPOCH")
             .as_secs();
     }
 

@@ -117,10 +117,8 @@ impl WordPieceTokenizer {
             "want", "because", "any", "these", "give", "day", "most", "us",
         ];
 
-        let mut id = special_tokens.len() as u32;
-        for token in common_tokens {
+        for (id, token) in (special_tokens.len() as u32..).zip(common_tokens) {
             vocab.insert(token.to_string(), id);
-            id += 1;
         }
 
         vocab
@@ -234,12 +232,13 @@ impl Tokenizer for WordPieceTokenizer {
 
         tokens.push(self.sep_token.clone());
 
-        let input_ids: Vec<u32> = tokens
-            .iter()
-            .map(|token| {
-                self.vocab.get_id(token).unwrap_or(self.vocab.get_id(&self.unk_token).unwrap())
-            })
-            .collect();
+        let mut input_ids = Vec::with_capacity(tokens.len());
+        for token in &tokens {
+            let id = self.vocab.get_id(token).unwrap_or_else(|| {
+                self.vocab.get_id(&self.unk_token).expect("UNK token must exist in vocabulary")
+            });
+            input_ids.push(id);
+        }
 
         let attention_mask = vec![1u8; input_ids.len()];
 
@@ -270,12 +269,13 @@ impl Tokenizer for WordPieceTokenizer {
 
         tokens.push(self.sep_token.clone());
 
-        let input_ids: Vec<u32> = tokens
-            .iter()
-            .map(|token| {
-                self.vocab.get_id(token).unwrap_or(self.vocab.get_id(&self.unk_token).unwrap())
-            })
-            .collect();
+        let mut input_ids = Vec::with_capacity(tokens.len());
+        for token in &tokens {
+            let id = self.vocab.get_id(token).unwrap_or_else(|| {
+                self.vocab.get_id(&self.unk_token).expect("UNK token must exist in vocabulary")
+            });
+            input_ids.push(id);
+        }
 
         let attention_mask = vec![1u8; input_ids.len()];
 

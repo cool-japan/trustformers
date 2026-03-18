@@ -31,11 +31,11 @@ impl Default for BenchConfig {
 fn bench_forward_pass(c: &mut Criterion) {
     let config = BenchConfig::default();
     let model_config = {{model_type|pascal_case}}Config::default();
-    let model = {{model_type|pascal_case}}Model::new(&model_config).unwrap();
-    
+    let model = {{model_type|pascal_case}}Model::new(&model_config).expect("Failed to create model");
+
     // Use CPU for consistent benchmarking
     let device = Device::Cpu;
-    model.to(device.clone()).unwrap();
+    model.to(device.clone()).expect("Failed to move model to device");
     model.eval();
     
     let mut group = c.benchmark_group("forward_pass");
@@ -55,9 +55,9 @@ fn bench_forward_pass(c: &mut Criterion) {
             BenchmarkId::new("{{name}}", &parameter_string),
             &input_shape,
             |b, shape| {
-                let input = Tensor::randn(shape).unwrap();
+                let input = Tensor::randn(shape).expect("Failed to create random tensor");
                 b.iter(|| {
-                    let _output = model.forward(black_box(&input)).unwrap();
+                    let _output = model.forward(black_box(&input)).expect("Forward pass failed");
                 });
             },
         );
@@ -75,10 +75,10 @@ fn bench_forward_pass(c: &mut Criterion) {
 fn bench_backward_pass(c: &mut Criterion) {
     let config = BenchConfig::default();
     let model_config = {{model_type|pascal_case}}Config::default();
-    let mut model = {{model_type|pascal_case}}Model::new(&model_config).unwrap();
-    
+    let mut model = {{model_type|pascal_case}}Model::new(&model_config).expect("Failed to create model");
+
     let device = Device::Cpu;
-    model.to(device.clone()).unwrap();
+    model.to(device.clone()).expect("Failed to move model to device");
     model.train();
     
     let mut group = c.benchmark_group("backward_pass");
@@ -98,12 +98,12 @@ fn bench_backward_pass(c: &mut Criterion) {
             BenchmarkId::new("{{name}}", &parameter_string),
             &input_shape,
             |b, shape| {
-                let input = Tensor::randn(shape).unwrap();
+                let input = Tensor::randn(shape).expect("Failed to create random tensor");
                 b.iter(|| {
-                    let output = model.forward(black_box(&input)).unwrap();
-                    let loss = output.mean().unwrap();
-                    loss.backward().unwrap();
-                    model.zero_grad().unwrap();
+                    let output = model.forward(black_box(&input)).expect("Forward pass failed");
+                    let loss = output.mean().expect("Failed to compute mean");
+                    loss.backward().expect("Backward pass failed");
+                    model.zero_grad().expect("Failed to zero gradients");
                 });
             },
         );
@@ -126,25 +126,25 @@ fn bench_components(c: &mut Criterion) {
     {{#each components}}
     {
         let mut group = c.benchmark_group("{{name}}");
-        let component = {{component_type}}::new({{component_args}}).unwrap();
-        component.to(device.clone()).unwrap();
-        
+        let component = {{component_type}}::new({{component_args}}).expect("Failed to create component");
+        component.to(device.clone()).expect("Failed to move component to device");
+
         for batch_size in &[1, 8, 32] {
             let input_shape = vec![*batch_size, {{input_dim}}];
-            
+
             group.throughput(Throughput::Elements(*batch_size as u64));
             group.bench_with_input(
                 BenchmarkId::new("forward", batch_size),
                 &input_shape,
                 |b, shape| {
-                    let input = Tensor::randn(shape).unwrap();
+                    let input = Tensor::randn(shape).expect("Failed to create random tensor");
                     b.iter(|| {
-                        let _output = component.forward(black_box(&input)).unwrap();
+                        let _output = component.forward(black_box(&input)).expect("Forward pass failed");
                     });
                 },
             );
         }
-        
+
         group.finish();
     }
     {{/each}}
@@ -164,7 +164,7 @@ fn bench_memory_usage(c: &mut Criterion) {
             BenchmarkId::new("model_creation", batch_size),
             |b| {
                 b.iter(|| {
-                    let _model = {{model_type|pascal_case}}Model::new(black_box(&model_config)).unwrap();
+                    let _model = {{model_type|pascal_case}}Model::new(black_box(&model_config)).expect("Failed to create model");
                 });
             },
         );
@@ -178,9 +178,9 @@ fn bench_memory_usage(c: &mut Criterion) {
 /// Benchmark text generation
 fn bench_generation(c: &mut Criterion) {
     let model_config = {{model_type|pascal_case}}Config::default();
-    let model = {{model_type|pascal_case}}Model::new(&model_config).unwrap();
+    let model = {{model_type|pascal_case}}Model::new(&model_config).expect("Failed to create model");
     let device = Device::Cpu;
-    model.to(device.clone()).unwrap();
+    model.to(device.clone()).expect("Failed to move model to device");
     model.eval();
     
     let mut group = c.benchmark_group("generation");
@@ -191,8 +191,9 @@ fn bench_generation(c: &mut Criterion) {
     for prompt_len in &prompt_lengths {
         for max_len in &max_lengths {
             if max_len > prompt_len {
-                let input = Tensor::randint(0, model_config.vocab_size as i64, &[1, *prompt_len]).unwrap();
-                
+                let input = Tensor::randint(0, model_config.vocab_size as i64, &[1, *prompt_len])
+                    .expect("Failed to create random integer tensor");
+
                 group.bench_with_input(
                     BenchmarkId::new(
                         format!("prompt_{}_max_{}", prompt_len, max_len),
@@ -207,7 +208,7 @@ fn bench_generation(c: &mut Criterion) {
                                 1.0,  // temperature
                                 None, // top_k
                                 None, // top_p
-                            ).unwrap();
+                            ).expect("Generation failed");
                         });
                     },
                 );

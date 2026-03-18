@@ -1,4 +1,5 @@
 //! Dynamic Batching and Performance Optimization Example
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example demonstrates dynamic batching, adaptive batch sizing,
@@ -171,7 +172,7 @@ async fn adaptive_batch_sizing_example() -> Result<()> {
     let latency_optimal = performance_data
         .iter()
         .min_by_key(|(size, latency, _)| latency.as_millis() / *size as u128)
-        .unwrap();
+        .expect("Queue should be created");
     println!(
         "  Latency-optimized: {} ({}ms per request)",
         latency_optimal.0,
@@ -184,9 +185,9 @@ async fn adaptive_batch_sizing_example() -> Result<()> {
         .max_by(|(size1, latency1, _), (size2, latency2, _)| {
             let throughput1 = *size1 as f64 / latency1.as_secs_f64();
             let throughput2 = *size2 as f64 / latency2.as_secs_f64();
-            throughput1.partial_cmp(&throughput2).unwrap()
+            throughput1.partial_cmp(&throughput2).expect("Values should be comparable")
         })
-        .unwrap();
+        .expect("Batch result should be available");
     let max_throughput = throughput_optimal.0 as f64 / throughput_optimal.1.as_secs_f64();
     println!(
         "  Throughput-optimized: {} ({:.1} req/s)",
@@ -197,7 +198,7 @@ async fn adaptive_batch_sizing_example() -> Result<()> {
     let memory_optimal = performance_data
         .iter()
         .min_by_key(|(size, _, memory)| memory / *size as usize)
-        .unwrap();
+        .expect("Statistics should be available");
     println!(
         "  Memory-optimized: {} ({}KB per request)",
         memory_optimal.0,

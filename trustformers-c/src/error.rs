@@ -523,7 +523,10 @@ impl ErrorTracker {
 
     fn update_health_score(&mut self) {
         // Simple health score calculation based on recent error rate
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::from_secs(0))
+            .as_secs();
         let recent_errors = self.error_timestamps.iter()
             .filter(|&&ts| now - ts < 300) // Last 5 minutes
             .count();
@@ -548,7 +551,10 @@ impl ErrorTracker {
     }
 
     fn calculate_error_rate(&self) -> f64 {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::from_secs(0))
+            .as_secs();
         let minute_ago = now - 60;
 
         let errors_last_minute =
@@ -603,7 +609,10 @@ pub extern "C" fn trustformers_error_record(
         }
     };
 
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::from_secs(0))
+        .as_secs();
 
     let record = ErrorRecord {
         error_code,
@@ -860,9 +869,11 @@ pub extern "C" fn trustformers_error_context_free(context: *mut TrustformersErro
         }
 
         if !ctx.related_errors.is_null() && ctx.num_related_errors > 0 {
-            let layout =
-                std::alloc::Layout::array::<TrustformersError>(ctx.num_related_errors).unwrap();
-            std::alloc::dealloc(ctx.related_errors as *mut u8, layout);
+            if let Ok(layout) =
+                std::alloc::Layout::array::<TrustformersError>(ctx.num_related_errors)
+            {
+                std::alloc::dealloc(ctx.related_errors as *mut u8, layout);
+            }
             ctx.related_errors = ptr::null_mut();
         }
     }

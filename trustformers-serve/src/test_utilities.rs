@@ -492,7 +492,7 @@ pub mod grouping {
 
                 join_set.spawn(async move {
                     let _permit = if let Some(ref sem) = semaphore_clone {
-                        Some(sem.acquire().await.unwrap())
+                        Some(sem.acquire().await.expect("semaphore should not be closed"))
                     } else {
                         None
                     };

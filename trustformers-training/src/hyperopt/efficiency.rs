@@ -672,14 +672,18 @@ impl BanditOptimizer {
 
         if rng.random::<f64>() < epsilon {
             // Explore: select random arm
-            Ok(rng.gen_range(0..self.arms.len()))
+            Ok(rng.random_range(0..self.arms.len()))
         } else {
             // Exploit: select best arm
             let best_arm = self
                 .arm_stats
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.average_reward.partial_cmp(&b.average_reward).unwrap())
+                .max_by(|(_, a), (_, b)| {
+                    a.average_reward
+                        .partial_cmp(&b.average_reward)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .map(|(i, _)| i)
                 .unwrap_or(0);
             Ok(best_arm)
@@ -893,21 +897,21 @@ impl SearchSpace {
         for param in &self.parameters {
             let value = match param {
                 super::search_space::HyperParameter::Continuous(p) => {
-                    let val = rng.gen_range(p.low..=p.high);
+                    let val = rng.random_range(p.low..=p.high);
                     ParameterValue::Float(val)
                 },
                 super::search_space::HyperParameter::Log(p) => {
                     let log_low = p.low.ln();
                     let log_high = p.high.ln();
-                    let log_val = rng.gen_range(log_low..=log_high);
+                    let log_val = rng.random_range(log_low..=log_high);
                     ParameterValue::Float(log_val.exp())
                 },
                 super::search_space::HyperParameter::Discrete(p) => {
-                    let val = rng.gen_range(p.low..=p.high);
+                    let val = rng.random_range(p.low..=p.high);
                     ParameterValue::Int(val)
                 },
                 super::search_space::HyperParameter::Categorical(p) => {
-                    let choice = &p.choices[rng.gen_range(0..p.choices.len())];
+                    let choice = &p.choices[rng.random_range(0..p.choices.len())];
                     ParameterValue::String(choice.clone())
                 },
             };
@@ -959,14 +963,14 @@ impl SearchSpace {
 
             // Shuffle indices
             for i in (1..indices.len()).rev() {
-                let j = rng.gen_range(0..=i);
+                let j = rng.random_range(0..=i);
                 indices.swap(i, j);
             }
 
             for (i, &idx) in indices.iter().enumerate() {
                 let lower = idx as f64 / n_samples as f64;
                 let upper = (idx + 1) as f64 / n_samples as f64;
-                lhs_matrix[i][dim] = rng.gen_range(lower..upper);
+                lhs_matrix[i][dim] = rng.random_range(lower..upper);
             }
         }
 
@@ -1002,11 +1006,11 @@ impl SearchSpace {
                 ) {
                     let value = match param {
                         super::search_space::HyperParameter::Discrete(p) => {
-                            let val = rng.gen_range(p.low..=p.high);
+                            let val = rng.random_range(p.low..=p.high);
                             ParameterValue::Int(val)
                         },
                         super::search_space::HyperParameter::Categorical(p) => {
-                            let choice = &p.choices[rng.gen_range(0..p.choices.len())];
+                            let choice = &p.choices[rng.random_range(0..p.choices.len())];
                             ParameterValue::String(choice.clone())
                         },
                         _ => unreachable!(),
@@ -1082,11 +1086,11 @@ impl SearchSpace {
                 ) {
                     let value = match param {
                         super::search_space::HyperParameter::Discrete(p) => {
-                            let val = rng.gen_range(p.low..=p.high);
+                            let val = rng.random_range(p.low..=p.high);
                             ParameterValue::Int(val)
                         },
                         super::search_space::HyperParameter::Categorical(p) => {
-                            let choice = &p.choices[rng.gen_range(0..p.choices.len())];
+                            let choice = &p.choices[rng.random_range(0..p.choices.len())];
                             ParameterValue::String(choice.clone())
                         },
                         _ => unreachable!(),
@@ -1132,14 +1136,14 @@ impl SearchSpace {
             for _ in 0..population_size {
                 if rng.random::<f64>() < crossover_rate && population.len() >= 2 {
                     // Crossover
-                    let parent1_idx = rng.gen_range(0..population.len());
-                    let parent2_idx = rng.gen_range(0..population.len());
+                    let parent1_idx = rng.random_range(0..population.len());
+                    let parent2_idx = rng.random_range(0..population.len());
                     let offspring =
                         self.crossover(&population[parent1_idx], &population[parent2_idx])?;
                     new_population.push(offspring);
                 } else {
                     // Mutation
-                    let parent_idx = rng.gen_range(0..population.len());
+                    let parent_idx = rng.random_range(0..population.len());
                     let mutated = self.mutate(&population[parent_idx], mutation_rate)?;
                     new_population.push(mutated);
                 }
@@ -1203,17 +1207,17 @@ impl SearchSpace {
                 // Fallback to random value if parent doesn't have this parameter
                 let random_value = match param {
                     super::search_space::HyperParameter::Continuous(p) => {
-                        ParameterValue::Float(rng.gen_range(p.low..=p.high))
+                        ParameterValue::Float(rng.random_range(p.low..=p.high))
                     },
                     super::search_space::HyperParameter::Log(p) => {
-                        let log_val = rng.gen_range(p.low.ln()..=p.high.ln());
+                        let log_val = rng.random_range(p.low.ln()..=p.high.ln());
                         ParameterValue::Float(log_val.exp())
                     },
                     super::search_space::HyperParameter::Discrete(p) => {
-                        ParameterValue::Int(rng.gen_range(p.low..=p.high))
+                        ParameterValue::Int(rng.random_range(p.low..=p.high))
                     },
                     super::search_space::HyperParameter::Categorical(p) => {
-                        let choice = &p.choices[rng.gen_range(0..p.choices.len())];
+                        let choice = &p.choices[rng.random_range(0..p.choices.len())];
                         ParameterValue::String(choice.clone())
                     },
                 };
@@ -1245,7 +1249,7 @@ impl SearchSpace {
                             let new_val = (current + noise * std_dev).clamp(p.low, p.high);
                             ParameterValue::Float(new_val)
                         } else {
-                            ParameterValue::Float(rng.gen_range(p.low..=p.high))
+                            ParameterValue::Float(rng.random_range(p.low..=p.high))
                         }
                     },
                     super::search_space::HyperParameter::Log(p) => {
@@ -1257,15 +1261,15 @@ impl SearchSpace {
                                 (log_current + noise * log_std).clamp(p.low.ln(), p.high.ln());
                             ParameterValue::Float(new_log.exp())
                         } else {
-                            let log_val = rng.gen_range(p.low.ln()..=p.high.ln());
+                            let log_val = rng.random_range(p.low.ln()..=p.high.ln());
                             ParameterValue::Float(log_val.exp())
                         }
                     },
                     super::search_space::HyperParameter::Discrete(p) => {
-                        ParameterValue::Int(rng.gen_range(p.low..=p.high))
+                        ParameterValue::Int(rng.random_range(p.low..=p.high))
                     },
                     super::search_space::HyperParameter::Categorical(p) => {
-                        let choice = &p.choices[rng.gen_range(0..p.choices.len())];
+                        let choice = &p.choices[rng.random_range(0..p.choices.len())];
                         ParameterValue::String(choice.clone())
                     },
                 };

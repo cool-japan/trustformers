@@ -1758,7 +1758,7 @@ mod tests {
 
         let bottlenecks = vec![];
         let score = profiler.calculate_performance_score(&metrics, &bottlenecks);
-        assert!(score >= 0.0 && score <= 100.0);
+        assert!((0.0..=100.0).contains(&score));
     }
 
     #[test]
@@ -1797,7 +1797,7 @@ mod tests {
         };
 
         let score = MobileProfilerUtils::calculate_efficiency_score(&metrics);
-        assert!(score >= 0.0 && score <= 100.0);
+        assert!((0.0..=100.0).contains(&score));
     }
 
     #[test]

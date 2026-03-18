@@ -330,7 +330,10 @@ pub extern "C" fn trustformers_pipeline_create(
         return error;
     }
 
-    let pipeline = pipeline_opt.unwrap();
+    let pipeline = match pipeline_opt {
+        Some(p) => p,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Register pipeline and return handle (pipeline is already Box<dyn Pipeline>)
     let mut registry = RESOURCE_REGISTRY.write();
@@ -367,7 +370,10 @@ pub extern "C" fn trustformers_onnx_text_classification_pipeline_create(
         return error;
     }
 
-    let tokenizer = tokenizer_opt.unwrap();
+    let tokenizer = match tokenizer_opt {
+        Some(t) => t,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Create ONNX config
     let config = ONNXBackendConfig::cpu_optimized(model_path_buf.clone());
@@ -381,7 +387,10 @@ pub extern "C" fn trustformers_onnx_text_classification_pipeline_create(
         return error;
     }
 
-    let pipeline = pipeline_opt.unwrap();
+    let pipeline = match pipeline_opt {
+        Some(p) => p,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Register pipeline and return handle
     let mut registry = RESOURCE_REGISTRY.write();
@@ -418,7 +427,10 @@ pub extern "C" fn trustformers_onnx_text_generation_pipeline_create(
         return error;
     }
 
-    let tokenizer = tokenizer_opt.unwrap();
+    let tokenizer = match tokenizer_opt {
+        Some(t) => t,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Create ONNX config
     let config = ONNXBackendConfig::cpu_optimized(model_path_buf.clone());
@@ -431,7 +443,10 @@ pub extern "C" fn trustformers_onnx_text_generation_pipeline_create(
         return error;
     }
 
-    let pipeline = pipeline_opt.unwrap();
+    let pipeline = match pipeline_opt {
+        Some(p) => p,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Register pipeline and return handle
     let mut registry = RESOURCE_REGISTRY.write();
@@ -477,7 +492,10 @@ pub extern "C" fn trustformers_pipeline_infer(
         return error;
     }
 
-    let output = output_opt.unwrap();
+    let output = match output_opt {
+        Some(o) => o,
+        None => return TrustformersError::RuntimeError,
+    };
     let inference_time = start_time.elapsed().as_secs_f64() * 1000.0;
 
     // Convert output to JSON
@@ -553,7 +571,10 @@ pub extern "C" fn trustformers_pipeline_batch_infer(
             return error;
         }
 
-        let output = output_opt.unwrap();
+        let output = match output_opt {
+        Some(o) => o,
+        None => return TrustformersError::RuntimeError,
+    };
         let result_json = match serde_json::to_string(&output) {
             Ok(json) => string_to_c_str(json),
             Err(_) => return TrustformersError::SerializationError,
@@ -618,7 +639,10 @@ pub extern "C" fn trustformers_pipeline_stream_generate(
 
     for (i, token) in simulated_tokens.iter().enumerate() {
         let is_final = if i == simulated_tokens.len() - 1 { 1 } else { 0 };
-        let c_token = CString::new(token.as_str()).unwrap();
+        let c_token = match CString::new(token.as_str()) {
+            Ok(s) => s,
+            Err(_) => continue, // Skip tokens with null bytes
+        };
 
         let should_continue = callback(c_token.as_ptr(), is_final, user_data);
         if should_continue == 0 {
@@ -662,7 +686,10 @@ pub extern "C" fn trustformers_conversation_pipeline_create(
         return error;
     }
 
-    let pipeline = pipeline_opt.unwrap();
+    let pipeline = match pipeline_opt {
+        Some(p) => p,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Register pipeline and return handle (pipeline is already Box<dyn Pipeline>)
     let mut registry = RESOURCE_REGISTRY.write();
@@ -716,7 +743,10 @@ pub extern "C" fn trustformers_conversation_continue(
         return error;
     }
 
-    let output = output_opt.unwrap();
+    let output = match output_opt {
+        Some(o) => o,
+        None => return TrustformersError::RuntimeError,
+    };
     let inference_time = start_time.elapsed().as_secs_f64() * 1000.0;
 
     // Convert output to JSON
@@ -780,7 +810,10 @@ pub extern "C" fn trustformers_multimodal_pipeline_create(
         return TrustformersError::FeatureNotAvailable;
     }
 
-    let pipeline = pipeline_opt.unwrap();
+    let pipeline = match pipeline_opt {
+        Some(p) => p,
+        None => return TrustformersError::RuntimeError,
+    };
 
     let mut registry = RESOURCE_REGISTRY.write();
     let handle = registry.register_pipeline(pipeline);
@@ -866,9 +899,11 @@ pub extern "C" fn trustformers_conversation_history_free(
                 }
             }
 
-            let layout =
-                std::alloc::Layout::array::<TrustformersConversationTurn>(hist.num_turns).unwrap();
-            std::alloc::dealloc(hist.turns as *mut u8, layout);
+            if let Ok(layout) =
+                std::alloc::Layout::array::<TrustformersConversationTurn>(hist.num_turns)
+            {
+                std::alloc::dealloc(hist.turns as *mut u8, layout);
+            }
             hist.turns = ptr::null_mut();
         }
 

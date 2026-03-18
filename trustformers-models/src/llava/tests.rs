@@ -163,14 +163,16 @@ fn test_config_validation() {
     assert!(config.validate().is_ok());
 
     // Test invalid language model configuration
-    let mut invalid_config = LlavaConfig::default();
-    invalid_config.hidden_size = 4095; // Not divisible by num_attention_heads
+    let invalid_config = LlavaConfig {
+        hidden_size: 4095, // Not divisible by num_attention_heads
+        ..LlavaConfig::default()
+    };
     assert!(invalid_config.validate().is_err());
 
     // Test invalid vision configuration
-    let mut invalid_config = LlavaConfig::default();
-    invalid_config.vision_config.hidden_size = 1023; // Not divisible by num_attention_heads
-    assert!(invalid_config.validate().is_err());
+    let mut invalid_vision_config = LlavaConfig::default();
+    invalid_vision_config.vision_config.hidden_size = 1023; // Not divisible by num_attention_heads
+    assert!(invalid_vision_config.validate().is_err());
 }
 
 #[test]

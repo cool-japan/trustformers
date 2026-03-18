@@ -232,7 +232,7 @@ impl InContextLearner {
             return Ok(self.select_random(examples, num));
         }
 
-        let embedder = self.embedder.as_ref().unwrap();
+        let embedder = self.embedder.as_ref().expect("embedder checked as Some above");
         let query_embedding = embedder(query);
 
         let mut similarities: Vec<(usize, f32)> = examples
@@ -248,7 +248,7 @@ impl InContextLearner {
             })
             .collect();
 
-        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        similarities.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(similarities.into_iter().take(num).map(|(i, _)| examples[i].clone()).collect())
     }
@@ -291,7 +291,9 @@ impl InContextLearner {
     /// Uncertainty-based selection
     fn select_uncertain(&self, examples: &[ICLExample], num: usize) -> Vec<ICLExample> {
         let mut sorted_examples = examples.to_vec();
-        sorted_examples.sort_by(|a, b| a.confidence.partial_cmp(&b.confidence).unwrap());
+        sorted_examples.sort_by(|a, b| {
+            a.confidence.partial_cmp(&b.confidence).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         sorted_examples.into_iter().take(num).collect()
     }
@@ -335,7 +337,9 @@ impl InContextLearner {
         }
 
         // Simple heuristic: order by confidence
-        examples.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+        examples.sort_by(|a, b| {
+            b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 }
 

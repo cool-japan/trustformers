@@ -574,14 +574,14 @@ mod tests {
 
     #[test]
     fn test_advanced_model_creation() {
-        let model = AdvancedClassifier::new(20, &[128, 64, 32], 5, 0.2).unwrap();
+        let model = AdvancedClassifier::new(20, &[128, 64, 32], 5, 0.2).expect("Failed to create model");
         assert!(model.num_parameters() > 0);
         assert_eq!(model.num_classes, 5);
     }
 
     #[test]
     fn test_complex_data_generation() {
-        let (features, labels) = generate_complex_data(100, 20, 5, 0.1, 1.0).unwrap();
+        let (features, labels) = generate_complex_data(100, 20, 5, 0.1, 1.0).expect("Failed to generate complex data");
         assert_eq!(features.shape(), &[100, 20]);
         assert_eq!(labels.shape(), &[100]);
     }

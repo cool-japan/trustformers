@@ -317,7 +317,7 @@ impl RocmImpl {
         });
 
         if success {
-            Ok(ROCM_INSTANCE.get().unwrap())
+            Ok(ROCM_INSTANCE.get().expect("ROCm instance should exist after initialization"))
         } else {
             Err(TrustformersError::hardware_error(
                 "ROCm not available on this system",
@@ -378,7 +378,12 @@ impl RocmImpl {
 
         // Get function
         let mut function = std::ptr::null_mut();
-        let name_cstr = std::ffi::CString::new(name).unwrap();
+        let name_cstr = std::ffi::CString::new(name).map_err(|_| {
+            TrustformersError::hardware_error(
+                "Kernel name contains null byte",
+                "RocmImpl::compile_kernel",
+            )
+        })?;
         let result = unsafe {
             (self.hip_lib.hip_module_get_function)(&mut function, module, name_cstr.as_ptr())
         };

@@ -204,17 +204,17 @@ impl TestCaseGenerator {
 
     /// Generate random text for testing
     pub fn generate_random_text(&mut self) -> String {
-        let length = self.rng.gen_range(1..=self.config.max_input_length);
+        let length = self.rng.random_range(1..=self.config.max_input_length);
         let mut text = String::new();
 
         for _ in 0..length {
-            let char_type = self.rng.gen_range(0..10);
+            let char_type = self.rng.random_range(0..10);
             let ch = match char_type {
-                0..=5 => self.rng.gen_range(b'a'..=b'z') as char, // Lowercase letters
-                6 => self.rng.gen_range(b'A'..=b'Z') as char,     // Uppercase letters
-                7 => self.rng.gen_range(b'0'..=b'9') as char,     // Digits
-                8 => ' ',                                         // Space
-                _ => self.generate_special_char(),                // Special characters
+                0..=5 => self.rng.random_range(b'a'..=b'z') as char, // Lowercase letters
+                6 => self.rng.random_range(b'A'..=b'Z') as char,     // Uppercase letters
+                7 => self.rng.random_range(b'0'..=b'9') as char,     // Digits
+                8 => ' ',                                            // Space
+                _ => self.generate_special_char(),                   // Special characters
             };
             text.push(ch);
         }
@@ -224,19 +224,19 @@ impl TestCaseGenerator {
 
     /// Generate Unicode text for testing
     pub fn generate_unicode_text(&mut self) -> String {
-        let length = self.rng.gen_range(1..=self.config.max_input_length / 2);
+        let length = self.rng.random_range(1..=self.config.max_input_length / 2);
         let mut text = String::new();
 
         for _ in 0..length {
-            let char_type = self.rng.gen_range(0..10);
+            let char_type = self.rng.random_range(0..10);
             let ch = match char_type {
-                0..=3 => self.rng.gen_range('a'..='z'),
-                4 => self.rng.gen_range('À'..='ÿ'), // Latin extended
-                5 => self.rng.gen_range('Α'..='ω'), // Greek
-                6 => self.rng.gen_range('А'..='я'), // Cyrillic
-                7 => self.rng.gen_range('一'..='龯'), // CJK
-                8 => self.rng.gen_range('ا'..='ي'), // Arabic
-                _ => self.rng.gen_range('😀'..='🙏'), // Emoji
+                0..=3 => self.rng.random_range('a'..='z'),
+                4 => self.rng.random_range('À'..='ÿ'), // Latin extended
+                5 => self.rng.random_range('Α'..='ω'), // Greek
+                6 => self.rng.random_range('А'..='я'), // Cyrillic
+                7 => self.rng.random_range('一'..='龯'), // CJK
+                8 => self.rng.random_range('ا'..='ي'), // Arabic
+                _ => self.rng.random_range('😀'..='🙏'), // Emoji
             };
             text.push(ch);
         }
@@ -260,16 +260,16 @@ impl TestCaseGenerator {
             "a\u{0301}e\u{0301}i\u{0301}", // Combining characters
         ];
 
-        edge_cases[self.rng.gen_range(0..edge_cases.len())].to_string()
+        edge_cases[self.rng.random_range(0..edge_cases.len())].to_string()
     }
 
     /// Generate malformed input for fuzzing
     pub fn generate_malformed_input(&mut self) -> Vec<u8> {
-        let length = self.rng.gen_range(1..=100);
+        let length = self.rng.random_range(1..=100);
         let mut bytes = Vec::new();
 
         for _ in 0..length {
-            bytes.push(self.rng.gen());
+            bytes.push(self.rng.random());
         }
 
         bytes
@@ -279,7 +279,7 @@ impl TestCaseGenerator {
         let special_chars = [
             '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '-', '_', '+', '=',
         ];
-        special_chars[self.rng.gen_range(0..special_chars.len())]
+        special_chars[self.rng.random_range(0..special_chars.len())]
     }
 }
 
@@ -862,7 +862,10 @@ impl CrossValidationRunner {
 
             // Check for consistency
             if results.len() > 1 {
-                let first_result = results.values().next().unwrap();
+                let first_result = match results.values().next() {
+                    Some(result) => result,
+                    None => continue, // Should not happen since results.len() > 1, but handle it safely
+                };
                 let is_consistent = results.values().all(|tokens| tokens == first_result);
 
                 if is_consistent {

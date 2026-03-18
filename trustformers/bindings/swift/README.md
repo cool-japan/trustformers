@@ -2,7 +2,7 @@
 
 [![Swift](https://img.shields.io/badge/Swift-5.9+-orange.svg)](https://swift.org)
 [![Platform](https://img.shields.io/badge/Platform-iOS%2015.0%2B%20%7C%20macOS%2012.0%2B%20%7C%20watchOS%208.0%2B%20%7C%20tvOS%2015.0%2B-lightgrey.svg)](https://developer.apple.com)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 Swift bindings for TrustformeRS, providing native iOS and macOS access to state-of-the-art transformer models with optimized performance for Apple platforms.
 
@@ -456,7 +456,7 @@ Check the `Examples/` directory for complete sample projects:
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the Apache-2.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
 

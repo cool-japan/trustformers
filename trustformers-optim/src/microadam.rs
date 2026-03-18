@@ -610,16 +610,14 @@ impl StatefulOptimizer for MicroAdam {
 
         // Load and compress momentum states
         for (key, tensor) in &state_dict {
-            if key.starts_with("momentum.") {
-                let param_id = key.strip_prefix("momentum.").unwrap().to_string();
+            if let Some(param_id) = key.strip_prefix("momentum.") {
                 let values = tensor.data()?;
                 let compressed = CompressedGradient::compress(&values, &self.config);
-                self.momentum.insert(param_id, compressed);
-            } else if key.starts_with("variance.") {
-                let param_id = key.strip_prefix("variance.").unwrap().to_string();
+                self.momentum.insert(param_id.to_string(), compressed);
+            } else if let Some(param_id) = key.strip_prefix("variance.") {
                 let values = tensor.data()?;
                 let compressed = CompressedGradient::compress(&values, &self.config);
-                self.variance.insert(param_id, compressed);
+                self.variance.insert(param_id.to_string(), compressed);
             }
         }
 
@@ -804,8 +802,10 @@ mod tests {
 
     #[test]
     fn test_memory_savings_ratio() {
-        let mut config = MicroAdamConfig::default();
-        config.max_compression_error = 1.0; // Allow higher compression error for tests
+        let config = MicroAdamConfig {
+            max_compression_error: 1.0, // Allow higher compression error for tests
+            ..MicroAdamConfig::default()
+        };
         let mut optimizer = MicroAdam::with_config(config);
 
         // Initially no savings
@@ -824,8 +824,10 @@ mod tests {
 
     #[test]
     fn test_compression_statistics() {
-        let mut config = MicroAdamConfig::default();
-        config.max_compression_error = 1.0; // Allow higher compression error for tests
+        let config = MicroAdamConfig {
+            max_compression_error: 1.0, // Allow higher compression error for tests
+            ..MicroAdamConfig::default()
+        };
         let mut optimizer = MicroAdam::with_config(config);
         let gradient_data = vec![0.1; 500];
         let gradient = Tensor::new(gradient_data).unwrap();
@@ -876,8 +878,10 @@ mod tests {
 
     #[test]
     fn test_memory_usage_tracking() -> Result<()> {
-        let mut config = MicroAdamConfig::default();
-        config.max_compression_error = 1.0; // Allow higher compression error for tests
+        let config = MicroAdamConfig {
+            max_compression_error: 1.0, // Allow higher compression error for tests
+            ..MicroAdamConfig::default()
+        };
         let mut optimizer = MicroAdam::with_config(config);
         let initial_usage = optimizer.memory_usage();
 

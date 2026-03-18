@@ -812,6 +812,45 @@ pub struct WaitTimeAnalysis {
     pub max_wait_time_us: u64,
 }
 
+/// Cycle detection algorithm for deadlock detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CycleDetectionAlgorithm {
+    pub enabled: bool,
+    pub method: String,
+}
+
+impl CycleDetectionAlgorithm {
+    pub fn new(enabled: bool, method: String) -> Self {
+        Self { enabled, method }
+    }
+}
+
+/// Predictive deadlock detection algorithm
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PredictiveDeadlockAlgorithm {
+    pub enabled: bool,
+    pub accuracy: f64,
+}
+
+impl PredictiveDeadlockAlgorithm {
+    pub fn new(enabled: bool, accuracy: f64) -> Self {
+        Self { enabled, accuracy }
+    }
+}
+
+/// Ordered locking strategy for deadlock prevention
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderedLockingStrategy {
+    pub enabled: bool,
+    pub hierarchy: Vec<String>,
+}
+
+impl OrderedLockingStrategy {
+    pub fn new(enabled: bool, hierarchy: Vec<String>) -> Self {
+        Self { enabled, hierarchy }
+    }
+}
+
 /// Conflict detection algorithm trait
 pub trait ConflictDetectionAlgorithm: std::fmt::Debug + Send + Sync {
     /// Detect resource conflicts in access patterns

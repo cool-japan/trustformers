@@ -234,8 +234,7 @@ impl MemoryProfiler {
         let total_collections = self.total_collections.load(Ordering::Relaxed);
         let overhead_us = self.monitoring_overhead_us.load(Ordering::Relaxed);
 
-        let average_overhead_us =
-            if total_collections > 0 { overhead_us / total_collections } else { 0 };
+        let average_overhead_us = overhead_us.checked_div(total_collections).unwrap_or(0);
 
         let uptime_secs = self.start_time.map(|start| start.elapsed().as_secs()).unwrap_or(0);
 

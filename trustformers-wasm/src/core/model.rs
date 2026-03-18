@@ -1613,7 +1613,8 @@ impl WasmModel {
         let metadata_obj = js_sys::Object::new();
 
         for (key, value) in &self.model_metadata {
-            js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into()).unwrap();
+            js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into())
+                .expect("Failed to set metadata property");
         }
 
         // Add additional computed metadata
@@ -1623,7 +1624,7 @@ impl WasmModel {
                 &"format".into(),
                 &format!("{format:?}").into(),
             )
-            .unwrap();
+            .expect("Failed to set metadata property");
         }
 
         js_sys::Reflect::set(
@@ -1631,19 +1632,19 @@ impl WasmModel {
             &"weight_count".into(),
             &self.weights.len().into(),
         )
-        .unwrap();
+        .expect("Failed to set metadata property");
         js_sys::Reflect::set(
             &metadata_obj,
             &"memory_usage_mb".into(),
             &self.memory_usage_mb().into(),
         )
-        .unwrap();
+        .expect("Failed to set metadata property");
         js_sys::Reflect::set(
             &metadata_obj,
             &"architecture".into(),
             &format!("{arch:?}", arch = self.config.architecture).into(),
         )
-        .unwrap();
+        .expect("Failed to set metadata property");
 
         metadata_obj
     }
@@ -1686,26 +1687,27 @@ impl WasmModel {
                 &"format".into(),
                 &format!("{format:?}", format = detection.format).into(),
             )
-            .unwrap();
+            .expect("Failed to set metadata property");
             js_sys::Reflect::set(
                 &result_obj,
                 &"confidence".into(),
                 &detection.confidence.into(),
             )
-            .unwrap();
+            .expect("Failed to set metadata property");
 
             // Add metadata
             let metadata_obj = js_sys::Object::new();
             for (key, value) in detection.metadata {
-                js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into()).unwrap();
+                js_sys::Reflect::set(&metadata_obj, &key.into(), &value.into())
+                    .expect("Failed to set metadata property");
             }
-            js_sys::Reflect::set(&result_obj, &"metadata".into(), &metadata_obj.into()).unwrap();
+            let _ = js_sys::Reflect::set(&result_obj, &"metadata".into(), &metadata_obj.into());
 
-            js_sys::Reflect::set(&result_obj, &"supported".into(), &true.into()).unwrap();
+            let _ = js_sys::Reflect::set(&result_obj, &"supported".into(), &true.into());
         } else {
-            js_sys::Reflect::set(&result_obj, &"format".into(), &"Unknown".into()).unwrap();
-            js_sys::Reflect::set(&result_obj, &"confidence".into(), &0.0.into()).unwrap();
-            js_sys::Reflect::set(&result_obj, &"supported".into(), &false.into()).unwrap();
+            let _ = js_sys::Reflect::set(&result_obj, &"format".into(), &"Unknown".into());
+            let _ = js_sys::Reflect::set(&result_obj, &"confidence".into(), &0.0.into());
+            let _ = js_sys::Reflect::set(&result_obj, &"supported".into(), &false.into());
         }
 
         result_obj
@@ -1717,39 +1719,40 @@ impl WasmModel {
         let mut weights = Vec::new();
 
         // Embedding weights
-        weights.push(
-            WasmTensor::randn(vec![self.config.vocab_size, self.config.hidden_size]).unwrap(),
-        );
+        if let Ok(tensor) = WasmTensor::randn(vec![self.config.vocab_size, self.config.hidden_size])
+        {
+            weights.push(tensor);
+        }
 
         // Position embeddings
-        weights.push(
-            WasmTensor::randn(vec![
-                self.config.max_position_embeddings,
-                self.config.hidden_size,
-            ])
-            .unwrap(),
-        );
+        if let Ok(tensor) = WasmTensor::randn(vec![
+            self.config.max_position_embeddings,
+            self.config.hidden_size,
+        ]) {
+            weights.push(tensor);
+        }
 
         // Layer weights (simplified)
         for _ in 0..self.config.num_layers {
             // Self-attention weights
-            weights.push(
-                WasmTensor::randn(vec![
-                    self.config.hidden_size,
-                    self.config.hidden_size * 3, // Q, K, V
-                ])
-                .unwrap(),
-            );
+            if let Ok(tensor) = WasmTensor::randn(vec![
+                self.config.hidden_size,
+                self.config.hidden_size * 3, // Q, K, V
+            ]) {
+                weights.push(tensor);
+            }
 
             // FFN weights
-            weights.push(
+            if let Ok(tensor) =
                 WasmTensor::randn(vec![self.config.hidden_size, self.config.intermediate_size])
-                    .unwrap(),
-            );
-            weights.push(
+            {
+                weights.push(tensor);
+            }
+            if let Ok(tensor) =
                 WasmTensor::randn(vec![self.config.intermediate_size, self.config.hidden_size])
-                    .unwrap(),
-            );
+            {
+                weights.push(tensor);
+            }
         }
 
         weights

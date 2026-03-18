@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! # Averaged Adam Optimizer Comprehensive Benchmark
 //!
 //! This example demonstrates the performance characteristics of the new Averaged Adam
@@ -219,7 +220,11 @@ fn analyze_results(results: &[BenchmarkResult]) {
 
     // Sort by final loss (best performance first)
     let mut sorted_results = results.to_vec();
-    sorted_results.sort_by(|a, b| a.final_loss.partial_cmp(&b.final_loss).unwrap());
+    sorted_results.sort_by(|a, b| {
+        a.final_loss
+            .partial_cmp(&b.final_loss)
+            .expect("Cannot compare NaN values in final loss")
+    });
 
     println!("\n🏆 Performance Ranking (by final loss):");
     for (rank, result) in sorted_results.iter().enumerate() {
@@ -239,7 +244,10 @@ fn analyze_results(results: &[BenchmarkResult]) {
     }
 
     // Find fastest optimizer
-    let fastest = results.iter().min_by_key(|r| r.total_time).unwrap();
+    let fastest = results
+        .iter()
+        .min_by_key(|r| r.total_time)
+        .expect("Results should not be empty");
     println!(
         "\n⚡ Fastest Optimizer: {} ({:?})",
         fastest.optimizer_name, fastest.total_time
@@ -248,8 +256,12 @@ fn analyze_results(results: &[BenchmarkResult]) {
     // Find most accurate optimizer
     let most_accurate = results
         .iter()
-        .min_by(|a, b| a.final_loss.partial_cmp(&b.final_loss).unwrap())
-        .unwrap();
+        .min_by(|a, b| {
+            a.final_loss
+                .partial_cmp(&b.final_loss)
+                .expect("Cannot compare NaN values in final loss")
+        })
+        .expect("Results should not be empty");
     println!(
         "🎯 Most Accurate: {} (Loss: {:.2e})",
         most_accurate.optimizer_name, most_accurate.final_loss
@@ -271,8 +283,12 @@ fn analyze_results(results: &[BenchmarkResult]) {
         println!("\n🔬 Averaged Adam Variants Analysis:");
         let best_avg_adam = avg_adam_results
             .iter()
-            .min_by(|a, b| a.final_loss.partial_cmp(&b.final_loss).unwrap())
-            .unwrap();
+            .min_by(|a, b| {
+                a.final_loss
+                    .partial_cmp(&b.final_loss)
+                    .expect("Cannot compare NaN values in final loss")
+            })
+            .expect("Averaged Adam results should not be empty");
 
         println!(
             "   Best Averaged Adam variant: {}",

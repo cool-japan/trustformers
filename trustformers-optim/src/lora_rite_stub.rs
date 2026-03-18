@@ -168,8 +168,16 @@ impl LoRARITE {
                     self.state.v_buffers.insert(param_name.clone(), vec![0.0; param_data.len()]);
                 }
 
-                let m_buffer = self.state.m_buffers.get_mut(param_name).unwrap();
-                let v_buffer = self.state.v_buffers.get_mut(param_name).unwrap();
+                let m_buffer = self
+                    .state
+                    .m_buffers
+                    .get_mut(param_name)
+                    .expect("m_buffer should exist after initialization");
+                let v_buffer = self
+                    .state
+                    .v_buffers
+                    .get_mut(param_name)
+                    .expect("v_buffer should exist after initialization");
 
                 // AdamW-like updates with LoRA-specific preconditioning
                 let mut updated_params = param_data.clone();

@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Optimizer Selection Demo
 //!
 //! This example demonstrates how to use the OptimizerSelector to choose

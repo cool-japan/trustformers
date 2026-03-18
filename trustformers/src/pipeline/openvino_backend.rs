@@ -1152,7 +1152,14 @@ impl<T: Tokenizer + Clone> Pipeline for OpenVINOTextClassificationPipeline<T> {
                 .iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-                .unwrap();
+                .ok_or_else(|| {
+                    TrustformersError::invalid_input(
+                        "No probabilities available for classification",
+                        Some("model_logits"),
+                        Some("at least one probability value"),
+                        Some("empty probability vector"),
+                    )
+                })?;
             results.push(crate::pipeline::ClassificationOutput {
                 label: format!("LABEL_{}", max_idx),
                 score: max_score,
@@ -1304,7 +1311,14 @@ impl<T: Tokenizer + Clone> OpenVINOTextGenerationPipeline<T> {
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, _)| idx as u32)
-                .unwrap()
+                .ok_or_else(|| {
+                    TrustformersError::invalid_input(
+                        "No logits available for token selection",
+                        Some("token_logits"),
+                        Some("at least one logit value"),
+                        Some("empty logits vector"),
+                    )
+                })?
         };
 
         Ok(next_token)

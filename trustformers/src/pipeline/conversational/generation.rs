@@ -1743,7 +1743,7 @@ mod tests {
     fn test_context_builder_creation() {
         let builder = ContextBuilder::new();
         // Just verify it can be created without panicking
-        assert!(true);
+        let _ = builder;
     }
 
     #[test]

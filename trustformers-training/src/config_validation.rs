@@ -618,7 +618,21 @@ impl ConfigSchema {
         match constraint {
             Constraint::Range { min, max } => {
                 if let serde_json::Value::Number(n) = value {
-                    let val = n.as_f64().unwrap();
+                    let val = match n.as_f64() {
+                        Some(v) => v,
+                        None => {
+                            log::warn!("Failed to convert number to f64 for field: {}", field_name);
+                            return Some(ValidationError {
+                                field: field_name.to_string(),
+                                message: format!(
+                                    "Number value cannot be represented as f64: {}",
+                                    n
+                                ),
+                                severity: Severity::Error,
+                                error_code: "INVALID_NUMBER_CONVERSION".to_string(),
+                            });
+                        },
+                    };
                     if let Some(min_val) = min {
                         if val < *min_val {
                             return Some(ValidationError {

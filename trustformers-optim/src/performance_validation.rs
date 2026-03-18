@@ -1044,7 +1044,10 @@ impl PerformanceValidator {
     ) -> Result<RegressionAnalysisResults> {
         println!("   🔍 Detecting performance regressions...");
 
-        let baseline = self.baseline_results.as_ref().unwrap();
+        let baseline = self
+            .baseline_results
+            .as_ref()
+            .expect("baseline_results must be set before detecting regressions");
         let mut results = RegressionAnalysisResults::new();
 
         for scenario_result in &current_results.scenario_results {
@@ -1107,7 +1110,7 @@ impl PerformanceValidator {
             report.push_str(&format!("### {}\\n", scenario_result.scenario_name));
 
             let mut sorted_optimizers: Vec<_> = scenario_result.optimizer_results.iter().collect();
-            sorted_optimizers.sort_by(|a, b| a.1.avg_step_time.cmp(&b.1.avg_step_time));
+            sorted_optimizers.sort_by_key(|a| a.1.avg_step_time);
 
             for (name, result) in sorted_optimizers {
                 report.push_str(&format!(
@@ -1647,7 +1650,7 @@ mod tests {
 
     #[test]
     fn test_mathematical_test_case_creation() {
-        let test_cases = vec![MathematicalTestCase {
+        let test_cases = [MathematicalTestCase {
             name: "Test Case".to_string(),
             description: "Test Description".to_string(),
             parameters: HashMap::new(),

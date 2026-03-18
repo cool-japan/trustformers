@@ -1,9 +1,7 @@
 use crate::gpt2::{Gpt2Config, Gpt2LMHeadModel, Gpt2Model};
-use std::time::Instant;
 use trustformers_core::{
     tensor::Tensor,
     traits::{Model, TokenizedInput},
-    Device,
 };
 
 #[test]
@@ -136,6 +134,8 @@ fn test_gpt2_beam_search() {
 #[cfg(all(target_os = "macos", feature = "metal"))]
 fn test_gpt2_metal_sampling() {
     use crate::gpt2::generation::GenerativeModel;
+    use std::time::Instant;
+    use trustformers_core::Device;
 
     // Very small model config to prevent Metal SIGTRAP
     let config = Gpt2Config {
@@ -198,6 +198,8 @@ fn test_gpt2_metal_sampling() {
 #[cfg(all(target_os = "macos", feature = "metal"))]
 fn test_gpt2_metal_vs_cpu_performance() {
     use crate::gpt2::generation::GenerativeModel;
+    use std::time::Instant;
+    use trustformers_core::Device;
 
     // Very small model config to prevent Metal SIGTRAP
     let config = Gpt2Config {

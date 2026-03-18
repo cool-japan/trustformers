@@ -477,12 +477,10 @@ impl StatefulOptimizer for BGEAdam {
                 if let Some(&count) = data.first() {
                     self.step_count = count as usize;
                 }
-            } else if key.ends_with("_momentum") {
-                let param_key = key.strip_suffix("_momentum").unwrap().to_string();
-                self.state.momentum.insert(param_key, data.clone());
-            } else if key.ends_with("_variance") {
-                let param_key = key.strip_suffix("_variance").unwrap().to_string();
-                self.state.variance.insert(param_key, data.clone());
+            } else if let Some(param_key) = key.strip_suffix("_momentum") {
+                self.state.momentum.insert(param_key.to_string(), data.clone());
+            } else if let Some(param_key) = key.strip_suffix("_variance") {
+                self.state.variance.insert(param_key.to_string(), data.clone());
             }
         }
         Ok(())
@@ -671,9 +669,11 @@ mod tests {
 
     #[test]
     fn test_disabled_features() {
-        let mut config = BGEAdamConfig::default();
-        config.entropy_weighting = false;
-        config.adaptive_parameters = false;
+        let config = BGEAdamConfig {
+            entropy_weighting: false,
+            adaptive_parameters: false,
+            ..BGEAdamConfig::default()
+        };
 
         let optimizer = BGEAdam {
             config,

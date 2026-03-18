@@ -771,8 +771,10 @@ mod tests {
 
     #[test]
     fn test_fp4_quantization() -> Result<()> {
-        let mut config = AdvancedQuantizationConfig::default();
-        config.method = QuantizationMethod::FP4;
+        let config = AdvancedQuantizationConfig {
+            method: QuantizationMethod::FP4,
+            ..AdvancedQuantizationConfig::default()
+        };
         let quantizer = AdvancedQuantizer::new(config);
 
         let data = vec![0.5, -1.0, 2.0, -3.5, 0.0, 1.5, -0.25, 4.0];
@@ -807,8 +809,10 @@ mod tests {
 
     #[test]
     fn test_int4_asymmetric_quantization() -> Result<()> {
-        let mut config = AdvancedQuantizationConfig::default();
-        config.method = QuantizationMethod::Int4Asymmetric;
+        let config = AdvancedQuantizationConfig {
+            method: QuantizationMethod::Int4Asymmetric,
+            ..AdvancedQuantizationConfig::default()
+        };
         let quantizer = AdvancedQuantizer::new(config);
 
         let data = vec![0.1, 0.3, 0.7, 0.9, 1.1, 1.3, 1.7, 1.9]; // Asymmetric range

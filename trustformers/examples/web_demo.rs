@@ -1,4 +1,5 @@
 //! Web-based Interactive Demo
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example creates a web interface for TrustformeRS, allowing users to
@@ -104,14 +105,14 @@ async fn serve_app_js() -> Response {
     Response::builder()
         .header("content-type", "application/javascript")
         .body(APP_JS.into())
-        .unwrap()
+        .expect("Model embedding should succeed")
 }
 
 async fn serve_style_css() -> Response {
     Response::builder()
         .header("content-type", "text/css")
         .body(STYLE_CSS.into())
-        .unwrap()
+        .expect("Text embedding should succeed")
 }
 
 async fn get_models() -> Json<ModelListResponse> {
@@ -402,7 +403,7 @@ fn simulate_summarization(text: &str) -> std::result::Result<serde_json::Value, 
         format!(
             "{}. {}",
             sentences[0].trim(),
-            sentences.last().unwrap().trim()
+            sentences.last().expect("Collection should not be empty").trim()
         )
     } else {
         format!("Summary: {}", &text[..text.len().min(100)])

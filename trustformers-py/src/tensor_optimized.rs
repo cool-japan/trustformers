@@ -471,7 +471,9 @@ impl PyTensorOptimized {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::silu(&input_array);
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -483,7 +485,9 @@ impl PyTensorOptimized {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::mish(&input_array);
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -498,7 +502,9 @@ impl PyTensorOptimized {
         let input_array = input.try_readonly()?.as_array().to_owned();
         let result = TensorOptimizer::gelu_fast(&input_array);
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -515,7 +521,9 @@ impl PyTensorOptimized {
         let result = TensorOptimizer::stable_softmax(&input_array, axis)
             .map_err(|e| PyValueError::new_err(format!("Softmax error: {:?}", e)))?;
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -533,7 +541,9 @@ impl PyTensorOptimized {
         let result = TensorOptimizer::optimized_matmul(&a_array, &b_array)
             .map_err(|e| PyValueError::new_err(format!("Matrix multiplication error: {:?}", e)))?;
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -550,8 +560,14 @@ impl PyTensorOptimized {
         normalized_shape: Vec<usize>,
     ) -> PyResult<Py<PyAny>> {
         let input_array = input.try_readonly()?.as_array().to_owned();
-        let weight_array = weight.map(|w| w.try_readonly().unwrap().as_array().to_owned());
-        let bias_array = bias.map(|b| b.try_readonly().unwrap().as_array().to_owned());
+        let weight_array = weight
+            .map(|w| w.try_readonly().ok()?.as_array().to_owned())
+            .transpose()
+            .ok_or_else(|| PyValueError::new_err("Failed to read weight array"))?;
+        let bias_array = bias
+            .map(|b| b.try_readonly().ok()?.as_array().to_owned())
+            .transpose()
+            .ok_or_else(|| PyValueError::new_err("Failed to read bias array"))?;
 
         let result = TensorOptimizer::layer_norm(
             &input_array,
@@ -563,7 +579,9 @@ impl PyTensorOptimized {
         .map_err(|e| PyValueError::new_err(format!("Layer norm error: {:?}", e)))?;
 
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -583,7 +601,10 @@ impl PyTensorOptimized {
         let query_array = query.try_readonly()?.as_array().to_owned();
         let key_array = key.try_readonly()?.as_array().to_owned();
         let value_array = value.try_readonly()?.as_array().to_owned();
-        let mask_array = mask.map(|m| m.try_readonly().unwrap().as_array().to_owned());
+        let mask_array = mask
+            .map(|m| m.try_readonly().ok()?.as_array().to_owned())
+            .transpose()
+            .ok_or_else(|| PyValueError::new_err("Failed to read mask array"))?;
 
         let result = TensorOptimizer::scaled_dot_product_attention(
             &query_array,
@@ -596,7 +617,9 @@ impl PyTensorOptimized {
         .map_err(|e| PyValueError::new_err(format!("Attention error: {:?}", e)))?;
 
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -618,7 +641,9 @@ impl PyTensorOptimized {
             .map_err(|e| PyValueError::new_err(format!("RoPE error: {:?}", e)))?;
 
         let result_shape = result.shape().to_vec();
-        let result_data = result.as_slice().unwrap();
+        let result_data = result.as_slice().ok_or_else(|| {
+            PyValueError::new_err("Failed to get contiguous slice from result array")
+        })?;
 
         let py_array = PyArray::from_slice(py, result_data).reshape(result_shape)?;
         Ok(py_array.into_any().unbind())
@@ -1269,8 +1294,12 @@ impl PyTensorOptimized {
                     let compression_ratio = original_size as f32 / quantized_size as f32;
 
                     // Calculate MSE between original and dequantized
-                    let original_data = tensor_core.to_vec_f32().unwrap();
-                    let dequantized_data = dequantized.to_vec_f32().unwrap();
+                    let original_data = tensor_core
+                        .to_vec_f32()
+                        .map_err(|e| PyValueError::new_err(format!("Failed to convert tensor to vec: {}", e)))?;
+                    let dequantized_data = dequantized
+                        .to_vec_f32()
+                        .map_err(|e| PyValueError::new_err(format!("Failed to convert dequantized tensor to vec: {}", e)))?;
 
                     let mse = original_data
                         .iter()

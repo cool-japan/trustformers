@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Automated Hyperparameter Tuning for Averaged Adam Optimizer
 //!
 //! This example demonstrates advanced automated hyperparameter optimization
@@ -371,14 +372,13 @@ impl BayesianOptimizer {
             .map(|(config, score)| (candidate.distance(config), *score))
             .collect();
 
-        distances.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        distances.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("Values should be comparable"));
 
         // Weighted average of nearest neighbors
         let mut weighted_sum = 0.0;
         let mut weight_sum = 0.0;
 
-        for i in 0..k {
-            let (distance, score) = distances[i];
+        for &(distance, score) in distances.iter().take(k) {
             let weight = 1.0 / (distance + 1e-6); // Inverse distance weighting
             weighted_sum += weight * score;
             weight_sum += weight;
@@ -474,8 +474,11 @@ impl PopulationBasedTrainer {
     /// Evolve population based on performance
     pub fn evolve(&mut self) {
         // Sort population by performance
-        self.population
-            .sort_by(|a, b| b.current_performance.partial_cmp(&a.current_performance).unwrap());
+        self.population.sort_by(|a, b| {
+            b.current_performance
+                .partial_cmp(&a.current_performance)
+                .expect("Values should be comparable")
+        });
 
         let top_k = ((self.population_size as f32 * self.exploitation_threshold) as usize).max(1);
         let mut rng = thread_rng();
@@ -515,9 +518,11 @@ impl PopulationBasedTrainer {
 
     /// Get best member
     pub fn get_best_member(&self) -> Option<&PopulationMember> {
-        self.population
-            .iter()
-            .max_by(|a, b| a.current_performance.partial_cmp(&b.current_performance).unwrap())
+        self.population.iter().max_by(|a, b| {
+            a.current_performance
+                .partial_cmp(&b.current_performance)
+                .expect("Values should be comparable")
+        })
     }
 }
 
@@ -749,9 +754,11 @@ fn run_population_based_training(
         }
 
         // Find best in this generation
-        let best_gen_result = generation_results
-            .iter()
-            .max_by(|(_, a), (_, b)| a.composite_score.partial_cmp(&b.composite_score).unwrap());
+        let best_gen_result = generation_results.iter().max_by(|(_, a), (_, b)| {
+            a.composite_score
+                .partial_cmp(&b.composite_score)
+                .expect("Values should be comparable")
+        });
 
         if let Some((_, best)) = best_gen_result {
             println!(
@@ -849,15 +856,23 @@ fn compare_optimization_methods() -> Result<(), TrustformersError> {
         let bayesian_results = run_bayesian_optimization(&task, search_space.clone(), 25)?;
         let best_bayesian = bayesian_results
             .iter()
-            .max_by(|a, b| a.composite_score.partial_cmp(&b.composite_score).unwrap())
-            .unwrap();
+            .max_by(|a, b| {
+                a.composite_score
+                    .partial_cmp(&b.composite_score)
+                    .expect("Values should be comparable")
+            })
+            .expect("Best config should exist");
 
         // Run Population-Based Training
         let pbt_results = run_population_based_training(&task, search_space, 8, 5)?;
         let best_pbt = pbt_results
             .iter()
-            .max_by(|a, b| a.composite_score.partial_cmp(&b.composite_score).unwrap())
-            .unwrap();
+            .max_by(|a, b| {
+                a.composite_score
+                    .partial_cmp(&b.composite_score)
+                    .expect("Values should be comparable")
+            })
+            .expect("Fallback config should exist");
 
         // Compare results
         println!("\n📈 Optimization Results Comparison:");

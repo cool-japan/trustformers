@@ -85,7 +85,7 @@ Main entry point for the library.
 
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version);     // "0.1.0-alpha.1"
+console.log(tf.version);     // "0.1.0-rc.1"
 console.log(tf.initialized); // true
 ```
 
@@ -175,4 +175,4 @@ See the `examples/` directory for complete examples:
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0

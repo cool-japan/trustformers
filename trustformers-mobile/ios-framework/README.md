@@ -384,7 +384,7 @@ rustup target add aarch64-apple-ios-sim
 
 ## License
 
-TrustformersKit is released under the MIT License. See LICENSE for details.
+TrustformersKit is released under the Apache-2.0 License. See LICENSE for details.
 
 ## Contributing
 

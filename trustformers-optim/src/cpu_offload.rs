@@ -411,13 +411,15 @@ mod tests {
         let adam = crate::adam::Adam::new(1e-3, (0.9, 0.999), 1e-8, 0.01);
         let mut optimizer = CPUOffloadedOptimizer::new(adam, CPUOffloadConfig::default());
 
-        let mut new_config = CPUOffloadConfig::default();
-        new_config.offload_gradients = true;
-        new_config.offload_threshold = 2048;
+        let new_config = CPUOffloadConfig {
+            offload_gradients: true,
+            offload_threshold: 2048,
+            ..CPUOffloadConfig::default()
+        };
 
         optimizer.set_config(new_config.clone());
 
-        assert_eq!(optimizer.get_config().offload_gradients, true);
+        assert!(optimizer.get_config().offload_gradients);
         assert_eq!(optimizer.get_config().offload_threshold, 2048);
     }
 }

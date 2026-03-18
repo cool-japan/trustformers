@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use rstest::*;
 use std::time::{Duration, Instant};
 use trustformers::config_management::ConfigurationManager;
@@ -70,7 +71,7 @@ fn benchmark_error_creation_performance() {
     let start = Instant::now();
 
     for i in 0..iterations {
-        let _error = TrustformersError::pipeline(&format!("Benchmark error {}", i), "benchmark");
+        let _error = TrustformersError::pipeline(format!("Benchmark error {}", i), "benchmark");
     }
 
     let duration = start.elapsed();
@@ -108,7 +109,7 @@ fn benchmark_profiler_overhead() {
     // Benchmark with profiling
     let start = Instant::now();
     for i in 0..iterations {
-        let _result = profiler.profile_function_lightweight(&format!("operation_{}", i), || {});
+        profiler.profile_function_lightweight(&format!("operation_{}", i), || {});
         // Simulate some work
         let _result = format!("operation_{}", i);
         std::hint::black_box(_result);
@@ -645,7 +646,7 @@ mod regression_tests {
         let start = Instant::now();
 
         for i in 0..iterations {
-            let _error = TrustformersError::pipeline(&format!("Error {}", i), "regression_test");
+            let _error = TrustformersError::pipeline(format!("Error {}", i), "regression_test");
         }
 
         let duration = start.elapsed();
@@ -673,7 +674,7 @@ mod regression_tests {
 
         let start = Instant::now();
         for _ in 0..iterations {
-            let _result = profiler.profile_function_lightweight("test_op", || {});
+            profiler.profile_function_lightweight("test_op", || {});
             // Simulate work with profiling
             std::hint::black_box(42);
         }

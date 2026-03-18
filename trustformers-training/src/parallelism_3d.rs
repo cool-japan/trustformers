@@ -288,7 +288,7 @@ impl Parallelism3D {
         }
 
         // Update communication statistics
-        let mut stats = self.comm_stats.lock().unwrap();
+        let mut stats = self.comm_stats.lock().expect("lock should not be poisoned");
         stats.dp_all_reduce_time += start_time.elapsed();
 
         Ok(())
@@ -296,7 +296,7 @@ impl Parallelism3D {
 
     /// Optimize memory usage based on configuration
     pub fn optimize_memory(&self, tensors: &mut [Tensor]) -> Result<()> {
-        let memory_manager = self.memory_manager.lock().unwrap();
+        let memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
 
         match memory_manager.memory_optimization_level {
             MemoryOptimization::None => {
@@ -327,7 +327,7 @@ impl Parallelism3D {
 
     /// Handle pipeline bubble optimization
     pub fn optimize_pipeline_bubbles(&self) -> Result<()> {
-        let state = self.pipeline_state.write().unwrap();
+        let state = self.pipeline_state.write().expect("lock should not be poisoned");
 
         // Analyze pipeline timing patterns
         let total_stages = self.config.pp_size;
@@ -360,9 +360,9 @@ impl Parallelism3D {
 
     /// Get comprehensive 3D parallelism statistics
     pub fn get_statistics(&self) -> Result<Parallelism3DStats> {
-        let pipeline_state = self.pipeline_state.read().unwrap();
-        let comm_stats = self.comm_stats.lock().unwrap();
-        let memory_manager = self.memory_manager.lock().unwrap();
+        let pipeline_state = self.pipeline_state.read().expect("lock should not be poisoned");
+        let comm_stats = self.comm_stats.lock().expect("lock should not be poisoned");
+        let memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
 
         Ok(Parallelism3DStats {
             dp_rank: self.dp_rank,
@@ -453,7 +453,7 @@ impl Parallelism3D {
         // Adaptive scheduling based on runtime characteristics
 
         // Choose strategy based on current performance metrics
-        let stats = self.comm_stats.lock().unwrap();
+        let stats = self.comm_stats.lock().expect("lock should not be poisoned");
         let communication_time_ratio = stats.pp_send_recv_time.as_millis() as f32
             / (stats.dp_all_reduce_time.as_millis() + stats.mp_all_reduce_time.as_millis() + 1)
                 as f32;
@@ -574,7 +574,7 @@ impl Parallelism3D {
         tensors: &mut [Tensor],
         checkpoint_ratio: usize,
     ) -> Result<()> {
-        let mut memory_manager = self.memory_manager.lock().unwrap();
+        let mut memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
 
         // Save every Nth activation for checkpointing
         for (i, tensor) in tensors.iter().enumerate() {
@@ -717,7 +717,7 @@ impl Parallelism3DManager {
 
     /// Optimize configuration based on performance metrics
     pub fn optimize_configuration(&mut self) -> Result<ParallelismConfig> {
-        let tracker = self.performance_tracker.lock().unwrap();
+        let tracker = self.performance_tracker.lock().expect("lock should not be poisoned");
 
         if tracker.efficiency_scores.is_empty() {
             return Ok(self.global_config.clone());

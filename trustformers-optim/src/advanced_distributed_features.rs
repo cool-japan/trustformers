@@ -786,7 +786,8 @@ impl SmartCheckpointManager {
             format!(
                 "checkpoint_step_{}_diff_{}.ckpt",
                 step,
-                base_checkpoint.unwrap()
+                base_checkpoint
+                    .expect("Base checkpoint exists when differential checkpointing is enabled")
             )
         } else {
             format!("checkpoint_step_{}_full.ckpt", step)
@@ -1032,7 +1033,7 @@ impl PerformanceMLOptimizer {
 
         // Update ML model with current metrics
         {
-            let mut model = self.performance_model.lock().unwrap();
+            let mut model = self.performance_model.lock().expect("lock should not be poisoned");
             model.update_training_data(current_metrics)?;
         }
 
@@ -1071,7 +1072,7 @@ impl PerformanceMLOptimizer {
             metrics.memory_usage.iter().sum::<f32>() / metrics.memory_usage.len() as f32;
 
         // Predict optimal batch size based on utilization and memory
-        let model = self.performance_model.lock().unwrap();
+        let model = self.performance_model.lock().expect("lock should not be poisoned");
         let predicted_optimal_batch =
             model.predict_optimal_batch_size(avg_utilization, avg_memory)?;
 
@@ -1261,9 +1262,11 @@ mod tests {
 
     #[test]
     fn test_auto_scaler_config() {
-        let mut config = AutoScalerConfig::default();
-        config.min_nodes = 2;
-        config.max_nodes = 32;
+        let config = AutoScalerConfig {
+            min_nodes: 2,
+            max_nodes: 32,
+            ..AutoScalerConfig::default()
+        };
 
         // Validate the modified configuration
         assert_eq!(config.min_nodes, 2);
@@ -1303,7 +1306,7 @@ mod tests {
         predictor.update_metrics(&metrics);
 
         let prediction = predictor.predict_workload(Duration::from_secs(600)).unwrap();
-        assert!(prediction >= 0.0 && prediction <= 1.0);
+        assert!((0.0..=1.0).contains(&prediction));
     }
 
     #[test]

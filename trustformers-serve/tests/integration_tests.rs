@@ -78,7 +78,7 @@ async fn create_test_server() -> TestServer {
 
     // Create router and convert to service that can be used by TestServer
     let router = server.create_test_router().await;
-    TestServer::new(router).unwrap()
+    TestServer::new(router)
 }
 
 /// Create test server with authentication enabled
@@ -95,7 +95,7 @@ async fn create_test_server_with_auth() -> TestServer {
     let server = TrustformerServer::new(config).with_auth(auth_service);
 
     let router = server.create_test_router().await;
-    TestServer::new(router).unwrap()
+    TestServer::new(router)
 }
 
 #[tokio::test]
@@ -812,7 +812,8 @@ async fn test_load_balancing_health_interaction() {
                     "parameters": {"max_length": 20}
                 });
 
-                server.post("/v1/inference").json(&request_body).await.assert_status_ok()
+                let response = server.post("/v1/inference").json(&request_body).await;
+                response.assert_status_ok();
             }
         })
         .collect();

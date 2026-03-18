@@ -662,7 +662,7 @@ impl BenchmarkSuite {
 
             // Sort by performance (throughput)
             let mut sorted_results = results.clone();
-            sorted_results.sort_by(|a, b| b.throughput_samples_per_sec.partial_cmp(&a.throughput_samples_per_sec).unwrap());
+            sorted_results.sort_by(|a, b| b.throughput_samples_per_sec.partial_cmp(&a.throughput_samples_per_sec).expect("Values should be comparable"));
 
             for (i, result) in sorted_results.iter().enumerate() {
                 let rank_icon = match i {
@@ -735,7 +735,7 @@ impl BenchmarkSuite {
     fn find_best_in_category(&self, category: &str) -> Option<&BenchmarkResult> {
         self.results.iter()
             .filter(|r| r.name.starts_with(category))
-            .max_by(|a, b| a.throughput_samples_per_sec.partial_cmp(&b.throughput_samples_per_sec).unwrap())
+            .max_by(|a, b| a.throughput_samples_per_sec.partial_cmp(&b.throughput_samples_per_sec).expect("Values should be comparable"))
     }
 
     // Simulation methods (in real implementation, these would run actual training)
@@ -853,9 +853,9 @@ mod tests {
 
     #[test]
     fn test_benchmark_model_creation() {
-        let small_model = BenchmarkModel::small().unwrap();
-        let medium_model = BenchmarkModel::medium().unwrap();
-        let large_model = BenchmarkModel::large().unwrap();
+        let small_model = BenchmarkModel::small().expect("Failed to create small benchmark model");
+        let medium_model = BenchmarkModel::medium().expect("Failed to create medium benchmark model");
+        let large_model = BenchmarkModel::large().expect("Failed to create large benchmark model");
 
         assert!(small_model.num_parameters() < medium_model.num_parameters());
         assert!(medium_model.num_parameters() < large_model.num_parameters());

@@ -178,17 +178,27 @@ impl EWC {
     pub fn new(config: EWCConfig, initial_parameters: Vec<Tensor>) -> Result<Self> {
         let param_count = initial_parameters.len();
 
+        let importance_weights: Result<Vec<Tensor>> = (0..param_count)
+            .map(|i| {
+                Tensor::zeros(&initial_parameters[i].shape())
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))
+            })
+            .collect();
+
+        let accumulated_importance: Result<Vec<Tensor>> = (0..param_count)
+            .map(|i| {
+                Tensor::zeros(&initial_parameters[i].shape())
+                    .map_err(|e| anyhow::anyhow!("{:?}", e))
+            })
+            .collect();
+
         Ok(Self {
             config,
             parameters: initial_parameters.clone(),
-            importance_weights: (0..param_count)
-                .map(|i| Tensor::zeros(&initial_parameters[i].shape()).unwrap())
-                .collect(),
+            importance_weights: importance_weights?,
             anchor_parameters: initial_parameters.clone(),
             current_task: 0,
-            accumulated_importance: (0..param_count)
-                .map(|i| Tensor::zeros(&initial_parameters[i].shape()).unwrap())
-                .collect(),
+            accumulated_importance: accumulated_importance?,
         })
     }
 
@@ -290,12 +300,16 @@ impl PackNet {
     pub fn new(config: PackNetConfig, initial_parameters: Vec<Tensor>) -> Result<Self> {
         let param_count = initial_parameters.len();
 
+        let parameter_masks: Result<Vec<Tensor>> = (0..param_count)
+            .map(|i| {
+                Tensor::ones(&initial_parameters[i].shape()).map_err(|e| anyhow::anyhow!("{:?}", e))
+            })
+            .collect();
+
         Ok(Self {
             config,
             parameters: initial_parameters.clone(),
-            parameter_masks: (0..param_count)
-                .map(|i| Tensor::ones(&initial_parameters[i].shape()).unwrap())
-                .collect(),
+            parameter_masks: parameter_masks?,
             task_allocations: HashMap::new(),
             current_task: 0,
             available_capacity: vec![1.0; param_count],
@@ -482,7 +496,7 @@ impl MemoryReplay {
             match self.config.selection_strategy {
                 MemorySelectionStrategy::Random => {
                     use scirs2_core::random::*; // SciRS2 Integration Policy
-                    let idx = thread_rng().gen_range(0..self.memory_buffer.len());
+                    let idx = thread_rng().random_range(0..self.memory_buffer.len());
                     self.memory_buffer.remove(idx);
                 },
                 _ => {

@@ -271,19 +271,15 @@ impl GenerationConfig {
                     ));
                 }
             },
-            GenerationMode::TopK { k } => {
-                if *k == 0 {
-                    return Err(TrustformersError::invalid_config(
-                        "top_k must be positive".to_string(),
-                    ));
-                }
+            GenerationMode::TopK { k } if *k == 0 => {
+                return Err(TrustformersError::invalid_config(
+                    "top_k must be positive".to_string(),
+                ));
             },
-            GenerationMode::TopP { p } | GenerationMode::MinP { p } => {
-                if *p <= 0.0 || *p > 1.0 {
-                    return Err(TrustformersError::invalid_config(
-                        "top_p/min_p must be in (0, 1]".to_string(),
-                    ));
-                }
+            GenerationMode::TopP { p } | GenerationMode::MinP { p } if (*p <= 0.0 || *p > 1.0) => {
+                return Err(TrustformersError::invalid_config(
+                    "top_p/min_p must be in (0, 1]".to_string(),
+                ));
             },
             GenerationMode::Combined { k, p } => {
                 if *k == 0 {
@@ -630,15 +626,13 @@ impl GenerationUtils {
         // Check stopping criteria
         for criterion in &config.stopping_criteria {
             match criterion {
-                StoppingCriteria::MaxLength => {
-                    if current_length >= config.max_length {
-                        return true;
-                    }
+                StoppingCriteria::MaxLength if current_length >= config.max_length => {
+                    return true;
                 },
-                StoppingCriteria::EosToken { eos_token_id } => {
-                    if generated_tokens.last() == Some(eos_token_id) {
-                        return true;
-                    }
+                StoppingCriteria::EosToken { eos_token_id }
+                    if generated_tokens.last() == Some(eos_token_id) =>
+                {
+                    return true;
                 },
                 StoppingCriteria::AnyToken { token_ids } => {
                     if let Some(last_token) = generated_tokens.last() {
@@ -752,13 +746,17 @@ mod tests {
         let valid_config = GenerationConfig::default();
         assert!(valid_config.validate().is_ok());
 
-        let mut invalid_config = GenerationConfig::default();
-        invalid_config.temperature = 0.0;
+        let invalid_config = GenerationConfig {
+            temperature: 0.0,
+            ..GenerationConfig::default()
+        };
         assert!(invalid_config.validate().is_err());
 
-        let mut invalid_config2 = GenerationConfig::default();
-        invalid_config2.min_length = 200;
-        invalid_config2.max_length = 100;
+        let invalid_config2 = GenerationConfig {
+            min_length: 200,
+            max_length: 100,
+            ..GenerationConfig::default()
+        };
         assert!(invalid_config2.validate().is_err());
     }
 

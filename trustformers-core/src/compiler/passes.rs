@@ -456,9 +456,9 @@ impl OptimizationPass for MemoryLayoutOptimizationPass {
 
         for node in &mut graph.nodes {
             match node.op_type.as_str() {
-                "MatMul" => {
+                "MatMul"
                     // Prefer row-major layout for first input, column-major for second
-                    if !node.attributes.contains_key("layout_optimized") {
+                    if !node.attributes.contains_key("layout_optimized") => {
                         node.attributes
                             .insert("input0_layout".to_string(), "row_major".to_string());
                         node.attributes
@@ -466,18 +466,16 @@ impl OptimizationPass for MemoryLayoutOptimizationPass {
                         node.attributes.insert("layout_optimized".to_string(), "true".to_string());
                         optimized_layouts += 1;
                         changed = true;
-                    }
-                },
-                "Conv2D" => {
+                    },
+                "Conv2D"
                     // Prefer NCHW layout for convolutions on GPU, NHWC for CPU
-                    if !node.attributes.contains_key("layout_optimized") {
+                    if !node.attributes.contains_key("layout_optimized") => {
                         node.attributes.insert("data_layout".to_string(), "NCHW".to_string());
                         node.attributes.insert("weight_layout".to_string(), "OIHW".to_string());
                         node.attributes.insert("layout_optimized".to_string(), "true".to_string());
                         optimized_layouts += 1;
                         changed = true;
-                    }
-                },
+                    },
                 _ => {},
             }
         }
@@ -500,10 +498,10 @@ impl OptimizationPass for MemoryLayoutOptimizationPass {
 
         for node in &graph.nodes {
             match node.op_type.as_str() {
-                "MatMul" | "Conv2D" | "Conv3D" => {
-                    if !node.attributes.contains_key("layout_optimized") {
-                        optimizable_ops += 1;
-                    }
+                "MatMul" | "Conv2D" | "Conv3D"
+                    if !node.attributes.contains_key("layout_optimized") =>
+                {
+                    optimizable_ops += 1;
                 },
                 _ => {},
             }

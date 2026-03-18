@@ -104,7 +104,7 @@ impl IntelImpl {
                 Self::create_fallback()
             }))
         });
-        Ok(INTEL_INSTANCE.get().unwrap())
+        Ok(INTEL_INSTANCE.get().expect("Intel instance should exist after initialization"))
     }
 
     /// Create fallback instance when Intel GPU is not available
@@ -129,7 +129,9 @@ impl IntelImpl {
         };
 
         let config = IntelKernelConfig::default();
-        let kernel_manager = IntelKernel::new(config).unwrap();
+        let kernel_manager = IntelKernel::new(config).expect(
+            "Failed to create IntelKernel for CPU fallback - this should never fail with default config"
+        );
 
         Self {
             kernel_manager: Arc::new(Mutex::new(kernel_manager)),

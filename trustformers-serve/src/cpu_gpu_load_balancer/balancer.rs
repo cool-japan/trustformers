@@ -120,7 +120,7 @@ impl CpuGpuLoadBalancer {
 
     /// Initialize CPU resources
     async fn initialize_cpu_resources(&self) -> Result<()> {
-        let mut cpu_resources = self.cpu_resources.write().unwrap();
+        let mut cpu_resources = self.cpu_resources.write().expect("lock should not be poisoned");
         cpu_resources.clear();
 
         for i in 0..self.config.cpu_pool_size {
@@ -139,7 +139,8 @@ impl CpuGpuLoadBalancer {
 
     /// Initialize GPU resources
     async fn initialize_gpu_resources(&self) -> Result<()> {
-        let mut gpu_resources = self.gpu_resources.write().unwrap();
+        let mut gpu_resources =
+            self.gpu_resources.write().expect("gpu_resources lock should not be poisoned");
         gpu_resources.clear();
 
         // Simulate 1 GPU for simplicity
@@ -225,7 +226,8 @@ impl CpuGpuLoadBalancer {
 
     /// Get task status
     pub async fn get_task_status(&self, task_id: &str) -> Option<ExecutionStatus> {
-        let running_tasks = self.running_tasks.read().unwrap();
+        let running_tasks =
+            self.running_tasks.read().expect("running_tasks lock should not be poisoned");
         running_tasks.get(task_id).map(|result| result.status.clone())
     }
 
@@ -243,8 +245,10 @@ impl CpuGpuLoadBalancer {
     /// Assign processor for task
     pub async fn assign_processor(&self, task: &ComputeTask) -> Option<(ProcessorType, usize)> {
         // Collect all available resources
-        let cpu_resources = self.cpu_resources.read().unwrap();
-        let gpu_resources = self.gpu_resources.read().unwrap();
+        let cpu_resources =
+            self.cpu_resources.read().expect("cpu_resources lock should not be poisoned");
+        let gpu_resources =
+            self.gpu_resources.read().expect("gpu_resources lock should not be poisoned");
 
         let mut all_resources = Vec::new();
         all_resources.extend(cpu_resources.iter().cloned());
@@ -284,8 +288,12 @@ impl CpuGpuLoadBalancer {
                 } {
                     // Assign processor
                     let all_resources = {
-                        let cpu_resources_guard = cpu_resources.read().unwrap();
-                        let gpu_resources_guard = gpu_resources.read().unwrap();
+                        let cpu_resources_guard = cpu_resources
+                            .read()
+                            .expect("cpu_resources lock should not be poisoned");
+                        let gpu_resources_guard = gpu_resources
+                            .read()
+                            .expect("gpu_resources lock should not be poisoned");
 
                         let mut resources = Vec::with_capacity(
                             cpu_resources_guard.len() + gpu_resources_guard.len(),
@@ -324,7 +332,9 @@ impl CpuGpuLoadBalancer {
 
                         // Add to running tasks
                         {
-                            let mut running = running_tasks.write().unwrap();
+                            let mut running = running_tasks
+                                .write()
+                                .expect("running_tasks lock should not be poisoned");
                             running.insert(task_id.clone(), execution_result);
                         }
 
@@ -334,7 +344,8 @@ impl CpuGpuLoadBalancer {
                             ProcessorType::GPU => Arc::clone(&gpu_semaphore),
                         };
 
-                        let _permit = semaphore.acquire().await.unwrap();
+                        let _permit =
+                            semaphore.acquire().await.expect("semaphore should not be closed");
 
                         // Simulate execution time
                         let execution_time =
@@ -343,7 +354,9 @@ impl CpuGpuLoadBalancer {
 
                         // Complete task
                         {
-                            let mut running = running_tasks.write().unwrap();
+                            let mut running = running_tasks
+                                .write()
+                                .expect("running_tasks lock should not be poisoned");
                             if let Some(result) = running.get_mut(&task_id) {
                                 result.status = ExecutionStatus::Completed;
                                 result.execution_time = execution_time;
@@ -394,7 +407,8 @@ impl CpuGpuLoadBalancer {
 
                 // Update CPU utilization
                 let cpu_resources_snapshot: Vec<_> = {
-                    let cpu_resources_guard = cpu_resources.read().unwrap();
+                    let cpu_resources_guard =
+                        cpu_resources.read().expect("cpu_resources lock should not be poisoned");
                     cpu_resources_guard.iter().cloned().collect()
                 };
 
@@ -412,7 +426,8 @@ impl CpuGpuLoadBalancer {
 
                 // Update GPU utilization
                 let gpu_resources_snapshot: Vec<_> = {
-                    let gpu_resources_guard = gpu_resources.read().unwrap();
+                    let gpu_resources_guard =
+                        gpu_resources.read().expect("gpu_resources lock should not be poisoned");
                     gpu_resources_guard.iter().cloned().collect()
                 };
 

@@ -237,13 +237,13 @@ proptest! {
         let dropout = Dropout::new(dropout_rate);
 
         let input_data = vec![1.0; size];
-        let _input = Tensor::from_vec(input_data, &vec![size]).unwrap();
+        let _input = Tensor::from_vec(input_data, &[size]).unwrap();
 
         // Apply dropout multiple times and check statistics
         let mut zero_counts = Vec::new();
 
         for _ in 0..10 {
-            let input = Tensor::from_vec(vec![1.0; size], &vec![size]).unwrap();
+            let input = Tensor::from_vec(vec![1.0; size], &[size]).unwrap();
             let output = dropout.forward(input).unwrap();
             let output_data = output.data().unwrap();
             let zero_count = output_data.iter().filter(|&&x| x == 0.0).count();

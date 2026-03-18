@@ -841,43 +841,43 @@ impl EdgeCacheManager {
             &JsValue::from_str("hit_rate"),
             &JsValue::from(hit_rate),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &metrics,
             &JsValue::from_str("memory_usage_ratio"),
             &JsValue::from(memory_usage_ratio),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &metrics,
             &JsValue::from_str("entry_count_ratio"),
             &JsValue::from(entry_count_ratio),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &metrics,
             &JsValue::from_str("health_score"),
             &JsValue::from(health_score),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &metrics,
             &JsValue::from_str("compression_ratio"),
             &JsValue::from(self.statistics.compression_ratio),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &metrics,
             &JsValue::from_str("network_bytes_saved"),
             &JsValue::from(self.statistics.network_bytes_saved),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &metrics,
             &JsValue::from_str("average_latency_improvement_ms"),
             &JsValue::from(self.statistics.latency_improvement_ms),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
 
         metrics.into()
     }
@@ -937,32 +937,33 @@ impl EdgeCacheManager {
             &JsValue::from_str("max_size_mb"),
             &JsValue::from(self.config.max_size_bytes / (1024 * 1024)),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &config,
             &JsValue::from_str("max_entries"),
             &JsValue::from(self.config.max_entries),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &config,
             &JsValue::from_str("eviction_policy"),
             &JsValue::from(format!("{:?}", self.config.eviction_policy)),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &config,
             &JsValue::from_str("consistency_level"),
             &JsValue::from(format!("{:?}", self.config.consistency_level)),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &config,
             &JsValue::from_str("replication_strategy"),
             &JsValue::from(format!("{:?}", self.config.replication_strategy)),
         )
-        .unwrap();
-        js_sys::Reflect::set(&diagnostics, &JsValue::from_str("config"), &config).unwrap();
+        .expect("Failed to set property in JS object");
+        js_sys::Reflect::set(&diagnostics, &JsValue::from_str("config"), &config)
+            .expect("Failed to set config in diagnostics object");
 
         // Statistics
         let stats = js_sys::Object::new();
@@ -971,44 +972,45 @@ impl EdgeCacheManager {
             &JsValue::from_str("total_entries"),
             &JsValue::from(self.statistics.total_entries),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("total_size_mb"),
             &JsValue::from(self.statistics.total_size_bytes / (1024 * 1024)),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("hit_rate"),
             &JsValue::from(self.statistics.hit_rate()),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("hit_count"),
             &JsValue::from(self.statistics.hit_count),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("miss_count"),
             &JsValue::from(self.statistics.miss_count),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("eviction_count"),
             &JsValue::from(self.statistics.eviction_count),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("compression_ratio"),
             &JsValue::from(self.statistics.compression_ratio),
         )
-        .unwrap();
-        js_sys::Reflect::set(&diagnostics, &JsValue::from_str("statistics"), &stats).unwrap();
+        .expect("Failed to set property in JS object");
+        js_sys::Reflect::set(&diagnostics, &JsValue::from_str("statistics"), &stats)
+            .expect("Failed to set statistics in diagnostics object");
 
         // Current state
         let state = js_sys::Object::new();
@@ -1017,23 +1019,27 @@ impl EdgeCacheManager {
             &JsValue::from_str("region"),
             &JsValue::from(format!("{:?}", self.region)),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &state,
             &JsValue::from_str("prefetch_queue_length"),
             &JsValue::from(self.prefetch_queue.len()),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &state,
             &JsValue::from_str("replication_peers"),
             &JsValue::from(self.replication_peers.len()),
         )
-        .unwrap();
-        js_sys::Reflect::set(&diagnostics, &JsValue::from_str("state"), &state).unwrap();
+        .expect("Failed to set property in JS object");
+        js_sys::Reflect::set(&diagnostics, &JsValue::from_str("state"), &state)
+            .expect("Failed to set state in diagnostics object");
 
         // Return as JSON string
-        js_sys::JSON::stringify(&diagnostics).unwrap().as_string().unwrap()
+        js_sys::JSON::stringify(&diagnostics)
+            .expect("Failed to stringify diagnostics")
+            .as_string()
+            .expect("Stringified JSON should be a valid string")
     }
 
     /// Add a replication peer
@@ -1129,7 +1135,9 @@ impl EdgeCacheManager {
         self.entries
             .iter()
             .min_by(|(_, a), (_, b)| {
-                a.efficiency_score().partial_cmp(&b.efficiency_score()).unwrap()
+                a.efficiency_score()
+                    .partial_cmp(&b.efficiency_score())
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(key, _)| key.clone())
     }

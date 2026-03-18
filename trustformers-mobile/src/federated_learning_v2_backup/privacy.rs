@@ -278,7 +278,7 @@ impl DifferentialPrivacyMechanism {
                 U2 = Some(z1);
             }
 
-            let noise = U1.unwrap() * std_dev + mean;
+            let noise = U1.expect("U1 was just set") * std_dev + mean;
             U1 = U2;
             U2 = None;
 

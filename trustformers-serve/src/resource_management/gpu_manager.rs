@@ -47,11 +47,24 @@ pub mod performance_tracker;
 pub mod types;
 
 // Re-export everything to maintain backward compatibility
-pub use alert_system::*;
-pub use health_monitor::*;
-pub use load_balancer::*;
+// Note: We use explicit imports for submodules that have conflicting `functions` module names
+// to avoid ambiguous glob re-export warnings.
+pub use alert_system::{GpuAlertError, GpuAlertResult, GpuAlertSystem};
+pub use health_monitor::{
+    GpuHealthAnalytics, GpuHealthConfig, GpuHealthError, GpuHealthMonitor, GpuHealthResult,
+    HealthEvent, HealthEventType, HealthMonitoringStats, HealthPredictionModel, HealthRiskLevel,
+    HealthSummary, HealthTrend, HealthTrendAnalysis, OverallHealthStatus,
+};
+pub use load_balancer::{
+    DeviceLoadInfo, GpuLoadBalancer, LoadBalancerConfig, LoadBalancerTrendDirection,
+    LoadBalancingAnalytics, LoadBalancingEvent, LoadPattern, LoadSnapshot, LoadTrend,
+    PowerPriority, RebalancingPriority, RebalancingSuggestion, WorkloadProfile, WorkloadType,
+};
 pub use manager::*;
-pub use monitoring::*;
+pub use monitoring::{
+    GpuMetricsSummary, GpuMonitoringError, GpuMonitoringResult, GpuMonitoringStatistics,
+    GpuMonitoringSystem,
+};
 pub use performance_tracker::*;
 pub use types::*;
 

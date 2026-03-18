@@ -368,7 +368,9 @@ impl Pipeline for Mamba2Pipeline {
 
     fn __call__(&self, input: Self::Input) -> Result<Self::Output> {
         // Use blocking runtime for async code
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+            TrustformersError::runtime_error(format!("Failed to create tokio runtime: {}", e))
+        })?;
         rt.block_on(self.process_async(input))
     }
 }

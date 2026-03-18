@@ -194,7 +194,7 @@ where
                 match process_batch(inputs).await {
                     Ok(outputs) => {
                         // Send responses back
-                        for (request, output) in batch.into_iter().zip(outputs.into_iter()) {
+                        for (request, output) in batch.into_iter().zip(outputs) {
                             let _ = request.response_sender.send(Ok(output));
                         }
 

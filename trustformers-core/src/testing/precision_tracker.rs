@@ -219,7 +219,10 @@ impl PrecisionTracker {
             if input_precision > 0.0 { precision_loss / input_precision } else { 0.0 };
 
         // Get current timestamp
-        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_millis() as u64;
 
         // Update operation counts
         *self.operation_counts.entry(operation.clone()).or_insert(0) += 1;

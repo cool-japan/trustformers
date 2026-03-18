@@ -100,7 +100,7 @@ impl ProfileResult {
 
         // Print children sorted by total time
         let mut children = self.children.clone();
-        children.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+        children.sort_by_key(|child| std::cmp::Reverse(child.total_time));
         for child in children {
             child.print(indent + 2);
         }
@@ -250,7 +250,7 @@ impl PerformanceProfiler {
 
         // Sort by total time
         let mut sorted: Vec<_> = results.values().collect();
-        sorted.sort_by(|a, b| b.total_time.cmp(&a.total_time));
+        sorted.sort_by_key(|item| std::cmp::Reverse(item.total_time));
 
         let total_time: Duration = sorted.iter().map(|r| r.total_time).sum();
         let total_ms = total_time.as_secs_f64() * 1000.0;

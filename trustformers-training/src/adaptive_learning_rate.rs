@@ -739,8 +739,10 @@ mod tests {
 
     #[test]
     fn test_plateau_detection() {
-        let mut config = AdaptiveLearningRateConfig::default();
-        config.plateau_patience = 3;
+        let config = AdaptiveLearningRateConfig {
+            plateau_patience: 3,
+            ..AdaptiveLearningRateConfig::default()
+        };
         let mut scheduler = AdaptiveLearningRateScheduler::new(config);
 
         // Simulate plateau by using same loss repeatedly
@@ -785,9 +787,11 @@ mod tests {
 
     #[test]
     fn test_cyclical_learning_rate() {
-        let mut config = AdaptiveLearningRateConfig::default();
-        config.cyclical_lr = true;
-        config.cycle_length = 10;
+        let config = AdaptiveLearningRateConfig {
+            cyclical_lr: true,
+            cycle_length: 10,
+            ..AdaptiveLearningRateConfig::default()
+        };
         let scheduler = AdaptiveLearningRateScheduler::new(config);
 
         let cyclical_lr = scheduler.compute_cyclical_lr();

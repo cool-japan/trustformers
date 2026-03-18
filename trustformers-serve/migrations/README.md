@@ -473,7 +473,7 @@ impl ConfigMigrationRule for V2ToV3ConfigRule {
 
 ## License
 
-This project is licensed under the MIT OR Apache-2.0 license.
+This project is licensed under the Apache-2.0 license.
 
 ## Support
 

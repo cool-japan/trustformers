@@ -364,7 +364,7 @@ For additional support:
 
 ## License
 
-This package is licensed under the MIT License. See LICENSE file for details.
+This package is licensed under the Apache-2.0 License. See LICENSE file for details.
 
 ## Changelog
 

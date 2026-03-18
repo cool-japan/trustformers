@@ -580,7 +580,7 @@ mod tests {
 #### Phase 1: Enable SciRS2 Features in Workspace (HIGH PRIORITY)
 ```toml
 # Cargo.toml workspace dependencies
-scirs2-core = { version = "0.1.0-rc.2", features = [
+scirs2-core = { version = "0.3.0", features = [
     "random",       # Replaces rand/rand_distr
     "parallel",     # Replaces rayon
     "simd",         # SIMD optimizations
@@ -809,7 +809,7 @@ use crate::config::ModelConfig;
   - [SciRS2 POLICY v3.0.0](https://github.com/cool-japan/scirs/blob/master/SCIRS2_POLICY.md)
   - [ToRSh SCIRS2 Policy v3.0](https://github.com/cool-japan/torsh/blob/master/SCIRS2_INTEGRATION_POLICY.md) - **96.7% compliance achieved**
   - [TensorLogic SCIRS2 Policy](https://github.com/cool-japan/tensorlogic/blob/master/SCIRS2_INTEGRATION_POLICY.md)
-- **SciRS2 Version**: v0.1.0-RC.2
+- **SciRS2 Version**: v0.3.0-RC.2
 - **Next Review**: Q1 2026
 - **Owner**: TrustformeRS Architecture Team
 

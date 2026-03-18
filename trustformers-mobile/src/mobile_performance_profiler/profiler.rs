@@ -2608,7 +2608,7 @@ mod tests {
         let profiling_data = profiler.stop_profiling()?;
 
         // Should have recorded events from multiple threads
-        assert!(profiling_data.events.len() > 0);
+        assert!(!profiling_data.events.is_empty());
 
         Ok(())
     }

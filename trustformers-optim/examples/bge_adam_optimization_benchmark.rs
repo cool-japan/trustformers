@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # BGE-Adam Optimization Benchmark
 //!
 //! Comprehensive benchmark comparing the original BGE-Adam implementation
@@ -18,8 +19,8 @@ fn create_test_data(size: usize) -> (Vec<Tensor>, Vec<Tensor>) {
         let grad_data: Vec<f32> =
             (0..size).map(|i| ((i as f32 * 0.02 + 0.5) % 2.0) - 1.0).collect();
 
-        parameters.push(Tensor::new(param_data).unwrap());
-        gradients.push(Tensor::new(grad_data).unwrap());
+        parameters.push(Tensor::new(param_data).expect("Failed to create tensor"));
+        gradients.push(Tensor::new(grad_data).expect("Failed to create tensor"));
     }
 
     (parameters, gradients)
@@ -36,7 +37,7 @@ fn benchmark_optimizer<O: Optimizer>(
 
     for _ in 0..iterations {
         for (param, grad) in parameters.iter_mut().zip(gradients.iter()) {
-            optimizer.update(param, grad).unwrap();
+            optimizer.update(param, grad).expect("Optimizer update should succeed");
         }
         optimizer.step();
     }
@@ -168,11 +169,11 @@ mod tests {
 
         // Check that each tensor has correct size
         for param in &params {
-            assert_eq!(param.data().unwrap().len(), 50);
+            assert_eq!(param.data().expect("Data should be available").len(), 50);
         }
 
         for grad in &grads {
-            assert_eq!(grad.data().unwrap().len(), 50);
+            assert_eq!(grad.data().expect("Data should be available").len(), 50);
         }
     }
 }

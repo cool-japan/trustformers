@@ -315,11 +315,11 @@ impl {{name|pascal_case}}Dataset {
             .pixels()
             .flat_map(|p| {
                 let channels = p.0;
-                channels.iter().map(|&c| {
+                channels.iter().enumerate().map(|(idx, &c)| {
                     let val = c as f32 / 255.0;
                     if self.normalize {
                         // ImageNet normalization
-                        match channels.iter().position(|&x| x == c).unwrap() {
+                        match idx {
                             0 => (val - 0.485) / 0.229, // R
                             1 => (val - 0.456) / 0.224, // G
                             2 => (val - 0.406) / 0.225, // B

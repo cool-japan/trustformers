@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::mistral::config::MistralConfig;
     use crate::mistral::model::{
@@ -83,8 +84,10 @@ mod tests {
 
     #[test]
     fn test_invalid_mistral_config() {
-        let mut config = MistralConfig::default();
-        config.num_attention_heads = 31; // Not divisible by num_key_value_heads (8)
+        let config = MistralConfig {
+            num_attention_heads: 31, // Not divisible by num_key_value_heads (8)
+            ..MistralConfig::default()
+        };
         assert!(config.validate().is_err());
     }
 

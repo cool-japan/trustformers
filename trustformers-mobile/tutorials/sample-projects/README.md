@@ -285,7 +285,7 @@ We welcome contributions to improve these sample projects!
 
 ## License
 
-All sample projects are licensed under MIT License. See individual project LICENSE files for details.
+All sample projects are licensed under Apache-2.0 License. See individual project LICENSE files for details.
 
 ## Acknowledgments
 

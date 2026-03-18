@@ -349,7 +349,7 @@ impl GradientConflictAnalyzer {
 
         // Find most problematic layers
         let mut layer_scores: Vec<(String, usize)> = layer_conflict_counts.into_iter().collect();
-        layer_scores.sort_by(|a, b| b.1.cmp(&a.1));
+        layer_scores.sort_by_key(|item| std::cmp::Reverse(item.1));
         let most_problematic_layers: Vec<String> =
             layer_scores.into_iter().take(5).map(|(name, _)| name).collect();
 

@@ -700,7 +700,11 @@ fn to_snake_case(s: &str) -> String {
             if i > 0 {
                 result.push('_');
             }
-            result.push(ch.to_lowercase().next().unwrap());
+            if let Some(lowercase) = ch.to_lowercase().next() {
+                result.push(lowercase);
+            } else {
+                result.push(ch);
+            }
         } else if ch == '-' {
             result.push('_');
         } else {

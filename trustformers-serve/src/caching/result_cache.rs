@@ -74,7 +74,10 @@ pub struct CacheEntry {
 
 impl CacheEntry {
     pub fn new(result: CacheResult, ttl_seconds: u64) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         let size_bytes = serde_json::to_vec(&result).unwrap_or_default().len();
 
@@ -91,14 +94,20 @@ impl CacheEntry {
 
     /// Check if entry is expired
     pub fn is_expired(&self) -> bool {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
         now > self.created_at + self.ttl_seconds
     }
 
     /// Update access metadata
     pub fn mark_accessed(&mut self) {
         self.access_count += 1;
-        self.last_accessed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        self.last_accessed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         // Update priority based on access pattern
         let age_factor = 1.0 / (1.0 + (self.last_accessed - self.created_at) as f32 / 3600.0);
@@ -188,7 +197,10 @@ impl ResultCacheService {
             self.metrics.record_cache_hit("result_cache").await;
 
             let hit_metadata = CacheHitMetadata {
-                age_seconds: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+                age_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("SystemTime should be after UNIX_EPOCH")
+                    .as_secs()
                     - entry.created_at,
                 access_count: entry.access_count,
                 cache_efficiency: entry.priority,
@@ -288,7 +300,11 @@ impl ResultCacheService {
             oldest_entry_age: cache
                 .values()
                 .map(|e| {
-                    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - e.created_at
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("SystemTime should be after UNIX_EPOCH")
+                        .as_secs()
+                        - e.created_at
                 })
                 .max()
                 .unwrap_or(0),
@@ -347,7 +363,10 @@ impl ResultCacheService {
         let mut cache = self.cache.write().await;
         let mut current_size = self.current_size_bytes.write().await;
 
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         let expired_keys: Vec<_> = cache
             .iter()
@@ -367,7 +386,10 @@ impl ResultCacheService {
 
     async fn update_priorities(&self) -> Result<()> {
         let mut cache = self.cache.write().await;
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         for entry in cache.values_mut() {
             // Recalculate priority based on current time

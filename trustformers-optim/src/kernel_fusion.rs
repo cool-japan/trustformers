@@ -556,8 +556,8 @@ impl Optimizer for KernelFusedAdam {
 
                 self.gpu_state.launch_fused_adam_kernel(
                     &param_id,
-                    param.as_slice_mut().unwrap(),
-                    grad_arr.as_slice().unwrap(),
+                    param.as_slice_mut().expect("param tensor should have contiguous layout"),
+                    grad_arr.as_slice().expect("gradient tensor should have contiguous layout"),
                     self.lr,
                     self.betas,
                     self.eps,

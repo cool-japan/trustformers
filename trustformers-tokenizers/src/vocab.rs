@@ -1042,11 +1042,11 @@ impl MultiVocabulary {
                 let mut best_priority = 0;
 
                 for (name, config) in &self.configs {
-                    if self.vocabularies.get(name).unwrap().contains(token)
-                        && config.priority > best_priority
-                    {
-                        best_priority = config.priority;
-                        best_vocab = Some(name.as_str());
+                    if let Some(vocab) = self.vocabularies.get(name) {
+                        if vocab.contains(token) && config.priority > best_priority {
+                            best_priority = config.priority;
+                            best_vocab = Some(name.as_str());
+                        }
                     }
                 }
 
@@ -1070,10 +1070,12 @@ impl MultiVocabulary {
             VocabSelectionStrategy::Context => {
                 if let Some(ref context) = self.current_context {
                     for (name, config) in &self.configs {
-                        if config.contexts.contains(context)
-                            && self.vocabularies.get(name).unwrap().contains(token)
-                        {
-                            return Some(name);
+                        if config.contexts.contains(context) {
+                            if let Some(vocab) = self.vocabularies.get(name) {
+                                if vocab.contains(token) {
+                                    return Some(name);
+                                }
+                            }
                         }
                     }
                 }
@@ -1082,10 +1084,12 @@ impl MultiVocabulary {
             VocabSelectionStrategy::Language => {
                 if let Some(ref language) = self.current_language {
                     for (name, config) in &self.configs {
-                        if config.languages.contains(language)
-                            && self.vocabularies.get(name).unwrap().contains(token)
-                        {
-                            return Some(name);
+                        if config.languages.contains(language) {
+                            if let Some(vocab) = self.vocabularies.get(name) {
+                                if vocab.contains(token) {
+                                    return Some(name);
+                                }
+                            }
                         }
                     }
                 }

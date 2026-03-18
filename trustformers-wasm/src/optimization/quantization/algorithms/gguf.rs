@@ -231,7 +231,7 @@ impl GGUFBlockQuantizer {
             let max_abs = block
                 .iter()
                 .map(|&x| x.abs())
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(1.0);
 
             let scale = max_abs / 7.5; // 4-bit range: -7.5 to 7.5
@@ -277,10 +277,16 @@ impl GGUFBlockQuantizer {
             let block = &data[start..end];
 
             // Compute min and max
-            let min_val =
-                block.iter().copied().min_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(0.0);
-            let max_val =
-                block.iter().copied().max_by(|a, b| a.partial_cmp(b).unwrap()).unwrap_or(1.0);
+            let min_val = block
+                .iter()
+                .copied()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(0.0);
+            let max_val = block
+                .iter()
+                .copied()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .unwrap_or(1.0);
 
             let scale = (max_val - min_val) / 15.0; // 4-bit range: 0-15
             let bias = min_val;
@@ -332,7 +338,7 @@ impl GGUFBlockQuantizer {
             let max_abs = block
                 .iter()
                 .map(|&x| x.abs())
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(1.0);
 
             let scale = max_abs / 15.5; // 5-bit range: -15.5 to 15.5
@@ -389,7 +395,7 @@ impl GGUFBlockQuantizer {
             let max_abs = block
                 .iter()
                 .map(|&x| x.abs())
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .unwrap_or(1.0);
 
             let scale = max_abs / 127.0; // 8-bit range: -127 to 127

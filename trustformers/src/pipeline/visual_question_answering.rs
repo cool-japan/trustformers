@@ -342,17 +342,17 @@ where
     }
 
     /// Set fusion strategy
-    pub fn with_fusion_strategy(mut self, strategy: FusionStrategy) -> Self {
+    pub fn with_fusion_strategy(mut self, strategy: FusionStrategy) -> Result<Self> {
         self.config.fusion_strategy = strategy.clone();
-        self.fusion_module = FusionModule::new(strategy).unwrap();
-        self
+        self.fusion_module = FusionModule::new(strategy)?;
+        Ok(self)
     }
 
     /// Set answer generation strategy
-    pub fn with_answer_generation(mut self, strategy: AnswerGenerationStrategy) -> Self {
+    pub fn with_answer_generation(mut self, strategy: AnswerGenerationStrategy) -> Result<Self> {
         self.config.answer_generation = strategy.clone();
-        self.answer_generator = AnswerGenerator::new(strategy).unwrap();
-        self
+        self.answer_generator = AnswerGenerator::new(strategy)?;
+        Ok(self)
     }
 
     /// Enable attention visualization
@@ -1400,7 +1400,9 @@ mod tests {
         let pipeline = VisualQuestionAnsweringPipeline::new(model, tokenizer)
             .unwrap()
             .with_fusion_strategy(FusionStrategy::CrossAttention)
+            .unwrap()
             .with_answer_generation(AnswerGenerationStrategy::Classification)
+            .unwrap()
             .with_confidence_threshold(0.5)
             .with_top_k_answers(3);
 

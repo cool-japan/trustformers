@@ -211,7 +211,10 @@ impl AdaptiveGradientScaler {
                 }
 
                 {
-                    let layer_stat = self.layer_stats.get_mut(layer_name).unwrap();
+                    let layer_stat = self
+                        .layer_stats
+                        .get_mut(layer_name)
+                        .expect("layer stats should exist after insertion at line 206-211");
                     layer_stat.update(layer_norm, self.config.momentum);
 
                     // Check for outliers
@@ -226,13 +229,19 @@ impl AdaptiveGradientScaler {
 
                 // Compute adaptive scale factor (need to get immutable reference)
                 let scale = {
-                    let layer_stat = self.layer_stats.get(layer_name).unwrap();
+                    let layer_stat = self
+                        .layer_stats
+                        .get(layer_name)
+                        .expect("layer stats should exist after insertion at line 206-211");
                     self.compute_adaptive_scale(layer_stat)?
                 };
 
                 // Update scale factor
                 {
-                    let layer_stat = self.layer_stats.get_mut(layer_name).unwrap();
+                    let layer_stat = self
+                        .layer_stats
+                        .get_mut(layer_name)
+                        .expect("layer stats should exist after insertion at line 206-211");
                     layer_stat.scale_factor = scale;
                 }
                 layer_scales.insert(layer_name.clone(), scale);
@@ -575,7 +584,7 @@ mod tests {
         let config = AdaptiveGradientScalingConfig::default();
         let scaler = AdaptiveGradientScaler::new(config);
         let score = scaler.compute_stability_score();
-        assert!(score >= 0.0 && score <= 1.0);
+        assert!((0.0..=1.0).contains(&score));
     }
 
     #[test]

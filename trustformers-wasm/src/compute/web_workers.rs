@@ -234,33 +234,29 @@ impl WorkerPool {
     pub fn get_stats(&self) -> js_sys::Object {
         let stats = Object::new();
 
-        js_sys::Reflect::set(&stats, &"total_workers".into(), &self.workers.len().into()).unwrap();
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(&stats, &"total_workers".into(), &self.workers.len().into());
+        let _ = js_sys::Reflect::set(
             &stats,
             &"busy_workers".into(),
             &self.count_busy_workers().into(),
-        )
-        .unwrap();
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"queued_tasks".into(),
             &self.task_queue.len().into(),
-        )
-        .unwrap();
-        js_sys::Reflect::set(
+        );
+        let _ = js_sys::Reflect::set(
             &stats,
             &"pending_tasks".into(),
             &self.pending_tasks.len().into(),
-        )
-        .unwrap();
+        );
 
         let total_completed: usize = self.workers.iter().map(|w| w.total_tasks_completed).sum();
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(
             &stats,
             &"total_completed_tasks".into(),
             &total_completed.into(),
-        )
-        .unwrap();
+        );
 
         stats
     }
@@ -376,7 +372,7 @@ impl WorkerPool {
                     let promise = js_sys::Promise::new(&mut |resolve, _reject| {
                         let worker_clone = worker_instance.worker.clone();
                         let closure = Closure::wrap(Box::new(move |event: MessageEvent| {
-                            resolve.call1(&JsValue::UNDEFINED, &event.data()).unwrap();
+                            let _ = resolve.call1(&JsValue::UNDEFINED, &event.data());
                         })
                             as Box<dyn FnMut(_)>);
 

@@ -366,6 +366,7 @@ impl VulkanKernel {
         // Attempt to enumerate actual Vulkan devices available on the system
         #[cfg(feature = "vulkan")]
         {
+            use vulkano::device::physical::PhysicalDevice;
             use vulkano::instance::{Instance, InstanceCreateInfo};
             use vulkano::VulkanLibrary;
 
@@ -375,9 +376,12 @@ impl VulkanKernel {
                     match Instance::new(library.clone(), InstanceCreateInfo::default()) {
                         Ok(instance) => {
                             // Enumerate physical devices
-                            for (idx, physical_device) in
-                                instance.enumerate_physical_devices().unwrap().enumerate()
-                            {
+                            let physical_devices: Vec<Arc<PhysicalDevice>> =
+                                match instance.enumerate_physical_devices() {
+                                    Ok(devices) => devices.collect(),
+                                    Err(_) => Vec::new(),
+                                };
+                            for (idx, physical_device) in physical_devices.iter().enumerate() {
                                 let properties = physical_device.properties();
                                 // Note: In Vulkano 0.35+, limits are part of properties directly
                                 let limits = properties;

@@ -392,7 +392,7 @@ impl MLflowClient {
         let dest_path = if let Some(rel_path) = artifact_path {
             artifact_dir.join(rel_path)
         } else {
-            artifact_dir.join(local_path.file_name().unwrap())
+            artifact_dir.join(local_path.file_name().context("local_path must have a filename")?)
         };
 
         if let Some(parent) = dest_path.parent() {

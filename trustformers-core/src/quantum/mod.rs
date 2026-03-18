@@ -577,7 +577,7 @@ impl QuantumManager {
                 let bitstring = format!("{:0width$b}", i, width = num_bits);
                 // Entangled superposition shows correlated patterns
                 let correlation_factor = if i % 3 == 0 { 1.5 } else { 0.7 };
-                let prob_variation = rng.gen_range(-0.1..0.1);
+                let prob_variation = rng.random_range(-0.1..0.1);
                 let final_prob = (base_prob * correlation_factor + prob_variation).max(0.01);
                 let count = (shots as f64 * final_prob) as usize;
                 counts.insert(bitstring, count);
@@ -591,7 +591,7 @@ impl QuantumManager {
             for i in 0..num_states_to_sample {
                 let bitstring = format!("{:0width$b}", i, width = num_bits);
                 // Add realistic quantum fluctuations
-                let prob_variation = rng.gen_range(-0.05..0.05);
+                let prob_variation = rng.random_range(-0.05..0.05);
                 let final_prob = (base_prob + prob_variation).max(0.005);
                 let count = (shots as f64 * final_prob) as usize;
                 counts.insert(bitstring, count);

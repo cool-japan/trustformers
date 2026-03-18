@@ -358,6 +358,7 @@ mod tests {
         let is_valid = suite.quick_validation().unwrap();
 
         // Result should be boolean
-        assert!(is_valid == true || is_valid == false);
+        // quick_validation returns a boolean result
+        let _result = is_valid;
     }
 }

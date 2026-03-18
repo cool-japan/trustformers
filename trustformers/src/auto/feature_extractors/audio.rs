@@ -402,9 +402,11 @@ impl FeatureExtractor for AudioFeatureExtractor {
                 if let Some(meta) = metadata {
                     output_metadata.insert(
                         "duration".to_string(),
-                        serde_json::Value::Number(
-                            serde_json::Number::from_f64(meta.duration).unwrap(),
-                        ),
+                        serde_json::Number::from_f64(meta.duration)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or_else(|| {
+                                serde_json::Value::String(format!("{}", meta.duration))
+                            }),
                     );
                     output_metadata.insert(
                         "channels".to_string(),
@@ -594,7 +596,7 @@ impl AudioFeatureConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let config = AudioFeatureConfig {
+    /// let config = AudioFeatureConfig {
     ///     sampling_rate: 16000,
     ///     feature_size: 80,
     ///     n_fft: 512,
@@ -604,6 +606,7 @@ impl AudioFeatureConfig {
     /// };
     ///
     /// config.validate_config()?; // Should succeed
+    /// ```
 
     pub fn validate_config(&self) -> Result<()> {
         if self.sampling_rate == 0 {

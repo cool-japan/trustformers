@@ -368,8 +368,14 @@ impl AutoDebugger {
 
         // Check for loss explosion
         let recent_losses: Vec<f64> = recent_metrics.iter().map(|m| m.loss).collect();
-        if let Some(max_loss) = recent_losses.iter().max_by(|a, b| a.partial_cmp(b).unwrap()) {
-            if let Some(min_loss) = recent_losses.iter().min_by(|a, b| a.partial_cmp(b).unwrap()) {
+        if let Some(max_loss) = recent_losses
+            .iter()
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            if let Some(min_loss) = recent_losses
+                .iter()
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            {
                 if max_loss / min_loss > 10.0 {
                     issues_to_add.push(IdentifiedIssue {
                         category: IssueCategory::LearningRate,
@@ -625,7 +631,9 @@ impl AutoDebugger {
             }
 
             // Check for excessive memory usage
-            if let Some(max_memory) = recent_memory.iter().max_by(|a, b| a.partial_cmp(b).unwrap())
+            if let Some(max_memory) = recent_memory
+                .iter()
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             {
                 if *max_memory > 16384.0 {
                     // 16GB
@@ -747,8 +755,8 @@ impl AutoDebugger {
         self.session_state.recommendations.sort_by(|a, b| {
             b.priority
                 .partial_cmp(&a.priority)
-                .unwrap()
-                .then(b.confidence.partial_cmp(&a.confidence).unwrap())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal))
         });
 
         Ok(())

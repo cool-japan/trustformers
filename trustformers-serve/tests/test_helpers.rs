@@ -437,7 +437,7 @@ fn apply_isolation_settings(
 async fn create_test_server_instance(config: ServerConfig) -> Result<TestServer> {
     let server = TrustformerServer::new(config);
     let router = server.create_test_router().await;
-    TestServer::new(router)
+    Ok(TestServer::new(router))
 }
 
 /// Create test server instance with authentication
@@ -455,7 +455,7 @@ async fn create_test_server_instance_with_auth(
     }
 
     let router = server.create_test_router().await;
-    TestServer::new(router)
+    Ok(TestServer::new(router))
 }
 
 /// Test fixture manager

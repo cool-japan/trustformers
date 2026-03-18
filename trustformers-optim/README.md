@@ -173,4 +173,4 @@ AdaFactor: lr=1e-3, no weight_decay, warmup=10% of steps
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0

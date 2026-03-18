@@ -583,7 +583,7 @@ mod tests {
             sequence_length: 512,
         };
 
-        let model = DistributedTransformer::new(config).unwrap();
+        let model = DistributedTransformer::new(config).expect("Failed to create model");
         assert!(model.num_parameters() > 0);
     }
 

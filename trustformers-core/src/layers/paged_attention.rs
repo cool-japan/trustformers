@@ -15,7 +15,7 @@ use std::sync::RwLock;
 /// during long sequence generation.
 ///
 /// Reference: Efficient Memory Management for Large Language Model Serving with PagedAttention
-/// https://arxiv.org/abs/2309.06180
+/// <https://arxiv.org/abs/2309.06180>
 #[derive(Debug)]
 pub struct PagedAttention {
     num_heads: usize,
@@ -314,7 +314,7 @@ impl PagedAttention {
                             })?
                             .get(&sequence_id)
                             .cloned()
-                            .unwrap();
+                            .expect("sequence must have allocated pages");
 
                         // For simplicity, use full attention for now
                         // In practice, this would manage KV cache pages more efficiently

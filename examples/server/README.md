@@ -275,4 +275,4 @@ See the main TrustformeRS repository for contribution guidelines.
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0

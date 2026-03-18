@@ -11,7 +11,7 @@
 //! - [`manager`] - Main ResourceManagementSystem coordinating all components
 //! - [`port_management`] - Network port allocation and reservation
 //! - [`directory_management`] - Temporary directory management and cleanup
-//! - [`gpu_management`] - GPU resource allocation and monitoring
+//! - [`gpu_manager`] - GPU resource allocation and monitoring
 //! - [`database_management`] - Database connection pool management
 
 // Allow dead code for resource management infrastructure under development

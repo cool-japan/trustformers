@@ -521,8 +521,12 @@ impl TrendDetectionAlgorithm for MovingAverageTrendDetector {
         let moving_averages = calculate_moving_average(&values, self.window_size);
 
         // Analyze trend in moving averages
-        let first_avg = moving_averages.first().unwrap();
-        let last_avg = moving_averages.last().unwrap();
+        let first_avg = moving_averages
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Moving averages is empty"))?;
+        let last_avg = moving_averages
+            .last()
+            .ok_or_else(|| anyhow::anyhow!("Moving averages is empty"))?;
         let change_ratio = (last_avg - first_avg) / first_avg;
 
         let direction = if change_ratio > 0.05 {
@@ -882,7 +886,8 @@ impl TrendPredictionModel for ExponentialSmoothingPredictor {
     ) -> Result<TrendPrediction> {
         let values: Vec<f64> = current_trend.data_points.iter().map(|p| p.throughput).collect();
         let smoothed = calculate_exponential_smoothing(&values, self.alpha);
-        let last_smoothed = *smoothed.last().unwrap();
+        let last_smoothed =
+            *smoothed.last().ok_or_else(|| anyhow::anyhow!("Smoothed values is empty"))?;
 
         // Simple exponential smoothing prediction (constant)
         let horizon_minutes = horizon.as_secs() / 60;
@@ -1029,8 +1034,15 @@ fn calculate_trend_confidence(moving_averages: &[f64]) -> f32 {
         return 0.5;
     }
 
-    let first = moving_averages.first().unwrap();
-    let last = moving_averages.last().unwrap();
+    // Safe: we already check len() >= 2 above
+    let first = match moving_averages.first() {
+        Some(f) => f,
+        None => return 0.5,
+    };
+    let last = match moving_averages.last() {
+        Some(l) => l,
+        None => return 0.5,
+    };
     let change = (last - first).abs() / first;
 
     (change.min(1.0) * 0.8 + 0.2) as f32
@@ -1038,12 +1050,11 @@ fn calculate_trend_confidence(moving_averages: &[f64]) -> f32 {
 
 /// Calculate trend slope from smoothed values
 fn calculate_trend_slope(values: &[f64]) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-
-    let first = values.first().unwrap();
-    let last = values.last().unwrap();
+    // Safe: we check len() >= 2 so first/last are guaranteed
+    let (first, last) = match (values.first(), values.last()) {
+        (Some(f), Some(l)) => (f, l),
+        _ => return 0.0,
+    };
     (last - first) / values.len() as f64
 }
 

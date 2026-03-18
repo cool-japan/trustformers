@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use std::time::Instant;
 use trustformers_core::errors::TrustformersError;
 use trustformers_core::traits::Optimizer;

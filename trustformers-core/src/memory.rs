@@ -638,7 +638,7 @@ impl TensorMemoryPool {
 
         for entries in pool.values_mut() {
             // Sort entries by access count (most accessed first)
-            entries.sort_by(|a, b| b.access_count.cmp(&a.access_count));
+            entries.sort_by_key(|entry| std::cmp::Reverse(entry.access_count));
         }
 
         Ok(())
@@ -709,7 +709,7 @@ impl TensorMemoryPool {
             .filter(|(_, count)| *count > 0)
             .collect();
 
-        frequent_shapes.sort_by(|a, b| b.1.cmp(&a.1));
+        frequent_shapes.sort_by_key(|item| std::cmp::Reverse(item.1));
         frequent_shapes.into_iter().map(|(shape, _)| shape).collect()
     }
 }

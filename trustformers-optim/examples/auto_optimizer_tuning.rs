@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Automatic Optimizer Tuning System
 //!
 //! This example demonstrates an intelligent optimizer tuning system that automatically
@@ -249,8 +250,9 @@ impl AutoOptimizerTuner {
         }
 
         // Check for slow convergence (minimal improvement)
-        let improvement_rate = (recent_losses.last().unwrap() - recent_losses.first().unwrap())
-            / recent_losses.first().unwrap();
+        let improvement_rate = (recent_losses.last().expect("Recent losses should not be empty")
+            - recent_losses.first().expect("Recent losses should not be empty"))
+            / recent_losses.first().expect("Recent losses should not be empty");
 
         if improvement_rate.abs() < 0.001 {
             return ConvergenceTrend::Slow;
@@ -427,7 +429,7 @@ mod rand {
     use std::cell::Cell;
 
     thread_local! {
-        static SEED: Cell<u64> = Cell::new(1);
+        static SEED: Cell<u64> = const { Cell::new(1) };
     }
 
     pub fn random<T>() -> T

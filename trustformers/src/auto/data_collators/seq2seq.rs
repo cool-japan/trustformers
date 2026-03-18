@@ -445,7 +445,7 @@ impl Seq2SeqCollatorConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let model_config = serde_json::json!({
+    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "max_target_length": 128,
     ///     "pad_token_id": 0,
@@ -456,6 +456,7 @@ impl Seq2SeqCollatorConfig {
     /// assert_eq!(config.max_length, Some(512));
     /// assert_eq!(config.max_target_length, Some(128));
     /// assert_eq!(config.pad_token_id, 0);
+    /// ```
 
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         let max_length = config

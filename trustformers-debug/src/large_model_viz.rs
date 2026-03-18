@@ -314,7 +314,7 @@ impl LargeModelVisualizer {
         }
 
         // Sort by variance (descending)
-        variances.sort_by(|a, b| b.1.cmp(&a.1));
+        variances.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         // Sample layers with highest variance
         for (idx, _) in variances.iter().take(max_layers.saturating_sub(2)) {

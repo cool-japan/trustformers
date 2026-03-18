@@ -679,7 +679,9 @@ impl QualityAnalyzer {
         }
 
         // Sort by priority
-        recommendations.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+        recommendations.sort_by(|a, b| {
+            b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal)
+        });
         recommendations
     }
 
@@ -918,11 +920,16 @@ impl QualityAnalyzer {
                 // Calculate throughput: measurements per second, converted to approximate MB/s
                 // Assuming avg chunk size of ~100 bytes per measurement
                 let time_window_secs = if window.len() > 1 {
-                    let elapsed = window
+                    // Safe: window.len() > 1 guarantees both back() and front() return Some
+                    let back_timestamp = window
                         .back()
-                        .unwrap()
-                        .timestamp
-                        .duration_since(window.front().unwrap().timestamp);
+                        .expect("window.back() guaranteed by len() > 1 check")
+                        .timestamp;
+                    let front_timestamp = window
+                        .front()
+                        .expect("window.front() guaranteed by len() > 1 check")
+                        .timestamp;
+                    let elapsed = back_timestamp.duration_since(front_timestamp);
                     elapsed.as_secs_f32().max(1.0)
                 } else {
                     1.0
@@ -1206,7 +1213,7 @@ impl QualityAnalyzer {
             return 0.0;
         }
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let index = ((percentile * (sorted.len() - 1) as f32) as usize).min(sorted.len() - 1);
         sorted[index]
     }
@@ -1258,7 +1265,7 @@ impl QualityAnalyzer {
         }
 
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let index = ((sorted.len() - 1) as f32 * p) as usize;
         sorted[index]

@@ -53,7 +53,7 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 /// the full attention matrix.
 ///
 /// Reference: FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness
-/// https://arxiv.org/abs/2205.14135
+/// <https://arxiv.org/abs/2205.14135>
 #[derive(Debug, Clone)]
 pub struct FlashAttention {
     num_heads: usize,

@@ -515,24 +515,21 @@ impl MultiModelManager {
 
         for model in &self.models {
             let obj = Object::new();
-            js_sys::Reflect::set(&obj, &"id".into(), &model.metadata.id.clone().into()).unwrap();
-            js_sys::Reflect::set(&obj, &"name".into(), &model.metadata.name.clone().into())
-                .unwrap();
-            js_sys::Reflect::set(
+            let _ = js_sys::Reflect::set(&obj, &"id".into(), &model.metadata.id.clone().into());
+            let _ = js_sys::Reflect::set(&obj, &"name".into(), &model.metadata.name.clone().into());
+            let _ = js_sys::Reflect::set(
                 &obj,
                 &"status".into(),
                 &format!("{:?}", model.status).into(),
-            )
-            .unwrap();
-            js_sys::Reflect::set(&obj, &"memory_usage".into(), &model.memory_usage.into()).unwrap();
-            js_sys::Reflect::set(&obj, &"last_used".into(), &model.metadata.last_used.into())
-                .unwrap();
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(&obj, &"memory_usage".into(), &model.memory_usage.into());
+            let _ =
+                js_sys::Reflect::set(&obj, &"last_used".into(), &model.metadata.last_used.into());
+            let _ = js_sys::Reflect::set(
                 &obj,
                 &"usage_count".into(),
                 &model.metadata.usage_count.into(),
-            )
-            .unwrap();
+            );
             array.push(&obj);
         }
 
@@ -613,7 +610,7 @@ impl MultiModelManager {
         candidates.sort_by(|a, b| {
             let a_score = (a.usage_count as f32) * (a.priority as u8 as f32);
             let b_score = (b.usage_count as f32) * (b.priority as u8 as f32);
-            b_score.partial_cmp(&a_score).unwrap()
+            b_score.partial_cmp(&a_score).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Preload top candidates if we have capacity

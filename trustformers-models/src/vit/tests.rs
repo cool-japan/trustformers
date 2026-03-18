@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::vit::config::ViTConfig;
     use crate::vit::model::{PatchEmbedding, ViTForImageClassification, ViTModel};

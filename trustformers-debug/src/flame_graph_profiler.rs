@@ -693,7 +693,7 @@ impl FlameGraphProfiler {
             self.collect_hot_functions(root, &mut functions);
         }
 
-        functions.sort_by(|a, b| b.total_time_ns.cmp(&a.total_time_ns));
+        functions.sort_by_key(|item| std::cmp::Reverse(item.total_time_ns));
         functions.truncate(limit);
         functions
     }

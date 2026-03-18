@@ -50,7 +50,7 @@
 //! - [`profiler`] - Main memory profiler implementation
 //! - [`system`] - System-level memory collection utilities
 //! - [`reporting`] - Report generation and HTML formatting
-//! - [`tests`] - Comprehensive test suite
+//! - `tests` - Comprehensive test suite
 
 // Public modules
 pub mod analytics;

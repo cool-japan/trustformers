@@ -1,4 +1,5 @@
 //! Advanced Pipeline Composition Example
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example demonstrates advanced pipeline composition, chaining,

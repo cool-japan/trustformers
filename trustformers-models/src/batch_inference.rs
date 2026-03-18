@@ -589,13 +589,17 @@ mod tests {
         let valid_config = BatchConfig::default();
         assert!(valid_config.validate().is_ok());
 
-        let mut invalid_config = BatchConfig::default();
-        invalid_config.max_batch_size = 0;
+        let invalid_config = BatchConfig {
+            max_batch_size: 0,
+            ..BatchConfig::default()
+        };
         assert!(invalid_config.validate().is_err());
 
-        let mut invalid_config2 = BatchConfig::default();
-        invalid_config2.min_batch_size = 100;
-        invalid_config2.max_batch_size = 10;
+        let invalid_config2 = BatchConfig {
+            min_batch_size: 100,
+            max_batch_size: 10,
+            ..BatchConfig::default()
+        };
         assert!(invalid_config2.validate().is_err());
     }
 
@@ -662,9 +666,11 @@ mod tests {
 
     #[test]
     fn test_truncation() -> Result<()> {
-        let mut config = BatchConfig::default();
-        config.max_sequence_length = Some(5);
-        config.truncation_strategy = TruncationStrategy::End;
+        let config = BatchConfig {
+            max_sequence_length: Some(5),
+            truncation_strategy: TruncationStrategy::End,
+            ..BatchConfig::default()
+        };
 
         let processor = BatchProcessor::new(config)?;
 
@@ -688,8 +694,10 @@ mod tests {
         assert_eq!(target, 10);
 
         // Test multiple padding
-        let mut config2 = BatchConfig::default();
-        config2.padding_strategy = PaddingStrategy::Multiple(8);
+        let config2 = BatchConfig {
+            padding_strategy: PaddingStrategy::Multiple(8),
+            ..BatchConfig::default()
+        };
         let processor2 = BatchProcessor::new(config2)?;
 
         let target2 = processor2.compute_target_length(10)?;

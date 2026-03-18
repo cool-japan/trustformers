@@ -872,7 +872,7 @@ mod tests {
             .expect("Failed to create tensor");
 
         // Calibrate
-        quantizer.calibrate(&[tensor.clone()]).expect("Calibration failed");
+        quantizer.calibrate(std::slice::from_ref(&tensor)).expect("Calibration failed");
 
         // Quantize
         let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
@@ -894,7 +894,7 @@ mod tests {
         let tensor = Tensor::from_vec(vec![-10.0, -5.0, 0.0, 5.0, 10.0], &[5])
             .expect("Failed to create tensor");
 
-        quantizer.calibrate(&[tensor.clone()]).expect("Calibration failed");
+        quantizer.calibrate(std::slice::from_ref(&tensor)).expect("Calibration failed");
 
         let quantized = quantizer.quantize_tensor(&tensor).expect("Quantization failed");
         let dequantized = quantizer.dequantize_tensor(&quantized).expect("Dequantization failed");
@@ -929,7 +929,9 @@ mod tests {
         let small_range =
             Tensor::from_vec(vec![0.1, 0.2, 0.3, 0.4], &[4]).expect("Operation failed");
 
-        quantizer.calibrate(&[small_range.clone()]).expect("Operation failed");
+        quantizer
+            .calibrate(std::slice::from_ref(&small_range))
+            .expect("Operation failed");
         let quantized = quantizer.quantize_tensor(&small_range).expect("Operation failed");
 
         // Test external storage functionality

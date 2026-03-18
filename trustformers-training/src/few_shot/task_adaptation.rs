@@ -694,8 +694,10 @@ mod tests {
     #[test]
     fn test_forward_pass() {
         let desc = TaskDescriptor::classification("test".to_string(), 10, 3);
-        let mut config = AdaptationConfig::default();
-        config.strategy = AdaptationStrategy::LinearProbing;
+        let config = AdaptationConfig {
+            strategy: AdaptationStrategy::LinearProbing,
+            ..AdaptationConfig::default()
+        };
 
         let adapter = TaskAdapter::new(desc, config).unwrap();
         let input = Array1::ones(10);

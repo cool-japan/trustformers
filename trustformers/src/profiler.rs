@@ -210,7 +210,8 @@ impl Profiler {
         })?;
 
         session.end_time = Some(Instant::now());
-        let total_duration = session.end_time.unwrap() - session.start_time;
+        let total_duration = session.end_time.expect("end_time just set to Some on previous line")
+            - session.start_time;
 
         // Collect results from core profiler
         let operations = self.core_profiler.get_results();
@@ -468,7 +469,7 @@ impl Profiler {
 
         // Find slow operations
         let mut sorted_ops: Vec<_> = operations.iter().collect();
-        sorted_ops.sort_by(|(_, a), (_, b)| b.total_time.cmp(&a.total_time));
+        sorted_ops.sort_by_key(|(_, item)| std::cmp::Reverse(item.total_time));
 
         if let Some((name, result)) = sorted_ops.first() {
             if result.total_time > Duration::from_millis(100) {
@@ -663,7 +664,7 @@ impl Profiler {
 
 impl Default for Profiler {
     fn default() -> Self {
-        Self::new().unwrap()
+        Self::new().expect("Profiler::new should not fail with default config")
     }
 }
 
@@ -684,7 +685,8 @@ pub type GlobalProfiler = Profiler;
 
 /// Get the global profiler instance
 pub fn get_global_profiler() -> &'static Profiler {
-    GLOBAL_PROFILER.get_or_init(|| Profiler::new().unwrap())
+    GLOBAL_PROFILER
+        .get_or_init(|| Profiler::new().expect("Profiler::new should not fail for global instance"))
 }
 
 /// Convenience macro for profiling operations

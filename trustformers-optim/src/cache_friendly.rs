@@ -105,7 +105,7 @@ impl CacheConfig {
 #[derive(Debug)]
 pub struct CacheFriendlyState {
     /// Interleaved momentum and variance data for cache efficiency
-    /// Format: [momentum[i], variance[i], momentum[i+1], variance[i+1], ...]
+    /// Format: \[momentum\[i\], variance\[i\], momentum\[i+1\], variance\[i+1\], ...\]
     pub interleaved_buffers: HashMap<usize, Vec<f32>>,
     /// Parameter metadata for efficient access
     pub param_metadata: HashMap<usize, ParameterMetadata>,

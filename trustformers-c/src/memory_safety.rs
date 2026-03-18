@@ -568,7 +568,10 @@ fn get_global_verifier() -> Arc<MemorySafetyVerifier> {
         VERIFIER_INIT.call_once(|| {
             GLOBAL_VERIFIER = Some(MemorySafetyVerifier::new(MemorySafetyConfig::default()));
         });
-        GLOBAL_VERIFIER.as_ref().unwrap().clone()
+        GLOBAL_VERIFIER
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| MemorySafetyVerifier::new(MemorySafetyConfig::default()))
     }
 }
 

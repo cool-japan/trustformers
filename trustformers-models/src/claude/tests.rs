@@ -45,8 +45,10 @@ fn test_config_validation() {
     assert!(config.validate().is_ok());
 
     // Test invalid configuration
-    let mut invalid_config = ClaudeConfig::default();
-    invalid_config.hidden_size = 4095; // Not divisible by num_attention_heads
+    let invalid_config = ClaudeConfig {
+        hidden_size: 4095, // Not divisible by num_attention_heads
+        ..ClaudeConfig::default()
+    };
     assert!(invalid_config.validate().is_err());
 }
 
@@ -97,11 +99,13 @@ fn test_constitutional_ai_disabled() {
 
 #[test]
 fn test_rope_scaling() {
-    let mut config = ClaudeConfig::default();
-    config.rope_scaling = Some(RopeScaling {
-        scaling_type: "linear".to_string(),
-        scaling_factor: 2.0,
-    });
+    let config = ClaudeConfig {
+        rope_scaling: Some(RopeScaling {
+            scaling_type: "linear".to_string(),
+            scaling_factor: 2.0,
+        }),
+        ..ClaudeConfig::default()
+    };
 
     assert!(config.validate().is_ok());
 }

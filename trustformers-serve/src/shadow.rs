@@ -395,7 +395,8 @@ impl ShadowTestingService {
 
         // Store active request
         {
-            let mut active_requests = self.active_requests.write().unwrap();
+            let mut active_requests =
+                self.active_requests.write().expect("lock should not be poisoned");
             active_requests.insert(request_id.clone(), shadow_request.clone());
         }
 
@@ -409,7 +410,7 @@ impl ShadowTestingService {
 
     /// Get shadow testing statistics
     pub async fn get_stats(&self) -> ShadowStats {
-        let stats = self.stats.read().unwrap();
+        let stats = self.stats.read().expect("lock should not be poisoned");
         stats.clone()
     }
 
@@ -573,7 +574,8 @@ impl ShadowTestingService {
 
         // Remove from active requests
         {
-            let mut active_requests = self.active_requests.write().unwrap();
+            let mut active_requests =
+                self.active_requests.write().expect("lock should not be poisoned");
             active_requests.remove(&request_id);
         }
     }
@@ -678,7 +680,7 @@ impl ShadowTestingService {
 
     /// Update statistics
     async fn update_statistics(&self, comparison: &ShadowComparison) {
-        let mut stats = self.stats.write().unwrap();
+        let mut stats = self.stats.write().expect("lock should not be poisoned");
         stats.total_requests += 1;
         stats.total_shadow_requests += comparison.shadow_responses.len() as u64;
 

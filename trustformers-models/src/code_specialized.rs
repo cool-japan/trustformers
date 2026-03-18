@@ -830,8 +830,10 @@ mod tests {
         let config = CodeSpecializedConfig::default();
         assert!(config.validate().is_ok());
 
-        let mut invalid_config = CodeSpecializedConfig::default();
-        invalid_config.code_context_length = 0;
+        let invalid_config = CodeSpecializedConfig {
+            code_context_length: 0,
+            ..CodeSpecializedConfig::default()
+        };
         assert!(invalid_config.validate().is_err());
 
         let mut invalid_config = CodeSpecializedConfig::default();
@@ -856,8 +858,10 @@ mod tests {
         let config = CodeSpecializedConfig::code_llama_7b();
         assert_eq!(config.effective_vocab_size(), 32016);
 
-        let mut config = CodeSpecializedConfig::default();
-        config.code_vocab_size = None;
+        let mut config = CodeSpecializedConfig {
+            code_vocab_size: None,
+            ..CodeSpecializedConfig::default()
+        };
         config.base_config.vocab_size = 50000;
         assert_eq!(config.effective_vocab_size(), 50000);
     }

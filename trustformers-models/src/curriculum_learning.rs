@@ -986,7 +986,7 @@ pub mod utils {
     ) -> Result<Vec<CurriculumExample>> {
         let mut examples = Vec::new();
 
-        for (input, target) in inputs.into_iter().zip(targets.into_iter()) {
+        for (input, target) in inputs.into_iter().zip(targets) {
             let outputs = model.forward(input.clone())?;
             // Use a simple cross-entropy loss calculation without trainer for difficulty estimation
             let loss = simple_cross_entropy_loss(&outputs, &target)?;

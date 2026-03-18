@@ -250,7 +250,8 @@ impl GradientBuffer {
 
     /// Zero the gradient buffer
     pub fn zero(&mut self) {
-        self.local_gradient = Tensor::zeros(&self.local_gradient.shape()).unwrap();
+        self.local_gradient = Tensor::zeros(&self.local_gradient.shape())
+            .expect("Failed to create zero tensor for gradient buffer reset");
         self.accumulated_gradient = None;
         self.accumulation_steps = 0;
     }

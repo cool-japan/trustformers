@@ -1,4 +1,5 @@
 //! Interactive CLI Demo
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example provides an interactive command-line interface for exploring
@@ -481,11 +482,11 @@ impl InteractiveCLI {
         ];
 
         print!("{}: ", prompt.trim().cyan());
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush(); // Ignore flush errors in streaming output
 
         for word in words {
             print!("{} ", word);
-            io::stdout().flush().unwrap();
+            let _ = io::stdout().flush(); // Ignore flush errors in streaming output
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
 
@@ -512,7 +513,7 @@ impl InteractiveCLI {
                 iterations,
                 (i as f64 / iterations as f64) * 100.0
             );
-            io::stdout().flush().unwrap();
+            let _ = io::stdout().flush(); // Ignore flush errors in progress display
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
 
@@ -602,7 +603,7 @@ impl InteractiveCLI {
 
     fn get_input(&self, prompt: &str) -> Result<String> {
         print!("{}: ", prompt.bold());
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush(); // Ignore flush errors in interactive mode
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;

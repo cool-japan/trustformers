@@ -1,4 +1,5 @@
 //! On-Device Fine-Tuning Demo
+#![allow(clippy::all)]
 //!
 //! Demonstrates comprehensive on-device fine-tuning capabilities including
 //! federated learning, differential privacy, and advanced training methods.
@@ -204,8 +205,8 @@ fn run_federated_learning_demo() -> Result<()> {
     println!("Federated Configuration:");
     println!(
         "- Privacy: ε={}, δ={}",
-        fl_config.dp_config.as_ref().unwrap().epsilon,
-        fl_config.dp_config.as_ref().unwrap().delta
+        fl_config.dp_config.as_ref().expect("Reference should exist").epsilon,
+        fl_config.dp_config.as_ref().expect("Reference should exist").delta
     );
     println!("- Secure aggregation: enabled");
     println!("- Compression: 10% of original size");
@@ -619,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_mock_data_creation() {
-        let data = create_mock_training_data(10).unwrap();
+        let data = create_mock_training_data(10).expect("Failed to create mock training data");
         assert_eq!(data.len(), 10);
     }
 }

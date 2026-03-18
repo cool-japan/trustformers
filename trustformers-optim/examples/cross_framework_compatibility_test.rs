@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use std::collections::HashMap;
 use std::time::Instant;
 use trustformers_core::TrustformersError;
@@ -125,13 +126,13 @@ fn test_tensorflow_compatibility() -> Result<(), TrustformersError> {
     println!(
         "   📊 LR: {:.4}, Beta1: {:.3}, Beta2: {:.4}",
         tf_config.learning_rate,
-        tf_config.beta_1.unwrap(),
-        tf_config.beta_2.unwrap()
+        tf_config.beta_1.expect("Beta1 should be set"),
+        tf_config.beta_2.expect("Beta2 should be set")
     );
     println!(
         "   🎯 JIT compilation: {}, EMA: {}",
-        tf_config.jit_compile.unwrap(),
-        tf_config.use_ema.unwrap()
+        tf_config.jit_compile.expect("JIT compile flag should be set"),
+        tf_config.use_ema.expect("EMA flag should be set")
     );
 
     // Test TensorFlow learning rate schedule

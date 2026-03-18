@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     use crate::gpt_neox::config::GPTNeoXConfig;
     use crate::gpt_neox::model::{GPTNeoXForCausalLM, GPTNeoXModel};
@@ -252,7 +253,7 @@ mod tests {
             let input_ids: Vec<u32> = (0..seq_len).map(|i| (i % 100) as u32).collect();
             let output = model
                 .forward(input_ids.clone())
-                .expect(&format!("Forward pass failed for seq_len={}", seq_len));
+                .unwrap_or_else(|_| panic!("Forward pass failed for seq_len={}", seq_len));
 
             match &output {
                 Tensor::F32(arr) => {

@@ -1,0 +1,56 @@
+//! Auto-generated module structure
+
+pub mod anomalyanalyzer_traits;
+pub mod antipatternclassifier_traits;
+pub mod antipatterndetectionrecord_traits;
+pub mod cachemetadata_traits;
+pub mod classificationmetrics_traits;
+pub mod classificationmodel_traits;
+pub mod classificationruleset_traits;
+pub mod clusteringanalyzer_traits;
+pub mod clusteringmodel_traits;
+pub mod concurrencyfeatureextractor_traits;
+pub mod concurrencypatterndetector_traits;
+pub mod concurrencyrecommendationgenerator_traits;
+pub mod consistencyconfidencecalculator_traits;
+pub mod correlationanalyzer_traits;
+pub mod correlationmatrix_traits;
+pub mod detectioncache_traits;
+pub mod detectioncontext_traits;
+pub mod detectorconfig_traits;
+pub mod effortbasedprioritycalculator_traits;
+pub mod frequencybasedseveritycalculator_traits;
+pub mod functions;
+pub mod generatedrecommendation_traits;
+pub mod historicalconfidencecalculator_traits;
+pub mod impactbasedprioritycalculator_traits;
+pub mod impactbasedseveritycalculator_traits;
+pub mod neuralnetworkmodel_traits;
+pub mod patternrecognitionmetrics_traits;
+pub mod performancebottleneckdetector_traits;
+pub mod performancefeatureextractor_traits;
+pub mod performanceimpactclassifier_traits;
+pub mod performancepatterndetector_traits;
+pub mod performancerecommendationgenerator_traits;
+pub mod resourcefeatureextractor_traits;
+pub mod resourceleakdetector_traits;
+pub mod resourcerecommendationgenerator_traits;
+pub mod resourceusageclassifier_traits;
+pub mod resourceusagepatterndetector_traits;
+pub mod seasonalityanalysisalgorithm_traits;
+pub mod severitylevel_traits;
+pub mod stabilityanalysisalgorithm_traits;
+pub mod statisticalconfidencecalculator_traits;
+pub mod temporalfeatureextractor_traits;
+pub mod temporalpatternclassifier_traits;
+pub mod temporalpatterndetector_traits;
+pub mod timeseriesanalyzer_traits;
+pub mod trainingscheduler_traits;
+pub mod trendanalysisalgorithm_traits;
+pub mod trenddirection_traits;
+pub mod types;
+pub mod versioncontrol_traits;
+
+// Re-export only types module which is actually used
+pub use functions::*;
+pub use types::*;

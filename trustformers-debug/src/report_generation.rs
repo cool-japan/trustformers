@@ -557,7 +557,8 @@ impl ReportGenerator {
 
             data.insert(
                 "memory_stats".to_string(),
-                serde_json::to_value(&profiling_data.memory_efficiency).unwrap(),
+                serde_json::to_value(&profiling_data.memory_efficiency)
+                    .expect("memory_efficiency should always serialize to JSON"),
             );
         } else {
             content.push_str("No memory data available.\n");
@@ -615,7 +616,8 @@ impl ReportGenerator {
 
             data.insert(
                 "gradient_analysis".to_string(),
-                serde_json::to_value(debug_data).unwrap(),
+                serde_json::to_value(debug_data)
+                    .expect("debug_data should always serialize to JSON"),
             );
         } else {
             content.push_str("No gradient data available.\n");
@@ -762,14 +764,16 @@ impl ReportGenerator {
         if let Some(debug_data) = &self.debug_data {
             raw_data.insert(
                 "debug_data".to_string(),
-                serde_json::to_value(debug_data).unwrap(),
+                serde_json::to_value(debug_data)
+                    .expect("debug_data should always serialize to JSON"),
             );
         }
 
         if let Some(profiling_data) = &self.profiling_data {
             raw_data.insert(
                 "profiling_data".to_string(),
-                serde_json::to_value(profiling_data).unwrap(),
+                serde_json::to_value(profiling_data)
+                    .expect("profiling_data should always serialize to JSON"),
             );
         }
 
@@ -884,7 +888,8 @@ impl ReportGenerator {
                 report.metadata.title,
                 report.generated_at.format("%Y-%m-%d %H:%M:%S UTC"))]
         });
-        notebook["cells"].as_array_mut().unwrap().push(title_cell);
+        let cells = notebook["cells"].as_array_mut().expect("notebook cells should be an array");
+        cells.push(title_cell);
 
         // Add content cells
         for section in &report.sections {
@@ -893,7 +898,7 @@ impl ReportGenerator {
                 "metadata": {},
                 "source": [section.content]
             });
-            notebook["cells"].as_array_mut().unwrap().push(cell);
+            cells.push(cell);
         }
 
         let notebook_str = serde_json::to_string_pretty(&notebook)

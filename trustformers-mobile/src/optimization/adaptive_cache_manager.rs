@@ -218,11 +218,7 @@ impl CacheStats {
 
     /// Calculate average item size
     pub fn avg_item_size(&self) -> usize {
-        if self.item_count == 0 {
-            0
-        } else {
-            self.memory_bytes / self.item_count
-        }
+        self.memory_bytes.checked_div(self.item_count).unwrap_or(0)
     }
 }
 

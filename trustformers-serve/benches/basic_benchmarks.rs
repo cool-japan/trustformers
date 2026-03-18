@@ -47,7 +47,7 @@ fn bench_server_creation(c: &mut Criterion) {
     });
 
     group.bench_function("create_server_with_router", |b| {
-        let rt = Runtime::new().unwrap();
+        let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
         b.to_async(&rt).iter(|| async {
             let config = create_benchmark_config();
             let server = TrustformerServer::new(black_box(config));
@@ -72,7 +72,8 @@ fn bench_config_serialization(c: &mut Criterion) {
         })
     });
 
-    let json_str = serde_json::to_string(&config).unwrap();
+    let json_str =
+        serde_json::to_string(&config).expect("Failed to serialize config for benchmark");
     group.bench_function("deserialize_config", |b| {
         b.iter(|| {
             let config: Result<ServerConfig, _> = serde_json::from_str(black_box(&json_str));
@@ -82,8 +83,10 @@ fn bench_config_serialization(c: &mut Criterion) {
 
     group.bench_function("serialize_deserialize_roundtrip", |b| {
         b.iter(|| {
-            let json_str = serde_json::to_string(&config).unwrap();
-            let config2: ServerConfig = serde_json::from_str(black_box(&json_str)).unwrap();
+            let json_str =
+                serde_json::to_string(&config).expect("Failed to serialize config in benchmark");
+            let config2: ServerConfig = serde_json::from_str(black_box(&json_str))
+                .expect("Failed to deserialize config in benchmark");
             black_box(config2)
         })
     });
@@ -203,11 +206,13 @@ fn bench_json_processing(c: &mut Criterion) {
         }
     });
 
-    let json_str = serde_json::to_string(&large_json).unwrap();
+    let json_str =
+        serde_json::to_string(&large_json).expect("Failed to serialize large JSON for benchmark");
 
     group.bench_function("parse_large_json", |b| {
         b.iter(|| {
-            let parsed: serde_json::Value = serde_json::from_str(black_box(&json_str)).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(black_box(&json_str))
+                .expect("Failed to parse large JSON in benchmark");
             black_box(parsed)
         })
     });
@@ -219,7 +224,7 @@ fn bench_json_processing(c: &mut Criterion) {
 #[allow(clippy::excessive_nesting)] // Concurrent operations require nesting
 fn bench_concurrent_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("concurrent_operations");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     // Benchmark concurrent server creation
     for concurrency in [1, 2, 4, 8, 16].iter() {
@@ -339,7 +344,7 @@ fn bench_string_operations(c: &mut Criterion) {
 /// Stress test benchmark
 fn bench_stress_tests(c: &mut Criterion) {
     let mut group = c.benchmark_group("stress_tests");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     group.sample_size(10); // Fewer samples for stress tests
     group.measurement_time(Duration::from_secs(5));
@@ -379,7 +384,7 @@ fn bench_stress_tests(c: &mut Criterion) {
 /// End-to-end performance benchmark
 fn bench_end_to_end(c: &mut Criterion) {
     let mut group = c.benchmark_group("end_to_end");
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     group.bench_function("complete_setup_flow", |b| {
         b.to_async(&rt).iter(|| async {
@@ -394,7 +399,8 @@ fn bench_end_to_end(c: &mut Criterion) {
                 "timestamp": chrono::Utc::now().timestamp(),
                 "size": 12345
             });
-            let _serialized = serde_json::to_string(&json_data).unwrap();
+            let _serialized = serde_json::to_string(&json_data)
+                .expect("Failed to serialize JSON data in benchmark");
 
             black_box(router)
         })

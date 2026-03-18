@@ -318,7 +318,7 @@ impl FeatureExtractor for VisionFeatureExtractor {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let input = FeatureInput::Image {
+    /// let input = FeatureInput::Image {
     ///     data: image_bytes,
     ///     format: ImageFormat::Jpeg,
     ///     metadata: Some(ImageMetadata {
@@ -330,6 +330,7 @@ impl FeatureExtractor for VisionFeatureExtractor {
     /// };
     ///
     /// let output = extractor.extract_features(&input)?;
+    /// ```
 
     fn extract_features(&self, input: &FeatureInput) -> Result<FeatureOutput> {
         match input {
@@ -621,7 +622,7 @@ impl VisionFeatureConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let config_json = serde_json::json!({
+    /// let config_json = serde_json::json!({
     ///     "image_size": 224,
     ///     "hidden_size": 768,
     ///     "do_normalize": true,
@@ -632,6 +633,7 @@ impl VisionFeatureConfig {
     /// });
     ///
     /// let config = VisionFeatureConfig::from_config(&config_json)?;
+    /// ```
 
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
@@ -765,7 +767,9 @@ impl FeatureExtractorConfig for VisionFeatureConfig {
                 self.mean
                     .iter()
                     .map(|&v| {
-                        serde_json::Value::Number(serde_json::Number::from_f64(v as f64).unwrap())
+                        serde_json::Number::from_f64(v as f64)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or_else(|| serde_json::Value::String(format!("{}", v)))
                     })
                     .collect(),
             ),
@@ -777,7 +781,9 @@ impl FeatureExtractorConfig for VisionFeatureConfig {
                 self.std
                     .iter()
                     .map(|&v| {
-                        serde_json::Value::Number(serde_json::Number::from_f64(v as f64).unwrap())
+                        serde_json::Number::from_f64(v as f64)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or_else(|| serde_json::Value::String(format!("{}", v)))
                     })
                     .collect(),
             ),

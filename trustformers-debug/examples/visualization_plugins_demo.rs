@@ -215,7 +215,7 @@ impl VisualizationPlugin for StatisticsPlugin {
         let std = variance.sqrt();
 
         let mut sorted = values.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).expect("Values should be comparable"));
 
         let median = if sorted.len() % 2 == 0 {
             (sorted[sorted.len() / 2 - 1] + sorted[sorted.len() / 2]) / 2.0

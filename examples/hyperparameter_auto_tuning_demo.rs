@@ -134,15 +134,33 @@ fn create_transformer_search_space() -> HyperparameterSpace {
 // Mock objective function that simulates model training
 fn mock_objective_function(config: &HyperparameterConfig) -> Result<HashMap<String, f64>, Box<dyn std::error::Error>> {
     // Extract parameters
-    let learning_rate = config.values.get("learning_rate").unwrap().as_f64().unwrap();
-    let batch_size = config.values.get("batch_size").unwrap().as_i64().unwrap();
-    let dropout = config.values.get("dropout").unwrap().as_f64().unwrap();
-    let hidden_size = config.values.get("hidden_size").unwrap().as_i64().unwrap();
-    let num_heads = config.values.get("num_attention_heads").unwrap().as_i64().unwrap();
-    let weight_decay = config.values.get("weight_decay").unwrap().as_f64().unwrap();
-    let warmup_ratio = config.values.get("warmup_ratio").unwrap().as_f64().unwrap();
-    let optimizer = config.values.get("optimizer").unwrap().as_string().unwrap();
-    let use_clipping = config.values.get("use_gradient_clipping").unwrap().as_bool().unwrap();
+    let learning_rate = config.values.get("learning_rate")
+        .expect("learning_rate parameter missing").as_f64()
+        .expect("learning_rate should be f64");
+    let batch_size = config.values.get("batch_size")
+        .expect("batch_size parameter missing").as_i64()
+        .expect("batch_size should be i64");
+    let dropout = config.values.get("dropout")
+        .expect("dropout parameter missing").as_f64()
+        .expect("dropout should be f64");
+    let hidden_size = config.values.get("hidden_size")
+        .expect("hidden_size parameter missing").as_i64()
+        .expect("hidden_size should be i64");
+    let num_heads = config.values.get("num_attention_heads")
+        .expect("num_attention_heads parameter missing").as_i64()
+        .expect("num_attention_heads should be i64");
+    let weight_decay = config.values.get("weight_decay")
+        .expect("weight_decay parameter missing").as_f64()
+        .expect("weight_decay should be f64");
+    let warmup_ratio = config.values.get("warmup_ratio")
+        .expect("warmup_ratio parameter missing").as_f64()
+        .expect("warmup_ratio should be f64");
+    let optimizer = config.values.get("optimizer")
+        .expect("optimizer parameter missing").as_string()
+        .expect("optimizer should be string");
+    let use_clipping = config.values.get("use_gradient_clipping")
+        .expect("use_gradient_clipping parameter missing").as_bool()
+        .expect("use_gradient_clipping should be bool");
 
     // Simulate training time (in practice this would be actual model training)
     std::thread::sleep(Duration::from_millis(100 + (batch_size as u64 * 2)));
@@ -303,7 +321,7 @@ fn print_optimization_summary(method: &str, result: &OptimizationResult) {
     let accuracies: Vec<f64> = result.history.iter().map(|r| r.primary_metric).collect();
     let best_trial_idx = accuracies.iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).expect("Cannot compare NaN values"))
         .map(|(idx, _)| idx)
         .unwrap_or(0);
 

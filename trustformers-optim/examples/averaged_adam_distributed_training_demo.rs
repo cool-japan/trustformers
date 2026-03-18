@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Averaged Adam Distributed Training Comprehensive Demo
 //!
 //! This example demonstrates advanced distributed training using Averaged Adam optimizer
@@ -184,7 +185,7 @@ fn demo_gradient_compression_training() -> Result<()> {
     println!("====================================");
 
     // Sort by compression ratio (best compression first)
-    results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    results.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("Values should be comparable"));
 
     for (i, (name, compression, time)) in results.iter().enumerate() {
         println!(
@@ -897,7 +898,7 @@ fn benchmark_distributed_configurations() -> Result<()> {
     }
 
     println!("\\n🏆 Benchmark Results Summary:");
-    benchmark_results.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    benchmark_results.sort_by(|a, b| a.1.partial_cmp(&b.1).expect("Values should be comparable"));
 
     for (i, (name, step_time, setup_time)) in benchmark_results.iter().enumerate() {
         println!(

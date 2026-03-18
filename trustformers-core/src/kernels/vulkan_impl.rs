@@ -168,7 +168,9 @@ impl VulkanImpl {
             )
         })?;
 
-        let queue = queues.next().unwrap();
+        let queue = queues.next().ok_or_else(|| {
+            TrustformersError::hardware_error("No queues available from device", "VulkanImpl::new")
+        })?;
 
         // Create allocators
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
@@ -356,7 +358,12 @@ impl VulkanImpl {
             })?;
 
             // Create descriptor set
-            let layout = pipeline.layout().set_layouts().first().unwrap();
+            let layout = pipeline.layout().set_layouts().first().ok_or_else(|| {
+                TrustformersError::hardware_error(
+                    "Pipeline has no descriptor set layouts",
+                    "VulkanImpl::matmul",
+                )
+            })?;
             let descriptor_set = DescriptorSet::new(
                 self.descriptor_set_allocator.clone(),
                 layout.clone(),

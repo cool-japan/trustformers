@@ -427,10 +427,13 @@ impl AdvancedTrainer {
                 let lora_b = Tensor::zeros(&[rank, out_features])?;
 
                 // Quantize B matrix if using QLoRA
+                let quantizer = self.quantizer.as_ref().ok_or_else(|| {
+                    TrustformersError::other("Quantizer not initialized".to_string())
+                })?;
                 let quantized_b = if nf4_quantization {
-                    self.quantizer.as_ref().unwrap().quantize_nf4(&lora_b)?
+                    quantizer.quantize_nf4(&lora_b)?
                 } else {
-                    self.quantizer.as_ref().unwrap().quantize(&lora_b)?
+                    quantizer.quantize(&lora_b)?
                 };
 
                 self.trainable_params.insert(
@@ -958,7 +961,7 @@ impl AdvancedTrainer {
                 let mut rng = DefaultRng::new();
 
                 for _ in 0..num_tokens {
-                    let idx = (rng.gen::<f32>() * vocab_size as f32) as usize;
+                    let idx = (rng.random::<f32>() * vocab_size as f32) as usize;
                     sampled.push(param.slice(0, idx, idx + 1)?);
                 }
 
@@ -1074,11 +1077,17 @@ impl AdvancedOptimizer {
         for (name, grad) in gradients {
             if let Some(param) = parameters.get_mut(name) {
                 // Get or create optimizer state
-                let state = self.state.entry(name.clone()).or_insert_with(|| OptimizerState {
-                    momentum_buffer: Tensor::zeros(&grad.shape()).unwrap(),
-                    second_moment: Some(Tensor::zeros(&grad.shape()).unwrap()),
-                    step: 0,
-                });
+                let state = if let Some(existing) = self.state.get_mut(name) {
+                    existing
+                } else {
+                    let new_state = OptimizerState {
+                        momentum_buffer: Tensor::zeros(&grad.shape())?,
+                        second_moment: Some(Tensor::zeros(&grad.shape())?),
+                        step: 0,
+                    };
+                    self.state.insert(name.clone(), new_state);
+                    self.state.get_mut(name).expect("just inserted")
+                };
 
                 state.step += 1;
 

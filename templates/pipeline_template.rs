@@ -314,8 +314,8 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = {{PIPELINE_NAME}}Config::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: {{PIPELINE_NAME}}Config = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("Failed to serialize config");
+        let deserialized: {{PIPELINE_NAME}}Config = serde_json::from_str(&json).expect("Failed to deserialize config");
 
         assert_eq!(config.max_length, deserialized.max_length);
         assert_eq!(config.temperature, deserialized.temperature);

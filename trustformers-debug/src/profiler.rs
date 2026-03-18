@@ -1188,7 +1188,10 @@ impl Profiler {
 
         if recent_snapshots.len() >= 5 {
             let initial_memory = recent_snapshots[0].heap_allocated;
-            let final_memory = recent_snapshots.last().unwrap().heap_allocated;
+            let final_memory = recent_snapshots
+                .last()
+                .expect("recent_snapshots has at least 5 elements")
+                .heap_allocated;
 
             if final_memory > initial_memory * 2 {
                 let mut metrics = HashMap::new();
@@ -1289,7 +1292,7 @@ impl Profiler {
             })
             .collect();
 
-        layer_times.sort_by(|a, b| b.1.cmp(&a.1));
+        layer_times.sort_by_key(|item| std::cmp::Reverse(item.1));
         layer_times.truncate(limit);
         layer_times
     }
@@ -1558,7 +1561,7 @@ impl Profiler {
             .iter()
             .map(|k| (k.kernel_name.clone(), k.execution_time))
             .collect();
-        kernels_by_time.sort_by(|a, b| b.1.cmp(&a.1));
+        kernels_by_time.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         let slowest_kernels = kernels_by_time.into_iter().take(5).map(|(name, _)| name).collect();
 
@@ -1587,7 +1590,7 @@ impl Profiler {
             .values()
             .map(|a| (format!("{} bytes", a.size_bytes), a.size_bytes))
             .collect();
-        allocations_by_size.sort_by(|a, b| b.1.cmp(&a.1));
+        allocations_by_size.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         let largest_allocations =
             allocations_by_size.into_iter().take(5).map(|(desc, _)| desc).collect();
@@ -1619,7 +1622,7 @@ impl Profiler {
                 )
             })
             .collect();
-        operations_by_duration.sort_by(|a, b| b.1.cmp(&a.1));
+        operations_by_duration.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         let slowest_operations =
             operations_by_duration.into_iter().take(5).map(|(desc, _)| desc).collect();

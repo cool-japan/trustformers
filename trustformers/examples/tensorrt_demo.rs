@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use std::path::PathBuf;
 #[allow(unused_variables)]
 use std::time::Instant;
@@ -498,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_config_creation() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp dir for test");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = TensorRTBackendConfig::latency_optimized(model_path.clone());
@@ -510,7 +511,7 @@ mod tests {
 
     #[test]
     fn test_tensorrt_pipeline_options() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp directory");
         let model_path = temp_dir.path().join("model.onnx");
 
         let options = TensorRTPipelineOptions::latency_optimized(model_path.clone());
@@ -521,13 +522,16 @@ mod tests {
 
     #[test]
     fn test_tensorrt_manager_creation() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Failed to create temp directory");
         let model_path = temp_dir.path().join("model.onnx");
 
         let config = TensorRTBackendConfig::production(model_path, 4);
         let manager = TensorRTPipelineManager::new(config);
 
         assert_eq!(manager.list_models().len(), 0);
-        assert_eq!(manager.cache_size().unwrap(), 0);
+        assert_eq!(
+            manager.cache_size().expect("Cache size should be retrievable"),
+            0
+        );
     }
 }

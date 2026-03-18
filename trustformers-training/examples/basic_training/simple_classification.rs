@@ -405,22 +405,27 @@ mod tests {
 
     #[test]
     fn test_model_creation() {
-        let model = SimpleClassifier::new(10, 64, 3).unwrap();
+        let model = SimpleClassifier::new(10, 64, 3)
+            .expect("Failed to create test model");
         assert_eq!(model.num_classes, 3);
         assert!(model.num_parameters() > 0);
     }
 
     #[test]
     fn test_model_forward() {
-        let model = SimpleClassifier::new(10, 64, 3).unwrap();
-        let input = Tensor::randn(&[2, 10]).unwrap();
-        let output = model.forward(&input).unwrap();
+        let model = SimpleClassifier::new(10, 64, 3)
+            .expect("Failed to create test model");
+        let input = Tensor::randn(&[2, 10])
+            .expect("Failed to create test input tensor");
+        let output = model.forward(&input)
+            .expect("Failed to perform forward pass");
         assert_eq!(output.shape(), &[2, 3]);
     }
 
     #[test]
     fn test_data_generation() {
-        let (features, labels) = generate_data(100, 10, 3, 0.1).unwrap();
+        let (features, labels) = generate_data(100, 10, 3, 0.1)
+            .expect("Failed to generate test data");
         assert_eq!(features.shape(), &[100, 10]);
         assert_eq!(labels.shape(), &[100]);
     }
@@ -428,10 +433,13 @@ mod tests {
     #[test]
     fn test_accuracy_metric() {
         let metric = AccuracyMetric;
-        let predictions = Tensor::from_vec(vec![2.0, 1.0, 0.0, 0.0, 2.0, 1.0], &[2, 3]).unwrap();
-        let targets = Tensor::from_vec(vec![0i64, 2i64], &[2]).unwrap();
+        let predictions = Tensor::from_vec(vec![2.0, 1.0, 0.0, 0.0, 2.0, 1.0], &[2, 3])
+            .expect("Failed to create predictions tensor");
+        let targets = Tensor::from_vec(vec![0i64, 2i64], &[2])
+            .expect("Failed to create targets tensor");
 
-        let result = metric.compute(&predictions, &targets).unwrap();
+        let result = metric.compute(&predictions, &targets)
+            .expect("Failed to compute accuracy metric");
         if let MetricResult::Single(accuracy) = result {
             assert!(accuracy >= 0.0 && accuracy <= 1.0);
         }
@@ -440,10 +448,13 @@ mod tests {
     #[test]
     fn test_cross_entropy_loss() {
         let loss_fn = CrossEntropyLoss;
-        let predictions = Tensor::randn(&[2, 3]).unwrap();
-        let targets = Tensor::from_vec(vec![0i64, 2i64], &[2]).unwrap();
+        let predictions = Tensor::randn(&[2, 3])
+            .expect("Failed to create predictions tensor");
+        let targets = Tensor::from_vec(vec![0i64, 2i64], &[2])
+            .expect("Failed to create targets tensor");
 
-        let loss = loss_fn.compute(&predictions, &targets).unwrap();
+        let loss = loss_fn.compute(&predictions, &targets)
+            .expect("Failed to compute cross entropy loss");
         assert_eq!(loss.shape(), &[]);  // Scalar loss
     }
 }

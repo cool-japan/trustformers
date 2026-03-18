@@ -1183,7 +1183,11 @@ impl BioTokenizer {
             *token_types.entry(token.token_type.clone()).or_insert(0) += 1;
 
             if token.text.len() == 1 {
-                let c = token.text.chars().next().unwrap();
+                let c = token
+                    .text
+                    .chars()
+                    .next()
+                    .expect("token.text with len()==1 must have at least one char");
 
                 match token.token_type {
                     BioTokenType::AminoAcid => {

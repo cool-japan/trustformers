@@ -199,12 +199,23 @@ static INIT_THREAD_POOL: std::sync::Once = std::sync::Once::new();
 
 /// Initialize the global thread pool
 pub fn init_global_thread_pool(config: ThreadPoolConfig) -> TrustformersResult<()> {
+    let mut init_error = None;
     INIT_THREAD_POOL.call_once(|| {
-        let pool = ThreadPool::new(config).expect("Failed to create thread pool");
-        unsafe {
-            GLOBAL_THREAD_POOL = Some(Arc::new(pool));
+        match ThreadPool::new(config) {
+            Ok(pool) => {
+                unsafe {
+                    GLOBAL_THREAD_POOL = Some(Arc::new(pool));
+                }
+            }
+            Err(e) => {
+                init_error = Some(e);
+            }
         }
     });
+
+    if let Some(err) = init_error {
+        return Err(err);
+    }
     Ok(())
 }
 

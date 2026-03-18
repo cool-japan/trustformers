@@ -258,7 +258,12 @@ impl CleanupManager {
 
         while let Some(task) = cleanup_queue.front() {
             if task.scheduled_time <= now {
-                ready_tasks.push(cleanup_queue.pop_front().unwrap());
+                // Safe: we just checked front() returned Some
+                ready_tasks.push(
+                    cleanup_queue
+                        .pop_front()
+                        .expect("queue should not be empty after front() returned Some"),
+                );
             } else {
                 break; // Tasks are ordered by time
             }

@@ -200,8 +200,6 @@ pub use optimization::{
     // Prediction and ML Types
     ImpactPredictionModel,
     // LearningModel, // NOTE: Internal type not exported from optimization module
-    // Trait Definitions
-    LiveOptimizationAlgorithm as OptimizationAlgorithmTrait,
     // Core Optimization Components
     LiveOptimizationEngine,
     MLBasedRecommendationAlgorithm,

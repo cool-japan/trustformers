@@ -503,8 +503,8 @@ pub fn run_code_generator() -> TrustformersResult<()> {
         )
         .get_matches();
 
-    let source_dir = PathBuf::from(matches.get_one::<String>("source").unwrap());
-    let output_dir = PathBuf::from(matches.get_one::<String>("output").unwrap());
+    let source_dir = PathBuf::from(matches.get_one::<String>("source").expect("Source directory is required"));
+    let output_dir = PathBuf::from(matches.get_one::<String>("output").expect("Output directory is required"));
 
     // Load configuration
     let mut config = if let Some(config_file) = matches.get_one::<String>("config") {
@@ -521,7 +521,7 @@ pub fn run_code_generator() -> TrustformersResult<()> {
     config.output_dir = output_dir;
 
     // Parse target languages
-    let languages_str = matches.get_one::<String>("languages").unwrap();
+    let languages_str = matches.get_one::<String>("languages").expect("Languages argument is required");
     config.target_languages = languages_str
         .split(',')
         .map(|lang| match lang.trim().to_lowercase().as_str() {
@@ -615,15 +615,15 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = CodeGenConfig::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: CodeGenConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("Failed to serialize config");
+        let deserialized: CodeGenConfig = serde_json::from_str(&json).expect("Failed to deserialize config");
         assert_eq!(config.package_info.name, deserialized.package_info.name);
     }
 
     #[test]
     fn test_validation_warnings() {
-        let generator = CodeGenerator::new(CodeGenConfig::default()).unwrap();
-        let warnings = generator.validate_interface().unwrap();
+        let generator = CodeGenerator::new(CodeGenConfig::default()).expect("Failed to create generator");
+        let warnings = generator.validate_interface().expect("Failed to validate interface");
         // Empty interface should produce no warnings
         assert!(warnings.is_empty());
     }

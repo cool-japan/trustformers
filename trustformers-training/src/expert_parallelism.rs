@@ -264,7 +264,10 @@ impl ExpertParallelism {
 
         // Update statistics
         {
-            let mut stats = self.communication_stats.lock().unwrap();
+            let mut stats = self
+                .communication_stats
+                .lock()
+                .expect("communication_stats lock should not be poisoned");
             stats.routing_overhead += start_time.elapsed();
             stats.total_tokens_routed += tokens.shape()[0] as u64;
         }
@@ -299,7 +302,8 @@ impl ExpertParallelism {
             }
 
             // Sort by score and take top-k
-            expert_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+            expert_scores
+                .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             expert_scores.truncate(self.config.top_k);
 
             // Normalize weights
@@ -379,7 +383,10 @@ impl ExpertParallelism {
             capacity_usage: HashMap::new(),
         };
 
-        let load_state = self.load_balancing_state.read().unwrap();
+        let load_state = self
+            .load_balancing_state
+            .read()
+            .expect("load_balancing_state lock should not be poisoned");
 
         for token_idx in 0..batch_size {
             // Find least loaded expert
@@ -446,7 +453,10 @@ impl ExpertParallelism {
 
         // Update communication statistics
         {
-            let mut stats = self.communication_stats.lock().unwrap();
+            let mut stats = self
+                .communication_stats
+                .lock()
+                .expect("communication_stats lock should not be poisoned");
             stats.all_to_all_time += start_time.elapsed();
         }
 
@@ -455,7 +465,10 @@ impl ExpertParallelism {
 
     /// Update load balancing state
     pub fn update_load_balancing(&self, expert_outputs: &HashMap<usize, Tensor>) -> Result<()> {
-        let mut load_state = self.load_balancing_state.write().unwrap();
+        let mut load_state = self
+            .load_balancing_state
+            .write()
+            .expect("load_balancing_state lock should not be poisoned");
 
         // Update expert loads based on output sizes
         for (expert_id, output) in expert_outputs {
@@ -481,8 +494,11 @@ impl ExpertParallelism {
 
     /// Get load balancing statistics
     pub fn get_load_balancing_stats(&self) -> LoadBalancingStats {
-        let load_state = self.load_balancing_state.read().unwrap();
-        let comm_stats = self.communication_stats.lock().unwrap();
+        let load_state = self
+            .load_balancing_state
+            .read()
+            .expect("load_balancing_state lock should not be poisoned");
+        let comm_stats = self.communication_stats.lock().expect("lock should not be poisoned");
 
         LoadBalancingStats {
             expert_loads: load_state.expert_loads.clone(),

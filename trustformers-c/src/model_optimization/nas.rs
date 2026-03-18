@@ -177,9 +177,9 @@ impl NASManager {
         println!("   Search time: {:.1}s", result.search_time_seconds);
 
         self.search_active = false;
-        self.best_result = Some(result);
+        self.best_result = Some(result.clone());
 
-        Ok(self.best_result.as_ref().unwrap().clone())
+        Ok(result)
     }
 
     fn algorithm_name(&self) -> &'static str {

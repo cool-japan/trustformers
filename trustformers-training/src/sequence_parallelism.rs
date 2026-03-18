@@ -751,7 +751,7 @@ impl SequenceParallelism {
 
     /// Dynamic sequence splitting based on memory usage
     fn split_dynamic(&self, total_length: usize) -> Result<Vec<SequenceChunk>> {
-        let memory_manager = self.memory_manager.lock().unwrap();
+        let memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
         let pressure = memory_manager.memory_pressure;
 
         // Adjust chunk size based on memory pressure
@@ -806,7 +806,7 @@ impl SequenceParallelism {
 
         // Update statistics
         {
-            let mut stats = self.communication_stats.lock().unwrap();
+            let mut stats = self.communication_stats.lock().expect("lock should not be poisoned");
             stats.total_communication_time += start_time.elapsed();
         }
 
@@ -847,7 +847,7 @@ impl SequenceParallelism {
         }
         .map(|result| {
             // Update attention communication statistics
-            let mut stats = self.communication_stats.lock().unwrap();
+            let mut stats = self.communication_stats.lock().expect("lock should not be poisoned");
             stats.attention_communication_time += start_time.elapsed();
             result
         })
@@ -921,7 +921,8 @@ impl SequenceParallelism {
 
     /// Get cached attention between chunks
     fn get_cached_attention(&self, source_chunk: usize, target_chunk: usize) -> Result<Tensor> {
-        let mut comm_manager = self.attention_comm_manager.write().unwrap();
+        let mut comm_manager =
+            self.attention_comm_manager.write().expect("lock should not be poisoned");
 
         let cache_key = (source_chunk, target_chunk);
         if let Some(cached_attention) = comm_manager.attention_cache.get(&cache_key).cloned() {
@@ -965,7 +966,7 @@ impl SequenceParallelism {
 
         // Update statistics
         {
-            let mut stats = self.communication_stats.lock().unwrap();
+            let mut stats = self.communication_stats.lock().expect("lock should not be poisoned");
             stats.gradient_sync_time += start_time.elapsed();
         }
 
@@ -974,7 +975,7 @@ impl SequenceParallelism {
 
     /// Update memory usage statistics
     pub fn update_memory_usage(&self, chunk_id: usize, memory_usage: u64) -> Result<()> {
-        let mut memory_manager = self.memory_manager.lock().unwrap();
+        let mut memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
 
         memory_manager.peak_memory_per_chunk.insert(chunk_id, memory_usage);
         memory_manager.current_memory_usage = memory_usage;
@@ -988,9 +989,9 @@ impl SequenceParallelism {
 
     /// Get sequence parallelism statistics
     pub fn get_statistics(&self) -> SequenceParallelismStats {
-        let comm_stats = self.communication_stats.lock().unwrap();
-        let comm_manager = self.attention_comm_manager.read().unwrap();
-        let memory_manager = self.memory_manager.lock().unwrap();
+        let comm_stats = self.communication_stats.lock().expect("lock should not be poisoned");
+        let comm_manager = self.attention_comm_manager.read().expect("lock should not be poisoned");
+        let memory_manager = self.memory_manager.lock().expect("lock should not be poisoned");
 
         let cache_hit_rate = if comm_manager.cache_hits + comm_manager.cache_misses > 0 {
             comm_manager.cache_hits as f32

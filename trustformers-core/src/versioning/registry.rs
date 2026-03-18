@@ -111,7 +111,7 @@ impl ModelRegistry {
                 versions.values().filter_map(|&id| versions_map.get(&id).cloned()).collect();
 
             // Sort by creation time (newest first)
-            models.sort_by(|a, b| b.metadata().created_at.cmp(&a.metadata().created_at));
+            models.sort_by_key(|model| std::cmp::Reverse(model.metadata().created_at));
             Ok(models)
         } else {
             Ok(vec![])

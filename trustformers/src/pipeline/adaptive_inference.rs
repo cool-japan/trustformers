@@ -397,30 +397,21 @@ where
         input_analysis: &InputAnalysis,
     ) -> Result<f32> {
         let base_skip_prob = match self.config.conditional_strategy {
-            ConditionalStrategy::AttentionSkipping => {
+            ConditionalStrategy::AttentionSkipping
                 // Skip attention layers for simple inputs
-                if layer_idx % 2 == 0 && input_analysis.complexity_score < 0.5 {
+                if layer_idx % 2 == 0 && input_analysis.complexity_score < 0.5 => {
                     0.3
-                } else {
-                    0.0
-                }
-            },
-            ConditionalStrategy::FeedForwardSkipping => {
+                },
+            ConditionalStrategy::FeedForwardSkipping
                 // Skip feed-forward layers for specific patterns
-                if layer_idx % 2 == 1 && input_analysis.complexity_score < 0.6 {
+                if layer_idx % 2 == 1 && input_analysis.complexity_score < 0.6 => {
                     0.4
-                } else {
-                    0.0
-                }
-            },
-            ConditionalStrategy::BlockSkipping => {
+                },
+            ConditionalStrategy::BlockSkipping
                 // Skip entire blocks for very simple inputs
-                if input_analysis.complexity_score < 0.3 {
+                if input_analysis.complexity_score < 0.3 => {
                     0.2
-                } else {
-                    0.0
-                }
-            },
+                },
             ConditionalStrategy::DynamicDepth => {
                 // Dynamic depth based on difficulty
                 let target_depth = (input_analysis.difficulty_estimate * 24.0) as usize;

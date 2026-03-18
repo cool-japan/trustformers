@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use rstest::*;
 use std::env;
 use trustformers::config_management::ConfigurationManager;
@@ -285,8 +286,8 @@ mod compatibility_tests {
     /// Test SIMD compatibility where available
     #[rstest]
     fn test_simd_compatibility() {
-        let data1 = vec![1.0f32, 2.0, 3.0, 4.0];
-        let data2 = vec![5.0f32, 6.0, 7.0, 8.0];
+        let data1 = [1.0f32, 2.0, 3.0, 4.0];
+        let data2 = [5.0f32, 6.0, 7.0, 8.0];
         let mut result = vec![0.0f32; 4];
 
         // Test basic vector operations (fallback implementation)

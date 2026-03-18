@@ -105,3 +105,6 @@ trustformers-py/test_results
 # CLAUDE
 **/CLAUDE.md
 **/.claude/
+
+# Rustc ICE dumps
+rustc-ice-*.txt

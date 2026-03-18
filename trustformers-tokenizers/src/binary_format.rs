@@ -305,13 +305,9 @@ impl BinarySerializer {
 
     /// Compress data using zlib
     fn compress_data(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use flate2::write::ZlibEncoder;
-        use flate2::Compression;
+        use oxiarc_deflate::streaming::ZlibStreamEncoder;
 
-        let mut encoder = ZlibEncoder::new(
-            Vec::new(),
-            Compression::new(self.config.compression_level as u32),
-        );
+        let mut encoder = ZlibStreamEncoder::new(Vec::new(), self.config.compression_level);
         encoder.write_all(data).map_err(|e| {
             TrustformersError::other(anyhow::anyhow!("Failed to compress data: {}", e).to_string())
         })?;
@@ -324,9 +320,9 @@ impl BinarySerializer {
 
     /// Decompress data using zlib
     fn decompress_data(&self, compressed_data: &[u8], expected_size: usize) -> Result<Vec<u8>> {
-        use flate2::read::ZlibDecoder;
+        use oxiarc_deflate::streaming::ZlibStreamDecoder;
 
-        let mut decoder = ZlibDecoder::new(compressed_data);
+        let mut decoder = ZlibStreamDecoder::new(compressed_data);
         let mut decompressed = Vec::with_capacity(expected_size);
         decoder.read_to_end(&mut decompressed).map_err(|e| {
             TrustformersError::other(

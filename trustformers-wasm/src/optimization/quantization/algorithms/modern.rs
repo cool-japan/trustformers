@@ -392,33 +392,29 @@ impl QATQuantizer {
     pub fn get_training_progress(&self) -> js_sys::Object {
         let progress = js_sys::Object::new();
 
-        js_sys::Reflect::set(&progress, &"current_step".into(), &self.current_step.into()).unwrap();
-        js_sys::Reflect::set(
+        let _ = js_sys::Reflect::set(&progress, &"current_step".into(), &self.current_step.into());
+        let _ = js_sys::Reflect::set(
             &progress,
             &"total_calibration_steps".into(),
             &self.config.calibration_steps.into(),
-        )
-        .unwrap();
+        );
 
         if let Some(last_stats) = self.training_stats.last() {
-            js_sys::Reflect::set(
+            let _ = js_sys::Reflect::set(
                 &progress,
                 &"last_quantization_loss".into(),
                 &last_stats.quantization_loss.into(),
-            )
-            .unwrap();
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(
                 &progress,
                 &"weight_sparsity".into(),
                 &last_stats.weight_sparsity.into(),
-            )
-            .unwrap();
-            js_sys::Reflect::set(
+            );
+            let _ = js_sys::Reflect::set(
                 &progress,
                 &"gradient_norm".into(),
                 &last_stats.gradient_norm.into(),
-            )
-            .unwrap();
+            );
         }
 
         progress
@@ -435,7 +431,8 @@ impl QATQuantizer {
             let avg_loss: f32 =
                 self.training_stats.iter().map(|s| s.quantization_loss).sum::<f32>()
                     / self.training_stats.len() as f32;
-            let final_sparsity = self.training_stats.last().unwrap().weight_sparsity;
+            let final_sparsity =
+                self.training_stats.last().expect("training_stats is non-empty").weight_sparsity;
 
             js_sys::Reflect::set(
                 &summary,

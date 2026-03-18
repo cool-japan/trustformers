@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Cutting-Edge 2025 Optimizers Demo
 //!
 //! This example demonstrates the latest state-of-the-art optimization algorithms

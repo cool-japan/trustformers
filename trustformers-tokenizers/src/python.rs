@@ -11,7 +11,7 @@ use crate::wordpiece::WordPieceTokenizer;
 use trustformers_core::traits::{TokenizedInput, Tokenizer};
 
 /// Python wrapper for TokenizedInput
-#[pyclass]
+#[pyclass(from_py_object)]
 #[derive(Clone)]
 pub struct PyTokenizedInput {
     #[pyo3(get)]

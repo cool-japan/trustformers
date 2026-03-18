@@ -1,4 +1,5 @@
 //! JIT Compilation and Optimization Example
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example demonstrates the JIT compilation capabilities of TrustformeRS,

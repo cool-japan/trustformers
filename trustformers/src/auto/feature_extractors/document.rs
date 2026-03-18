@@ -404,20 +404,8 @@ impl DocumentFeatureExtractor {
                     match feat_idx % 4 {
                         0 => word.len() as f32 / 20.0, // Normalized word length
                         1 => token_idx as f32 / self.config.max_length as f32, // Position
-                        2 => {
-                            if word.chars().all(|c| c.is_alphabetic()) {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }, // Is alphabetic
-                        3 => {
-                            if word.chars().any(|c| c.is_uppercase()) {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        }, // Has uppercase
+                        2 if word.chars().all(|c| c.is_alphabetic()) => 1.0, // Is alphabetic
+                        3 if word.chars().any(|c| c.is_uppercase()) => 1.0, // Has uppercase
                         _ => 0.0,
                     }
                 } else {
@@ -473,7 +461,7 @@ impl FeatureExtractor for DocumentFeatureExtractor {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let input = FeatureInput::Document {
+    /// let input = FeatureInput::Document {
     ///     content: b"Sample document content".to_vec(),
     ///     format: DocumentFormat::Text,
     ///     metadata: None,
@@ -483,6 +471,7 @@ impl FeatureExtractor for DocumentFeatureExtractor {
     /// assert_eq!(output.shape, vec![512, 768]); // max_length, feature_size
     /// assert!(output.attention_mask.is_some());
     /// assert_eq!(output.special_tokens.len(), 2); // CLS and SEP
+    /// ```
 
     fn extract_features(&self, input: &FeatureInput) -> Result<FeatureOutput> {
         match input {

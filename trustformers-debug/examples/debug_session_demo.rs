@@ -17,6 +17,45 @@ use trustformers_debug::{
     VisualizationConfig,
 };
 
+fn log_hook_results(
+    hook_results: &[(uuid::Uuid, trustformers_debug::hooks::HookResult)],
+    step: usize,
+    layer_name: &str,
+) {
+    for (hook_id, result) in hook_results {
+        match result {
+            trustformers_debug::hooks::HookResult::Success if step == 0 => {
+                println!(
+                    "  ✓ Hook {} executed successfully for {}",
+                    hook_id, layer_name
+                );
+            },
+            trustformers_debug::hooks::HookResult::Error(err) => {
+                println!("  ❌ Hook {} failed for {}: {}", hook_id, layer_name, err);
+            },
+            trustformers_debug::hooks::HookResult::Skipped(reason) if step == 0 => {
+                println!(
+                    "  ⏭ Hook {} skipped for {}: {}",
+                    hook_id, layer_name, reason
+                );
+            },
+            _ => {},
+        }
+    }
+}
+
+fn log_backward_hook_results(
+    hook_results: &[(uuid::Uuid, trustformers_debug::hooks::HookResult)],
+    step: usize,
+    layer_name: &str,
+) {
+    for (hook_id, result) in hook_results {
+        if matches!(result, trustformers_debug::hooks::HookResult::Success) && step == 0 {
+            println!("  ✓ Gradient hook {} executed for {}", hook_id, layer_name);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -64,7 +103,7 @@ async fn basic_debugging_session() -> Result<()> {
     // Create some sample tensors
     let input_tensor = Array::linspace(0.0, 1.0, 1000)
         .into_shape_with_order(IxDyn(&[10, 10, 10]))
-        .unwrap();
+        .expect("System health metrics should be available");
     let weight_tensor = Array::<f32, _>::ones(IxDyn(&[10, 10])) * 0.5;
 
     // Inspect tensors
@@ -436,33 +475,11 @@ async fn automated_debugging_with_hooks() -> Result<()> {
             );
 
             // Log hook execution results
-            for (hook_id, result) in hook_results {
-                match result {
-                    trustformers_debug::hooks::HookResult::Success => {
-                        if step == 0 {
-                            println!(
-                                "  ✓ Hook {} executed successfully for {}",
-                                hook_id, layer_name
-                            );
-                        }
-                    },
-                    trustformers_debug::hooks::HookResult::Error(err) => {
-                        println!("  ❌ Hook {} failed for {}: {}", hook_id, layer_name, err);
-                    },
-                    trustformers_debug::hooks::HookResult::Skipped(reason) => {
-                        if step == 0 {
-                            println!(
-                                "  ⏭ Hook {} skipped for {}: {}",
-                                hook_id, layer_name, reason
-                            );
-                        }
-                    },
-                }
-            }
+            log_hook_results(&hook_results, step, layer_name);
 
             // Simulate backward pass for some layers
             if layer_name.contains("linear") {
-                let hook_results = debug_session.hooks_mut().execute_hooks(
+                let bwd_results = debug_session.hooks_mut().execute_hooks(
                     layer_name,
                     &tensor_data,
                     &tensor_shape,
@@ -470,13 +487,8 @@ async fn automated_debugging_with_hooks() -> Result<()> {
                     Some(metadata),
                 );
 
-                // Process backward pass hook results (similar to forward)
-                for (hook_id, result) in hook_results {
-                    if matches!(result, trustformers_debug::hooks::HookResult::Success) && step == 0
-                    {
-                        println!("  ✓ Gradient hook {} executed for {}", hook_id, layer_name);
-                    }
-                }
+                // Process backward pass hook results
+                log_backward_hook_results(&bwd_results, step, layer_name);
             }
         }
 
@@ -645,7 +657,7 @@ async fn performance_profiling_demo() -> Result<()> {
         })
         .collect();
 
-    layer_times.sort_by(|a, b| b.1.cmp(&a.1));
+    layer_times.sort_by_key(|item| std::cmp::Reverse(item.1));
 
     for (i, (layer_name, avg_time)) in layer_times.iter().take(5).enumerate() {
         println!(
@@ -767,7 +779,7 @@ async fn visualization_demo() -> Result<()> {
 
     // ASCII line plot
     let line_plot = terminal_viz.ascii_line_plot(
-        &steps[0..20].to_vec(),
+        &steps[0..20],
         &gradient_norms[0..20],
         "Gradient Norm Over Time",
     );

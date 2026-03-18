@@ -118,7 +118,7 @@ fn example_text_to_image_retrieval() -> Result<()> {
 
     let mock_similarities = vec![0.92, 0.45, 0.38, 0.42, 0.85];
     let mut ranked: Vec<_> = image_database.iter().zip(mock_similarities.iter()).collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).expect("Values should be comparable"));
 
     println!("\nTop matches:");
     for (i, ((filename, description), similarity)) in ranked.iter().take(3).enumerate() {
@@ -151,7 +151,7 @@ fn example_image_to_text_retrieval() -> Result<()> {
     print_subsection("Retrieval Results");
     let mock_similarities = vec![0.88, 0.35, 0.28, 0.22, 0.91];
     let mut ranked: Vec<_> = text_database.iter().zip(mock_similarities.iter()).collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+    ranked.sort_by(|a, b| b.1.partial_cmp(a.1).expect("Values should be comparable"));
 
     println!("\nTop matching descriptions:");
     for (i, (text, similarity)) in ranked.iter().take(3).enumerate() {

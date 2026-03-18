@@ -1234,9 +1234,6 @@ fn get_enabled_features() -> Vec<String> {
     #[cfg(feature = "mobile-optimization")]
     features.push("mobile-optimization".to_string());
 
-    #[cfg(feature = "wee-alloc")]
-    features.push("wee-alloc".to_string());
-
     #[cfg(feature = "dlmalloc-alloc")]
     features.push("dlmalloc-alloc".to_string());
 

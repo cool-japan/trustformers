@@ -1,7 +1,5 @@
 // GGML export functionality for llama.cpp compatibility
 
-#![allow(deprecated)] // Using rand legacy API, will migrate to scirs2_core
-
 use super::{ExportConfig, ExportFormat, ExportPrecision, ModelExporter};
 use crate::traits::Model;
 use anyhow::{anyhow, Result};
@@ -293,14 +291,14 @@ impl GGMLExporter {
             GGMLType::F32 => {
                 for _ in 0..size {
                     // Use Xavier/Glorot initialization for realistic weights
-                    let val = if rng.gen::<f32>() < 0.5 {
+                    let val = if rng.random::<f32>() < 0.5 {
                         // Xavier normal initialization: N(0, sqrt(2/(fan_in + fan_out)))
                         let std_dev = (2.0 / (size as f32).sqrt()).sqrt();
-                        rng.gen_range(-3.0 * std_dev..3.0 * std_dev)
+                        rng.random_range(-3.0 * std_dev..3.0 * std_dev)
                     } else {
                         // He initialization for ReLU networks: N(0, sqrt(2/fan_in))
                         let std_dev = (2.0 / size as f32).sqrt();
-                        rng.gen_range(-3.0 * std_dev..3.0 * std_dev)
+                        rng.random_range(-3.0 * std_dev..3.0 * std_dev)
                     };
                     data.extend_from_slice(&val.to_le_bytes());
                 }
@@ -309,7 +307,7 @@ impl GGMLExporter {
                 for _ in 0..size {
                     // Similar initialization for F16 with appropriate precision
                     let std_dev = (2.0 / (size as f32).sqrt()).sqrt();
-                    let val = rng.gen_range(-2.0 * std_dev..2.0 * std_dev);
+                    let val = rng.random_range(-2.0 * std_dev..2.0 * std_dev);
                     let f16_val = half::f16::from_f32(val.clamp(-65504.0, 65504.0)); // F16 limits
                     data.extend_from_slice(&f16_val.to_le_bytes());
                 }
@@ -322,12 +320,12 @@ impl GGMLExporter {
 
                 for _ in 0..num_blocks {
                     // Generate a realistic scale factor for this block
-                    let scale = rng.gen_range(0.001..0.1f32);
+                    let scale = rng.random_range(0.001..0.1f32);
                     data.extend_from_slice(&scale.to_le_bytes());
 
                     // Generate quantized values for this block
                     for _ in 0..block_size {
-                        let normalized_val = rng.gen_range(-1.0..1.0f32);
+                        let normalized_val = rng.random_range(-1.0..1.0f32);
                         let quantized =
                             (normalized_val / scale * 127.0).round().clamp(-128.0, 127.0) as i8;
                         data.push(quantized as u8);

@@ -208,11 +208,11 @@ impl SequencePacker {
             },
             PackingStrategy::BestFit => {
                 // Sort by length descending for better bin packing
-                seq_items.sort_by(|a, b| b.length.cmp(&a.length));
+                seq_items.sort_by_key(|item| std::cmp::Reverse(item.length));
             },
             PackingStrategy::SimilarLength => {
                 // Sort by length ascending to group similar lengths
-                seq_items.sort_by(|a, b| a.length.cmp(&b.length));
+                seq_items.sort_by_key(|a| a.length);
             },
             PackingStrategy::Random => {
                 // Shuffle randomly

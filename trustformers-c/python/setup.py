@@ -15,7 +15,7 @@ else:
     long_description = "Python bindings for TrustformeRS - High-performance transformer library"
 
 # Get version from __init__.py
-version = "0.1.0"
+version = "0.1.0-rc.1"
 init_path = Path(__file__).parent / "trustformers_c" / "__init__.py"
 if init_path.exists():
     with open(init_path, "r") as f:
@@ -38,7 +38,6 @@ setup(
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
         "Intended Audience :: Science/Research",
-        "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",

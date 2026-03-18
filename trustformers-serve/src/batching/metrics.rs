@@ -221,7 +221,7 @@ impl LatencyTracker {
             return 0.0;
         }
 
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let index = ((samples.len() - 1) as f32 * percentile) as usize;
         samples[index]
     }
@@ -281,7 +281,10 @@ impl ThroughputMonitor {
             return 0.0;
         }
 
-        let duration = times.back().unwrap().duration_since(*times.front().unwrap());
+        let duration = times
+            .back()
+            .expect("times has at least 2 elements")
+            .duration_since(*times.front().expect("times has at least 2 elements"));
         if duration.as_secs_f32() > 0.0 {
             times.len() as f32 / duration.as_secs_f32()
         } else {

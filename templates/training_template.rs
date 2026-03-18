@@ -422,8 +422,8 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = {{MODEL_NAME}}TrainingConfig::default();
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: {{MODEL_NAME}}TrainingConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("Failed to serialize config");
+        let deserialized: {{MODEL_NAME}}TrainingConfig = serde_json::from_str(&json).expect("Failed to deserialize config");
 
         assert_eq!(config.learning_rate, deserialized.learning_rate);
         assert_eq!(config.batch_size, deserialized.batch_size);

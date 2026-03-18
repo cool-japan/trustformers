@@ -493,12 +493,11 @@ impl MobileTestingFramework {
         while start_time.elapsed() < config.memory_stress_duration {
             // Simulate memory operations based on test type
             match test_type {
-                MemoryTestType::LeakDetection => {
+                MemoryTestType::LeakDetection
                     // Simulate potential memory leaks
-                    if start_time.elapsed().as_secs() % 10 == 0 {
+                    if start_time.elapsed().as_secs() % 10 == 0 => {
                         leak_count += self.detect_memory_leaks();
-                    }
-                },
+                    },
                 MemoryTestType::PressureTesting => {
                     // Apply memory pressure
                     let _pressure_data = self.apply_memory_pressure();

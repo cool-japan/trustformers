@@ -243,7 +243,8 @@ impl PortReservationSystem {
 
         let mut reserved_ports = Vec::new();
         let now = Utc::now();
-        let expiry_time = now + chrono::Duration::from_std(reservation_duration).unwrap();
+        let expiry_time = now + chrono::Duration::from_std(reservation_duration)
+            .expect("Valid duration for conversion");
 
         // Reserve ports by finding available ports that aren't already reserved
         for _ in 0..count {

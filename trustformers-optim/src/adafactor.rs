@@ -180,7 +180,8 @@ impl Optimizer for AdaFactor {
                     self.state.insert(name.clone(), state);
                 }
 
-                let state = self.state.get_mut(name).unwrap();
+                let state = self.state.get_mut(name)
+                    .expect("state must exist after insert");
                 state.step += 1;
 
                 // Compute gradient clipping

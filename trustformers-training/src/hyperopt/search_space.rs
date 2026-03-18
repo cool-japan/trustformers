@@ -139,7 +139,7 @@ impl CategoricalParameter {
             return Err(anyhow::anyhow!("Cannot sample from empty choices list"));
         }
         #[allow(deprecated)]
-        let idx = rng.gen_range(0..self.choices.len());
+        let idx = rng.random_range(0..self.choices.len());
         let choice = self.choices[idx].clone();
         Ok(ParameterValue::String(choice))
     }
@@ -489,8 +489,8 @@ mod tests {
         assert_eq!(int_val.as_float(), Some(42.0));
         assert_eq!(int_val.as_string(), None);
 
-        let float_val = ParameterValue::Float(3.14);
-        assert_eq!(float_val.as_float(), Some(3.14));
+        let float_val = ParameterValue::Float(std::f64::consts::PI);
+        assert_eq!(float_val.as_float(), Some(std::f64::consts::PI));
         assert_eq!(float_val.as_int(), None);
 
         let str_val = ParameterValue::String("test".to_string());
@@ -523,7 +523,7 @@ mod tests {
 
         match value {
             ParameterValue::Float(f) => {
-                assert!(f >= 1e-5 && f <= 1e-1);
+                assert!((1e-5..=1e-1).contains(&f));
             },
             _ => panic!("Expected float value"),
         }
@@ -537,7 +537,7 @@ mod tests {
 
         match value {
             ParameterValue::Int(i) => {
-                assert!(i >= 8 && i <= 128);
+                assert!((8..=128).contains(&i));
                 assert!((i - 8) % 8 == 0);
             },
             _ => panic!("Expected int value"),
@@ -552,7 +552,7 @@ mod tests {
 
         match value {
             ParameterValue::Float(f) => {
-                assert!(f >= 1e-6 && f <= 1e-2);
+                assert!((1e-6..=1e-2).contains(&f));
             },
             _ => panic!("Expected float value"),
         }

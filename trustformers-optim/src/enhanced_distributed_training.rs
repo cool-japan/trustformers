@@ -1272,13 +1272,11 @@ impl<T: Optimizer + StatefulOptimizer + Clone> EnhancedDistributedTrainer<T> {
         // Apply gradients using multi-node trainer or local optimizer
         if let Some(ref mut trainer) = self.multi_node_trainer {
             // Decompress gradients for multi-node trainer
-            let decompressed: HashMap<String, Tensor> = compressed_gradients
-                .iter()
-                .map(|(name, compressed)| {
-                    let decompressed = compressed.decompress().unwrap();
-                    (name.clone(), decompressed)
-                })
-                .collect();
+            let mut decompressed: HashMap<String, Tensor> = HashMap::new();
+            for (name, compressed) in &compressed_gradients {
+                let decompressed_tensor = compressed.decompress()?;
+                decompressed.insert(name.clone(), decompressed_tensor);
+            }
 
             trainer.update_gradients(decompressed)?;
             trainer.optimizer_step()?;

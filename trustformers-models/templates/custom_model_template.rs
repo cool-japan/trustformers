@@ -296,14 +296,14 @@ mod tests {
             ..Default::default()
         };
 
-        let model = {{ModelName}}::new(config).unwrap();
+        let model = {{ModelName}}::new(config).expect("Failed to create model");
 
         {{test_forward_setup}}
 
         let output = model.forward({{test_forward_args}});
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         {{#each output_tests}}
         {{test_assertion}}
         {{/each}}

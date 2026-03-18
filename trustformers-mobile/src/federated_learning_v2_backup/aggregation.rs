@@ -153,7 +153,8 @@ impl SecureAggregator {
         }
 
         // Get the first update to determine size
-        let first_update = self.participant_updates.values().next().unwrap();
+        let first_update = self.participant_updates.values().next()
+            .ok_or_else(|| TrustformersError::other("No participant updates available".to_string()))?;
         let update_size = first_update.len();
         let mut aggregated = vec![0u8; update_size];
 

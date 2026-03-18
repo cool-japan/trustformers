@@ -288,7 +288,8 @@ where
 
         for (index, item) in batch_items.into_iter().enumerate() {
             let pipeline = self.pipeline.clone();
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
+            let permit =
+                semaphore.clone().acquire_owned().await.expect("semaphore should not be closed");
             let tx = output_tx.clone();
 
             let handle = tokio::spawn(async move {

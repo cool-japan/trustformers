@@ -196,7 +196,7 @@ impl TrafficSplitter {
         }
 
         let mut rng = thread_rng();
-        let random_value: f64 = rng.gen_range(0.0..total_weight);
+        let random_value: f64 = rng.random_range(0.0..total_weight);
         let mut cumulative_weight = 0.0;
 
         for variant in variants {

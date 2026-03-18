@@ -80,8 +80,10 @@ pub struct ClientConfig {
 impl Default for ClientConfig {
     fn default() -> Self {
         let mut default_headers = HeaderMap::new();
-        default_headers.insert("Content-Type", "application/json".parse().unwrap());
-        default_headers.insert("Accept", "application/json".parse().unwrap());
+        default_headers.insert("Content-Type", "application/json".parse()
+            .expect("static header value is valid"));
+        default_headers.insert("Accept", "application/json".parse()
+            .expect("static header value is valid"));
 
         Self {
             timeout: Duration::from_secs(30),

@@ -7,7 +7,7 @@ The project provides a comprehensive ecosystem for transformer model development
 with support for 21+ architectures and multiple deployment targets.
 
 ### Version Information
-- **Current Version:** 0.1.0-alpha.2
+- **Current Version:** 0.1.0-rc.1
 - **Status:** Production-Ready for Alpha Release
 - **License:** Apache 2.0 / MIT dual license
 - **Repository:** https://github.com/cool-japan/trustformers
@@ -454,7 +454,7 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
   - Priority 2: `gelu()`, `silu()` with operator stitching
   - Priority 2: `layer_norm()`, `rms_norm()` with fusion
   - Priority 3: `rope()` (rotary position embeddings)
-- [ ] Release scirs2-core 0.1.0 (full release, graduation from rc.3)
+- [ ] Release scirs2-core 0.3.0 (full release, graduation from rc.3)
 - [ ] Benchmark and verify 50+ tok/sec performance target
 
 **Implementation Request**: `~/work/requests/MPSGRAPH.md` (978 lines, ready for SciRS2 team)
@@ -472,10 +472,10 @@ TrustformeRS is organized as a Cargo workspace with 13 specialized crates:
 - ✅ Cargo.toml updated (mpsgraph feature enabled for macOS)
 
 **Next Actions**:
-1. **Blocked**: Await scirs2-core 0.1.0 release with MPSGraph implementation (Track A)
-2. **Then**: Update TrustformeRS to scirs2-core 0.1.0
+1. **Blocked**: Await scirs2-core 0.3.0 release with MPSGraph implementation (Track A)
+2. **Then**: Update TrustformeRS to scirs2-core 0.3.0
 3. **Then**: Verify 50+ tok/sec performance on rinna-1b model
-4. **Then**: Release TrustformeRS 0.1.0-beta.1 (graduation from alpha)
+4. **Then**: Release TrustformeRS 0.3.0 (graduation from alpha)
 
 **Performance Roadmap**:
 - Current: ~1 tok/sec (basic MPS working)
@@ -620,7 +620,7 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 ---
 
 **Last Updated:** 2025-12-19 - SciRS2 Policy Compliance Audit Complete, MPSGraph Implementation Request Ready
-**Next Milestone:** Beta 1.0 Release (blocked on scirs2-core 0.1.0 with MPSGraph)
+**Next Milestone:** Beta 1.0 Release (blocked on scirs2-core 0.3.0 with MPSGraph)
 **Target Audience:** ML engineers, researchers, and production deployment teams
 **Recent Updates:**
 - ✅ Comprehensive SciRS2 policy compliance audit (145,823 lines) - 100% compliant, zero violations
@@ -628,4 +628,4 @@ cargo run -p trustformers --example clip_multimodal_example --features "clip,vit
 - ✅ MPSGraph implementation request document created (`~/work/requests/MPSGRAPH.md`)
 - ✅ Feature configuration: mpsgraph enabled for macOS in trustformers-core
 - ✅ BLAS integration verified: Accelerate framework via scirs2-core
-- 🔄 Awaiting scirs2-core 0.1.0 release for 50-200x performance improvement
+- 🔄 Awaiting scirs2-core 0.3.0 release for 50-200x performance improvement

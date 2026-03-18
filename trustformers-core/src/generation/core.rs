@@ -1,6 +1,6 @@
 use crate::errors::{Result, TrustformersError};
 use crate::tensor::Tensor;
-use scirs2_core::random::Rng; // SciRS2 Policy compliant
+use scirs2_core::RngExt; // SciRS2 Policy compliant
 
 use super::cache::KVCache;
 use super::config::{GenerationConfig, GenerationStrategy};

@@ -47,7 +47,7 @@ async fn test_isolated_auth_flow() {
 
         let server = TrustformerServer::new(config);
         let router = server.create_test_router().await;
-        let test_server = TestServer::new(router).unwrap();
+        let test_server = TestServer::new(router);
 
         // Test authentication flow in isolation
         let response = test_server
@@ -123,7 +123,7 @@ async fn run_isolated_inference_test(
 
         let server = TrustformerServer::new(config);
         let router = server.create_test_router().await;
-        let test_server = TestServer::new(router).unwrap();
+        let test_server = TestServer::new(router);
 
         // Each test uses different model and isolated resources
         let response = test_server

@@ -62,10 +62,10 @@ proptest! {
         let data = vec![value; total_size];
 
         // Create as 1D
-        let tensor_1d = Tensor::from_vec(data.clone(), &vec![total_size]).unwrap();
+        let tensor_1d = Tensor::from_vec(data.clone(), &[total_size]).unwrap();
 
         // Create as 2D
-        let tensor_2d = Tensor::from_vec(data.clone(), &vec![rows, cols]).unwrap();
+        let tensor_2d = Tensor::from_vec(data.clone(), &[rows, cols]).unwrap();
 
         // Both should have the same data
         prop_assert_eq!(tensor_1d.data().unwrap(), tensor_2d.data().unwrap());

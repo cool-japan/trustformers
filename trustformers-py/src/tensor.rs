@@ -110,7 +110,9 @@ impl PyTensor {
         if array.is_c_contiguous() {
             // Zero-copy path: create tensor from existing data
             // SAFETY: We ensure the data outlives the tensor by keeping a reference
-            let data_slice = array.as_slice().unwrap();
+            let data_slice = array.as_slice().ok_or_else(|| {
+                PyValueError::new_err("Failed to get contiguous slice from array")
+            })?;
 
             // For true zero-copy, we need to work with the array's memory directly
             // This is a simplified implementation - in production, we'd need proper

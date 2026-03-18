@@ -448,7 +448,9 @@ echo "Deployment completed successfully!"
             }]
         });
 
-        Ok(serde_json::to_string_pretty(&task_def).unwrap())
+        serde_json::to_string_pretty(&task_def).map_err(|e| {
+            TrustformersError::from_string(format!("Failed to serialize task definition: {}", e))
+        })
     }
 
     fn generate_ecs_service_definition(&self, config: &ECSConfig) -> TrustformersResult<String> {
@@ -461,7 +463,9 @@ echo "Deployment completed successfully!"
             "launchType": config.launch_type
         });
 
-        Ok(serde_json::to_string_pretty(&service_def).unwrap())
+        serde_json::to_string_pretty(&service_def).map_err(|e| {
+            TrustformersError::from_string(format!("Failed to serialize service definition: {}", e))
+        })
     }
 
     fn generate_ecs_cloudformation_template(

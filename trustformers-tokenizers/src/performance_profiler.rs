@@ -395,7 +395,7 @@ impl PerformanceProfiler {
         let average_throughput = throughputs.iter().sum::<f64>() / throughputs.len() as f64;
         let peak_throughput = throughputs
             .iter()
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .copied()
             .unwrap_or(0.0);
 
@@ -484,7 +484,9 @@ impl PerformanceProfiler {
         let fastest = self
             .results
             .iter()
-            .min_by(|a, b| a.timing.mean.partial_cmp(&b.timing.mean).unwrap())
+            .min_by(|a, b| {
+                a.timing.mean.partial_cmp(&b.timing.mean).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|r| r.tokenizer_name.clone())
             .unwrap_or_else(|| "N/A".to_string());
 
@@ -493,7 +495,7 @@ impl PerformanceProfiler {
             .results
             .iter()
             .filter_map(|r| r.memory.as_ref().map(|m| (r, m.peak_memory_mb)))
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(r, _)| r.tokenizer_name.clone())
             .unwrap_or_else(|| "N/A".to_string());
 
@@ -502,7 +504,7 @@ impl PerformanceProfiler {
             .results
             .iter()
             .filter_map(|r| r.throughput.as_ref().map(|t| (r, t.peak_throughput)))
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(r, _)| r.tokenizer_name.clone())
             .unwrap_or_else(|| "N/A".to_string());
 
@@ -510,7 +512,12 @@ impl PerformanceProfiler {
         let most_consistent = self
             .results
             .iter()
-            .min_by(|a, b| a.timing.std_dev.partial_cmp(&b.timing.std_dev).unwrap())
+            .min_by(|a, b| {
+                a.timing
+                    .std_dev
+                    .partial_cmp(&b.timing.std_dev)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|r| r.tokenizer_name.clone())
             .unwrap_or_else(|| "N/A".to_string());
 
@@ -562,7 +569,12 @@ impl PerformanceProfiler {
                 // Find winner (fastest)
                 let winner = results
                     .iter()
-                    .min_by(|a, b| a.timing.mean.partial_cmp(&b.timing.mean).unwrap())
+                    .min_by(|a, b| {
+                        a.timing
+                            .mean
+                            .partial_cmp(&b.timing.mean)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
                     .map(|r| r.tokenizer_name.clone())
                     .unwrap_or_else(|| "N/A".to_string());
 
@@ -611,7 +623,7 @@ impl PerformanceProfiler {
             .iter()
             .filter_map(|r| r.memory.as_ref())
             .map(|m| m.peak_memory_mb)
-            .max_by(|a, b| a.partial_cmp(b).unwrap())
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
         {
             if max_memory > 1000.0 {
                 recommendations.push(
@@ -643,12 +655,12 @@ impl PerformanceProfiler {
         if !throughputs.is_empty() {
             let max_throughput = throughputs
                 .iter()
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .copied()
                 .unwrap_or(0.0);
             let min_throughput = throughputs
                 .iter()
-                .min_by(|a, b| a.partial_cmp(b).unwrap())
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
                 .copied()
                 .unwrap_or(0.0);
 

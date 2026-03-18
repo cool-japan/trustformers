@@ -1,6 +1,6 @@
 use crate::core::error::Result;
 use crate::error::TrustformersError;
-use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+use oxiarc_deflate::streaming::{GzipStreamDecoder, GzipStreamEncoder};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -613,7 +613,7 @@ impl BinaryDiffEngine {
 
     /// Compress delta using gzip
     fn compress_delta(&self, delta: &[u8]) -> Result<Vec<u8>> {
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::new(self.compression_level));
+        let mut encoder = GzipStreamEncoder::new(Vec::new(), self.compression_level as u8);
         encoder.write_all(delta).map_err(|e| TrustformersError::InvalidInput {
             message: format!("Failed to compress delta: {}", e),
             parameter: Some("delta_data".to_string()),
@@ -635,7 +635,7 @@ impl BinaryDiffEngine {
 
     /// Decompress delta
     fn decompress_delta(&self, compressed: &[u8]) -> Result<Vec<u8>> {
-        let mut decoder = GzDecoder::new(compressed);
+        let mut decoder = GzipStreamDecoder::new(compressed);
         let mut decompressed = Vec::new();
         decoder
             .read_to_end(&mut decompressed)

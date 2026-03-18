@@ -276,7 +276,7 @@ impl GradientCompressor {
         let keep_ratio = self.compression_ratio;
         let data_len = data.len();
         let keep_count = (data_len as f32 * keep_ratio) as usize;
-        let step_size = if keep_count > 0 { data_len / keep_count } else { 1 };
+        let step_size = data_len.checked_div(keep_count).unwrap_or(1);
         Ok(data.into_iter().step_by(step_size).collect())
     }
 

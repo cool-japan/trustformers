@@ -973,8 +973,10 @@ mod tests {
         let config = MathSpecializedConfig::default();
         assert!(config.validate().is_ok());
 
-        let mut invalid_config = MathSpecializedConfig::default();
-        invalid_config.math_context_length = 0;
+        let invalid_config = MathSpecializedConfig {
+            math_context_length: 0,
+            ..MathSpecializedConfig::default()
+        };
         assert!(invalid_config.validate().is_err());
 
         let mut invalid_config = MathSpecializedConfig::default();
@@ -1011,8 +1013,10 @@ mod tests {
         let config = MathSpecializedConfig::math_llama_7b();
         assert_eq!(config.effective_vocab_size(), 35000);
 
-        let mut config = MathSpecializedConfig::default();
-        config.math_vocab_size = None;
+        let mut config = MathSpecializedConfig {
+            math_vocab_size: None,
+            ..MathSpecializedConfig::default()
+        };
         config.base_config.vocab_size = 50000;
         assert_eq!(config.effective_vocab_size(), 50000);
     }

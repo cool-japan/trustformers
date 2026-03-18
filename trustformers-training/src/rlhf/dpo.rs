@@ -344,8 +344,10 @@ mod tests {
 
     #[test]
     fn test_dpo_data_collator() {
-        let mut config = DPOConfig::default();
-        config.max_length = Some(3); // Set to match test expectations
+        let config = DPOConfig {
+            max_length: Some(3), // Set to match test expectations
+            ..DPOConfig::default()
+        };
         let collator = DPODataCollator::new(config);
 
         let examples = vec![

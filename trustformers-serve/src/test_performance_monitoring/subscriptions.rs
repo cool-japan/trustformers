@@ -4,7 +4,6 @@
 //! including notification preferences, data streaming subscriptions, and user preferences.
 
 use super::events::*;
-use super::types::*;
 use crate::performance_optimizer::test_characterization::pattern_engine::SeverityLevel;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

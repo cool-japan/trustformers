@@ -287,8 +287,10 @@ impl DefaultDataCollator {
         let input_lengths: Vec<usize> = examples.iter().map(|ex| ex.input_ids.len()).collect();
 
         if !input_lengths.is_empty() {
-            let min_length = *input_lengths.iter().min().unwrap();
-            let max_length = *input_lengths.iter().max().unwrap();
+            let min_length =
+                *input_lengths.iter().min().expect("input_lengths checked as non-empty");
+            let max_length =
+                *input_lengths.iter().max().expect("input_lengths checked as non-empty");
             let avg_length =
                 input_lengths.iter().sum::<usize>() as f64 / input_lengths.len() as f64;
 
@@ -503,7 +505,7 @@ impl DefaultCollatorConfig {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let model_config = serde_json::json!({
+    /// let model_config = serde_json::json!({
     ///     "max_position_embeddings": 512,
     ///     "pad_token_id": 0,
     ///     "vocab_size": 30522
@@ -513,6 +515,7 @@ impl DefaultCollatorConfig {
     /// assert_eq!(config.max_length, Some(512));
     /// assert_eq!(config.pad_token_id, 0);
     /// assert_eq!(config.truncation, true);
+    /// ```
 
     pub fn from_config(config: &serde_json::Value) -> Result<Self> {
         Ok(Self {
@@ -649,7 +652,7 @@ mod tests {
         let collator = DefaultDataCollator::new(config);
         assert_eq!(collator.config().max_length(), Some(128));
         assert_eq!(collator.config().padding(), PaddingStrategy::Longest);
-        assert_eq!(collator.config().truncation(), true);
+        assert!(collator.config().truncation());
     }
 
     #[test]
@@ -663,7 +666,7 @@ mod tests {
         let config = DefaultCollatorConfig::from_config(&config_json).unwrap();
         assert_eq!(config.max_length, Some(512));
         assert_eq!(config.pad_token_id, 1);
-        assert_eq!(config.truncation, true);
+        assert!(config.truncation);
         assert_eq!(config.padding, PaddingStrategy::Longest);
     }
 
@@ -819,7 +822,7 @@ mod tests {
         let config = DefaultCollatorConfig::minimal(42);
         assert_eq!(config.pad_token_id, 42);
         assert_eq!(config.max_length, None);
-        assert_eq!(config.truncation, false);
+        assert!(!config.truncation);
         assert_eq!(config.padding, PaddingStrategy::Longest);
     }
 
@@ -832,7 +835,7 @@ mod tests {
 
         let config = DefaultCollatorConfig::for_inference(&model_config).unwrap();
         assert_eq!(config.max_length, Some(512));
-        assert_eq!(config.truncation, false); // More lenient for inference
+        assert!(!config.truncation); // More lenient for inference
     }
 
     #[test]
@@ -855,7 +858,7 @@ mod tests {
 
         let config = DefaultCollatorConfig::with_max_length(&model_config, 256).unwrap();
         assert_eq!(config.max_length, Some(256));
-        assert_eq!(config.truncation, true);
+        assert!(config.truncation);
     }
 
     #[test]

@@ -251,7 +251,7 @@ impl StreamingTrainer {
 
                 println!("Training tokenizer {} on {:?}", idx, path);
                 let result = trainer.train_bpe_streaming(&path);
-                tx.send((idx, result)).unwrap();
+                tx.send((idx, result)).expect("receiver should be available in training loop");
             });
 
             handles.push(handle);
@@ -268,7 +268,7 @@ impl StreamingTrainer {
 
         // Wait for all threads to complete
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("training thread should not panic");
         }
 
         // Extract successful results
@@ -315,7 +315,7 @@ impl StreamingTrainer {
             merge_rules: merge_rules.to_vec(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
             config: self.config.clone(),
         };
@@ -412,7 +412,7 @@ impl TrainingCheckpoint {
     pub fn age_seconds(&self) -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system time should be after UNIX epoch")
             .as_secs()
             - self.timestamp
     }
@@ -553,7 +553,7 @@ impl DistributedTrainingCoordinator {
 
         // Create final vocabulary with most frequent tokens
         let mut sorted_tokens: Vec<_> = combined_frequencies.into_iter().collect();
-        sorted_tokens.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency descending
+        sorted_tokens.sort_by_key(|item| std::cmp::Reverse(item.1)); // Sort by frequency descending
 
         for (idx, (token, _freq)) in sorted_tokens.into_iter().take(50000).enumerate() {
             combined_vocab.insert(token, idx as u32);

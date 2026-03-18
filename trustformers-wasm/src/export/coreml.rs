@@ -424,14 +424,13 @@ impl CoreMLExporter {
                     // Use fused layer norm when possible
                     optimized_op.parameters.insert("fused".to_string(), "true".to_string());
                 },
-                "gelu" => {
+                "gelu"
                     // Use approximated GELU for Neural Engine
-                    if self.config.precision == CoreMLPrecision::Float16 {
+                    if self.config.precision == CoreMLPrecision::Float16 => {
                         optimized_op
                             .parameters
                             .insert("mode".to_string(), "APPROXIMATE".to_string());
-                    }
-                },
+                    },
                 _ => {},
             }
 

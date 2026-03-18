@@ -70,17 +70,18 @@ impl RetryPolicy {
                     return Ok(result);
                 },
                 Err(error) => {
-                    last_error = Some(error);
-
                     // Check if we should retry
                     if attempt >= self.config.max_attempts {
+                        last_error = Some(error);
                         break;
                     }
 
                     // Check if error is retryable
-                    if !self.is_retryable_error(&last_error.as_ref().unwrap()).await {
+                    if !self.is_retryable_error(&error).await {
+                        last_error = Some(error);
                         break;
                     }
+                    last_error = Some(error);
 
                     // Calculate delay for next attempt
                     let delay = self.strategy.next_delay(attempt);
@@ -324,7 +325,7 @@ impl RetryStats {
             success_rate: 0.0,
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
         }
     }

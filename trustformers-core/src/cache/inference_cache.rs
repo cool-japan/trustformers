@@ -272,14 +272,14 @@ impl InferenceCache {
     /// Compress data using zstd
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
         use std::io::Write;
-        let mut encoder = zstd::Encoder::new(Vec::new(), 3)?;
+        let mut encoder = oxiarc_zstd::ZstdStreamEncoder::new(Vec::new(), 3);
         encoder.write_all(data)?;
         encoder.finish()
     }
 
     /// Decompress data using zstd
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>, std::io::Error> {
-        zstd::decode_all(data)
+        oxiarc_zstd::decode_all(data).map_err(|e| std::io::Error::other(e.to_string()))
     }
 }
 

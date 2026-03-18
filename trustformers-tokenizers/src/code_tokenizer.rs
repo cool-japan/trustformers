@@ -709,7 +709,9 @@ impl CodeTokenizer {
     ) -> Result<Option<CodeToken>> {
         // Check for line comments
         if let Some(line_comment) = patterns.line_comment {
-            if first_char == line_comment.chars().next().unwrap() {
+            if first_char
+                == line_comment.chars().next().expect("line_comment pattern must be non-empty")
+            {
                 if let Some(token) = self.try_parse_line_comment(
                     char_indices,
                     start_offset,
@@ -725,7 +727,12 @@ impl CodeTokenizer {
 
         // Check for block comments
         if let Some((start_delim, end_delim)) = patterns.block_comment {
-            if first_char == start_delim.chars().next().unwrap() {
+            if first_char
+                == start_delim
+                    .chars()
+                    .next()
+                    .expect("block comment start delimiter must be non-empty")
+            {
                 if let Some(token) = self.try_parse_block_comment(
                     char_indices,
                     start_offset,

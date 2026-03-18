@@ -38,7 +38,7 @@ impl CircuitBreaker {
                 // Check if we should transition to half-open
                 let current_time = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .expect("SystemTime should be after UNIX_EPOCH")
                     .as_secs();
                 let elapsed_duration = Duration::from_secs(current_time.saturating_sub(opened_at));
                 if elapsed_duration >= self.config.timeout {
@@ -198,7 +198,7 @@ impl CircuitBreaker {
         *self.state.write().await = CircuitBreakerState::Open {
             opened_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
         };
         self.stats.write().await.record_state_change();
@@ -317,7 +317,7 @@ impl CircuitBreakerStats {
             last_state_change: None,
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
         }
     }
@@ -341,7 +341,7 @@ impl CircuitBreakerStats {
         self.last_state_change = Some(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_secs(),
         );
     }
@@ -370,7 +370,7 @@ impl CircuitBreakerStats {
     pub fn uptime(&self) -> Duration {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should be after UNIX_EPOCH")
             .as_secs();
         Duration::from_secs(now.saturating_sub(self.created_at))
     }

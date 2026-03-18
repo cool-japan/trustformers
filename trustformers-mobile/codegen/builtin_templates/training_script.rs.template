@@ -238,19 +238,21 @@ fn main() -> Result<()> {
             }
             
             // Evaluation
-            if global_step % args.eval_steps == 0 && val_loader.is_some() {
-                let val_loss = evaluate(&model, val_loader.as_ref().unwrap(), &loss_fn)?;
-                println!("Validation loss: {:.4}", val_loss);
-                
-                // Save best model
-                if val_loss < best_val_loss {
-                    best_val_loss = val_loss;
-                    let checkpoint_path = args.output_dir.join("best_model.pt");
-                    model.save_checkpoint(&checkpoint_path)?;
-                    println!("Saved best model with val_loss = {:.4}", val_loss);
+            if global_step % args.eval_steps == 0 {
+                if let Some(ref val_loader) = val_loader {
+                    let val_loss = evaluate(&model, val_loader, &loss_fn)?;
+                    println!("Validation loss: {:.4}", val_loss);
+
+                    // Save best model
+                    if val_loss < best_val_loss {
+                        best_val_loss = val_loss;
+                        let checkpoint_path = args.output_dir.join("best_model.pt");
+                        model.save_checkpoint(&checkpoint_path)?;
+                        println!("Saved best model with val_loss = {:.4}", val_loss);
+                    }
+
+                    model.train();
                 }
-                
-                model.train();
             }
         }
         
@@ -307,8 +309,8 @@ mod tests {
     fn test_training_loop() {
         // Test basic training functionality
         let config = {{model_type|pascal_case}}Config::default();
-        let model = {{model_type|pascal_case}}Model::new(&config).unwrap();
-        
+        let model = {{model_type|pascal_case}}Model::new(&config).expect("Failed to create model");
+
         // Create dummy data
         let batch_size = 4;
         {{#if is_sequence_model}}
@@ -317,9 +319,9 @@ mod tests {
         {{else}}
         let inputs = Tensor::randn(&[batch_size, config.input_size]);
         {{/if}}
-        
+
         // Forward pass
-        let outputs = model.forward(&inputs).unwrap();
+        let outputs = model.forward(&inputs).expect("Forward pass failed");
         assert_eq!(outputs.shape()[0], batch_size);
     }
 }

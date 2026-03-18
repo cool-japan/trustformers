@@ -420,15 +420,15 @@ impl LayerAnalyzer {
         // Simulate weight distribution analysis
         let layer_type = self.infer_layer_type(layer_name);
         let (mean, std_dev) = match layer_type.as_str() {
-            "Linear" => (rng.gen_range(-0.1..0.1), rng.gen_range(0.1..0.5)),
-            "Convolutional" => (rng.gen_range(-0.05..0.05), rng.gen_range(0.05..0.3)),
-            "Attention" => (rng.gen_range(-0.02..0.02), rng.gen_range(0.02..0.2)),
-            _ => (rng.gen_range(-0.1..0.1), rng.gen_range(0.1..0.4)),
+            "Linear" => (rng.random_range(-0.1..0.1), rng.random_range(0.1..0.5)),
+            "Convolutional" => (rng.random_range(-0.05..0.05), rng.random_range(0.05..0.3)),
+            "Attention" => (rng.random_range(-0.02..0.02), rng.random_range(0.02..0.2)),
+            _ => (rng.random_range(-0.1..0.1), rng.random_range(0.1..0.4)),
         };
 
         let min = mean - 3.0 * std_dev;
         let max = mean + 3.0 * std_dev;
-        let sparsity = rng.gen_range(0.0..0.3);
+        let sparsity = rng.random_range(0.0..0.3);
 
         WeightDistribution {
             mean,
@@ -458,7 +458,7 @@ impl LayerAnalyzer {
         let data: Vec<Vec<f64>> = (0..height)
             .map(|_| {
                 (0..width)
-                    .map(|_| rng.gen_range(stats.min_activation..stats.max_activation))
+                    .map(|_| rng.random_range(stats.min_activation..stats.max_activation))
                     .collect()
             })
             .collect();
@@ -478,9 +478,9 @@ impl LayerAnalyzer {
         use scirs2_core::random::*; // SciRS2 Integration Policy
         let mut rng = thread_rng();
 
-        let seq_length = rng.gen_range(10..50);
+        let seq_length = rng.random_range(10..50);
         let attention_weights: Vec<Vec<f64>> = (0..seq_length)
-            .map(|_| (0..seq_length).map(|_| rng.gen_range(0.0..1.0)).collect())
+            .map(|_| (0..seq_length).map(|_| rng.random_range(0.0..1.0)).collect())
             .collect();
 
         let input_tokens: Vec<String> = (0..seq_length).map(|i| format!("token_{}", i)).collect();
@@ -535,10 +535,10 @@ impl LayerAnalyzer {
 
         let layer_type = self.infer_layer_type(layer_name);
         match layer_type.as_str() {
-            "Attention" => rng.gen_range(0.6..0.9),
-            "Linear" => rng.gen_range(0.4..0.7),
-            "Convolutional" => rng.gen_range(0.3..0.6),
-            _ => rng.gen_range(0.4..0.7),
+            "Attention" => rng.random_range(0.6..0.9),
+            "Linear" => rng.random_range(0.4..0.7),
+            "Convolutional" => rng.random_range(0.3..0.6),
+            _ => rng.random_range(0.4..0.7),
         }
     }
 
@@ -547,21 +547,21 @@ impl LayerAnalyzer {
         let mut rng = thread_rng();
 
         let hidden_dims = self.get_hidden_dimensions(layer_name);
-        let num_clusters = rng.gen_range(5..20);
+        let num_clusters = rng.random_range(5..20);
 
         let cluster_centers: Vec<Vec<f64>> = (0..num_clusters)
-            .map(|_| (0..hidden_dims.min(10)).map(|_| rng.gen_range(-1.0..1.0)).collect())
+            .map(|_| (0..hidden_dims.min(10)).map(|_| rng.random_range(-1.0..1.0)).collect())
             .collect();
 
         let cluster_assignments: Vec<usize> =
-            (0..100).map(|_| rng.gen_range(0..num_clusters)).collect();
+            (0..100).map(|_| rng.random_range(0..num_clusters)).collect();
 
         ClusteringResults {
             num_clusters,
             cluster_centers,
             cluster_assignments,
-            silhouette_score: rng.gen_range(0.2..0.8),
-            inertia: rng.gen_range(100.0..1000.0),
+            silhouette_score: rng.random_range(0.2..0.8),
+            inertia: rng.random_range(100.0..1000.0),
         }
     }
 
@@ -569,14 +569,14 @@ impl LayerAnalyzer {
         use scirs2_core::random::*; // SciRS2 Integration Policy
         let mut rng = thread_rng();
 
-        let consistency = rng.gen_range(0.5..0.9);
-        let change_rate = rng.gen_range(0.01..0.1);
+        let consistency = rng.random_range(0.5..0.9);
+        let change_rate = rng.random_range(0.01..0.1);
 
-        let num_windows = rng.gen_range(3..8);
+        let num_windows = rng.random_range(3..8);
         let stability_windows: Vec<(usize, usize)> = (0..num_windows)
             .map(|i| {
                 let start = i * 100;
-                let end = start + rng.gen_range(50..150);
+                let end = start + rng.random_range(50..150);
                 (start, end)
             })
             .collect();
@@ -584,13 +584,13 @@ impl LayerAnalyzer {
         let drift_detected = rng.gen_bool(0.2);
         let drift_info = DriftInfo {
             drift_detected,
-            drift_magnitude: if drift_detected { rng.gen_range(0.1..0.5) } else { 0.0 },
+            drift_magnitude: if drift_detected { rng.random_range(0.1..0.5) } else { 0.0 },
             drift_direction: if drift_detected {
-                ["increasing", "decreasing", "oscillating"][rng.gen_range(0..3)].to_string()
+                ["increasing", "decreasing", "oscillating"][rng.random_range(0..3)].to_string()
             } else {
                 "stable".to_string()
             },
-            onset_step: if drift_detected { Some(rng.gen_range(100..1000)) } else { None },
+            onset_step: if drift_detected { Some(rng.random_range(100..1000)) } else { None },
         };
 
         TemporalDynamics {
@@ -608,17 +608,17 @@ impl LayerAnalyzer {
         let layer_type = self.infer_layer_type(layer_name);
 
         let stability_score = match layer_type.as_str() {
-            "Normalization" => rng.gen_range(0.8..0.95),
-            "Attention" => rng.gen_range(0.6..0.85),
-            "Linear" => rng.gen_range(0.5..0.8),
-            _ => rng.gen_range(0.4..0.7),
+            "Normalization" => rng.random_range(0.8..0.95),
+            "Attention" => rng.random_range(0.6..0.85),
+            "Linear" => rng.random_range(0.5..0.8),
+            _ => rng.random_range(0.4..0.7),
         };
 
         RepresentationStability {
             stability_score,
-            variance_across_batches: rng.gen_range(0.01..0.1),
-            consistency_measure: rng.gen_range(0.6..0.9),
-            robustness_to_noise: rng.gen_range(0.3..0.8),
+            variance_across_batches: rng.random_range(0.01..0.1),
+            consistency_measure: rng.random_range(0.6..0.9),
+            robustness_to_noise: rng.random_range(0.3..0.8),
         }
     }
 

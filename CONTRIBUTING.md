@@ -348,7 +348,7 @@ let result = a.simd_add(&b)?;
 
 ## 📄 License
 
-By contributing, you agree that your contributions will be licensed under the same terms as the project (MIT OR Apache-2.0).
+By contributing, you agree that your contributions will be licensed under the same terms as the project (Apache-2.0).
 
 ## 🙏 Thank You!
 

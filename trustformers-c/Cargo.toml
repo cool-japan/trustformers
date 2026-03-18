@@ -58,13 +58,13 @@ codegen = ["syn", "quote", "clap", "toml"]
 
 [dependencies]
 # Internal dependencies - use path references for legacy compatibility
-trustformers = { version = "0.1.0-alpha.2", path = "../trustformers", default-features = false, features = ["bert", "gpt2"] }
-trustformers-core = { version = "0.1.0-alpha.2", path = "../trustformers-core", default-features = false }
-trustformers-tokenizers = { version = "0.1.0-alpha.2", path = "../trustformers-tokenizers", optional = true, default-features = false }
-trustformers-models = { version = "0.1.0-alpha.2", path = "../trustformers-models", optional = true, default-features = false }
-trustformers-serve = { version = "0.1.0-alpha.2", path = "../trustformers-serve", optional = true, default-features = false }
-trustformers-training = { version = "0.1.0-alpha.2", path = "../trustformers-training", optional = true, default-features = false }
-trustformers-debug = { version = "0.1.0-alpha.2", path = "../trustformers-debug", optional = true, default-features = false }
+trustformers = { version = "0.1.0-rc.1", path = "../trustformers", default-features = false, features = ["bert", "gpt2"] }
+trustformers-core = { version = "0.1.0-rc.1", path = "../trustformers-core", default-features = false }
+trustformers-tokenizers = { version = "0.1.0-rc.1", path = "../trustformers-tokenizers", optional = true, default-features = false }
+trustformers-models = { version = "0.1.0-rc.1", path = "../trustformers-models", optional = true, default-features = false }
+trustformers-serve = { version = "0.1.0-rc.1", path = "../trustformers-serve", optional = true, default-features = false }
+trustformers-training = { version = "0.1.0-rc.1", path = "../trustformers-training", optional = true, default-features = false }
+trustformers-debug = { version = "0.1.0-rc.1", path = "../trustformers-debug", optional = true, default-features = false }
 
 # Async dependencies
 futures = "0.3"
@@ -103,7 +103,7 @@ toml = { version = "0.9", optional = true }
 chrono = { version = "0.4", features = ["serde"] }
 
 # SciRS2 Integration
-scirs2-core = "0.1"
+scirs2-core = "0.3.4"
 
 # Standards framework dependencies
 regex = "1.12"

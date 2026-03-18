@@ -247,7 +247,6 @@ async fn wasm_interface_demo() -> Result<()> {
     Ok(())
 }
 */
-
 /// Demonstrate real-time dashboard capabilities
 async fn realtime_dashboard_demo() -> Result<()> {
     println!("📊 Setting up Real-Time Dashboard...");

@@ -362,8 +362,10 @@ impl FakeQuantLayer {
             self.zero_point = Some(zero_point);
         }
 
-        let scale = self.scale.unwrap();
-        let zero_point = self.zero_point.unwrap();
+        // Safe: scale and zero_point are set in the block above if None
+        let scale = self.scale.expect("scale should be set after observer initialization");
+        let zero_point =
+            self.zero_point.expect("zero_point should be set after observer initialization");
 
         // Apply fake quantization with straight-through estimator
         self.fake_quantize(tensor, scale, zero_point)

@@ -10,7 +10,6 @@ use super::historical_data::*;
 use super::metrics::*;
 use super::real_time_monitor::*;
 use super::reporting::*;
-use super::types::*;
 
 // Explicit imports to disambiguate ambiguous types
 // AlertManager: use from alerting (specialized module) rather than real_time_monitor

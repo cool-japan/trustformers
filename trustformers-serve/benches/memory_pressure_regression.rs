@@ -475,7 +475,7 @@ fn bench_garbage_collection_handler(c: &mut Criterion) {
 
     // Benchmark concurrent execution
     group.bench_function("concurrent_cleanup", |b| {
-        let rt = Runtime::new().unwrap();
+        let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
         b.to_async(&rt).iter(|| async {
             let handles: Vec<_> = (0..8)
                 .map(|_| {
@@ -570,7 +570,7 @@ fn bench_gpu_cleanup_handlers(c: &mut Criterion) {
     group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
 
     let baseline_manager = BaselineManager::new();
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
     let config = create_test_memory_pressure_config();
     let handler = MemoryPressureHandler::new(config);
 
@@ -707,7 +707,7 @@ fn bench_complete_memory_pressure_scenarios(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     let baseline_manager = BaselineManager::new();
-    let rt = Runtime::new().unwrap();
+    let rt = Runtime::new().expect("Failed to create Tokio runtime for benchmark");
 
     // Benchmark complete memory pressure handling workflow
     group.bench_function("complete_pressure_handling_workflow", |b| {

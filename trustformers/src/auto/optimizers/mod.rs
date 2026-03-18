@@ -448,8 +448,10 @@ impl Optimizer for AdamWOptimizer {
                 self.v.insert(param_name.clone(), vec![0.0; grad.len()]);
             }
 
-            let m = self.m.get_mut(param_name).unwrap();
-            let v = self.v.get_mut(param_name).unwrap();
+            let m =
+                self.m.get_mut(param_name).expect("param_name exists in m after initialization");
+            let v =
+                self.v.get_mut(param_name).expect("param_name exists in v after initialization");
 
             let mut updates = Vec::with_capacity(grad.len());
 
@@ -504,9 +506,11 @@ impl Optimizer for AdamWOptimizer {
         );
         state.insert(
             "learning_rate".to_string(),
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(self.config.learning_rate).unwrap(),
-            ),
+            serde_json::Number::from_f64(self.config.learning_rate)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| {
+                    serde_json::Value::String(format!("{}", self.config.learning_rate))
+                }),
         );
         // In a real implementation, would serialize m and v moment estimates
         state
@@ -576,8 +580,10 @@ impl Optimizer for AdamOptimizer {
                 self.v.insert(param_name.clone(), vec![0.0; grad.len()]);
             }
 
-            let m = self.m.get_mut(param_name).unwrap();
-            let v = self.v.get_mut(param_name).unwrap();
+            let m =
+                self.m.get_mut(param_name).expect("param_name exists in m after initialization");
+            let v =
+                self.v.get_mut(param_name).expect("param_name exists in v after initialization");
 
             let mut updates = Vec::with_capacity(grad.len());
 
@@ -622,9 +628,11 @@ impl Optimizer for AdamOptimizer {
         );
         state.insert(
             "learning_rate".to_string(),
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(self.config.learning_rate).unwrap(),
-            ),
+            serde_json::Number::from_f64(self.config.learning_rate)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| {
+                    serde_json::Value::String(format!("{}", self.config.learning_rate))
+                }),
         );
         state
     }
@@ -744,7 +752,9 @@ impl Optimizer for ScheduledOptimizer {
         );
         state.insert(
             "initial_lr".to_string(),
-            serde_json::Value::Number(serde_json::Number::from_f64(self.initial_lr).unwrap()),
+            serde_json::Number::from_f64(self.initial_lr)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(format!("{}", self.initial_lr))),
         );
         state
     }

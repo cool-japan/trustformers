@@ -441,7 +441,7 @@ impl TrainingDynamicsAnalyzer {
         let improvement_rate = self.calculate_improvement_rate(&losses);
 
         let best_loss = losses.iter().fold(f32::INFINITY, |a, &b| a.min(b));
-        let current_loss = *losses.last().unwrap();
+        let current_loss = *losses.last().expect("losses is non-empty from metrics_history");
         let loss_reduction_percentage = if losses.len() > 1 {
             ((losses[0] - current_loss) / losses[0].abs()) * 100.0
         } else {
@@ -1220,7 +1220,7 @@ impl TrainingDynamicsAnalyzer {
             return None;
         }
 
-        let current_loss = *losses.last().unwrap();
+        let current_loss = *losses.last().expect("losses has at least 5 elements after len check");
         let target_loss = current_loss * (1.0 - self.config.convergence_tolerance);
         let remaining_improvement = current_loss - target_loss;
 

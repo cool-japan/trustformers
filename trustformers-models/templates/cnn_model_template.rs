@@ -901,17 +901,17 @@ mod tests {
             ..Default::default()
         };
 
-        let model = {{ModelName}}::new(config).unwrap();
+        let model = {{ModelName}}::new(config).expect("Failed to create model");
 
         // Create dummy input
         let batch_size = 2;
-        let pixel_values = Tensor::randn(&[batch_size, 3, 32, 32]).unwrap();
+        let pixel_values = Tensor::randn(&[batch_size, 3, 32, 32]).expect("Failed to create random tensor");
 
         // Forward pass
         let output = model.forward(&pixel_values);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.pooler_output.shape(), &[batch_size, 32]);
     }
 
@@ -922,13 +922,13 @@ mod tests {
             ..Default::default()
         };
 
-        let model = {{ModelName}}ForImageClassification::new(config).unwrap();
-        let pixel_values = Tensor::randn(&[2, 3, 32, 32]).unwrap();
+        let model = {{ModelName}}ForImageClassification::new(config).expect("Failed to create classification model");
+        let pixel_values = Tensor::randn(&[2, 3, 32, 32]).expect("Failed to create random tensor");
 
         let output = model.forward(&pixel_values);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("Forward pass failed");
         assert_eq!(output.logits.shape(), &[2, 10]);
     }
 }

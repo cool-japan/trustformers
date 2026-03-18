@@ -240,7 +240,8 @@ impl ModelOptimizer {
         model_path: &str,
         output_path: &str,
     ) -> TrustformersResult<String> {
-        let pruning_config = self.pruning_config.as_ref().unwrap();
+        let pruning_config = self.pruning_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
 
         println!(
             "Optimizing model with {} pruning (target sparsity: {:.1}%)",
@@ -276,7 +277,8 @@ impl ModelOptimizer {
         model_path: &str,
         output_path: &str,
     ) -> TrustformersResult<String> {
-        let distillation_config = self.distillation_config.as_ref().unwrap();
+        let distillation_config = self.distillation_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
 
         println!(
             "Optimizing model with {} distillation (size reduction: {:.1}x)",
@@ -316,7 +318,8 @@ impl ModelOptimizer {
 
         // Then use the pruned model as teacher for distillation to further compress
         let original_distillation_config = self.distillation_config.take();
-        let mut combined_distillation_config = original_distillation_config.unwrap();
+        let mut combined_distillation_config = original_distillation_config
+            .ok_or(TrustformersError::InvalidParameter)?;
         combined_distillation_config.teacher_config.model_path = pruned_model;
         combined_distillation_config.student_config.compression_ratio *= 0.7; // More aggressive compression
 
@@ -378,7 +381,8 @@ impl ModelOptimizer {
         output_path: &str,
         sensitivity: &HashMap<String, SensitivityResults>,
     ) -> TrustformersResult<()> {
-        let pruning_config = self.pruning_config.as_ref().unwrap();
+        let pruning_config = self.pruning_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
 
         println!(
             "Applying initial {} pruning",
@@ -424,7 +428,8 @@ impl ModelOptimizer {
         input_path: &str,
         output_path: &str,
     ) -> TrustformersResult<()> {
-        let pruning_config = self.pruning_config.as_ref().unwrap();
+        let pruning_config = self.pruning_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
         let schedule = &pruning_config.schedule;
 
         println!(
@@ -486,7 +491,8 @@ impl ModelOptimizer {
         input_path: &str,
         output_path: &str,
     ) -> TrustformersResult<()> {
-        let pruning_config = self.pruning_config.as_ref().unwrap();
+        let pruning_config = self.pruning_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
         let recovery_config = &pruning_config.recovery_config;
 
         println!(
@@ -517,7 +523,8 @@ impl ModelOptimizer {
 
     /// Initialize student model architecture
     fn initialize_student_model(&self, output_path: &str) -> TrustformersResult<()> {
-        let distillation_config = self.distillation_config.as_ref().unwrap();
+        let distillation_config = self.distillation_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
         let student_config = &distillation_config.student_config;
 
         println!(
@@ -554,7 +561,8 @@ impl ModelOptimizer {
 
     /// Load teacher model for distillation
     fn load_teacher_model(&self, teacher_path: &str) -> TrustformersResult<String> {
-        let distillation_config = self.distillation_config.as_ref().unwrap();
+        let distillation_config = self.distillation_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
         let teacher_config = &distillation_config.teacher_config;
 
         println!("Loading teacher model: {}", teacher_path);
@@ -585,7 +593,8 @@ impl ModelOptimizer {
         teacher_path: &str,
         output_path: &str,
     ) -> TrustformersResult<()> {
-        let distillation_config = self.distillation_config.as_ref().unwrap();
+        let distillation_config = self.distillation_config.as_ref()
+            .ok_or(TrustformersError::InvalidParameter)?;
         let training_config = &distillation_config.training_config;
         let loss_weights = &distillation_config.loss_weights;
 

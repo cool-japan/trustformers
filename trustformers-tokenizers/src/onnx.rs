@@ -544,10 +544,11 @@ impl OnnxTokenizerRuntime {
 
         for word in words {
             // Skip leading whitespace in original text
-            while current_offset < text.len()
-                && text.chars().nth(current_offset).unwrap().is_whitespace()
-            {
-                current_offset += 1;
+            while current_offset < text.len() {
+                match text.chars().nth(current_offset) {
+                    Some(c) if c.is_whitespace() => current_offset += 1,
+                    _ => break,
+                }
             }
 
             let word_start = current_offset;

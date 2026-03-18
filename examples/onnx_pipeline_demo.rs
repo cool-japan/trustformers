@@ -372,7 +372,8 @@ impl PerformanceMonitor {
         let max = self.measurements.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
         let mut sorted = self.measurements.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b)
+            .expect("Cannot compare NaN values in measurements"));
         let median = sorted[sorted.len() / 2];
 
         (mean, median, min, max)

@@ -269,7 +269,10 @@ pub extern "C" fn trustformers_alloc_memory(size: c_uint) -> *mut std::ffi::c_vo
         return ptr::null_mut();
     }
 
-    let layout = std::alloc::Layout::from_size_align(size as usize, 1).unwrap();
+    let layout = match std::alloc::Layout::from_size_align(size as usize, 1) {
+        Ok(l) => l,
+        Err(_) => return ptr::null_mut(),
+    };
     unsafe { std::alloc::alloc(layout) as *mut std::ffi::c_void }
 }
 
@@ -279,8 +282,9 @@ pub extern "C" fn trustformers_free_memory(ptr: *mut std::ffi::c_void) {
         // In a real implementation, we'd need to know the size
         // This is a simplified version
         unsafe {
-            let layout = std::alloc::Layout::from_size_align(1, 1).unwrap();
-            std::alloc::dealloc(ptr as *mut u8, layout);
+            if let Ok(layout) = std::alloc::Layout::from_size_align(1, 1) {
+                std::alloc::dealloc(ptr as *mut u8, layout);
+            }
         }
     }
 }

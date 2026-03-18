@@ -497,7 +497,7 @@ impl MobileModelDebugger {
         }
 
         // Sort by timestamp (most recent first)
-        all_anomalies.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        all_anomalies.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
 
         Ok(all_anomalies)
     }

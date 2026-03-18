@@ -1100,7 +1100,7 @@ mod tests {
 
         let quality = engine.estimate_quality_score(&weights).expect("Operation failed");
 
-        assert!(quality >= 0.0 && quality <= 1.0);
+        assert!((0.0..=1.0).contains(&quality));
     }
 
     #[test]

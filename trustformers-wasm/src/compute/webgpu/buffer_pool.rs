@@ -278,37 +278,37 @@ impl BufferPool {
             &"total_allocations".into(),
             &self.stats.total_allocations.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &stats,
             &"coalesced_allocations".into(),
             &self.stats.coalesced_allocations.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &stats,
             &"memory_saved_bytes".into(),
             &self.stats.memory_saved_bytes.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &stats,
             &"fragmentation_ratio".into(),
             &self.stats.fragmentation_ratio.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &stats,
             &"allocated_bytes".into(),
             &self.allocated_bytes.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &stats,
             &"peak_allocated_bytes".into(),
             &self.peak_allocated_bytes.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         stats
     }
 
@@ -770,7 +770,7 @@ impl BufferPool {
 
         // Predict most likely sizes
         let mut sorted_sizes: Vec<(usize, u32)> = size_frequencies.into_iter().collect();
-        sorted_sizes.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency (descending)
+        sorted_sizes.sort_by_key(|item| std::cmp::Reverse(item.1)); // Sort by frequency (descending)
 
         // Take top 5 most frequent sizes
         for (size, frequency) in sorted_sizes.into_iter().take(5) {
@@ -795,37 +795,37 @@ impl BufferPool {
             &"total_allocations".into(),
             &self.stats.total_allocations.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"coalesced_allocations".into(),
             &self.stats.coalesced_allocations.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"memory_saved_bytes".into(),
             &self.stats.memory_saved_bytes.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"fragmentation_ratio".into(),
             &self.fragmentation_ratio().into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"allocated_bytes".into(),
             &self.allocated_bytes.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"peak_allocated_bytes".into(),
             &self.peak_allocated_bytes.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
 
         // Advanced analytics
         js_sys::Reflect::set(
@@ -833,38 +833,39 @@ impl BufferPool {
             &"dynamic_coalescing_threshold".into(),
             &self.coalescing_threshold.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"dynamic_defrag_threshold".into(),
             &self.defragmentation_threshold.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"workload_factor".into(),
             &self.dynamic_thresholds.workload_factor.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"prediction_confidence".into(),
             &self.access_predictor.prediction_confidence.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
         js_sys::Reflect::set(
             &analytics,
             &"bandwidth_utilization".into(),
             &self.memory_bandwidth_optimizer.bandwidth_utilization.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
 
         // Memory bank load balancing
         let bank_loads = js_sys::Array::new();
         for load in &self.memory_bandwidth_optimizer.bank_load_balancing {
             bank_loads.push(&(*load).into());
         }
-        js_sys::Reflect::set(&analytics, &"memory_bank_loads".into(), &bank_loads.into()).unwrap();
+        js_sys::Reflect::set(&analytics, &"memory_bank_loads".into(), &bank_loads.into())
+            .expect("Failed to set buffer pool stats property");
 
         // Predicted buffer sizes
         let predicted = js_sys::Array::new();
@@ -876,7 +877,7 @@ impl BufferPool {
             &"predicted_buffer_sizes".into(),
             &predicted.into(),
         )
-        .unwrap();
+        .expect("Failed to set buffer pool stats property");
 
         analytics
     }
@@ -1026,7 +1027,7 @@ impl BufferPool {
             .iter()
             .map(|(&size, buffers)| (size, size * buffers.len()))
             .collect();
-        sizes_by_bytes.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by total bytes (descending)
+        sizes_by_bytes.sort_by_key(|item| std::cmp::Reverse(item.1)); // Sort by total bytes (descending)
 
         for (bucket_size, _total_bytes) in
             sizes_by_bytes.into_iter().take(self.free_buffers.len() / 2)

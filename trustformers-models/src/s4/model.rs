@@ -114,7 +114,7 @@ impl HiPPOMatrix {
         let mut a = Array2::<f32>::zeros((n, n));
         for i in 0..n {
             for j in 0..i {
-                let val = rng.gen_range(-1.0..1.0);
+                let val = rng.random_range(-1.0..1.0);
                 a[[i, j]] = val;
                 a[[j, i]] = -val; // Skew-symmetric
             }

@@ -275,7 +275,10 @@ impl DiWo {
         let violation = self.calculate_orthogonality_violation(&param_data, orthogonal_update)?;
 
         // Get mutable reference after immutable borrow is done
-        let ortho_state = self.ortho_history.get_mut(param_name).unwrap();
+        let ortho_state = self
+            .ortho_history
+            .get_mut(param_name)
+            .expect("ortho_history state must exist after initialization");
         ortho_state.violation_history.push(violation);
 
         // Keep only recent history
@@ -357,8 +360,14 @@ impl Optimizer for DiWo {
         }
 
         // Get momentum and velocity states
-        let momentum = self.momentum_states.get_mut(&param_id).unwrap();
-        let velocity = self.velocity_states.get_mut(&param_id).unwrap();
+        let momentum = self
+            .momentum_states
+            .get_mut(&param_id)
+            .expect("momentum_states must exist after initialization");
+        let velocity = self
+            .velocity_states
+            .get_mut(&param_id)
+            .expect("velocity_states must exist after initialization");
 
         let momentum_data = momentum.data()?;
         let velocity_data = velocity.data()?;
@@ -450,7 +459,11 @@ impl StatefulOptimizer for DiWo {
             });
             // This is still unsafe because we're returning a reference to thread-local data
             // A proper fix would require restructuring the trait and implementation
-            unsafe { std::mem::transmute(config.borrow().as_ref().unwrap()) }
+            unsafe {
+                std::mem::transmute(
+                    config.borrow().as_ref().expect("config just set to Some above"),
+                )
+            }
         })
     }
 
@@ -471,7 +484,9 @@ impl StatefulOptimizer for DiWo {
             });
             // This is still unsafe because we're returning a reference to thread-local data
             // A proper fix would require restructuring the trait and implementation
-            unsafe { std::mem::transmute(state.borrow().as_ref().unwrap()) }
+            unsafe {
+                std::mem::transmute(state.borrow().as_ref().expect("state just set to Some above"))
+            }
         })
     }
 
@@ -492,7 +507,11 @@ impl StatefulOptimizer for DiWo {
             });
             // This is still unsafe because we're returning a mutable reference to thread-local data
             // A proper fix would require restructuring the trait and implementation
-            unsafe { std::mem::transmute(state.borrow_mut().as_mut().unwrap()) }
+            unsafe {
+                std::mem::transmute(
+                    state.borrow_mut().as_mut().expect("state just set to Some above"),
+                )
+            }
         })
     }
 
@@ -1126,7 +1145,10 @@ impl Optimizer for AdaWin {
 
         // Add gradient to history and maintain circular buffer
         {
-            let param_state = self.parameter_states.get_mut(&param_id).unwrap();
+            let param_state = self
+                .parameter_states
+                .get_mut(&param_id)
+                .expect("parameter_states must exist after step");
             param_state.gradient_history.push(gradient.clone());
 
             if param_state.gradient_history.len() > self.max_window_size {
@@ -1136,20 +1158,29 @@ impl Optimizer for AdaWin {
 
         // Adapt window size based on gradient correlations
         {
-            let mut param_state = self.parameter_states.remove(&param_id).unwrap();
+            let mut param_state = self
+                .parameter_states
+                .remove(&param_id)
+                .expect("parameter_states must exist for param_id");
             self.adapt_window_size(&mut param_state)?;
             self.parameter_states.insert(param_id.clone(), param_state);
         }
 
         // Calculate weighted momentum
         let weighted_momentum = {
-            let param_state = self.parameter_states.get(&param_id).unwrap();
+            let param_state = self
+                .parameter_states
+                .get(&param_id)
+                .expect("parameter_states must exist for param_id");
             self.calculate_weighted_momentum(param_state)?
         };
 
         // Update cumulative momentum
         let momentum_data = {
-            let param_state = self.parameter_states.get(&param_id).unwrap();
+            let param_state = self
+                .parameter_states
+                .get(&param_id)
+                .expect("parameter_states must exist for param_id");
             param_state.momentum.data()?
         };
         let weighted_data = weighted_momentum.data()?;
@@ -1161,7 +1192,10 @@ impl Optimizer for AdaWin {
 
         // Update momentum
         {
-            let param_state = self.parameter_states.get_mut(&param_id).unwrap();
+            let param_state = self
+                .parameter_states
+                .get_mut(&param_id)
+                .expect("parameter_states must exist after step");
             param_state.momentum = Tensor::new(new_momentum_data.clone())?;
         }
 

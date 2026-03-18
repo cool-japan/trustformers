@@ -86,11 +86,14 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
 #[inline]
 fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize) {
     use scirs2_core::ndarray::Array2;
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec())
+        .expect("matrix dimensions must match slice length");
     f32::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
-    c.copy_from_slice(c_arr.as_slice().unwrap());
+    c.copy_from_slice(c_arr.as_slice().expect("array must have contiguous layout"));
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -98,11 +101,14 @@ fn blas_sgemm(a: &[f32], b: &[f32], c: &mut [f32], m: usize, k: usize, n: usize)
 #[inline]
 fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
     use scirs2_core::ndarray::Array2;
-    let a_arr = Array2::from_shape_vec((m, k), a.to_vec()).unwrap();
-    let b_arr = Array2::from_shape_vec((k, n), b.to_vec()).unwrap();
-    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec()).unwrap();
+    let a_arr = Array2::from_shape_vec((m, k), a.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let b_arr = Array2::from_shape_vec((k, n), b.to_vec())
+        .expect("matrix dimensions must match slice length");
+    let mut c_arr = Array2::from_shape_vec((m, n), c.to_vec())
+        .expect("matrix dimensions must match slice length");
     f64::simd_gemm(1.0, &a_arr.view(), &b_arr.view(), 0.0, &mut c_arr);
-    c.copy_from_slice(c_arr.as_slice().unwrap());
+    c.copy_from_slice(c_arr.as_slice().expect("array must have contiguous layout"));
 }
 
 impl Tensor {
@@ -319,7 +325,8 @@ impl Tensor {
                                 let b_vec: Vec<f32> = b_2d.iter().copied().collect();
                                 let mut result_vec = vec![0.0f32; rows * cols];
                                 blas_sgemm(&a_vec, &b_vec, &mut result_vec, rows, inner, cols);
-                                Array2::from_shape_vec((rows, cols), result_vec).unwrap()
+                                Array2::from_shape_vec((rows, cols), result_vec)
+                                    .expect("matrix dimensions must match result_vec length")
                             };
                             result.slice_mut(s![i, .., ..]).assign(&batch_result);
                         }
@@ -379,7 +386,7 @@ impl Tensor {
                                         seq_len_b,
                                     );
                                     Array2::from_shape_vec((seq_len_a, seq_len_b), result_vec)
-                                        .unwrap()
+                                        .expect("result_vec has correct size for shape")
                                 };
 
                                 // Assign result back to 4D tensor
@@ -625,7 +632,7 @@ impl Tensor {
             return Tensor::from_vec(vec![global_norm], &[1]);
         }
 
-        let dims = dims.unwrap();
+        let dims = dims.expect("dims checked as Some above");
 
         match self {
             Tensor::F32(arr) => {

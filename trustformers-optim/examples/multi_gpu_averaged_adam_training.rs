@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! # Multi-GPU Distributed Training with Averaged Adam
 //!
 //! This example demonstrates how to use the Averaged Adam optimizer in distributed

@@ -223,7 +223,8 @@ fn compute_confusion_matrix(
     predictions: &[i64],
     labels: &[i64],
 ) -> Result<Vec<Vec<usize>>> {
-    let num_classes = (*labels.iter().max().unwrap() + 1) as usize;
+    let max_label = labels.iter().max().ok_or_else(|| anyhow::anyhow!("Empty label set"))?;
+    let num_classes = (*max_label + 1) as usize;
     let mut matrix = vec![vec![0usize; num_classes]; num_classes];
     
     for (&pred, &label) in predictions.iter().zip(labels.iter()) {

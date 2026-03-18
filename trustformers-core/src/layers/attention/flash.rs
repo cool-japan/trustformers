@@ -19,7 +19,7 @@ use crate::traits::Layer;
 /// the full attention matrix.
 ///
 /// Reference: FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness
-/// https://arxiv.org/abs/2205.14135
+/// <https://arxiv.org/abs/2205.14135>
 #[derive(Debug, Clone)]
 pub struct FlashAttention {
     /// Attention configuration

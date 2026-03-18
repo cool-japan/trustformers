@@ -378,12 +378,14 @@ impl HubUiState {
             repo.versions.insert(version.version.clone(), version.clone());
             repo.version_history.push(version.version);
             repo.version_history.sort_by(|a, b| {
-                let a_version = repo.versions.get(a).unwrap();
-                let b_version = repo.versions.get(b).unwrap();
+                let a_version = repo.versions.get(a).expect("version in history must exist");
+                let b_version = repo.versions.get(b).expect("version in history must exist");
                 a_version.created_at.cmp(&b_version.created_at)
             });
-            repo.metadata.updated_at =
-                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            repo.metadata.updated_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs();
             repo.metadata.stats.version_count = repo.versions.len();
             Ok(())
         } else {
@@ -398,7 +400,10 @@ impl HubUiState {
 impl ModelRepository {
     /// Create a new model repository
     pub fn new(model_id: String, owner: String) -> Self {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
         Self {
             model_id: model_id.clone(),
             versions: HashMap::new(),
@@ -456,7 +461,10 @@ impl ModelRepository {
             size_diff: to_version.size_bytes as i64 - from_version.size_bytes as i64,
             changes: self.compute_changes(from_version, to_version),
             performance_diff: self.compute_performance_diff(from_version, to_version),
-            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs(),
         })
     }
 
@@ -1475,7 +1483,11 @@ fn generate_css(theme: &ThemeConfig) -> String {
 
 fn format_timestamp(timestamp: u64) -> String {
     // Simple timestamp formatting - in production would use proper date formatting
-    let duration = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() - timestamp;
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("SystemTime should be after UNIX_EPOCH")
+        .as_secs()
+        - timestamp;
 
     if duration < 60 {
         "Just now".to_string()
@@ -1529,8 +1541,14 @@ mod tests {
             version: "v1.0.0".to_string(),
             name: Some("Initial release".to_string()),
             description: Some("First stable version".to_string()),
-            created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-            modified_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs(),
+            modified_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs(),
             author: Some("test_user".to_string()),
             tags: vec!["stable".to_string()],
             metrics: None,

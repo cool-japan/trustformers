@@ -152,7 +152,10 @@ impl TrainingMonitor {
 
         let metrics = StepMetrics {
             step,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs(),
             loss,
             gradient_norm,
             learning_rate,
@@ -731,7 +734,10 @@ mod tests {
         let mut stats = PerformanceStats::new();
         let metrics = StepMetrics {
             step: 0,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64,
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_millis() as u64,
             loss: 1.0,
             gradient_norm: 2.0,
             learning_rate: 0.001,

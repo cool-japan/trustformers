@@ -1,4 +1,5 @@
 //! Real-time Streaming Demo
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example demonstrates TrustformeRS's real-time streaming capabilities,
@@ -251,7 +252,8 @@ impl StreamProcessor {
         let batch: Vec<StreamMessage> = message_buffer.drain(..batch_size).collect();
 
         // Acquire semaphore permit for concurrent processing
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
+        let permit =
+            semaphore.clone().acquire_owned().await.expect("Async operation should succeed");
         let pipeline = self.pipeline.clone();
         let stats = self.stats.clone();
         let result_tx_clone = result_tx.clone();
@@ -281,7 +283,7 @@ impl StreamProcessor {
                             processing_time_ms: processing_time / batch.len() as u64,
                             processed_at: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
+                                .expect("Failed to send inference request")
                                 .as_millis() as u64,
                         };
 
@@ -352,7 +354,7 @@ impl MessageGenerator {
             text: templates[fastrand::usize(0..templates.len())].to_string(),
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("Receiver should not be closed")
                 .as_millis() as u64,
             source: self.sources[fastrand::usize(0..self.sources.len())].clone(),
         }
@@ -523,10 +525,12 @@ async fn interactive_mode() -> Result<()> {
     let mut message_id = 0;
     loop {
         print!("📝 Enter message: ");
-        io::stdout().flush().unwrap();
+        {
+            let _ = io::stdout().flush();
+        } // Ignore flush errors;
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
+        io::stdin().read_line(&mut input).expect("Failed to read user input");
         let input = input.trim();
 
         if input == "quit" {
@@ -540,7 +544,7 @@ async fn interactive_mode() -> Result<()> {
                 text: input.to_string(),
                 timestamp: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .expect("Failed to send message")
                     .as_millis() as u64,
                 source: "interactive".to_string(),
             };

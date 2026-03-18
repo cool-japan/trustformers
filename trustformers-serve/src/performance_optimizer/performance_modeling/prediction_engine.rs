@@ -369,7 +369,7 @@ impl PredictionEngine {
 
         // Find optimal parallelism (simplified)
         let optimal_parallelism = predictions.iter()
-            .max_by(|a, b| a.throughput.partial_cmp(&b.throughput).unwrap())
+            .max_by(|a, b| a.throughput.partial_cmp(&b.throughput).unwrap_or(std::cmp::Ordering::Equal))
             .map(|_| 4) // Simplified
             .unwrap_or(1);
 
@@ -911,7 +911,7 @@ impl EnsembleCoordinator {
     fn best_model(&self, predictions: Vec<WeightedPrediction>) -> Result<PerformancePrediction> {
         let best_prediction = predictions
             .into_iter()
-            .max_by(|a, b| a.weight.partial_cmp(&b.weight).unwrap())
+            .max_by(|a, b| a.weight.partial_cmp(&b.weight).unwrap_or(std::cmp::Ordering::Equal))
             .ok_or_else(|| anyhow!("No predictions available"))?;
 
         Ok(best_prediction.prediction)

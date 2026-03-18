@@ -316,7 +316,10 @@ impl ModelSplitter {
         });
 
         // Vocabulary chunk (medium priority)
-        let vocab_start = components.last().unwrap().end_offset();
+        let vocab_start = components
+            .last()
+            .expect("components has at least one element after config push")
+            .end_offset();
         components.push(ModelComponent {
             name: "vocabulary".to_string(),
             chunk_type: ChunkType::Vocabulary,
@@ -326,7 +329,10 @@ impl ModelSplitter {
         });
 
         // Embeddings (high priority)
-        let embed_start = components.last().unwrap().end_offset();
+        let embed_start = components
+            .last()
+            .expect("components has at least two elements after vocab push")
+            .end_offset();
         components.push(ModelComponent {
             name: "embeddings".to_string(),
             chunk_type: ChunkType::Embeddings,
@@ -336,7 +342,10 @@ impl ModelSplitter {
         });
 
         // Split remaining data into attention and FFN layers
-        let remaining_start = components.last().unwrap().end_offset();
+        let remaining_start = components
+            .last()
+            .expect("components has at least three elements after embeddings push")
+            .end_offset();
         let remaining_size = total_size - remaining_start;
         let num_layer_chunks = remaining_size.div_ceil(chunk_size);
 
@@ -674,7 +683,10 @@ impl ModelLoadingSession {
         let total_count = loading_order.length() as usize;
 
         for i in 0..loading_order.length() {
-            let chunk_id = loading_order.get(i).as_string().unwrap();
+            let chunk_id = loading_order
+                .get(i)
+                .as_string()
+                .expect("loading order should contain string chunk IDs");
 
             // Simulate loading delay
             self.simulate_chunk_loading(&chunk_id).await?;
@@ -706,13 +718,17 @@ impl ModelLoadingSession {
 
         // Create a promise that resolves after delay
         let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-            let timeout_id = web_sys::window()
-                .unwrap()
-                .set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, delay_ms as i32)
-                .unwrap();
-
-            // Store timeout_id if needed for cleanup
-            let _ = timeout_id;
+            if let Some(window) = web_sys::window() {
+                if let Ok(timeout_id) = window
+                    .set_timeout_with_callback_and_timeout_and_arguments_0(
+                        &resolve,
+                        delay_ms as i32,
+                    )
+                {
+                    // Store timeout_id if needed for cleanup
+                    let _ = timeout_id;
+                }
+            }
         });
 
         wasm_bindgen_futures::JsFuture::from(promise).await?;

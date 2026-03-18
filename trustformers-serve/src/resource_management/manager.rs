@@ -10,7 +10,7 @@ use std::sync::{atomic::AtomicBool, Arc};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use crate::test_independence_analyzer::ResourceRequirement;
+use crate::parallel_execution_engine::ResourceRequirement;
 use crate::test_parallelization::ResourceAllocation;
 
 use super::custom_resources::CustomResourceManager;

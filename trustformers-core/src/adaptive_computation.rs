@@ -195,7 +195,10 @@ impl AdaptiveComputationStrategy for ConfidenceBasedStrategy {
         }
 
         // Adaptive halting criterion based on confidence growth rate
-        let mut confidence_history = self.confidence_history.write().unwrap();
+        let mut confidence_history = self
+            .confidence_history
+            .write()
+            .expect("confidence_history lock should not be poisoned");
         confidence_history.push(metrics.confidence_score);
 
         if confidence_history.len() >= 3 {
@@ -488,7 +491,10 @@ impl AdaptiveComputationManager {
 
         // Update performance tracking
         {
-            let mut tracker = self.performance_tracker.write().unwrap();
+            let mut tracker = self
+                .performance_tracker
+                .write()
+                .expect("performance_tracker lock should not be poisoned");
             tracker.record_layer_execution(layer_id, metrics.execution_time_ms);
         }
 

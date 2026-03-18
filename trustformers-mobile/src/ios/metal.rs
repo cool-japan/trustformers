@@ -598,7 +598,7 @@ impl MetalCommandBuffer {
     /// Set command buffer label
     pub fn set_label(&mut self, label: &str) {
         self.label = Some(label.to_string());
-        let label_cstr = CString::new(label).unwrap();
+        let label_cstr = CString::new(label).expect("label should not contain null bytes");
         unsafe {
             MTLCommandBuffer_setLabel(self.command_buffer, label_cstr.as_ptr());
         }
@@ -701,7 +701,7 @@ impl MetalComputeEncoder {
 
     /// Set encoder label
     pub fn set_label(&self, label: &str) {
-        let label_cstr = CString::new(label).unwrap();
+        let label_cstr = CString::new(label).expect("label should not contain null bytes");
         unsafe {
             MTLComputeCommandEncoder_setLabel(self.encoder, label_cstr.as_ptr());
         }

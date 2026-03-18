@@ -443,11 +443,9 @@ impl AdvancedRAGPipeline {
                 if let Some(obj) = json.as_object() {
                     for (key, value) in obj.iter().take(10) {
                         let value_summary = match value {
-                            serde_json::Value::Object(_) => format!(
-                                "{}: [object with {} fields]",
-                                key,
-                                value.as_object().unwrap().len()
-                            ),
+                            serde_json::Value::Object(obj) => {
+                                format!("{}: [object with {} fields]", key, obj.len())
+                            },
                             serde_json::Value::Array(arr) => {
                                 format!("{}: [array with {} items]", key, arr.len())
                             },
@@ -465,7 +463,7 @@ impl AdvancedRAGPipeline {
     /// Summarize XML content
     async fn summarize_xml(&self, content: &str) -> Result<String> {
         // Simple XML tag extraction for demonstration
-        let tag_regex = regex::Regex::new(r"<(\w+)").unwrap();
+        let tag_regex = regex::Regex::new(r"<(\w+)").expect("static regex pattern is valid");
         let tags: Vec<_> = tag_regex.captures_iter(content).map(|cap| cap[1].to_string()).collect();
 
         if tags.is_empty() {
@@ -495,7 +493,9 @@ impl AdvancedRAGPipeline {
         // Simple entity extraction - in practice would use NER models
         let words: Vec<String> = query
             .split_whitespace()
-            .filter(|word| word.len() > 3 && word.chars().next().unwrap().is_uppercase())
+            .filter(|word| {
+                word.len() > 3 && word.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+            })
             .map(|word| word.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
             .filter(|word| !word.is_empty())
             .collect();
@@ -536,7 +536,10 @@ impl AdvancedRAGPipeline {
 
         match synthesis_output {
             PipelineOutput::Text(text) => Ok(text),
-            _ => Ok(reasoning_chain.last().unwrap().intermediate_answer.clone()),
+            _ => Ok(reasoning_chain
+                .last()
+                .map(|r| r.intermediate_answer.clone())
+                .unwrap_or_default()),
         }
     }
 }

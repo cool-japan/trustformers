@@ -368,8 +368,10 @@ struct GenerationResult {
 impl IntoPy<PyObject> for GenerationResult {
     fn into_py(self, py: Python<'_>) -> PyObject {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("generated_text", self.generated_text).unwrap();
-        dict.set_item("score", self.score).unwrap();
+        dict.set_item("generated_text", self.generated_text)
+            .expect("Failed to set generated_text in PyDict");
+        dict.set_item("score", self.score)
+            .expect("Failed to set score in PyDict");
         dict.into()
     }
 }
@@ -383,8 +385,10 @@ struct ClassificationResult {
 impl IntoPy<PyObject> for ClassificationResult {
     fn into_py(self, py: Python<'_>) -> PyObject {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("label", self.label).unwrap();
-        dict.set_item("score", self.score).unwrap();
+        dict.set_item("label", self.label)
+            .expect("Failed to set label in PyDict");
+        dict.set_item("score", self.score)
+            .expect("Failed to set score in PyDict");
         dict.into()
     }
 }
@@ -402,12 +406,18 @@ struct EntityResult {
 impl IntoPy<PyObject> for EntityResult {
     fn into_py(self, py: Python<'_>) -> PyObject {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("entity", self.entity).unwrap();
-        dict.set_item("score", self.score).unwrap();
-        dict.set_item("index", self.index).unwrap();
-        dict.set_item("word", self.word).unwrap();
-        dict.set_item("start", self.start).unwrap();
-        dict.set_item("end", self.end).unwrap();
+        dict.set_item("entity", self.entity)
+            .expect("Failed to set entity in PyDict");
+        dict.set_item("score", self.score)
+            .expect("Failed to set score in PyDict");
+        dict.set_item("index", self.index)
+            .expect("Failed to set index in PyDict");
+        dict.set_item("word", self.word)
+            .expect("Failed to set word in PyDict");
+        dict.set_item("start", self.start)
+            .expect("Failed to set start in PyDict");
+        dict.set_item("end", self.end)
+            .expect("Failed to set end in PyDict");
         dict.into()
     }
 }
@@ -423,10 +433,14 @@ struct QAResult {
 impl IntoPy<PyObject> for QAResult {
     fn into_py(self, py: Python<'_>) -> PyObject {
         let dict = pyo3::types::PyDict::new(py);
-        dict.set_item("answer", self.answer).unwrap();
-        dict.set_item("score", self.score).unwrap();
-        dict.set_item("start", self.start).unwrap();
-        dict.set_item("end", self.end).unwrap();
+        dict.set_item("answer", self.answer)
+            .expect("Failed to set answer in PyDict");
+        dict.set_item("score", self.score)
+            .expect("Failed to set score in PyDict");
+        dict.set_item("start", self.start)
+            .expect("Failed to set start in PyDict");
+        dict.set_item("end", self.end)
+            .expect("Failed to set end in PyDict");
         dict.into()
     }
 }

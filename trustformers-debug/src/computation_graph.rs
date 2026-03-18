@@ -693,7 +693,7 @@ impl ComputationGraphAnalyzer {
 
         let mut memory_hotspots: Vec<(String, u64)> =
             graph.nodes.values().map(|n| (n.id.clone(), n.memory_usage)).collect();
-        memory_hotspots.sort_by(|a, b| b.1.cmp(&a.1));
+        memory_hotspots.sort_by_key(|item| std::cmp::Reverse(item.1));
         memory_hotspots.truncate(10); // Top 10
 
         let peak_memory_usage = total_memory_usage; // Simplified
@@ -725,7 +725,7 @@ impl ComputationGraphAnalyzer {
 
         let mut compute_hotspots: Vec<(String, u64)> =
             graph.nodes.values().map(|n| (n.id.clone(), n.flop_count)).collect();
-        compute_hotspots.sort_by(|a, b| b.1.cmp(&a.1));
+        compute_hotspots.sort_by_key(|item| std::cmp::Reverse(item.1));
         compute_hotspots.truncate(10); // Top 10
 
         let total_memory = graph.nodes.values().map(|n| n.memory_usage).sum::<u64>();

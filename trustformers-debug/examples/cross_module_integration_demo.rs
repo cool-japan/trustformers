@@ -395,7 +395,7 @@ async fn tokenization_analysis() -> Result<()> {
         // Convert to tensor for debugging
         let token_tensor = ndarray::Array::from_vec(token_ids.iter().map(|&x| x as f32).collect())
             .into_shape_with_order(ndarray::IxDyn(&[1, token_ids.len()]))
-            .unwrap();
+            .expect("Failed to start profiling");
 
         let tensor_id = debug_session.tensor_inspector_mut().inspect_tensor(
             &token_tensor,
@@ -779,7 +779,7 @@ fn simulate_layer_output(layer: &MockLayer) -> ndarray::ArrayD<f32> {
 
     ndarray::Array::from_vec(data)
         .into_shape_with_order(ndarray::IxDyn(&layer.output_shape))
-        .unwrap()
+        .expect("Failed to stop profiling")
 }
 
 fn create_layer_activation_stats(
@@ -908,7 +908,7 @@ fn simulate_embeddings(embedding_dim: usize) -> ndarray::ArrayD<f32> {
 
     ndarray::Array::from_vec(data)
         .into_shape_with_order(ndarray::IxDyn(&[1, embedding_dim]))
-        .unwrap()
+        .expect("Checkpoint should be created")
 }
 
 fn simulate_parameters(layer_name: &str, step: usize) -> ndarray::ArrayD<f32> {
@@ -923,7 +923,7 @@ fn simulate_parameters(layer_name: &str, step: usize) -> ndarray::ArrayD<f32> {
 
     ndarray::Array::from_vec(data)
         .into_shape_with_order(ndarray::IxDyn(&[size]))
-        .unwrap()
+        .expect("Alert should be created")
 }
 
 async fn simulate_data_loading(debug_session: &mut DebugSession) -> Result<()> {
@@ -932,7 +932,7 @@ async fn simulate_data_loading(debug_session: &mut DebugSession) -> Result<()> {
 
     let batch_data = ndarray::Array::linspace(0.0, 1.0, 32 * 512)
         .into_shape_with_order(ndarray::IxDyn(&[32, 512]))
-        .unwrap();
+        .expect("Metrics should be available");
 
     debug_session.tensor_inspector_mut().inspect_tensor(
         &batch_data,
@@ -949,7 +949,7 @@ async fn simulate_tokenization_stage(debug_session: &mut DebugSession) -> Result
 
     let token_ids = ndarray::Array::from_vec((0..32 * 512).map(|i| (i % 50000) as f32).collect())
         .into_shape_with_order(ndarray::IxDyn(&[32, 512]))
-        .unwrap();
+        .expect("Report should be generated");
 
     debug_session.tensor_inspector_mut().inspect_tensor(
         &token_ids,
@@ -969,7 +969,7 @@ async fn simulate_model_forward(debug_session: &mut DebugSession) -> Result<()> 
     for layer_name in layer_names {
         let output = ndarray::Array::linspace(0.0, 1.0, 32 * 512 * 768)
             .into_shape_with_order(ndarray::IxDyn(&[32, 512, 768]))
-            .unwrap();
+            .expect("Event log should be retrieved");
 
         debug_session.tensor_inspector_mut().inspect_tensor(
             &output,
@@ -987,7 +987,7 @@ async fn simulate_loss_computation(debug_session: &mut DebugSession) -> Result<(
 
     let loss = ndarray::Array::from_vec(vec![2.5])
         .into_shape_with_order(ndarray::IxDyn(&[1]))
-        .unwrap();
+        .expect("Workflow should execute");
 
     debug_session.tensor_inspector_mut().inspect_tensor(
         &loss,

@@ -369,12 +369,14 @@ impl WasmTensor {
 
     pub fn exp(&self) -> WasmTensor {
         let data: Vec<f32> = self.data.iter().map(|x| x.exp()).collect();
-        WasmTensor::new(data, self.shape.clone()).unwrap()
+        WasmTensor::new(data, self.shape.clone())
+            .expect("exp: tensor creation should succeed with valid shape")
     }
 
     pub fn log(&self) -> WasmTensor {
         let data: Vec<f32> = self.data.iter().map(|x| x.ln()).collect();
-        WasmTensor::new(data, self.shape.clone()).unwrap()
+        WasmTensor::new(data, self.shape.clone())
+            .expect("log: tensor creation should succeed with valid shape")
     }
 
     pub fn softmax(&self, axis: i32) -> Result<WasmTensor, JsValue> {
@@ -476,7 +478,8 @@ impl WasmTensor {
     /// Fast element-wise maximum with scalar
     pub fn max_scalar(&self, scalar: f32) -> WasmTensor {
         let data: Vec<f32> = self.data.iter().map(|&x| x.max(scalar)).collect();
-        WasmTensor::new(data, self.shape.clone()).unwrap()
+        WasmTensor::new(data, self.shape.clone())
+            .expect("max_scalar: tensor creation should succeed with valid shape")
     }
 
     /// Efficient dot product for 1D tensors
@@ -932,7 +935,8 @@ impl WasmTensor {
         } else {
             self.data.iter().map(|&x| x.max(0.0)).collect()
         };
-        WasmTensor::new(data, self.shape.clone()).unwrap()
+        WasmTensor::new(data, self.shape.clone())
+            .expect("tensor creation should succeed with valid shape")
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -986,7 +990,8 @@ impl WasmTensor {
                 .map(|&x| 0.5 * x * (1.0 + ((2.0 / PI).sqrt() * (x + 0.044715 * x.powi(3))).tanh()))
                 .collect()
         };
-        WasmTensor::new(data, self.shape.clone()).unwrap()
+        WasmTensor::new(data, self.shape.clone())
+            .expect("tensor creation should succeed with valid shape")
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1057,7 +1062,8 @@ impl WasmTensor {
         } else {
             self.data.iter().map(|&x| 1.0 / (1.0 + (-x).exp())).collect()
         };
-        WasmTensor::new(data, self.shape.clone()).unwrap()
+        WasmTensor::new(data, self.shape.clone())
+            .expect("tensor creation should succeed with valid shape")
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -1127,7 +1133,8 @@ impl WasmTensor {
         } else {
             self.data.iter().map(|&x| x.tanh()).collect()
         };
-        WasmTensor::new(data, self.shape.clone()).unwrap()
+        WasmTensor::new(data, self.shape.clone())
+            .expect("tensor creation should succeed with valid shape")
     }
 
     #[cfg(target_arch = "wasm32")]

@@ -293,7 +293,7 @@ impl MetalImpl {
     /// This implementation uses the pre-compiled matrix_multiply_f32 kernel which is optimized for
     /// Apple's unified memory architecture.
     ///
-    /// Algorithm: result[i,j] = sum_k(a[i,k] * b[k,j]) for all i in [0,M), j in [0,N)
+    /// Algorithm: result\[i,j\] = sum_k(a\[i,k\] * b\[k,j\]) for all i in \[0,M), j in \[0,N)
     ///
     /// # Performance
     /// - Utilizes GPU parallelization with 2D thread grid

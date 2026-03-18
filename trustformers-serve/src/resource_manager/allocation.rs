@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tracing::{debug, info};
 
-use crate::test_independence_analyzer::ResourceRequirement;
+use crate::parallel_execution_engine::ResourceRequirement;
 use crate::test_parallelization::{ConflictResolutionConfig, ResourceAllocation};
 
 /// Resource allocator for coordinating resource allocation
@@ -439,7 +439,9 @@ impl AllocationCoordinator {
         allocation_queue.push(request);
 
         // Sort by priority (highest first)
-        allocation_queue.sort_by(|a, b| b.priority.partial_cmp(&a.priority).unwrap());
+        allocation_queue.sort_by(|a, b| {
+            b.priority.partial_cmp(&a.priority).unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         Ok(())
     }

@@ -213,7 +213,7 @@ impl MemoryUtils {
             })
             .collect();
 
-        scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored_memories.into_iter().take(limit).map(|(memory, _)| memory).collect()
     }
 
@@ -318,7 +318,7 @@ impl MemoryUtils {
         memories.sort_by(|a, b| {
             let priority_a = a.importance + (a.access_count as f32 * 0.01);
             let priority_b = b.importance + (b.access_count as f32 * 0.01);
-            priority_b.partial_cmp(&priority_a).unwrap()
+            priority_b.partial_cmp(&priority_a).unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 }

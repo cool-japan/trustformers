@@ -51,7 +51,10 @@ pub extern "C" fn trustformers_model_from_pretrained(
         return error;
     }
 
-    let model = model_opt.unwrap();
+    let model = match model_opt {
+        Some(m) => m,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Register model and return handle
     let mut registry = RESOURCE_REGISTRY.write();
@@ -84,7 +87,10 @@ pub extern "C" fn trustformers_model_from_path(
         return error;
     }
 
-    let model = model_opt.unwrap();
+    let model = match model_opt {
+        Some(m) => m,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Register model and return handle
     let mut registry = RESOURCE_REGISTRY.write();
@@ -144,7 +150,10 @@ pub extern "C" fn trustformers_model_forward(
             return error;
         }
 
-        let output_tensor = result_opt.unwrap();
+        let output_tensor = match result_opt {
+            Some(t) => t,
+            None => return TrustformersError::RuntimeError,
+        };
 
         // Register output tensor(s)
         drop(registry);
@@ -230,7 +239,10 @@ pub extern "C" fn trustformers_tensor_from_data(
         return error;
     }
 
-    let tensor = tensor_opt.unwrap();
+    let tensor = match tensor_opt {
+        Some(t) => t,
+        None => return TrustformersError::RuntimeError,
+    };
 
     // Register tensor
     let mut registry = RESOURCE_REGISTRY.write();

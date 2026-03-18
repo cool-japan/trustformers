@@ -150,7 +150,8 @@ impl Template {
         let mut placeholders = Vec::new();
 
         // Simple regex to find {{placeholder}} patterns
-        let placeholder_regex = regex::Regex::new(r"\{\{([^}]+)\}\}").unwrap();
+        let placeholder_regex = regex::Regex::new(r"\{\{([^}]+)\}\}")
+            .expect("static regex pattern is valid");
 
         for captures in placeholder_regex.captures_iter(content) {
             if let Some(placeholder) = captures.get(1) {
@@ -213,12 +214,22 @@ impl Template {
 
         // Very basic conditional handling: {{#if condition}}...{{/if}}
         // Use (?s) flag to enable single-line mode where . matches newlines
-        let if_regex = regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}").unwrap();
+        let if_regex = regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{/if\}\}")
+            .expect("Regex pattern for if statements should be valid");
 
         while let Some(captures) = if_regex.captures(&result) {
-            let condition_name = captures.get(1).unwrap().as_str();
-            let conditional_content = captures.get(2).unwrap().as_str();
-            let full_match = captures.get(0).unwrap().as_str();
+            let condition_name = captures
+                .get(1)
+                .expect("Capture group 1 should exist in if regex match")
+                .as_str();
+            let conditional_content = captures
+                .get(2)
+                .expect("Capture group 2 should exist in if regex match")
+                .as_str();
+            let full_match = captures
+                .get(0)
+                .expect("Capture group 0 should exist in if regex match")
+                .as_str();
 
             let should_include = if let Some(value) = context.get(condition_name) {
                 match value {
@@ -242,13 +253,26 @@ impl Template {
         // Handle {{#if condition}}...{{else}}...{{/if}}
         // Use (?s) flag to enable single-line mode where . matches newlines
         let if_else_regex =
-            regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}").unwrap();
+            regex::Regex::new(r"(?s)\{\{#if\s+(\w+)\}\}(.*?)\{\{else\}\}(.*?)\{\{/if\}\}")
+                .expect("Regex pattern for if-else statements should be valid");
 
         while let Some(captures) = if_else_regex.captures(&result) {
-            let condition_name = captures.get(1).unwrap().as_str();
-            let if_content = captures.get(2).unwrap().as_str();
-            let else_content = captures.get(3).unwrap().as_str();
-            let full_match = captures.get(0).unwrap().as_str();
+            let condition_name = captures
+                .get(1)
+                .expect("Capture group 1 should exist in if-else regex match")
+                .as_str();
+            let if_content = captures
+                .get(2)
+                .expect("Capture group 2 should exist in if-else regex match")
+                .as_str();
+            let else_content = captures
+                .get(3)
+                .expect("Capture group 3 should exist in if-else regex match")
+                .as_str();
+            let full_match = captures
+                .get(0)
+                .expect("Capture group 0 should exist in if-else regex match")
+                .as_str();
 
             let should_include_if = if let Some(value) = context.get(condition_name) {
                 match value {
@@ -280,13 +304,22 @@ impl Template {
 
         // Basic loop handling: {{#each list_name}}...{{/each}}
         // Use (?s) flag to enable single-line mode where . matches newlines
-        let each_regex =
-            regex::Regex::new(r"(?s)\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}").unwrap();
+        let each_regex = regex::Regex::new(r"(?s)\{\{#each\s+(\w+)\}\}(.*?)\{\{/each\}\}")
+            .expect("Regex pattern for each loops should be valid");
 
         while let Some(captures) = each_regex.captures(&result) {
-            let list_name = captures.get(1).unwrap().as_str();
-            let loop_content = captures.get(2).unwrap().as_str();
-            let full_match = captures.get(0).unwrap().as_str();
+            let list_name = captures
+                .get(1)
+                .expect("Capture group 1 should exist in each regex match")
+                .as_str();
+            let loop_content = captures
+                .get(2)
+                .expect("Capture group 2 should exist in each regex match")
+                .as_str();
+            let full_match = captures
+                .get(0)
+                .expect("Capture group 0 should exist in each regex match")
+                .as_str();
 
             let replacement = if let Some(value) = context.get(list_name) {
                 match value {
@@ -516,7 +549,7 @@ mod tests {
     #[test]
     fn test_template_parsing() {
         let template_content = "Hello {{name}}, you are {{age}} years old!";
-        let template = Template::parse(template_content).unwrap();
+        let template = Template::parse(template_content).expect("Failed to parse template");
 
         assert_eq!(template.placeholders.len(), 2);
         assert!(template.placeholders.contains(&"name".to_string()));
@@ -526,21 +559,21 @@ mod tests {
     #[test]
     fn test_template_rendering() {
         let template_content = "Hello {{name}}, you are {{age}} years old!";
-        let template = Template::parse(template_content).unwrap();
+        let template = Template::parse(template_content).expect("Failed to parse template");
 
         let context = template_context! {
             "name" => TemplateValue::string("Alice"),
             "age" => TemplateValue::number(30),
         };
 
-        let result = template.render(&context).unwrap();
+        let result = template.render(&context).expect("Failed to render template");
         assert_eq!(result, "Hello Alice, you are 30 years old!");
     }
 
     #[test]
     fn test_conditional_rendering() {
         let template_content = "{{#if show_message}}Hello World!{{/if}}";
-        let template = Template::parse(template_content).unwrap();
+        let template = Template::parse(template_content).expect("Failed to parse template");
 
         let context_true = template_context! {
             "show_message" => TemplateValue::boolean(true),
@@ -550,8 +583,8 @@ mod tests {
             "show_message" => TemplateValue::boolean(false),
         };
 
-        let result_true = template.render(&context_true).unwrap();
-        let result_false = template.render(&context_false).unwrap();
+        let result_true = template.render(&context_true).expect("Failed to render with true condition");
+        let result_false = template.render(&context_false).expect("Failed to render with false condition");
 
         assert_eq!(result_true, "Hello World!");
         assert_eq!(result_false, "");
@@ -560,7 +593,7 @@ mod tests {
     #[test]
     fn test_loop_rendering() {
         let template_content = "{{#each items}}Item: {{item}}\n{{/each}}";
-        let template = Template::parse(template_content).unwrap();
+        let template = Template::parse(template_content).expect("Failed to parse template");
 
         let items = vec![
             TemplateValue::string("first"),
@@ -572,21 +605,21 @@ mod tests {
             "items" => TemplateValue::list(items),
         };
 
-        let result = template.render(&context).unwrap();
+        let result = template.render(&context).expect("Failed to render template");
         assert_eq!(result, "Item: first\nItem: second\nItem: third\n");
     }
 
     #[test]
     fn test_template_engine() {
-        let mut engine = TemplateEngine::new().unwrap();
+        let mut engine = TemplateEngine::new().expect("Failed to create template engine");
 
-        engine.load_template("greeting", "Hello {{name}}!").unwrap();
+        engine.load_template("greeting", "Hello {{name}}!").expect("Failed to load template");
 
         let context = template_context! {
             "name" => TemplateValue::string("World"),
         };
 
-        let result = engine.render("greeting", &context).unwrap();
+        let result = engine.render("greeting", &context).expect("Failed to render template");
         assert_eq!(result, "Hello World!");
     }
 }

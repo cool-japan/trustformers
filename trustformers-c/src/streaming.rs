@@ -403,17 +403,18 @@ fn simulate_streaming_generation(
         // Token callback
         if config.enable_token_callback != 0 {
             if let Some(callback) = config.token_callback {
-                let token_cstr = CString::new(*token).unwrap();
-                let should_stop = callback(
-                    config.user_data,
-                    token_cstr.as_ptr(),
-                    token_id,
-                    probability,
-                    if is_final { 1 } else { 0 },
-                );
+                if let Ok(token_cstr) = CString::new(*token) {
+                    let should_stop = callback(
+                        config.user_data,
+                        token_cstr.as_ptr(),
+                        token_id,
+                        probability,
+                        if is_final { 1 } else { 0 },
+                    );
 
-                if should_stop != 0 {
-                    break;
+                    if should_stop != 0 {
+                        break;
+                    }
                 }
             }
         }
@@ -422,16 +423,17 @@ fn simulate_streaming_generation(
         if config.enable_chunk_callback != 0 && (i + 1) % config.chunk_size == 0 {
             if let Some(callback) = config.chunk_callback {
                 let chunk = state.read().accumulated_text.clone();
-                let chunk_cstr = CString::new(chunk.clone()).unwrap();
-                let should_stop = callback(
-                    config.user_data,
-                    chunk_cstr.as_ptr(),
-                    chunk.len(),
-                    if is_final { 1 } else { 0 },
-                );
+                if let Ok(chunk_cstr) = CString::new(chunk.clone()) {
+                    let should_stop = callback(
+                        config.user_data,
+                        chunk_cstr.as_ptr(),
+                        chunk.len(),
+                        if is_final { 1 } else { 0 },
+                    );
 
-                if should_stop != 0 {
-                    break;
+                    if should_stop != 0 {
+                        break;
+                    }
                 }
             }
         }

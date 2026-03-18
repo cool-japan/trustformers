@@ -234,13 +234,14 @@ impl AutoFeatureExtractor {
     /// # Examples
     ///
     /// ```rust,ignore
-    ///    /// let config = serde_json::json!({
+    /// let config = serde_json::json!({
     ///     "model_type": "clip",
     ///     "image_size": 224,
     ///     "hidden_size": 768
     /// });
     ///
     /// let extractor = AutoFeatureExtractor::for_task("image-classification", &config)?;
+    /// ```
 
     pub fn for_task(
         task: &str,

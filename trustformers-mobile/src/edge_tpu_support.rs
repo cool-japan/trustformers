@@ -1249,7 +1249,7 @@ impl TPUModelManager {
                 target_architecture: "EdgeTPU".to_string(),
                 compilation_time: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
+                    .expect("SystemTime should be after UNIX_EPOCH")
                     .as_secs(),
                 optimization_level: OptimizationLevel::Standard,
                 size_bytes: 1024000,
@@ -1316,7 +1316,7 @@ impl TPUInferenceScheduler {
             energy_consumption_mj: 17.0,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("SystemTime should be after UNIX_EPOCH")
                 .as_millis() as u64,
         })
     }

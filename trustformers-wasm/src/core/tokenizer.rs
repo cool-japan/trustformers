@@ -292,7 +292,9 @@ impl WasmTokenizer {
                 let cur_substr = found_substr;
 
                 if let Some(substr) = cur_substr {
-                    tokens.push(*self.vocab.get(&substr).unwrap());
+                    tokens.push(
+                        *self.vocab.get(&substr).expect("found substring must exist in vocab"),
+                    );
                     start = new_end;
                 } else {
                     is_bad = true;

@@ -115,7 +115,10 @@ fn main() -> anyhow::Result<()> {
 
     let context = RecommendationContext {
         hardware_info: HashMap::from([
-            ("gpu_memory_gb".to_string(), serde_json::Value::Number(serde_json::Number::from_f64(16.0).unwrap())),
+            ("gpu_memory_gb".to_string(), serde_json::Value::Number(
+                serde_json::Number::from_f64(16.0)
+                    .expect("Valid float value for GPU memory")
+            )),
             ("gpu_count".to_string(), serde_json::Value::Number(serde_json::Number::from(2))),
         ]),
         use_case: "production".to_string(),

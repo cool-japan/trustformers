@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! Performance benchmarks for trustformers-tokenizers
 //!
 //! This benchmark suite tests the performance of different tokenizers

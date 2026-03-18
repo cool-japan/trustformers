@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Multi-Strategy Hyperparameter Optimization Demo
 #![allow(unused_variables)]
 //!
@@ -434,7 +435,11 @@ fn analyze_results(results: Vec<StrategyResult>) -> ComparisonResults {
 
     let most_accurate_strategy = results
         .iter()
-        .max_by(|a, b| a.best_accuracy.partial_cmp(&b.best_accuracy).unwrap())
+        .max_by(|a, b| {
+            a.best_accuracy
+                .partial_cmp(&b.best_accuracy)
+                .expect("Values should be comparable")
+        })
         .map(|r| r.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
 
@@ -444,7 +449,7 @@ fn analyze_results(results: Vec<StrategyResult>) -> ComparisonResults {
         .max_by(|a, b| {
             let eff_a = a.best_accuracy / a.duration.as_secs_f64();
             let eff_b = b.best_accuracy / b.duration.as_secs_f64();
-            eff_a.partial_cmp(&eff_b).unwrap()
+            eff_a.partial_cmp(&eff_b).expect("Values should be comparable")
         })
         .map(|r| r.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
@@ -576,7 +581,7 @@ mod tests {
             ParameterValue::String("adamw".to_string()),
         );
 
-        let result = demo_objective_function(params).unwrap();
+        let result = demo_objective_function(params).expect("Objective function should succeed");
 
         if result.is_success() {
             assert!(result.metrics.objective_value >= 0.65);

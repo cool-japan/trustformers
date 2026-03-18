@@ -424,6 +424,27 @@ pub struct CacheConfig {
     pub eviction_policy: String,
     /// Max entries
     pub max_entries: usize,
+    /// Cache TTL in seconds (for compatibility)
+    pub cache_ttl_seconds: u64,
+    /// Maximum cache size
+    pub max_cache_size: usize,
+    /// Cache compression enabled
+    pub cache_compression_enabled: bool,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            cache_size: 1024 * 1024 * 1024, // 1GB
+            ttl: std::time::Duration::from_secs(3600),
+            eviction_policy: "LRU".to_string(),
+            max_entries: 10000,
+            cache_ttl_seconds: 3600,
+            max_cache_size: 10000,
+            cache_compression_enabled: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

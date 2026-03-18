@@ -134,20 +134,20 @@ impl LowOverheadDebugSession {
         // Start selective components only
         for component in &self.selective_components {
             match component {
-                DebugComponent::TensorInspection => {
-                    if self.session.config().enable_tensor_inspection {
-                        self.session.tensor_inspector_mut().start().await?;
-                    }
+                DebugComponent::TensorInspection
+                    if self.session.config().enable_tensor_inspection =>
+                {
+                    self.session.tensor_inspector_mut().start().await?;
                 },
-                DebugComponent::GradientDebugging => {
-                    if self.session.config().enable_gradient_debugging {
-                        self.session.gradient_debugger_mut().start().await?;
-                    }
+                DebugComponent::GradientDebugging
+                    if self.session.config().enable_gradient_debugging =>
+                {
+                    self.session.gradient_debugger_mut().start().await?;
                 },
-                DebugComponent::ModelDiagnostics => {
-                    if self.session.config().enable_model_diagnostics {
-                        self.session.model_diagnostics_mut().start().await?;
-                    }
+                DebugComponent::ModelDiagnostics
+                    if self.session.config().enable_model_diagnostics =>
+                {
+                    self.session.model_diagnostics_mut().start().await?;
                 },
                 DebugComponent::MemoryProfiling => {
                     if let Some(profiler) = self.session.memory_profiler_mut() {

@@ -33,13 +33,13 @@ async-trait.workspace = true
 tokio-stream.workspace = true
 num_cpus.workspace = true
 once_cell.workspace = true
-memmap2 = "0.9.9"
+memmap2 = "0.9.10"
 jieba-rs = "0.8.1"
 mecab = { version = "0.1.6", optional = true }
 # Korean tokenization support
 hangul = "0.1.3"
 # Binary format dependencies
-flate2.workspace = true
+oxiarc-deflate.workspace = true
 crc32fast = "1.5.0"
 oxicode.workspace = true
 # Performance profiler dependencies

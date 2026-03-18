@@ -139,8 +139,8 @@ impl QuantumState {
 
         // Quantum tunneling: allow transitions between states
         if rng.random::<f32>() < tunneling_strength * temperature {
-            let state1 = rng.gen_range(0..self.amplitudes.len());
-            let state2 = rng.gen_range(0..self.amplitudes.len());
+            let state1 = rng.random_range(0..self.amplitudes.len());
+            let state2 = rng.random_range(0..self.amplitudes.len());
 
             if state1 != state2 {
                 let energy_diff = self.energy_levels[state2] - self.energy_levels[state1];
@@ -324,9 +324,16 @@ impl Optimizer for QuantumAnnealingOptimizer {
         // Classical momentum update
         {
             let mut momentum_states = self.classical_momentum.write();
+
+            // Initialize momentum if needed
+            if !momentum_states.contains_key(param_name) {
+                let zero_momentum = Tensor::zeros_like(parameter)?;
+                momentum_states.insert(param_name.to_string(), zero_momentum);
+            }
+
             let momentum = momentum_states
-                .entry(param_name.to_string())
-                .or_insert_with(|| Tensor::zeros_like(parameter).unwrap());
+                .get_mut(param_name)
+                .expect("Momentum state must exist after initialization");
 
             // Update momentum with quantum correction
             let quantum_correction = self.quantum_measurement(param_name).unwrap_or(0.0);
@@ -644,9 +651,9 @@ mod tests {
 
         // Test memory usage
         let memory_stats = optimizer.memory_usage();
-        // Memory stats are non-negative by type (usize)
-        assert!(memory_stats.total_bytes > 0 || memory_stats.total_bytes == 0);
-        assert!(memory_stats.num_parameters > 0 || memory_stats.num_parameters == 0);
+        // Verify memory stats are accessible (usize values are always non-negative)
+        let _total = memory_stats.total_bytes;
+        let _params = memory_stats.num_parameters;
 
         // Test num parameters
         assert_eq!(optimizer.num_parameters(), 0); // No parameters registered yet

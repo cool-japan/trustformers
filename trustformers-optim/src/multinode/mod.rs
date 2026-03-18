@@ -550,6 +550,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Requires MPI infrastructure - run manually with: cargo test --ignored"]
     fn test_multinode_trainer_creation() {
         let config = MultiNodeConfig::new(2, 4, 0, 0);
         let optimizer = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);

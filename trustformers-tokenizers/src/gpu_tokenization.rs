@@ -1158,7 +1158,9 @@ impl GpuTokenizer {
 
     /// Tokenize single text on GPU
     fn tokenize_single_gpu(&self, text: &str) -> Result<(Vec<u32>, Vec<u8>), GpuTokenizerError> {
-        let gpu_context = self.gpu_context.as_ref().unwrap();
+        let gpu_context = self.gpu_context.as_ref().ok_or_else(|| {
+            GpuTokenizerError::GpuInitializationError("GPU context not initialized".to_string())
+        })?;
 
         // Get BPE tokenization kernel
         let kernel = gpu_context.kernel_cache.get("bpe_tokenize").ok_or(
@@ -1462,7 +1464,9 @@ impl GpuTokenizationBenchmark {
         self.results
             .iter()
             .max_by(|a, b| {
-                a.throughput_tokens_per_sec.partial_cmp(&b.throughput_tokens_per_sec).unwrap()
+                a.throughput_tokens_per_sec
+                    .partial_cmp(&b.throughput_tokens_per_sec)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|result| &result.config)
     }

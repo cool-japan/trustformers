@@ -211,7 +211,8 @@ pub async fn text_classification(
         })
         .collect();
 
-    scores.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+    scores.sort_by(|a, b| b.score.partial_cmp(&a.score)
+        .expect("Cannot compare NaN values in scores"));
 
     Ok(Json(TextClassificationResponse {
         label: scores[0].label.clone(),
@@ -277,7 +278,8 @@ pub async fn text_generation(
             .enumerate()
             .map(|(i, &logit)| (i, logit))
             .collect();
-        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        indexed_logits.sort_by(|a, b| b.1.partial_cmp(&a.1)
+            .expect("Cannot compare NaN values in logits"));
 
         // Take top-k tokens
         let top_k_tokens = &indexed_logits[..top_k.min(indexed_logits.len())];
@@ -402,14 +404,16 @@ pub async fn question_answering(
     // Find the best start and end positions
     let start_pos = start_probs.iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b)
+            .expect("Cannot compare NaN values in start probabilities"))
         .map(|(i, _)| i)
         .unwrap_or(0);
 
     let end_pos = end_probs.iter()
         .enumerate()
         .skip(start_pos) // End must be after start
-        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b)
+            .expect("Cannot compare NaN values in end probabilities"))
         .map(|(i, _)| i)
         .unwrap_or(start_pos);
 
@@ -547,7 +551,8 @@ pub async fn token_classification(
         let (predicted_label_idx, &max_prob) = token_probs
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b)
+                .expect("Cannot compare NaN values in token probabilities"))
             .unwrap_or((0, &0.0));
 
         let predicted_label = ner_labels.get(predicted_label_idx).unwrap_or(&"O");

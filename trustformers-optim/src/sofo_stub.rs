@@ -165,8 +165,16 @@ impl SOFO {
                         .insert(param_name.clone(), vec![1.0; param_data.len()]);
                 }
 
-                let momentum_buffer = self.state.momentum_buffers.get_mut(param_name).unwrap();
-                let curvature_buffer = self.state.curvature_estimates.get_mut(param_name).unwrap();
+                let momentum_buffer = self
+                    .state
+                    .momentum_buffers
+                    .get_mut(param_name)
+                    .expect("momentum_buffer should exist after initialization");
+                let curvature_buffer = self
+                    .state
+                    .curvature_estimates
+                    .get_mut(param_name)
+                    .expect("curvature_buffer should exist after initialization");
 
                 // Simplified second-order updates
                 let mut updated_params = param_data.clone();

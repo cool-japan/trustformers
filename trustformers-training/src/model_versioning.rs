@@ -130,7 +130,10 @@ impl ModelVersioningManager {
         std::fs::write(&file_path, model_data).context("Failed to save model data")?;
 
         // Get current timestamp
-        let created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         // Get parent version (latest version of the same model)
         let parent_version = self.registry.latest_versions.get(&model_name).cloned();
@@ -189,7 +192,7 @@ impl ModelVersioningManager {
             .get(model_name)
             .map(|versions| {
                 let mut sorted_versions: Vec<_> = versions.iter().collect();
-                sorted_versions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                sorted_versions.sort_by_key(|v| std::cmp::Reverse(v.created_at));
                 sorted_versions
             })
             .unwrap_or_default()

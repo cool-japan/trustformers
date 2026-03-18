@@ -34,7 +34,7 @@ pub struct ResourceUsageDatabase {
     aggregations: RwLock<ResourceUsageAggregations>,
 
     /// Resource performance baselines
-    performance_baselines: RwLock<HashMap<String, PerformanceBaseline>>,
+    _performance_baselines: RwLock<HashMap<String, PerformanceBaseline>>,
 }
 
 /// Database configuration parameters
@@ -763,7 +763,7 @@ impl ResourceUsageDatabase {
             statistics: RwLock::new(DatabaseStatistics::default()),
             config: RwLock::new(config),
             aggregations: RwLock::new(ResourceUsageAggregations::default()),
-            performance_baselines: RwLock::new(HashMap::new()),
+            _performance_baselines: RwLock::new(HashMap::new()),
         }
     }
 
@@ -776,7 +776,7 @@ impl ResourceUsageDatabase {
 
         if types.contains_key(&resource_type.type_id) {
             return Err(AnalysisError::ResourceTypeAlreadyExists {
-                type_id: resource_type.type_id,
+                message: format!("Resource type already exists: {}", resource_type.type_id),
             });
         }
 
@@ -907,25 +907,25 @@ impl ResourceUsageDatabase {
     fn validate_usage_record(&self, record: &ResourceUsageRecord) -> AnalysisResult<()> {
         if record.test_id.is_empty() {
             return Err(AnalysisError::InvalidUsageRecord {
-                reason: "Test ID cannot be empty".to_string(),
+                message: "Test ID cannot be empty".to_string(),
             });
         }
 
         if record.resource_type.is_empty() {
             return Err(AnalysisError::InvalidUsageRecord {
-                reason: "Resource type cannot be empty".to_string(),
+                message: "Resource type cannot be empty".to_string(),
             });
         }
 
         if !(0.0..=1.0).contains(&record.usage_amount) {
             return Err(AnalysisError::InvalidUsageRecord {
-                reason: "Usage amount must be between 0.0 and 1.0".to_string(),
+                message: "Usage amount must be between 0.0 and 1.0".to_string(),
             });
         }
 
         if !(0.0..=1.0).contains(&record.efficiency) {
             return Err(AnalysisError::InvalidUsageRecord {
-                reason: "Efficiency must be between 0.0 and 1.0".to_string(),
+                message: "Efficiency must be between 0.0 and 1.0".to_string(),
             });
         }
 
@@ -936,13 +936,13 @@ impl ResourceUsageDatabase {
     fn validate_allocation_event(&self, event: &ResourceAllocationEvent) -> AnalysisResult<()> {
         if event.test_id.is_empty() {
             return Err(AnalysisError::InvalidAllocationEvent {
-                reason: "Test ID cannot be empty".to_string(),
+                message: "Test ID cannot be empty".to_string(),
             });
         }
 
         if event.resource_type.is_empty() {
             return Err(AnalysisError::InvalidAllocationEvent {
-                reason: "Resource type cannot be empty".to_string(),
+                message: "Resource type cannot be empty".to_string(),
             });
         }
 
@@ -1015,8 +1015,11 @@ impl ResourceUsageDatabase {
     pub fn cleanup(&self) -> AnalysisResult<CleanupResult> {
         let config = self.config.read();
         let cutoff_time = Utc::now()
-            - chrono::Duration::from_std(config.retention_period)
-                .map_err(|e| AnalysisError::TimeConversionError { source: e.into() })?;
+            - chrono::Duration::from_std(config.retention_period).map_err(|e| {
+                AnalysisError::TimeConversionError {
+                    message: e.to_string(),
+                }
+            })?;
 
         let mut records_cleaned = 0;
         let events_cleaned;
@@ -1105,6 +1108,85 @@ pub struct CleanupResult {
 
     /// Number of allocation events cleaned
     pub events_cleaned: usize,
+}
+
+/// Database statistics tracking
+#[derive(Debug, Clone, Default)]
+pub struct DatabaseStatistics {
+    /// Total number of registered resources
+    pub total_resources: usize,
+    /// Total number of usage records
+    pub total_records: usize,
+    /// Total number of allocation events
+    pub total_events: usize,
+}
+
+/// Resource sharing specification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceSharingSpec {
+    /// Whether the resource can be shared
+    pub shareable: bool,
+    /// Maximum sharing level
+    pub max_sharing_level: Option<usize>,
+    /// Overhead per shared user (0.0 to 1.0)
+    pub sharing_overhead: f64,
+    /// Constraints on sharing
+    pub constraints: Vec<String>,
+}
+
+/// Conflict rule definition for resources
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConflictRule {
+    /// Rule identifier
+    pub rule_id: String,
+    /// Rule description
+    pub description: String,
+    /// Whether this rule is active
+    pub active: bool,
+}
+
+/// Performance characteristics of a resource
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PerformanceCharacteristics {
+    /// Throughput characteristics
+    pub throughput: ThroughputCharacteristics,
+    /// Latency characteristics
+    pub latency: LatencyCharacteristics,
+    /// Scalability characteristics
+    pub scalability: ScalabilityCharacteristics,
+}
+
+/// Throughput characteristics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThroughputCharacteristics {
+    /// Base throughput value
+    pub base_throughput: f64,
+    /// Peak throughput value
+    pub peak_throughput: f64,
+    /// Unit of measurement
+    pub unit: String,
+}
+
+/// Latency characteristics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatencyCharacteristics {
+    /// Base latency under normal load
+    pub base_latency: Duration,
+    /// Latency under load
+    pub load_latency: Duration,
+    /// Latency variance
+    pub variance: Duration,
+}
+
+/// Scalability characteristics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScalabilityCharacteristics {
+    /// Maximum scale factor
+    pub max_scale_factor: f64,
+    /// Scale efficiency (0.0 to 1.0)
+    pub scale_efficiency: f64,
+    /// Known bottlenecks
+    pub bottlenecks: Vec<String>,
 }
 
 impl Default for ResourceUsageDatabase {

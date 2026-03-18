@@ -819,7 +819,9 @@ impl NNAPIModelConverter {
         let model_data = self.serialize_model(partitions)?;
 
         // Create output directory
-        std::fs::create_dir_all(output_path.parent().unwrap())?;
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
 
         // Write model file
         let model_path = match self.config.output_format {

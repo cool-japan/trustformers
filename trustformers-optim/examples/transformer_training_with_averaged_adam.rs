@@ -1,3 +1,4 @@
+#![allow(clippy::result_large_err)]
 //! # Transformer Training with Averaged Adam Optimizer
 //!
 //! This example demonstrates how to use the Averaged Adam optimizer for training
@@ -436,7 +437,11 @@ fn analyze_training_results(results: &[TrainingResults], model_name: &str) {
 
     // Sort by final loss
     let mut sorted_results = results.to_vec();
-    sorted_results.sort_by(|a, b| a.final_loss.partial_cmp(&b.final_loss).unwrap());
+    sorted_results.sort_by(|a, b| {
+        a.final_loss
+            .partial_cmp(&b.final_loss)
+            .expect("Cannot compare NaN values in final loss")
+    });
 
     println!("\n🏆 Performance Ranking:");
     for (rank, result) in sorted_results.iter().enumerate() {
@@ -463,8 +468,12 @@ fn analyze_training_results(results: &[TrainingResults], model_name: &str) {
     if !avg_adam_results.is_empty() {
         let best_avg_adam = avg_adam_results
             .iter()
-            .min_by(|a, b| a.final_loss.partial_cmp(&b.final_loss).unwrap())
-            .unwrap();
+            .min_by(|a, b| {
+                a.final_loss
+                    .partial_cmp(&b.final_loss)
+                    .expect("Cannot compare NaN values in final loss")
+            })
+            .expect("Averaged Adam results should not be empty");
 
         println!("\n🎯 Averaged Adam Analysis:");
         println!("   Best variant: {}", best_avg_adam.optimizer_name);

@@ -382,11 +382,11 @@ impl OfflineModelPackManager {
         config: &PackCreationConfig,
     ) -> Result<u64> {
         // Real tar archive implementation
-        use flate2::write::GzEncoder;
+        use oxiarc_deflate::streaming::GzipStreamEncoder;
         use tar::Builder;
 
         let file = File::create(output_path)?;
-        let encoder = GzEncoder::new(file, flate2::Compression::default());
+        let encoder = GzipStreamEncoder::new(file, 6);
         let mut tar_builder = Builder::new(encoder);
 
         // Create pack metadata
@@ -443,8 +443,9 @@ impl OfflineModelPackManager {
             total_size += content_len;
         }
 
-        // Finalize the archive
-        tar_builder.finish()?;
+        // Finalize the archive and flush the gzip encoder
+        let encoder = tar_builder.into_inner()?;
+        encoder.finish()?;
 
         // Calculate final archive size
         let final_size = output_path.metadata()?.len();
@@ -520,13 +521,13 @@ impl OfflineModelPackManager {
 
     async fn extract_pack(&self, pack_path: &Path, extract_path: &Path) -> Result<()> {
         // Real tar extraction implementation
-        use flate2::read::GzDecoder;
+        use oxiarc_deflate::streaming::GzipStreamDecoder;
         use tar::Archive;
 
         std::fs::create_dir_all(extract_path)?;
 
         let file = File::open(pack_path)?;
-        let decoder = GzDecoder::new(file);
+        let decoder = GzipStreamDecoder::new(file);
         let mut archive = Archive::new(decoder);
 
         // Extract all files from the archive

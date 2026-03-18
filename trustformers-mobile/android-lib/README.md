@@ -471,7 +471,7 @@ cd trustformers-mobile
 
 ## License
 
-TrustformeRS Android is released under the MIT License. See LICENSE for details.
+TrustformeRS Android is released under the Apache-2.0 License. See LICENSE for details.
 
 ## Contributing
 

@@ -442,13 +442,21 @@ pub struct PerformanceInsightEngine {
     pub quality_score: f64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceMetrics {
     pub throughput: f64,
+    #[serde(skip)]
     pub latency: std::time::Duration,
+    #[serde(skip)]
     pub response_time: std::time::Duration,
     pub error_rate: f64,
     pub resource_utilization: HashMap<String, f64>,
+    /// CPU usage percentage
+    pub cpu_usage_percent: f64,
+    /// Memory usage in megabytes
+    pub memory_usage_mb: f64,
+    /// Average response time in milliseconds
+    pub average_response_time_ms: f64,
 }
 
 impl Default for PerformanceMetrics {
@@ -459,6 +467,9 @@ impl Default for PerformanceMetrics {
             response_time: Duration::default(),
             error_rate: 0.0,
             resource_utilization: HashMap::new(),
+            cpu_usage_percent: 0.0,
+            memory_usage_mb: 0.0,
+            average_response_time_ms: 0.0,
         }
     }
 }

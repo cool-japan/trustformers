@@ -64,7 +64,7 @@ impl PerformanceProfiler {
             let mean = sum / count as f64;
 
             let mut sorted = durations_ms.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
             let median = if count % 2 == 0 {
                 (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0
@@ -152,7 +152,7 @@ impl PerformanceProfiler {
         let mean = sum / count as f64;
 
         let mut sorted = durations_ms.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median = if count % 2 == 0 {
             (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0

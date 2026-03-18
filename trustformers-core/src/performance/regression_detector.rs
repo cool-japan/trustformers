@@ -152,7 +152,10 @@ impl RegressionDetector {
             std_dev_ns: 0, // Will be updated with multiple measurements
             throughput_ops_per_sec: measurement.throughput_ops_per_sec,
             memory_usage_bytes: measurement.memory_usage_bytes,
-            timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            timestamp: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs(),
             commit_hash: Self::get_git_commit_hash(),
             hardware_config,
         };
@@ -276,7 +279,10 @@ impl RegressionDetector {
 
             baseline.mean_time_ns = new_mean as u64;
             baseline.std_dev_ns = new_variance.sqrt() as u64;
-            baseline.timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+            baseline.timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("SystemTime should be after UNIX_EPOCH")
+                .as_secs();
 
             if let Some(throughput) = measurement.throughput_ops_per_sec {
                 baseline.throughput_ops_per_sec = Some(throughput);

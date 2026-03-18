@@ -239,7 +239,7 @@ impl PerformanceTuner {
         recommendations.retain(|r| r.confidence >= self.config.confidence_threshold);
 
         // Sort by priority (highest first)
-        recommendations.sort_by(|a, b| b.priority.cmp(&a.priority));
+        recommendations.sort_by_key(|item| std::cmp::Reverse(item.priority));
 
         let current_perf = self.compute_current_performance();
         let estimated_perf = self.estimate_improved_performance(&recommendations);

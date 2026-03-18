@@ -711,8 +711,8 @@ mod tests {
     #[test]
     fn test_vector_operations() {
         let optimizer = SIMDOptimizer::default();
-        let mut a = vec![1.0, 2.0, 3.0, 4.0];
-        let b = vec![0.5, 0.5, 0.5, 0.5];
+        let mut a = [1.0, 2.0, 3.0, 4.0];
+        let b = [0.5, 0.5, 0.5, 0.5];
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
@@ -720,7 +720,7 @@ mod tests {
                 unsafe {
                     optimizer.vector_add_avx2(&mut a, &b, 2.0).unwrap();
                 }
-                assert_eq!(a, vec![2.0, 3.0, 4.0, 5.0]);
+                assert_eq!(a, [2.0f32, 3.0, 4.0, 5.0]);
             }
         }
     }
@@ -728,8 +728,8 @@ mod tests {
     #[test]
     fn test_dot_product() {
         let optimizer = SIMDOptimizer::default();
-        let a = vec![1.0, 2.0, 3.0, 4.0];
-        let b = vec![1.0, 1.0, 1.0, 1.0];
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [1.0, 1.0, 1.0, 1.0];
 
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {

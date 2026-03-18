@@ -332,7 +332,7 @@ impl SimpleCallback for CheckpointCallback {
         let should_save = if self.save_best_only {
             if let (Some(_monitor), Some(current_value)) = (
                 &self.monitor,
-                state.metrics.get(self.monitor.as_ref().unwrap().as_str()),
+                self.monitor.as_ref().and_then(|m| state.metrics.get(m.as_str())),
             ) {
                 let is_best = match self.best_value {
                     None => true,
@@ -490,7 +490,11 @@ where
             best_metric: self.state.best_metric,
             total_epochs: self.state.epoch,
             total_steps: self.state.global_step,
-            training_time: self.state.start_time.unwrap().elapsed(),
+            training_time: self
+                .state
+                .start_time
+                .expect("start_time is set at beginning of train method")
+                .elapsed(),
             history: training_history,
         })
     }

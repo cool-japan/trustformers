@@ -322,12 +322,14 @@ fn create_test_model(param_count: usize) -> HashMap<String, Tensor> {
     let layer_size = (param_count as f64).sqrt() as usize;
 
     weights.insert("layer1".to_string(),
-        Tensor::randn(&[layer_size, layer_size]).unwrap());
+        Tensor::randn(&[layer_size, layer_size])
+            .expect("Failed to create layer1 tensor for test model"));
 
     if param_count > layer_size * layer_size {
         let remaining = param_count - layer_size * layer_size;
         weights.insert("layer2".to_string(),
-            Tensor::randn(&[remaining]).unwrap());
+            Tensor::randn(&[remaining])
+                .expect("Failed to create layer2 tensor for test model"));
     }
 
     weights

@@ -502,15 +502,15 @@ impl TokenDistributionAnalyzer {
 
         // Sort character usage by frequency
         let mut char_frequency: Vec<_> = character_usage.into_iter().collect();
-        char_frequency.sort_by(|a, b| b.1.cmp(&a.1));
+        char_frequency.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         // Get top prefixes and suffixes
         let mut prefix_frequency: Vec<_> = prefix_analysis.into_iter().collect();
-        prefix_frequency.sort_by(|a, b| b.1.cmp(&a.1));
+        prefix_frequency.sort_by_key(|item| std::cmp::Reverse(item.1));
         prefix_frequency.truncate(20); // Top 20
 
         let mut suffix_frequency: Vec<_> = suffix_analysis.into_iter().collect();
-        suffix_frequency.sort_by(|a, b| b.1.cmp(&a.1));
+        suffix_frequency.sort_by_key(|item| std::cmp::Reverse(item.1));
         suffix_frequency.truncate(20); // Top 20
 
         TokenDistributionResult {

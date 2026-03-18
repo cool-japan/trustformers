@@ -149,7 +149,9 @@ impl RewardModel {
         for (prompt, prompt_feedback) in feedback_by_prompt {
             // Sort by rating descending
             let mut sorted_feedback = prompt_feedback;
-            sorted_feedback.sort_by(|a, b| b.rating.partial_cmp(&a.rating).unwrap());
+            sorted_feedback.sort_by(|a, b| {
+                b.rating.partial_cmp(&a.rating).unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             // Create pairs between high and low rated responses
             for i in 0..sorted_feedback.len() {
@@ -449,6 +451,6 @@ mod tests {
 
         assert!(preference.is_ok());
         let prob = preference.unwrap();
-        assert!(prob >= 0.0 && prob <= 1.0);
+        assert!((0.0..=1.0).contains(&prob));
     }
 }

@@ -654,7 +654,7 @@ impl NumaAllocator {
         }
 
         let mut sorted_traffic: Vec<_> = traffic_by_node.into_iter().collect();
-        sorted_traffic.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_traffic.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         for (node_id, traffic) in sorted_traffic.into_iter().take(3) {
             analysis.hotspots.push(TrafficHotspot {

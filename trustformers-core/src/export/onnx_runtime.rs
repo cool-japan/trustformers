@@ -1,7 +1,6 @@
 // ONNX Runtime inference backend for optimized model execution
 
-#![allow(deprecated)] // Using rand legacy API, will migrate to scirs2_core
-
+use crate::errors::TrustformersError;
 use crate::tensor::Tensor;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
@@ -360,7 +359,7 @@ impl ONNXRuntimeSession {
 
                 for _ in 0..(batch_size * seq_length * vocab_size) {
                     // Generate logits with realistic distribution (mean around 0, std around 2)
-                    let logit: f32 = rng.gen_range(-6.0..6.0) * (rng.gen::<f32>().powf(0.5));
+                    let logit: f32 = rng.random_range(-6.0..6.0) * (rng.random::<f32>().powf(0.5));
                     logits_data.push(logit);
                 }
 
@@ -382,7 +381,7 @@ impl ONNXRuntimeSession {
 
                 for _ in 0..(batch_size * seq_length * hidden_size) {
                     // Generate hidden states with realistic activation patterns
-                    let activation: f32 = rng.gen_range(-2.0..2.0) * rng.gen::<f32>().sqrt();
+                    let activation: f32 = rng.random_range(-2.0..2.0) * rng.random::<f32>().sqrt();
                     hidden_data.push(activation);
                 }
 
@@ -403,7 +402,7 @@ impl ONNXRuntimeSession {
 
                 for _ in 0..(batch_size * hidden_size) {
                     // Pooler outputs are typically post-tanh, so range [-1, 1]
-                    let pooled: f32 = (rng.gen_range(-3.0f32..3.0f32)).tanh();
+                    let pooled: f32 = (rng.random_range(-3.0f32..3.0f32)).tanh();
                     pooler_data.push(pooled);
                 }
 
@@ -426,7 +425,7 @@ impl ONNXRuntimeSession {
 
                 for _ in 0..(batch_size * feature_dim) {
                     // Vision features are often ReLU-activated, so mostly positive
-                    let feature: f32 = rng.gen_range(0.0..5.0) * rng.gen::<f32>().sqrt();
+                    let feature: f32 = rng.random_range(0.0..5.0) * rng.random::<f32>().sqrt();
                     features_data.push(feature.max(0.0));
                 }
 
@@ -437,7 +436,9 @@ impl ONNXRuntimeSession {
 
         // If no specific outputs were generated, create a generic output
         if outputs.is_empty() {
-            let first_input = inputs.values().next().unwrap();
+            let first_input = inputs.values().next().ok_or_else(|| {
+                TrustformersError::other("Model must have at least one input".to_string())
+            })?;
             let input_shape = first_input.shape();
             let batch_size = input_shape[0];
 
@@ -447,7 +448,7 @@ impl ONNXRuntimeSession {
             let mut output_data = Vec::with_capacity(batch_size * num_classes);
 
             for _ in 0..(batch_size * num_classes) {
-                let score: f32 = rng.gen_range(-10.0..10.0) * rng.gen::<f32>().powf(2.0);
+                let score: f32 = rng.random_range(-10.0..10.0) * rng.random::<f32>().powf(2.0);
                 output_data.push(score);
             }
 

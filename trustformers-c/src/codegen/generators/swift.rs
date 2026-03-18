@@ -304,11 +304,15 @@ impl SwiftGenerator {
         for param in &func.parameters {
             let param_name = Self::to_camel_case(&param.name);
             if param.type_info.is_string() {
-                let c_string_var = format!(
-                    "c{}",
-                    param_name.chars().next().unwrap().to_uppercase().collect::<String>()
-                        + &param_name[1..]
-                );
+                let c_string_var = if let Some(first_char) = param_name.chars().next() {
+                    format!(
+                        "c{}{}",
+                        first_char.to_uppercase().collect::<String>(),
+                        &param_name[1..]
+                    )
+                } else {
+                    format!("c{}", param_name)
+                };
                 conversions.push(format!(
                     "        let {} = {}.utf8CString",
                     c_string_var, param_name

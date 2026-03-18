@@ -225,7 +225,10 @@ impl TrainingOrchestrator {
     pub fn submit_job(&self, mut job: TrainingJob) -> Result<String> {
         job.job_id = Uuid::new_v4().to_string();
         job.status = JobStatus::Pending;
-        job.created_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        job.created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         // Add to jobs registry
         {
@@ -279,8 +282,12 @@ impl TrainingOrchestrator {
             match job.status {
                 JobStatus::Pending | JobStatus::Queued | JobStatus::Running | JobStatus::Paused => {
                     job.status = JobStatus::Cancelled;
-                    job.completed_at =
-                        Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+                    job.completed_at = Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("SystemTime should be after UNIX_EPOCH")
+                            .as_secs(),
+                    );
 
                     // Remove from queue if still queued
                     let mut queue = self.job_queue.write().map_err(|_| {
@@ -427,14 +434,13 @@ impl TrainingOrchestrator {
         // Sort based on scheduling strategy
         match scheduler.scheduling_strategy {
             SchedulingStrategy::Priority => {
-                ready_jobs
-                    .sort_by(|a, b| (b.priority.clone() as u8).cmp(&(a.priority.clone() as u8)));
+                ready_jobs.sort_by_key(|job| std::cmp::Reverse(job.priority.clone() as u8));
             },
             SchedulingStrategy::ShortestJobFirst => {
-                ready_jobs.sort_by(|a, b| a.training_config.epochs.cmp(&b.training_config.epochs));
+                ready_jobs.sort_by_key(|a| a.training_config.epochs);
             },
             SchedulingStrategy::FIFO => {
-                ready_jobs.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+                ready_jobs.sort_by_key(|a| a.created_at);
             },
             _ => {}, // Keep original order for other strategies
         }
@@ -474,8 +480,12 @@ impl TrainingOrchestrator {
 
             if let Some(job) = jobs.get_mut(job_id) {
                 job.status = JobStatus::Running;
-                job.started_at =
-                    Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+                job.started_at = Some(
+                    SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("SystemTime should be after UNIX_EPOCH")
+                        .as_secs(),
+                );
             } else {
                 return Err(anyhow::anyhow!("Job not found: {}", job_id));
             }
@@ -531,7 +541,10 @@ impl TrainingOrchestrator {
     }
 
     pub fn complete_job(&self, job_id: &str) -> Result<()> {
-        let completion_time = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let completion_time = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("SystemTime should be after UNIX_EPOCH")
+            .as_secs();
 
         // Update job status
         let (node_id, job_duration) = {
@@ -635,8 +648,12 @@ impl TrainingOrchestrator {
                     should_retry = true;
                 } else {
                     job.status = JobStatus::Failed;
-                    job.completed_at =
-                        Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+                    job.completed_at = Some(
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("SystemTime should be after UNIX_EPOCH")
+                            .as_secs(),
+                    );
                 }
 
                 job.error_message = Some(error_message.clone());

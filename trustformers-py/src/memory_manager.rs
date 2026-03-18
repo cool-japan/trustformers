@@ -250,7 +250,7 @@ impl StringOptimizer {
             static ref INTERNED_STRINGS: Mutex<HashSet<&'static str>> = Mutex::new(HashSet::new());
         }
 
-        let mut set = INTERNED_STRINGS.lock().unwrap();
+        let mut set = INTERNED_STRINGS.lock().expect("lock should not be poisoned");
         if let Some(&interned) = set.get(s) {
             interned
         } else {
@@ -301,11 +301,15 @@ where
     }
 
     pub fn as_slice(&self) -> &[T] {
-        self.buffer.as_ref().unwrap()
+        self.buffer
+            .as_ref()
+            .expect("buffer is always Some until Drop")
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        self.buffer.as_mut().unwrap()
+        self.buffer
+            .as_mut()
+            .expect("buffer is always Some until Drop")
     }
 }
 

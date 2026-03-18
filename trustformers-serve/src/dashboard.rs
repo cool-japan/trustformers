@@ -1054,8 +1054,10 @@ impl DashboardService {
 
         let _service = self.clone();
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .expect("failed to bind dashboard server to address");
+            axum::serve(listener, app).await.expect("dashboard server failed to run");
         });
 
         Ok(())

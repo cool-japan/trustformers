@@ -1,4 +1,5 @@
 //! Mobile Optimization Demo
+#![allow(clippy::all)]
 //!
 //! Demonstrates comprehensive mobile inference optimizations using TrustformeRS
 

@@ -507,7 +507,7 @@ pub trait Tokenizer: Send + Sync {
     /// # Returns
     ///
     /// Returns a `TokenizedInput` with both sequences encoded and separated
-    /// by appropriate special tokens (e.g., [SEP] for BERT).
+    /// by appropriate special tokens (e.g., `[SEP]` for BERT).
     ///
     /// # Errors
     ///
@@ -607,7 +607,7 @@ pub struct TokenizedInput {
     pub token_type_ids: Option<Vec<u32>>,
 
     /// Optional special tokens mask indicating special tokens (1) vs regular tokens (0).
-    /// Used to identify tokens like [CLS], [SEP], [PAD] etc.
+    /// Used to identify tokens like `[CLS]`, `[SEP]`, `[PAD]` etc.
     pub special_tokens_mask: Option<Vec<u8>>,
 
     /// Optional offset mapping showing character positions of tokens in original text.

@@ -386,7 +386,7 @@ impl VocabAnalyzer {
             })
             .collect();
 
-        token_freq.sort_by(|a, b| b.1.cmp(&a.1));
+        token_freq.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         let most_frequent = token_freq.iter().take(20).cloned().collect();
         let least_frequent = token_freq.iter().rev().take(20).cloned().collect();
@@ -693,7 +693,7 @@ impl VocabAnalyzer {
             });
         }
 
-        result.sort_by(|a, b| b.count.cmp(&a.count));
+        result.sort_by_key(|item| std::cmp::Reverse(item.count));
         Ok(result)
     }
 
@@ -742,7 +742,7 @@ impl VocabAnalyzer {
             })
             .collect();
 
-        result.sort_by(|a, b| b.count.cmp(&a.count));
+        result.sort_by_key(|item| std::cmp::Reverse(item.count));
         result.truncate(50); // Limit to top 50 patterns
         Ok(result)
     }
@@ -790,7 +790,7 @@ impl VocabAnalyzer {
             })
             .collect();
 
-        distribution.sort_by(|a, b| b.token_count.cmp(&a.token_count));
+        distribution.sort_by_key(|item| std::cmp::Reverse(item.token_count));
         Ok(distribution)
     }
 
@@ -867,7 +867,7 @@ impl VocabAnalyzer {
         }
 
         let mut patterns: Vec<(String, usize)> = pattern_counts.into_iter().collect();
-        patterns.sort_by(|a, b| b.1.cmp(&a.1));
+        patterns.sort_by_key(|item| std::cmp::Reverse(item.1));
         patterns.into_iter().map(|(pattern, _)| pattern).collect()
     }
 

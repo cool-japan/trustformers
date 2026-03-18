@@ -61,7 +61,7 @@ impl CharTokenizer {
 
         // Sort by frequency and take top vocab_size
         let mut sorted_chars: Vec<_> = char_counts.into_iter().collect();
-        sorted_chars.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_chars.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         let vocab: HashMap<String, u32> = sorted_chars
             .into_iter()

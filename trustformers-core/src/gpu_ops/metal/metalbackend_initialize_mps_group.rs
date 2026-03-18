@@ -399,7 +399,7 @@ impl MetalBackend {
         Ok(output_id)
     }
     /// Add bias to matrix GPU-to-GPU (ZERO CPU transfers!)
-    /// Input: [m, n], Bias: [n] → Output: [m, n]
+    /// Input: \[m, n\], Bias: \[n\] → Output: \[m, n\]
     pub fn add_bias_gpu_to_gpu(
         &self,
         input_buffer_id: &BufferId,
@@ -671,7 +671,7 @@ impl MetalBackend {
         cache.insert(output_id, output_buffer_arc);
         Ok(output_id)
     }
-    /// Scale buffer elements by a scalar: output[i] = input[i] * scale
+    /// Scale buffer elements by a scalar: output\[i\] = input\[i\] * scale
     /// Used for attention score scaling: scores *= 1/sqrt(head_dim)
     pub fn scale_buffer_gpu_to_gpu(
         &self,
@@ -1422,10 +1422,10 @@ impl MetalBackend {
         new_seq_len: usize,
         head_dim: usize,
     ) -> Result<BufferId> {
-        if cached_buffer_id.is_none() || cached_seq_len == 0 {
-            return Ok(*new_buffer_id);
-        }
-        let cached_buffer_id = cached_buffer_id.unwrap();
+        let cached_buffer_id = match cached_buffer_id {
+            Some(id) if cached_seq_len > 0 => *id,
+            _ => return Ok(*new_buffer_id),
+        };
         let total_seq_len = cached_seq_len + new_seq_len;
         // eprintln!(
         //     "🔗 GPU KV-cache concat: cached_seq={}, new_seq={}, total={}",
@@ -1434,7 +1434,7 @@ impl MetalBackend {
         let mut cache = self.buffer_cache.lock().map_err(|_| {
             TrustformersError::hardware_error("Failed to lock buffer cache", "concat_kv_cache")
         })?;
-        let cached_buffer = cache.get(cached_buffer_id).ok_or_else(|| {
+        let cached_buffer = cache.get(&cached_buffer_id).ok_or_else(|| {
             TrustformersError::hardware_error("Cached buffer not found", "concat_kv_cache")
         })?;
         let new_buffer = cache.get(new_buffer_id).ok_or_else(|| {

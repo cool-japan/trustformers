@@ -768,7 +768,7 @@ impl ContextSummarizer {
         }
 
         let mut topics: Vec<_> = topic_counts.into_iter().collect();
-        topics.sort_by(|a, b| b.1.cmp(&a.1));
+        topics.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         topics.into_iter().take(limit).map(|(topic, _)| topic).collect()
     }
@@ -786,7 +786,7 @@ impl ContextSummarizer {
         }
 
         let mut entities: Vec<_> = entity_counts.into_iter().collect();
-        entities.sort_by(|a, b| b.1.cmp(&a.1));
+        entities.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         entities.into_iter().take(limit).map(|(entity, _)| entity).collect()
     }
@@ -829,7 +829,7 @@ impl ContextSummarizer {
         }
 
         let initial_sentiment = &sentiment_progression[0];
-        let final_sentiment = sentiment_progression.last().unwrap();
+        let final_sentiment = sentiment_progression.last().expect("len >= 2 checked above");
 
         if initial_sentiment != final_sentiment {
             Some(format!(
@@ -1351,7 +1351,7 @@ impl ContextSummarizer {
         }
 
         let mut topics: Vec<_> = topic_counts.into_iter().collect();
-        topics.sort_by(|a, b| b.1.cmp(&a.1));
+        topics.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         topics.into_iter()
             .take(5) // Top 5 topics

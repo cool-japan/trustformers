@@ -118,7 +118,7 @@ impl SimdTensorOps {
             return Err(JsValue::from_str("Cannot apply softmax to empty tensor"));
         }
 
-        let last_dim = *shape.last().unwrap();
+        let last_dim = *shape.last().expect("shape is not empty after emptiness check");
         if last_dim == 0 {
             return Err(JsValue::from_str("Last dimension cannot be zero"));
         }

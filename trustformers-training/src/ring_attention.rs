@@ -1548,10 +1548,12 @@ mod tests {
 
     #[test]
     fn test_ring_attention_stats() {
-        let mut stats = RingAttentionStats::default();
-        stats.total_attention_ops = 1000;
-        stats.computation_time_ms = 100.0;
-        stats.communication_time_ms = 20.0;
+        let mut stats = RingAttentionStats {
+            total_attention_ops: 1000,
+            computation_time_ms: 100.0,
+            communication_time_ms: 20.0,
+            ..RingAttentionStats::default()
+        };
 
         // Compute efficiency: computation / total time
         let total_time = stats.computation_time_ms + stats.communication_time_ms;

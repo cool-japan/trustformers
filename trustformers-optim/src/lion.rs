@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn test_gradient_clipping() {
         let optimizer = Lion::with_grad_clip(1e-4, (0.9, 0.99), 0.01, 1.0);
-        let gradients = vec![2.0, -3.0, 1.5]; // Norm = sqrt(4 + 9 + 2.25) = ~3.91
+        let gradients = [2.0, -3.0, 1.5]; // Norm = sqrt(4 + 9 + 2.25) = ~3.91
 
         let grad_norm: f32 = gradients.iter().map(|g| g * g).sum::<f32>().sqrt();
         let clip_coeff =
@@ -451,7 +451,7 @@ mod tests {
     #[test]
     fn test_no_gradient_clipping() {
         let optimizer = Lion::with_grad_clip(1e-4, (0.9, 0.99), 0.01, 0.0); // Disabled
-        let gradients = vec![2.0, -3.0, 1.5];
+        let gradients = [2.0, -3.0, 1.5];
 
         let grad_norm: f32 = gradients.iter().map(|g| g * g).sum::<f32>().sqrt();
         let clip_coeff =

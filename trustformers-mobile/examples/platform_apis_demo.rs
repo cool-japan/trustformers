@@ -1,4 +1,5 @@
 //! Platform APIs Demo
+#![allow(clippy::all)]
 //!
 //! Demonstrates Core ML and NNAPI integration for iOS and Android platforms
 

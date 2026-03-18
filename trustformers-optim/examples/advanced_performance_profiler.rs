@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! Advanced Performance Profiler for TrustformeRS Optimizers
 //!
 //! This tool provides comprehensive performance analysis with:
@@ -141,7 +142,9 @@ impl AdvancedPerformanceProfiler {
             // Progress indicator
             if (i + 1) % (self.test_iterations / 10).max(1) == 0 {
                 print!(".");
-                std::io::Write::flush(&mut std::io::stdout()).unwrap();
+                {
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                }
             }
         }
 
@@ -182,8 +185,10 @@ impl AdvancedPerformanceProfiler {
     ) -> OptimizerPerformanceStats {
         // Timing statistics
         let avg_iteration_time = total_duration / iterations as u32;
-        let min_iteration_time = *iteration_times.iter().min().unwrap();
-        let max_iteration_time = *iteration_times.iter().max().unwrap();
+        let min_iteration_time =
+            *iteration_times.iter().min().expect("Collection should not be empty");
+        let max_iteration_time =
+            *iteration_times.iter().max().expect("Collection should not be empty");
 
         // Calculate standard deviation
         let avg_nanos = avg_iteration_time.as_nanos() as f64;
@@ -204,7 +209,7 @@ impl AdvancedPerformanceProfiler {
         let memory_efficiency_score = parameters_per_second / peak_memory_mb.max(1.0);
 
         // Convergence analysis
-        let final_loss = *losses.last().unwrap();
+        let final_loss = *losses.last().expect("Collection should not be empty");
         let initial_loss = losses[0];
         let convergence_rate = (initial_loss - final_loss) / iterations as f32;
 
@@ -262,8 +267,11 @@ impl AdvancedPerformanceProfiler {
         report.push_str(&format!("{}\n", "─".repeat(95)));
 
         let mut sorted_results: Vec<_> = self.results.values().collect();
-        sorted_results
-            .sort_by(|a, b| b.iterations_per_second.partial_cmp(&a.iterations_per_second).unwrap());
+        sorted_results.sort_by(|a, b| {
+            b.iterations_per_second
+                .partial_cmp(&a.iterations_per_second)
+                .expect("Values should be comparable")
+        });
 
         for stats in &sorted_results {
             report.push_str(&format!(
@@ -348,7 +356,9 @@ impl AdvancedPerformanceProfiler {
         recs.push_str("-----------------------------\n");
 
         if let Some((fastest, _)) = self.results.iter().max_by(|a, b| {
-            a.1.iterations_per_second.partial_cmp(&b.1.iterations_per_second).unwrap()
+            a.1.iterations_per_second
+                .partial_cmp(&b.1.iterations_per_second)
+                .expect("Values should be comparable")
         }) {
             recs.push_str(&format!(
                 "🚀 Fastest optimizer: {} ({:.1} iter/sec)\n",
@@ -357,7 +367,9 @@ impl AdvancedPerformanceProfiler {
         }
 
         if let Some((most_efficient, _)) = self.results.iter().max_by(|a, b| {
-            a.1.memory_efficiency_score.partial_cmp(&b.1.memory_efficiency_score).unwrap()
+            a.1.memory_efficiency_score
+                .partial_cmp(&b.1.memory_efficiency_score)
+                .expect("Values should be comparable")
         }) {
             recs.push_str(&format!(
                 "💾 Most memory efficient: {} ({:.2} params/MB/sec)\n",
@@ -366,7 +378,9 @@ impl AdvancedPerformanceProfiler {
         }
 
         if let Some((most_stable, _)) = self.results.iter().max_by(|a, b| {
-            a.1.convergence_stability.partial_cmp(&b.1.convergence_stability).unwrap()
+            a.1.convergence_stability
+                .partial_cmp(&b.1.convergence_stability)
+                .expect("Values should be comparable")
         }) {
             recs.push_str(&format!(
                 "📈 Most stable convergence: {} (stability: {:.4})\n",
@@ -399,7 +413,7 @@ impl AdvancedPerformanceProfiler {
         // In practice, would use process memory tracking
         50.0 + (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("Best configuration should exist")
             .as_millis()
             % 100) as f64
             * 0.1

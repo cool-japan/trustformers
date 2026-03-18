@@ -77,8 +77,8 @@ impl Default for HardwareTestConfig {
 // CUDA-specific tests
 //
 
-#[cfg(all(feature = "cuda"))]
 // Disabled: cuda_kernels module not available
+// #[cfg(feature = "cuda")]
 // mod cuda_tests {
 //     use super::*;
 //
@@ -551,6 +551,7 @@ mod cross_platform_tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::excessive_nesting)]
     fn test_cross_platform_numerical_consistency() -> TestResult<()> {
         let config = HardwareTestConfig::default();
 

@@ -1,4 +1,5 @@
 //! Basic Pipeline Usage Example
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 //!
 //! This example demonstrates the fundamental usage of TrustformeRS pipelines,
@@ -147,10 +148,10 @@ pub async fn interactive_example() -> Result<()> {
 
     loop {
         print!("Enter text to classify (or 'quit' to exit): ");
-        io::stdout().flush().unwrap();
+        let _ = io::stdout().flush(); // Ignore flush errors in interactive mode
 
         let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap();
+        io::stdin().read_line(&mut input).expect("Failed to read user input");
         let input = input.trim();
 
         if input == "quit" {

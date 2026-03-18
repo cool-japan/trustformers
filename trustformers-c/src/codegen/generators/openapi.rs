@@ -150,7 +150,11 @@ impl OpenApiGenerator {
             .collect();
 
         // Sort tags alphabetically
-        tag_array.sort_by(|a, b| a["name"].as_str().unwrap().cmp(b["name"].as_str().unwrap()));
+        tag_array.sort_by(|a, b| {
+            let a_name = a["name"].as_str().unwrap_or("");
+            let b_name = b["name"].as_str().unwrap_or("");
+            a_name.cmp(b_name)
+        });
 
         json!(tag_array)
     }

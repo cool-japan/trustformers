@@ -1753,8 +1753,8 @@ mod tests {
         let simple_complexity = ensemble.estimate_complexity(simple_text);
         let complex_complexity = ensemble.estimate_complexity(complex_text);
 
-        assert!(simple_complexity >= 0.0 && simple_complexity <= 1.0);
-        assert!(complex_complexity >= 0.0 && complex_complexity <= 1.0);
+        assert!((0.0..=1.0).contains(&simple_complexity));
+        assert!((0.0..=1.0).contains(&complex_complexity));
         // Complex text should generally have higher complexity
         assert!(complex_complexity >= simple_complexity);
     }

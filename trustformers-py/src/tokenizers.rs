@@ -429,7 +429,14 @@ impl PyWordPieceTokenizer {
         if outputs.iter().all(|o| o.token_type_ids.is_some()) {
             let token_type_ids: Vec<Vec<usize>> = outputs
                 .iter()
-                .map(|o| o.token_type_ids.clone().unwrap().iter().map(|&id| id as usize).collect())
+                .map(|o| {
+                    o.token_type_ids
+                        .clone()
+                        .expect("token_type_ids is Some from all() check")
+                        .iter()
+                        .map(|&id| id as usize)
+                        .collect()
+                })
                 .collect();
             dict.set_item("token_type_ids", token_type_ids)?;
         }

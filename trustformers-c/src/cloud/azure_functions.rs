@@ -356,7 +356,10 @@ impl AzureFunctionHandler {
                 let error_response = serde_json::json!({
                     "error": error.to_string(),
                     "invocation_id": context.invocation_id,
-                    "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0))
+                    .as_secs(),
                     "function_name": context.function_name
                 });
 
@@ -385,7 +388,10 @@ impl AzureFunctionHandler {
                 "cold_starts": self.metrics.cold_starts
             },
             "memory_usage": self.get_memory_usage(),
-            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0))
+                    .as_secs()
         });
 
         Ok(health_data.to_string())
@@ -431,7 +437,10 @@ impl AzureFunctionHandler {
                 "inference_time_ms": inference_time.as_millis(),
                 "model_used": inference_request.model.unwrap_or_else(|| "default".to_string()),
                 "task": inference_request.task,
-                "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+                "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0))
+                    .as_secs()
             }
         });
 
@@ -447,7 +456,10 @@ impl AzureFunctionHandler {
                 "models": self.models.len(),
                 "pipelines": self.pipelines.len()
             },
-            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0))
+                    .as_secs()
         });
 
         Ok(models_data.to_string())
@@ -476,7 +488,10 @@ impl AzureFunctionHandler {
                 }
             },
             "memory_usage_mb": self.get_memory_usage(),
-            "timestamp": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+            "timestamp": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::from_secs(0))
+                    .as_secs()
         });
 
         Ok(metrics_data.to_string())
@@ -644,7 +659,8 @@ impl AzureFunctionDeployment {
             }
         });
 
-        serde_json::to_string_pretty(&host_json).unwrap()
+        serde_json::to_string_pretty(&host_json)
+            .unwrap_or_else(|_| "{}".to_string())
     }
 
     /// Generate ARM template for Azure deployment
@@ -716,7 +732,8 @@ impl AzureFunctionDeployment {
             ]
         });
 
-        serde_json::to_string_pretty(&template).unwrap()
+        serde_json::to_string_pretty(&template)
+            .unwrap_or_else(|_| "{}".to_string())
     }
 }
 

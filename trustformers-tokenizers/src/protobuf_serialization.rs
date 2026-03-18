@@ -455,10 +455,12 @@ impl ProtobufSerializer {
         } else {
             0.0
         };
-        stats.insert(
-            "special_token_ratio".to_string(),
-            serde_json::Value::Number(serde_json::Number::from_f64(special_token_ratio).unwrap()),
-        );
+        if let Some(ratio_number) = serde_json::Number::from_f64(special_token_ratio) {
+            stats.insert(
+                "special_token_ratio".to_string(),
+                serde_json::Value::Number(ratio_number),
+            );
+        }
 
         stats
     }
@@ -467,10 +469,10 @@ impl ProtobufSerializer {
     pub fn compress_model(model: &ProtobufTokenizerModel) -> Result<Vec<u8>> {
         let serialized = Self::to_protobuf_bytes(model)?;
 
-        use flate2::{write::GzEncoder, Compression};
+        use oxiarc_deflate::streaming::GzipStreamEncoder;
         use std::io::Write;
 
-        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut encoder = GzipStreamEncoder::new(Vec::new(), 6);
         encoder.write_all(&serialized).map_err(|e| {
             TrustformersError::other(anyhow::anyhow!("Failed to compress: {}", e).to_string())
         })?;
@@ -484,10 +486,10 @@ impl ProtobufSerializer {
 
     /// Decompress protobuf data
     pub fn decompress_model(compressed_data: &[u8]) -> Result<ProtobufTokenizerModel> {
-        use flate2::read::GzDecoder;
+        use oxiarc_deflate::streaming::GzipStreamDecoder;
         use std::io::Read;
 
-        let mut decoder = GzDecoder::new(compressed_data);
+        let mut decoder = GzipStreamDecoder::new(compressed_data);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).map_err(|e| {
             TrustformersError::other(anyhow::anyhow!("Failed to decompress: {}", e).to_string())

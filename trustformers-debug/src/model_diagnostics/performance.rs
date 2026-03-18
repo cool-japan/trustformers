@@ -95,7 +95,10 @@ impl PerformanceAnalyzer {
         }
 
         let total_steps = self.performance_history.len();
-        let current_metrics = self.performance_history.last().unwrap();
+        let current_metrics = self
+            .performance_history
+            .last()
+            .expect("performance_history is non-empty after is_empty check");
 
         let losses: Vec<f64> = self.performance_history.iter().map(|m| m.loss).collect();
         let throughputs: Vec<f64> =
@@ -300,7 +303,11 @@ impl PerformanceAnalyzer {
                 anomaly_type: AnomalyType::MemoryLeak,
                 severity: AnomalySeverity::High,
                 description: format!("Memory usage increasing at {:.1} MB/step", memory_trend),
-                detected_at_step: self.performance_history.last().unwrap().training_step,
+                detected_at_step: self
+                    .performance_history
+                    .last()
+                    .expect("performance_history is non-empty after is_empty check")
+                    .training_step,
                 confidence: 0.8,
             })
         } else {
@@ -331,7 +338,11 @@ impl PerformanceAnalyzer {
                 anomaly_type: AnomalyType::PerformanceDegradation,
                 severity: AnomalySeverity::High,
                 description: format!("Performance degraded by {:.1}%", degradation_percent),
-                detected_at_step: self.performance_history.last().unwrap().training_step,
+                detected_at_step: self
+                    .performance_history
+                    .last()
+                    .expect("performance_history is non-empty after is_empty check")
+                    .training_step,
                 confidence: 0.9,
             })
         } else {
@@ -354,7 +365,11 @@ impl PerformanceAnalyzer {
                 anomaly_type: AnomalyType::TrainingInstability,
                 severity: AnomalySeverity::Medium,
                 description: format!("High loss volatility: {:.3}", volatility),
-                detected_at_step: self.performance_history.last().unwrap().training_step,
+                detected_at_step: self
+                    .performance_history
+                    .last()
+                    .expect("performance_history is non-empty after is_empty check")
+                    .training_step,
                 confidence: 0.7,
             })
         } else {
@@ -378,7 +393,11 @@ impl PerformanceAnalyzer {
                 anomaly_type: AnomalyType::ThroughputDrop,
                 severity: AnomalySeverity::Medium,
                 description: format!("Low throughput: {:.1} samples/sec", avg_recent_throughput),
-                detected_at_step: self.performance_history.last().unwrap().training_step,
+                detected_at_step: self
+                    .performance_history
+                    .last()
+                    .expect("performance_history is non-empty after is_empty check")
+                    .training_step,
                 confidence: 0.8,
             })
         } else {

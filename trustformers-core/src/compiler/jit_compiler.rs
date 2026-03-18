@@ -693,29 +693,43 @@ impl JitCompiler {
         // Simple constant evaluation for demonstration
         // In a real implementation, this would perform actual computation
         match instruction.opcode {
-            IROpcode::Add => {
+            IROpcode::Add
                 if instruction.attributes.contains_key("const_a")
-                    && instruction.attributes.contains_key("const_b")
-                {
-                    // Parse and add constants
-                    if let (Ok(a), Ok(b)) = (
-                        instruction.attributes.get("const_a").unwrap().parse::<f64>(),
-                        instruction.attributes.get("const_b").unwrap().parse::<f64>(),
-                    ) {
-                        return Some((a + b).to_string());
-                    }
+                    && instruction.attributes.contains_key("const_b") =>
+            {
+                // Parse and add constants
+                if let (Ok(a), Ok(b)) = (
+                    instruction
+                        .attributes
+                        .get("const_a")
+                        .expect("const_a must exist after contains_key check")
+                        .parse::<f64>(),
+                    instruction
+                        .attributes
+                        .get("const_b")
+                        .expect("const_b must exist after contains_key check")
+                        .parse::<f64>(),
+                ) {
+                    return Some((a + b).to_string());
                 }
             },
-            IROpcode::Mul => {
+            IROpcode::Mul
                 if instruction.attributes.contains_key("const_a")
-                    && instruction.attributes.contains_key("const_b")
-                {
-                    if let (Ok(a), Ok(b)) = (
-                        instruction.attributes.get("const_a").unwrap().parse::<f64>(),
-                        instruction.attributes.get("const_b").unwrap().parse::<f64>(),
-                    ) {
-                        return Some((a * b).to_string());
-                    }
+                    && instruction.attributes.contains_key("const_b") =>
+            {
+                if let (Ok(a), Ok(b)) = (
+                    instruction
+                        .attributes
+                        .get("const_a")
+                        .expect("const_a must exist after contains_key check")
+                        .parse::<f64>(),
+                    instruction
+                        .attributes
+                        .get("const_b")
+                        .expect("const_b must exist after contains_key check")
+                        .parse::<f64>(),
+                ) {
+                    return Some((a * b).to_string());
                 }
             },
             _ => {},

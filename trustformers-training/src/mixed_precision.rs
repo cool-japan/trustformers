@@ -422,12 +422,16 @@ pub mod utils {
                 Ok((min_val, max_val))
             },
             Tensor::F64(arr) => {
-                let min_val =
-                    arr.iter().min_by(|a, b| a.partial_cmp(b).unwrap()).copied().unwrap_or(0.0)
-                        as f32;
-                let max_val =
-                    arr.iter().max_by(|a, b| a.partial_cmp(b).unwrap()).copied().unwrap_or(0.0)
-                        as f32;
+                let min_val = arr
+                    .iter()
+                    .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .copied()
+                    .unwrap_or(0.0) as f32;
+                let max_val = arr
+                    .iter()
+                    .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .copied()
+                    .unwrap_or(0.0) as f32;
                 Ok((min_val, max_val))
             },
             Tensor::F16(arr) => {
@@ -716,7 +720,10 @@ impl AdvancedMixedPrecisionManager {
             // Get scale factor before mutably borrowing
             let enable_per_layer_scaling = self.config.enable_per_layer_scaling;
 
-            let layer_config = self.layer_configs.get_mut(layer_name).unwrap();
+            let layer_config = self
+                .layer_configs
+                .get_mut(layer_name)
+                .expect("layer config should exist after insertion at line 710-715");
             layer_config.gradient_norm_history.push(grad_norm);
 
             // Keep only recent history
@@ -759,7 +766,10 @@ impl AdvancedMixedPrecisionManager {
             let has_overflow = self.has_overflow(gradient)?;
 
             // Re-acquire mutable borrow to update counters
-            let layer_config = self.layer_configs.get_mut(layer_name).unwrap();
+            let layer_config = self
+                .layer_configs
+                .get_mut(layer_name)
+                .expect("layer config should exist after insertion at line 710-715");
             if has_overflow {
                 layer_config.overflow_count += 1;
                 global_overflow = true;
@@ -1370,16 +1380,20 @@ mod tests {
 
     #[test]
     fn test_loss_scaler_enabled() {
-        let mut config = MixedPrecisionConfig::default();
-        config.enabled = true;
+        let config = MixedPrecisionConfig {
+            enabled: true,
+            ..MixedPrecisionConfig::default()
+        };
         let scaler = LossScaler::new(config);
         assert_eq!(scaler.get_scale(), 65536.0);
     }
 
     #[test]
     fn test_loss_scaling() {
-        let mut config = MixedPrecisionConfig::default();
-        config.enabled = true;
+        let config = MixedPrecisionConfig {
+            enabled: true,
+            ..MixedPrecisionConfig::default()
+        };
         let scaler = LossScaler::new(config);
 
         let loss = Tensor::ones(&[2, 2]).unwrap();
@@ -1396,8 +1410,10 @@ mod tests {
 
     #[test]
     fn test_gradient_unscaling() {
-        let mut config = MixedPrecisionConfig::default();
-        config.enabled = true;
+        let config = MixedPrecisionConfig {
+            enabled: true,
+            ..MixedPrecisionConfig::default()
+        };
         let scaler = LossScaler::new(config);
 
         let mut gradients = HashMap::new();
@@ -1425,8 +1441,10 @@ mod tests {
 
     #[test]
     fn test_amp_manager_enabled() {
-        let mut config = MixedPrecisionConfig::default();
-        config.enabled = true;
+        let config = MixedPrecisionConfig {
+            enabled: true,
+            ..MixedPrecisionConfig::default()
+        };
         let manager = AMPManager::new(config);
         assert!(manager.is_enabled());
         assert_eq!(manager.get_loss_scale(), 65536.0);
@@ -1471,9 +1489,11 @@ mod tests {
 
     #[test]
     fn test_overflow_detection_and_scale_update() {
-        let mut config = MixedPrecisionConfig::default();
-        config.enabled = true;
-        config.backoff_factor = 0.5;
+        let config = MixedPrecisionConfig {
+            enabled: true,
+            backoff_factor: 0.5,
+            ..MixedPrecisionConfig::default()
+        };
         let mut scaler = LossScaler::new(config);
 
         let initial_scale = scaler.get_scale();

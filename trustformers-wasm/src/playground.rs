@@ -1402,7 +1402,8 @@ console.log('TrustformeRS initialized successfully!');
                     let encoded_code = js_sys::encode_uri_component(&code);
 
                     // Get location.href using Reflect
-                    let window = web_sys::window().unwrap();
+                    let window =
+                        web_sys::window().expect("window should be available in browser context");
                     let location = js_sys::Reflect::get(&window, &JsValue::from_str("location"))
                         .ok()
                         .and_then(|loc| js_sys::Reflect::get(&loc, &JsValue::from_str("href")).ok())

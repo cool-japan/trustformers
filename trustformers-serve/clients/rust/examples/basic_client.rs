@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
                             if let Some(content) = &choice.delta.content {
                                 print!("{}", content);
                                 use std::io::{self, Write};
-                                io::stdout().flush().unwrap();
+                                let _ = io::stdout().flush(); // Ignore flush errors in streaming output
                             }
                         }
                     }

@@ -256,11 +256,11 @@ impl SimulationAnalyzer {
             // Randomly modify features
             use scirs2_core::random::*; // SciRS2 Integration Policy
             let mut rng = thread_rng();
-            let num_features_to_change = 1 + (rng.gen_range(0..3)); // 1-3 features
+            let num_features_to_change = 1 + (rng.random_range(0..3)); // 1-3 features
             let features: Vec<String> = base_input.keys().cloned().collect();
 
             for _ in 0..num_features_to_change {
-                if let Some(feature_name) = features.get(rng.gen_range(0..features.len())) {
+                if let Some(feature_name) = features.get(rng.random_range(0..features.len())) {
                     let original_value = base_input[feature_name];
                     let change_factor = 0.8 + (rng.random::<f64>() * 0.4); // 0.8-1.2 multiplier
                     let new_value = original_value * change_factor;

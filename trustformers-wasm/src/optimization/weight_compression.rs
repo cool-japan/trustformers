@@ -319,7 +319,7 @@ impl WeightCompressor {
 
         // Calculate magnitude threshold for pruning
         let mut magnitudes: Vec<f32> = weights.iter().map(|&w| w.abs()).collect();
-        magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        magnitudes.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let threshold_idx = (magnitudes.len() as f32 * self.config.target_sparsity) as usize;
         let threshold = magnitudes.get(threshold_idx).unwrap_or(&0.0);
 
@@ -394,7 +394,7 @@ impl WeightCompressor {
         }
 
         // Sort by importance and remove least important channels
-        channel_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        channel_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         let channels_to_keep = ((1.0 - self.config.target_sparsity) * num_channels as f32) as usize;
 
         let mut pruned_weights = Vec::new();

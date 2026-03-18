@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! # Comprehensive Distributed Training Benchmarks
 //!
 //! This example provides a comprehensive benchmarking suite for distributed training
@@ -279,8 +280,9 @@ impl BenchmarkSuite {
 
         let total_time = start_time.elapsed();
         let convergence_rate = if convergence_metrics.len() >= 2 {
-            (convergence_metrics.last().unwrap() - convergence_metrics.first().unwrap())
-                / convergence_metrics.first().unwrap()
+            (convergence_metrics.last().expect("Collection should not be empty")
+                - convergence_metrics.first().expect("Collection should not be empty"))
+                / convergence_metrics.first().expect("Collection should not be empty")
         } else {
             0.0
         };
@@ -309,7 +311,11 @@ impl BenchmarkSuite {
 
     fn analyze_optimizer_performance(&self) -> Result<()> {
         let mut sorted_results = self.results.optimizer_results.clone();
-        sorted_results.sort_by(|a, b| b.final_throughput.partial_cmp(&a.final_throughput).unwrap());
+        sorted_results.sort_by(|a, b| {
+            b.final_throughput
+                .partial_cmp(&a.final_throughput)
+                .expect("Values should be comparable")
+        });
 
         println!("🏆 Optimizer Performance Ranking:");
         for (i, result) in sorted_results.iter().enumerate() {
@@ -444,8 +450,11 @@ impl BenchmarkSuite {
 
     fn analyze_compression_efficiency(&self) -> Result<()> {
         let mut sorted_results = self.results.compression_results.clone();
-        sorted_results
-            .sort_by(|a, b| b.bandwidth_savings.partial_cmp(&a.bandwidth_savings).unwrap());
+        sorted_results.sort_by(|a, b| {
+            b.bandwidth_savings
+                .partial_cmp(&a.bandwidth_savings)
+                .expect("Values should be comparable")
+        });
 
         println!("🏆 Compression Efficiency Ranking:");
         for (i, result) in sorted_results.iter().enumerate() {
@@ -585,7 +594,9 @@ impl BenchmarkSuite {
     fn analyze_memory_optimization(&self) -> Result<()> {
         let mut sorted_results = self.results.memory_results.clone();
         sorted_results.sort_by(|a, b| {
-            b.memory_efficiency_score.partial_cmp(&a.memory_efficiency_score).unwrap()
+            b.memory_efficiency_score
+                .partial_cmp(&a.memory_efficiency_score)
+                .expect("Values should be comparable")
         });
 
         println!("🏆 Memory Efficiency Ranking:");
@@ -843,7 +854,11 @@ impl BenchmarkSuite {
 
     fn analyze_auto_scaling_efficiency(&self) -> Result<()> {
         let mut sorted_results = self.results.auto_scaling_results.clone();
-        sorted_results.sort_by(|a, b| b.cost_efficiency.partial_cmp(&a.cost_efficiency).unwrap());
+        sorted_results.sort_by(|a, b| {
+            b.cost_efficiency
+                .partial_cmp(&a.cost_efficiency)
+                .expect("Values should be comparable")
+        });
 
         println!("🏆 Auto-Scaling Efficiency Ranking:");
         for (i, result) in sorted_results.iter().enumerate() {
@@ -1031,7 +1046,9 @@ impl BenchmarkSuite {
     fn analyze_end_to_end_performance(&self) -> Result<()> {
         let mut sorted_results = self.results.end_to_end_results.clone();
         sorted_results.sort_by(|a, b| {
-            b.overall_performance_score.partial_cmp(&a.overall_performance_score).unwrap()
+            b.overall_performance_score
+                .partial_cmp(&a.overall_performance_score)
+                .expect("Values should be comparable")
         });
 
         println!("🏆 End-to-End Performance Ranking:");
@@ -1069,12 +1086,11 @@ impl BenchmarkSuite {
         println!("\\n🔝 Top Performers by Category:");
 
         // Best scaling configuration
-        if let Some(best_scaling) = self
-            .results
-            .scaling_results
-            .iter()
-            .max_by(|a, b| a.scaling_efficiency.partial_cmp(&b.scaling_efficiency).unwrap())
-        {
+        if let Some(best_scaling) = self.results.scaling_results.iter().max_by(|a, b| {
+            a.scaling_efficiency
+                .partial_cmp(&b.scaling_efficiency)
+                .expect("Values should be comparable")
+        }) {
             println!(
                 "   📈 Best Scaling: {}-GPU ({:.1}% efficiency)",
                 best_scaling.gpu_count,
@@ -1083,12 +1099,11 @@ impl BenchmarkSuite {
         }
 
         // Best optimizer
-        if let Some(best_optimizer) = self
-            .results
-            .optimizer_results
-            .iter()
-            .max_by(|a, b| a.final_throughput.partial_cmp(&b.final_throughput).unwrap())
-        {
+        if let Some(best_optimizer) = self.results.optimizer_results.iter().max_by(|a, b| {
+            a.final_throughput
+                .partial_cmp(&b.final_throughput)
+                .expect("Values should be comparable")
+        }) {
             println!(
                 "   ⚡ Best Optimizer: {} ({:.1} samples/sec)",
                 best_optimizer.optimizer_name, best_optimizer.final_throughput
@@ -1099,7 +1114,7 @@ impl BenchmarkSuite {
         if let Some(best_compression) = self.results.compression_results.iter().max_by(|a, b| {
             (b.bandwidth_savings * b.accuracy_preservation)
                 .partial_cmp(&(a.bandwidth_savings * a.accuracy_preservation))
-                .unwrap()
+                .expect("Min memory result should exist")
         }) {
             println!(
                 "   🗜️  Best Compression: {} ({:.1}% savings, {:.3} accuracy)",
@@ -1111,7 +1126,9 @@ impl BenchmarkSuite {
 
         // Best memory optimization
         if let Some(best_memory) = self.results.memory_results.iter().max_by(|a, b| {
-            a.memory_efficiency_score.partial_cmp(&b.memory_efficiency_score).unwrap()
+            a.memory_efficiency_score
+                .partial_cmp(&b.memory_efficiency_score)
+                .expect("Values should be comparable")
         }) {
             println!(
                 "   💾 Best Memory Config: {} ({:.1}% efficiency)",

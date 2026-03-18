@@ -529,7 +529,7 @@ impl GeoDistributionManager {
             .collect();
 
         // Sort by score (lower is better)
-        location_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        location_scores.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Filter healthy locations
         let healthy_locations: Vec<_> = location_scores
@@ -637,31 +637,31 @@ impl GeoDistributionManager {
             &JsValue::from_str("total_locations"),
             &JsValue::from(total_locations),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("healthy_locations"),
             &JsValue::from(healthy_locations),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("average_load"),
             &JsValue::from(average_load),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("average_health"),
             &JsValue::from(average_health),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("health_percentage"),
             &JsValue::from(healthy_locations / total_locations * 100.0),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
 
         // Add regional distribution
         let regions = js_sys::Object::new();
@@ -680,14 +680,14 @@ impl GeoDistributionManager {
                 &JsValue::from_str(region_name),
                 &JsValue::from(count),
             )
-            .unwrap();
+            .expect("Failed to set region count in JS object");
         }
         js_sys::Reflect::set(
             &stats,
             &JsValue::from_str("regional_distribution"),
             &regions,
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
 
         stats.into()
     }
@@ -920,7 +920,7 @@ impl GeoDistributionManager {
 
             geolocation
                 .get_current_position_with_error_callback(&resolve, Some(&reject))
-                .unwrap();
+                .expect("Failed to request geolocation position");
         }))
         .await?;
 
@@ -963,7 +963,8 @@ impl GeoDistributionManager {
             web_sys::Request::new_with_str_and_init("https://ipapi.co/json/", &fetch_options)?;
 
         let resp = JsFuture::from(window.fetch_with_request(&request)).await?;
-        let resp: web_sys::Response = resp.dyn_into().unwrap();
+        let resp: web_sys::Response =
+            resp.dyn_into().expect("Fetch result should be a Response object");
 
         if resp.ok() {
             let json = JsFuture::from(resp.json()?).await?;
@@ -1088,20 +1089,21 @@ impl GeoDistributionManager {
             &JsValue::from_str("datacenter_id"),
             &JsValue::from_str(&datacenter_id),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
         js_sys::Reflect::set(
             &result,
             &JsValue::from_str("health_score"),
             &JsValue::from(health_score),
         )
-        .unwrap();
-        js_sys::Reflect::set(&result, &JsValue::from_str("load"), &JsValue::from(load)).unwrap();
+        .expect("Failed to set property in JS object");
+        js_sys::Reflect::set(&result, &JsValue::from_str("load"), &JsValue::from(load))
+            .expect("Failed to set load property in JS object");
         js_sys::Reflect::set(
             &result,
             &JsValue::from_str("status"),
             &JsValue::from_str("healthy"),
         )
-        .unwrap();
+        .expect("Failed to set property in JS object");
 
         Ok(result.into())
     }

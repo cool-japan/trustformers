@@ -531,7 +531,10 @@ impl LancBiO {
             self.states.insert(param_key.clone(), new_state);
         }
 
-        let state = self.states.get_mut(&param_key).unwrap();
+        let state = self
+            .states
+            .get_mut(&param_key)
+            .expect("LancBiO state must exist after initialization");
 
         // Adaptive Lanczos iterations based on convergence history
         let max_iterations =
@@ -575,7 +578,10 @@ impl LancBiO {
             self.lanczos_iterations(hessian_vector_product, lower_grad, max_iterations)?;
 
         // Re-acquire mutable borrow
-        let state = self.states.get_mut(&param_key).unwrap();
+        let state = self
+            .states
+            .get_mut(&param_key)
+            .expect("LancBiO state must exist after Lanczos iterations");
 
         // Store convergence information for adaptive behavior
         state.convergence_history.push(krylov_subspace.residual_norm);
@@ -592,7 +598,10 @@ impl LancBiO {
         let bilevel_grad = upper_grad.add(&inverse_hvp)?;
 
         // Re-acquire mutable borrow to store results
-        let state = self.states.get_mut(&param_key).unwrap();
+        let state = self
+            .states
+            .get_mut(&param_key)
+            .expect("LancBiO state must exist for storing results");
         state.krylov_subspace = Some(krylov_subspace);
         state.prev_gradients = Some(lower_grad.clone());
 
@@ -611,7 +620,10 @@ impl LancBiO {
         let bilevel_grad =
             self.compute_bilevel_gradient(param_id, upper_grad, lower_grad, parameter)?;
 
-        let state = self.states.get_mut(param_id).unwrap();
+        let state = self
+            .states
+            .get_mut(param_id)
+            .expect("LancBiO state must exist after computing bilevel gradient");
         state.step += 1;
 
         // Apply momentum if enabled

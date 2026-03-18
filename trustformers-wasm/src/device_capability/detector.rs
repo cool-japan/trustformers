@@ -444,13 +444,18 @@ impl DeviceCapabilityDetector {
 
     async fn detect_gpu_info(&self, window: &web_sys::Window) -> (GPUVendor, String) {
         // Try WebGL approach first
-        if let Ok(canvas) = window.document().unwrap().create_element("canvas") {
-            let canvas = canvas.dyn_into::<HtmlCanvasElement>().unwrap();
-            if let Ok(Some(gl)) = canvas.get_context("webgl") {
-                let gl = gl.dyn_into::<WebGlRenderingContext>().unwrap();
-                if let Ok(renderer) = gl.get_parameter(WebGlRenderingContext::RENDERER) {
-                    if let Some(renderer_string) = renderer.as_string() {
-                        return self.parse_gpu_info(&renderer_string);
+        if let Some(document) = window.document() {
+            if let Ok(canvas_element) = document.create_element("canvas") {
+                if let Ok(canvas) = canvas_element.dyn_into::<HtmlCanvasElement>() {
+                    if let Ok(Some(gl_context)) = canvas.get_context("webgl") {
+                        if let Ok(gl) = gl_context.dyn_into::<WebGlRenderingContext>() {
+                            if let Ok(renderer) = gl.get_parameter(WebGlRenderingContext::RENDERER)
+                            {
+                                if let Some(renderer_string) = renderer.as_string() {
+                                    return self.parse_gpu_info(&renderer_string);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -763,6 +768,6 @@ impl DeviceCapabilityDetector {
             &JsValue::from_str(event_type),
             callback,
         )
-        .unwrap();
+        .expect("Failed to set capability event callback");
     }
 }

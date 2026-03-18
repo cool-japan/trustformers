@@ -335,23 +335,22 @@ pub fn pipeline(
             _ => "bert-base-uncased",
         };
 
-        let model = if model.is_none() {
-            PyAutoModel::from_pretrained(py, default_model, None)?
-        } else {
-            model.unwrap().unbind()
+        let model = match model {
+            None => PyAutoModel::from_pretrained(py, default_model, None)?,
+            Some(m) => m.unbind(),
         };
 
-        let tokenizer = if tokenizer.is_none() {
-            PyAutoTokenizer::from_pretrained(py, default_model, None)?
-        } else {
-            tokenizer.unwrap().unbind()
+        let tokenizer = match tokenizer {
+            None => PyAutoTokenizer::from_pretrained(py, default_model, None)?,
+            Some(t) => t.unbind(),
         };
 
         (model, tokenizer)
     } else {
+        // Both model and tokenizer are provided
         (
-            model.unwrap().unbind(),
-            tokenizer.unwrap().unbind(),
+            model.expect("model should be Some").unbind(),
+            tokenizer.expect("tokenizer should be Some").unbind(),
         )
     };
 

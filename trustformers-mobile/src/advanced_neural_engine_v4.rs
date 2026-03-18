@@ -619,9 +619,14 @@ impl AdvancedNeuralEngineV4 {
         self.memory_manager.prepare_execution(&optimized_graph).await?;
 
         // 4. Precision optimization
+        let thermal_state = self
+            .thermal_state
+            .read()
+            .expect("thermal_state lock should not be poisoned")
+            .clone();
         let precision_config = self
             .precision_optimizer
-            .optimize_precision(&optimized_graph, self.thermal_state.read().unwrap().clone())
+            .optimize_precision(&optimized_graph, thermal_state)
             .await?;
 
         // 5. Concurrent execution with pipeline optimization
@@ -660,20 +665,23 @@ impl AdvancedNeuralEngineV4 {
         value: &Tensor,
         attention_mask: Option<&Tensor>,
     ) -> Result<Tensor> {
+        let thermal_state = self
+            .thermal_state
+            .read()
+            .expect("thermal_state lock should not be poisoned")
+            .clone();
         self.attention_optimizer
-            .execute_optimized_attention(
-                query,
-                key,
-                value,
-                attention_mask,
-                self.thermal_state.read().unwrap().clone(),
-            )
+            .execute_optimized_attention(query, key, value, attention_mask, thermal_state)
             .await
     }
 
     /// Get comprehensive performance analytics
     pub async fn get_performance_analytics(&self) -> Result<AdvancedPerformanceAnalytics> {
-        let history = self.performance_history.read().unwrap().clone();
+        let history = self
+            .performance_history
+            .read()
+            .expect("performance_history lock should not be poisoned")
+            .clone();
         let thermal_history = self.thermal_manager.get_thermal_history().await?;
         let memory_statistics = self.memory_manager.get_memory_statistics().await?;
         let compilation_statistics = self.graph_optimizer.get_compilation_statistics().await?;

@@ -1,12 +1,12 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha.2-blue.svg)](https://github.com/trustformers/trustformers)
-[![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.1.0--rc.1-blue.svg)](https://github.com/trustformers/trustformers)
+[![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **📢 Project Status**: TrustformeRS 0.1.0-alpha.2 brings major performance improvements with 17x CPU BLAS acceleration and comprehensive Metal GPU support. Production-ready with 21+ transformer architectures, full test coverage, and multi-platform deployment (web, server, Python, mobile, C FFI).
+> **📢 Project Status**: TrustformeRS 0.1.0-rc.1 is the first release candidate, bringing major performance improvements with 17x CPU BLAS acceleration and comprehensive Metal GPU support. Production-ready with 21+ transformer architectures, full test coverage, and multi-platform deployment (web, server, Python, mobile, C FFI).
 
 ## 🚀 Why TrustformeRS?
 
@@ -55,7 +55,7 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.1.0-alpha.1"
+trustformers = "0.1.0-rc.1"
 ```
 
 ### Basic Usage
@@ -312,7 +312,7 @@ let outputs = model.forward(&inputs)?;
 ### 🔮 Future Enhancements
 
 #### High Priority
-- [ ] **Latest Architectures**: Mamba, RWKV, Phi-3, Gemini models
+- [x] **Latest Architectures**: Mamba, RWKV, Phi-3, Falcon, StableLM, S4, RetNet, Hyena
 - [ ] **Enhanced RLHF**: Advanced reward modeling and DPO/RLAIF methods
 - [ ] **More quantization methods**: GGUF format, AutoGPTQ enhancements
 
@@ -375,14 +375,24 @@ View detailed results in `target/criterion/report/index.html`
 - Tokenizers from [Hugging Face Tokenizers](https://github.com/huggingface/tokenizers)
 - Community contributions and feedback
 
+## Sponsorship
+
+TrustFormers is developed and maintained by **COOLJAPAN OU (Team Kitasan)**.
+
+If you find TrustFormers useful, please consider sponsoring the project to support continued development of the Pure Rust ecosystem.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?logo=github)](https://github.com/sponsors/cool-japan)
+
+**[https://github.com/sponsors/cool-japan](https://github.com/sponsors/cool-japan)**
+
+Your sponsorship helps us:
+- Maintain and improve the COOLJAPAN ecosystem
+- Keep the entire ecosystem (OxiBLAS, OxiFFT, SciRS2, etc.) 100% Pure Rust
+- Provide long-term support and security updates
+
 ## 📄 License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
+Licensed under Apache License, Version 2.0 ([LICENSE](LICENSE)).
 
 ## 🌟 Star History
 

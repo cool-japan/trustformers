@@ -734,7 +734,7 @@ impl MathTokenizer {
 
 impl Default for MathTokenizer {
     fn default() -> Self {
-        Self::new().unwrap()
+        Self::new().expect("MathTokenizer::new() should not fail with default config")
     }
 }
 
@@ -897,7 +897,7 @@ impl MathAnalysis {
     pub fn top_functions(&self, n: usize) -> Vec<(String, usize)> {
         let mut functions: Vec<(String, usize)> =
             self.function_frequency.iter().map(|(k, &v)| (k.clone(), v)).collect();
-        functions.sort_by(|a, b| b.1.cmp(&a.1));
+        functions.sort_by_key(|item| std::cmp::Reverse(item.1));
         functions.into_iter().take(n).collect()
     }
 
@@ -905,7 +905,7 @@ impl MathAnalysis {
     pub fn top_operators(&self, n: usize) -> Vec<(String, usize)> {
         let mut operators: Vec<(String, usize)> =
             self.operator_frequency.iter().map(|(k, &v)| (k.clone(), v)).collect();
-        operators.sort_by(|a, b| b.1.cmp(&a.1));
+        operators.sort_by_key(|item| std::cmp::Reverse(item.1));
         operators.into_iter().take(n).collect()
     }
 

@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use proptest::prelude::*;
 use std::collections::{HashMap, HashSet};
 use trustformers::core::tensor::Tensor;
@@ -18,7 +19,7 @@ mod fuzz_tests {
             shape: Vec<usize>,
             data: Vec<f32>,
         ) -> std::result::Result<(), TestCaseError> {
-            if shape.is_empty() || shape.iter().any(|&dim| dim == 0) {
+            if shape.is_empty() || shape.contains(&0) {
                 return Ok(()); // Skip invalid shapes
             }
 
@@ -124,7 +125,7 @@ mod fuzz_tests {
             // Configuration creation should not panic
             prop_assert!(config.batch_size.unwrap_or(1) > 0);
             prop_assert!(config.max_length.unwrap_or(1) > 0);
-            prop_assert!(config.truncation == true || config.truncation == false);
+            prop_assert!(config.truncation || !config.truncation);
 
             Ok(())
         }
@@ -418,7 +419,7 @@ mod regression_fuzz_tests {
             let merges = Vec::new();
             let bpe_tokenizer = trustformers::tokenizers::bpe::BPETokenizer::new(vocab, merges);
             let tokenizer = TokenizerWrapper::BPE(bpe_tokenizer);
-            let _result = tokenizer.encode(&text);
+            let _result = tokenizer.encode(text);
 
             // Test error message creation with unicode
             let error = trustformers::error::TrustformersError::Pipeline {

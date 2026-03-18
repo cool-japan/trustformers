@@ -371,7 +371,7 @@ impl MAMLTrainer {
 
     /// Compute meta-gradients
     fn compute_meta_gradients(&self, task_batch: &TaskBatch) -> Result<(ModelParameters, f32)> {
-        let meta_params = self.meta_parameters.read().unwrap();
+        let meta_params = self.meta_parameters.read().expect("lock should not be poisoned");
         let mut meta_gradients = ModelParameters::new();
         let mut total_meta_loss = 0.0;
 
@@ -695,7 +695,8 @@ impl MetaLearningAlgorithm for MAMLTrainer {
 
         // Update meta-parameters
         {
-            let mut meta_params = self.meta_parameters.write().unwrap();
+            let mut meta_params =
+                self.meta_parameters.write().expect("lock should not be poisoned");
             meta_params.update_with_gradients(&meta_gradients, self.config.meta_lr)?;
         }
 
@@ -705,12 +706,16 @@ impl MetaLearningAlgorithm for MAMLTrainer {
             meta_loss,
             task_losses: vec![meta_loss; task_batch.num_tasks()], // Simplified
             grad_norm,
-            updated_parameters: self.meta_parameters.read().unwrap().clone_parameters(),
+            updated_parameters: self
+                .meta_parameters
+                .read()
+                .expect("lock should not be poisoned")
+                .clone_parameters(),
         })
     }
 
     fn adapt(&self, support_set: &TaskData, adaptation_steps: usize) -> Result<ModelParameters> {
-        let meta_params = self.meta_parameters.read().unwrap();
+        let meta_params = self.meta_parameters.read().expect("lock should not be poisoned");
         let mut adapted_params = meta_params.clone_parameters();
 
         for _ in 0..adaptation_steps {
@@ -744,7 +749,7 @@ impl ReptileTrainer {
 
     /// Perform SGD on a single task
     fn sgd_on_task(&self, task_data: &TaskData) -> Result<ModelParameters> {
-        let meta_params = self.meta_parameters.read().unwrap();
+        let meta_params = self.meta_parameters.read().expect("lock should not be poisoned");
         let mut task_params = meta_params.clone_parameters();
 
         for _ in 0..self.config.adaptation_steps {
@@ -853,7 +858,7 @@ impl MetaLearningAlgorithm for ReptileTrainer {
 
         // Initialize update to zero
         {
-            let meta_params = self.meta_parameters.read().unwrap();
+            let meta_params = self.meta_parameters.read().expect("lock should not be poisoned");
             for (name, param) in &meta_params.parameters {
                 total_update.add_parameter(name.clone(), Array2::zeros(param.raw_dim()));
             }
@@ -865,7 +870,7 @@ impl MetaLearningAlgorithm for ReptileTrainer {
             let task_params = self.sgd_on_task(support_set)?;
 
             // Compute update direction
-            let meta_params = self.meta_parameters.read().unwrap();
+            let meta_params = self.meta_parameters.read().expect("lock should not be poisoned");
             let update = task_params.subtract(&meta_params)?;
 
             // Accumulate update
@@ -889,7 +894,8 @@ impl MetaLearningAlgorithm for ReptileTrainer {
 
         // Apply meta-update
         {
-            let mut meta_params = self.meta_parameters.write().unwrap();
+            let mut meta_params =
+                self.meta_parameters.write().expect("lock should not be poisoned");
             let scaled_update = total_update.scale(self.config.meta_lr);
             *meta_params = meta_params.add(&scaled_update)?;
         }
@@ -900,12 +906,16 @@ impl MetaLearningAlgorithm for ReptileTrainer {
             meta_loss: total_loss,
             task_losses: vec![total_loss; task_batch.num_tasks()], // Simplified
             grad_norm: 0.0,                                        // Not computed for Reptile
-            updated_parameters: self.meta_parameters.read().unwrap().clone_parameters(),
+            updated_parameters: self
+                .meta_parameters
+                .read()
+                .expect("lock should not be poisoned")
+                .clone_parameters(),
         })
     }
 
     fn adapt(&self, support_set: &TaskData, adaptation_steps: usize) -> Result<ModelParameters> {
-        let meta_params = self.meta_parameters.read().unwrap();
+        let meta_params = self.meta_parameters.read().expect("lock should not be poisoned");
         let mut adapted_params = meta_params.clone_parameters();
 
         for _ in 0..adaptation_steps {

@@ -85,9 +85,11 @@ fn test_discretization_stability() {
 
 #[test]
 fn test_s4_layer_discretization() {
-    let mut config = S4Config::default();
-    config.d_state = 4;
-    config.d_model = 8;
+    let config = S4Config {
+        d_state: 4,
+        d_model: 8,
+        ..S4Config::default()
+    };
 
     let mut _layer = S4Layer::new(&config).expect("operation failed");
 
@@ -231,8 +233,10 @@ fn test_postact_options() {
 
 #[test]
 fn test_bidirectional_mode() {
-    let mut config = S4Config::default();
-    config.bidirectional = true;
+    let config = S4Config {
+        bidirectional: true,
+        ..S4Config::default()
+    };
 
     let layer = S4Layer::new(&config);
     assert!(layer.is_ok());
@@ -268,8 +272,10 @@ fn test_different_hippo_initializations() {
 
 #[test]
 fn test_lr_mult_parameter() {
-    let mut config = S4Config::default();
-    config.lr_mult = 0.1;
+    let config = S4Config {
+        lr_mult: 0.1,
+        ..S4Config::default()
+    };
 
     let layer = S4Layer::new(&config);
     assert!(layer.is_ok());
@@ -280,14 +286,19 @@ fn test_lr_mult_parameter() {
 
 #[test]
 fn test_transposed_parameter() {
-    let mut config = S4Config::default();
-    config.transposed = false;
+    let config = S4Config {
+        transposed: false,
+        ..S4Config::default()
+    };
 
     let layer = S4Layer::new(&config);
     assert!(layer.is_ok());
 
-    config.transposed = true;
-    let layer_transposed = S4Layer::new(&config);
+    let config_transposed = S4Config {
+        transposed: true,
+        ..S4Config::default()
+    };
+    let layer_transposed = S4Layer::new(&config_transposed);
     assert!(layer_transposed.is_ok());
 }
 

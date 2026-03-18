@@ -930,13 +930,13 @@ impl FfiParser {
 impl RegexCache {
     fn new() -> Self {
         Self {
-            no_mangle: Regex::new(r"#\[no_mangle\]").unwrap(),
-            extern_c: Regex::new(r#"pub extern "C""#).unwrap(),
-            doc_comment: Regex::new(r"///\s*(.*)").unwrap(),
-            feature_attr: Regex::new(r#"#\[cfg\(feature = "([^"]+)"\)\]"#).unwrap(),
-            deprecated_attr: Regex::new(r"#\[deprecated").unwrap(),
-            repr_c: Regex::new(r"#\[repr\(C\)\]").unwrap(),
-            cbindgen_attr: Regex::new(r"#\[cbindgen::").unwrap(),
+            no_mangle: Regex::new(r"#\[no_mangle\]").expect("static regex pattern is valid"),
+            extern_c: Regex::new(r#"pub extern "C""#).expect("static regex pattern is valid"),
+            doc_comment: Regex::new(r"///\s*(.*)").expect("static regex pattern is valid"),
+            feature_attr: Regex::new(r#"#\[cfg\(feature = "([^"]+)"\)\]"#).expect("static regex pattern is valid"),
+            deprecated_attr: Regex::new(r"#\[deprecated").expect("static regex pattern is valid"),
+            repr_c: Regex::new(r"#\[repr\(C\)\]").expect("static regex pattern is valid"),
+            cbindgen_attr: Regex::new(r"#\[cbindgen::").expect("static regex pattern is valid"),
         }
     }
 }
@@ -956,7 +956,7 @@ mod tests {
         "#;
 
         let parser = FfiParser::new();
-        let interface = parser.parse_source(source, Path::new("test.rs")).unwrap();
+        let interface = parser.parse_source(source, Path::new("test.rs")).expect("Failed to parse source");
 
         assert_eq!(interface.functions.len(), 1);
         assert_eq!(interface.functions[0].name, "test_function");
@@ -975,7 +975,7 @@ mod tests {
         "#;
 
         let parser = FfiParser::new();
-        let interface = parser.parse_source(source, Path::new("test.rs")).unwrap();
+        let interface = parser.parse_source(source, Path::new("test.rs")).expect("Failed to parse source");
 
         assert_eq!(interface.structs.len(), 1);
         assert_eq!(interface.structs[0].name, "TestStruct");
@@ -996,7 +996,7 @@ mod tests {
         "#;
 
         let parser = FfiParser::new();
-        let interface = parser.parse_source(source, Path::new("test.rs")).unwrap();
+        let interface = parser.parse_source(source, Path::new("test.rs")).expect("Failed to parse source");
 
         assert_eq!(interface.enums.len(), 1);
         assert_eq!(interface.enums[0].name, "TestEnum");

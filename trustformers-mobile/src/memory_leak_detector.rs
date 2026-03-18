@@ -753,7 +753,7 @@ mod tests {
     fn test_memory_leak_detector_creation() {
         let config = MemoryLeakDetectorConfig::default();
         let detector = MobileMemoryLeakDetector::new(config);
-        assert!(!detector.config.enabled || detector.config.enabled);
+        assert!(detector.config.sampling_rate >= 0.0);
     }
 
     #[test]

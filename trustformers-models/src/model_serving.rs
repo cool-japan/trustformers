@@ -439,10 +439,8 @@ impl CircuitBreaker {
         self.last_failure_time = Some(Instant::now());
 
         match self.state {
-            CircuitBreakerState::Closed => {
-                if self.failure_count >= self.failure_threshold {
-                    self.state = CircuitBreakerState::Open;
-                }
+            CircuitBreakerState::Closed if self.failure_count >= self.failure_threshold => {
+                self.state = CircuitBreakerState::Open;
             },
             CircuitBreakerState::HalfOpen => {
                 self.state = CircuitBreakerState::Open;
@@ -1364,8 +1362,10 @@ mod tests {
         };
         let scaler = AutoScaler::new(config, 2);
 
-        let mut metrics = ServingMetrics::default();
-        metrics.current_queue_size = 25; // High queue size (above threshold of 20)
+        let mut metrics = ServingMetrics {
+            current_queue_size: 25, // High queue size (above threshold of 20)
+            ..ServingMetrics::default()
+        };
         metrics.update_request(true, Duration::from_millis(1500)); // High response time
 
         let recommendations = scaler.get_scaling_recommendations(&metrics);

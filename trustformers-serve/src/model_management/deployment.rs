@@ -247,7 +247,10 @@ impl DeploymentManager {
 
         // Add to active deployments
         {
-            let mut deployments = self.canary_deployments.write().unwrap();
+            let mut deployments = self
+                .canary_deployments
+                .write()
+                .expect("canary_deployments lock should not be poisoned");
             deployments.insert(deployment_id.clone(), deployment);
         }
 
@@ -260,7 +263,10 @@ impl DeploymentManager {
     /// Progress a canary deployment to next step
     async fn progress_canary_deployment(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
-            let deployments = self.canary_deployments.read().unwrap();
+            let deployments = self
+                .canary_deployments
+                .read()
+                .expect("canary_deployments lock should not be poisoned");
             deployments
                 .get(deployment_id)
                 .cloned()
@@ -304,7 +310,10 @@ impl DeploymentManager {
 
         // Update deployment
         {
-            let mut deployments = self.canary_deployments.write().unwrap();
+            let mut deployments = self
+                .canary_deployments
+                .write()
+                .expect("canary_deployments lock should not be poisoned");
             deployments.insert(deployment_id.to_string(), deployment.clone());
         }
 
@@ -322,7 +331,10 @@ impl DeploymentManager {
     /// Evaluate current canary step and decide whether to continue
     async fn evaluate_canary_step(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
-            let deployments = self.canary_deployments.read().unwrap();
+            let deployments = self
+                .canary_deployments
+                .read()
+                .expect("canary_deployments lock should not be poisoned");
             deployments
                 .get(deployment_id)
                 .cloned()
@@ -375,7 +387,10 @@ impl DeploymentManager {
 
         // Update deployment
         {
-            let mut deployments = self.canary_deployments.write().unwrap();
+            let mut deployments = self
+                .canary_deployments
+                .write()
+                .expect("canary_deployments lock should not be poisoned");
             deployments.insert(deployment_id.to_string(), deployment);
         }
 
@@ -385,7 +400,10 @@ impl DeploymentManager {
     /// Rollback a canary deployment
     async fn rollback_canary_deployment(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
-            let deployments = self.canary_deployments.read().unwrap();
+            let deployments = self
+                .canary_deployments
+                .read()
+                .expect("canary_deployments lock should not be poisoned");
             deployments
                 .get(deployment_id)
                 .cloned()
@@ -402,7 +420,10 @@ impl DeploymentManager {
 
         // Update deployment
         {
-            let mut deployments = self.canary_deployments.write().unwrap();
+            let mut deployments = self
+                .canary_deployments
+                .write()
+                .expect("canary_deployments lock should not be poisoned");
             deployments.insert(deployment_id.to_string(), deployment);
         }
 
@@ -433,7 +454,10 @@ impl DeploymentManager {
 
         // Add to active deployments
         {
-            let mut deployments = self.blue_green_deployments.write().unwrap();
+            let mut deployments = self
+                .blue_green_deployments
+                .write()
+                .expect("blue_green_deployments lock should not be poisoned");
             deployments.insert(deployment_id.clone(), deployment);
         }
 
@@ -446,7 +470,10 @@ impl DeploymentManager {
     /// Validate green environment before switching
     async fn validate_green_environment(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
-            let deployments = self.blue_green_deployments.read().unwrap();
+            let deployments = self
+                .blue_green_deployments
+                .read()
+                .expect("blue_green_deployments lock should not be poisoned");
             deployments
                 .get(deployment_id)
                 .cloned()
@@ -480,7 +507,10 @@ impl DeploymentManager {
 
         // Update deployment
         {
-            let mut deployments = self.blue_green_deployments.write().unwrap();
+            let mut deployments = self
+                .blue_green_deployments
+                .write()
+                .expect("blue_green_deployments lock should not be poisoned");
             deployments.insert(deployment_id.to_string(), deployment);
         }
 
@@ -490,7 +520,10 @@ impl DeploymentManager {
     /// Switch traffic to green environment
     async fn switch_to_green_environment(&self, deployment_id: &str) -> ModelResult<()> {
         let mut deployment = {
-            let deployments = self.blue_green_deployments.read().unwrap();
+            let deployments = self
+                .blue_green_deployments
+                .read()
+                .expect("blue_green_deployments lock should not be poisoned");
             deployments
                 .get(deployment_id)
                 .cloned()
@@ -508,7 +541,10 @@ impl DeploymentManager {
 
         // Update deployment
         {
-            let mut deployments = self.blue_green_deployments.write().unwrap();
+            let mut deployments = self
+                .blue_green_deployments
+                .write()
+                .expect("blue_green_deployments lock should not be poisoned");
             deployments.insert(deployment_id.to_string(), deployment);
         }
 
@@ -542,7 +578,9 @@ impl DeploymentManager {
             variants: test_variants,
             status: DeploymentStatus::InProgress,
             started_at: now,
-            ends_at: now + chrono::Duration::from_std(config.test_duration).unwrap(),
+            ends_at: now
+                + chrono::Duration::from_std(config.test_duration)
+                    .expect("test_duration must be valid for chrono::Duration"),
             results: ABTestResults::default(),
             config,
         };
@@ -558,7 +596,7 @@ impl DeploymentManager {
 
         // Add to active tests
         {
-            let mut tests = self.ab_tests.write().unwrap();
+            let mut tests = self.ab_tests.write().expect("ab_tests lock should not be poisoned");
             tests.insert(test_id.clone(), test);
         }
 
@@ -637,7 +675,8 @@ impl TrafficRouter {
 
     /// Set canary traffic percentage
     pub fn set_canary_traffic(&self, model_id: &str, percentage: f32) -> ModelResult<()> {
-        let mut canary_traffic = self.canary_traffic.write().unwrap();
+        let mut canary_traffic =
+            self.canary_traffic.write().expect("canary_traffic lock should not be poisoned");
         canary_traffic.insert(model_id.to_string(), percentage);
         Ok(())
     }
@@ -649,7 +688,10 @@ impl TrafficRouter {
         model_id: &str,
         percentage: f32,
     ) -> ModelResult<()> {
-        let mut ab_test_traffic = self.ab_test_traffic.write().unwrap();
+        let mut ab_test_traffic = self
+            .ab_test_traffic
+            .write()
+            .expect("ab_test_traffic lock should not be poisoned");
         ab_test_traffic
             .entry(test_id.to_string())
             .or_default()

@@ -1375,7 +1375,11 @@ mod tests {
         };
 
         let pipeline = DataPipeline::new(config);
-        assert!(pipeline.streaming_datasets.lock().unwrap().is_empty());
+        assert!(pipeline
+            .streaming_datasets
+            .lock()
+            .expect("lock should not be poisoned")
+            .is_empty());
     }
 
     #[test]

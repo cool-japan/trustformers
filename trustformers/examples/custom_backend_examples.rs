@@ -1,4 +1,5 @@
 // Custom Backend Examples for TrustformeRS
+#![allow(clippy::all)]
 #![allow(unused_variables)]
 // This file demonstrates how to implement custom backends using the TrustformeRS framework
 
@@ -135,7 +136,7 @@ impl CustomBackend for MockBackend {
     }
 
     fn get_metrics(&self) -> BackendMetrics {
-        self.metrics.lock().unwrap().clone()
+        self.metrics.lock().expect("Lock should not be poisoned").clone()
     }
 
     fn cleanup(&mut self) -> Result<()> {
@@ -305,7 +306,7 @@ impl BackendModel for MockModel {
     }
 
     fn performance_stats(&self) -> ModelPerformanceStats {
-        self.performance_stats.lock().unwrap().clone()
+        self.performance_stats.lock().expect("Lock should not be poisoned").clone()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -395,7 +396,7 @@ impl CustomBackend for FileBasedBackend {
 
         Ok(Box::new(FileBasedModel::new(
             path.clone(),
-            self.base_path.clone().unwrap(),
+            self.base_path.clone().expect("Clone should succeed"),
             self.cache.clone(),
         )))
     }
@@ -449,7 +450,7 @@ impl CustomBackend for FileBasedBackend {
     }
 
     fn get_metrics(&self) -> BackendMetrics {
-        let cache_size = self.cache.lock().unwrap().len() as u64;
+        let cache_size = self.cache.lock().expect("Lock should not be poisoned").len() as u64;
 
         BackendMetrics {
             total_inferences: cache_size * 10, // Estimate
@@ -761,8 +762,8 @@ impl CustomBackend for HttpApiBackend {
 
         Ok(Box::new(HttpApiModel::new(
             path.clone(),
-            self.api_endpoint.clone().unwrap(),
-            self.client.clone().unwrap(),
+            self.api_endpoint.clone().expect("Clone should succeed"),
+            self.client.clone().expect("Clone should succeed"),
         )))
     }
 
@@ -792,14 +793,16 @@ impl CustomBackend for HttpApiBackend {
         let api_available =
             if let (Some(client), Some(endpoint)) = (&self.client, &self.api_endpoint) {
                 // Try to ping the API endpoint
-                tokio::runtime::Runtime::new().unwrap().block_on(async {
-                    client
-                        .get(&format!("{}/health", endpoint))
-                        .send()
-                        .await
-                        .map(|resp| resp.status().is_success())
-                        .unwrap_or(false)
-                })
+                tokio::runtime::Runtime::new()
+                    .expect("Failed to create Tokio runtime")
+                    .block_on(async {
+                        client
+                            .get(&format!("{}/health", endpoint))
+                            .send()
+                            .await
+                            .map(|resp| resp.status().is_success())
+                            .unwrap_or(false)
+                    })
             } else {
                 false
             };
@@ -908,26 +911,28 @@ impl BackendModel for HttpApiModel {
         // For this example, we'll simulate the HTTP request
         // In a real implementation, you would serialize the tensors and send HTTP requests
 
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            // Simulate HTTP request delay
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::runtime::Runtime::new()
+            .expect("Failed to create Tokio runtime")
+            .block_on(async {
+                // Simulate HTTP request delay
+                tokio::time::sleep(Duration::from_millis(100)).await;
 
-            // Create mock response
-            let response_size = 100 * 4; // 100 float32 values
-            let response_data = vec![0u8; response_size];
+                // Create mock response
+                let response_size = 100 * 4; // 100 float32 values
+                let response_data = vec![0u8; response_size];
 
-            let output_tensor = BackendTensor::new(
-                response_data,
-                vec![1, 100],
-                DataType::Float32,
-                MemoryLayout::RowMajor,
-            );
+                let output_tensor = BackendTensor::new(
+                    response_data,
+                    vec![1, 100],
+                    DataType::Float32,
+                    MemoryLayout::RowMajor,
+                );
 
-            let mut outputs = HashMap::new();
-            outputs.insert("predictions".to_string(), output_tensor);
+                let mut outputs = HashMap::new();
+                outputs.insert("predictions".to_string(), output_tensor);
 
-            Ok(outputs)
-        })
+                Ok(outputs)
+            })
     }
 
     fn metadata(&self) -> &ModelMetadata {
@@ -1267,10 +1272,10 @@ mod tests {
         let mut backend = MockBackend::new();
         let config = BackendConfig::default();
 
-        backend.initialize(&config).unwrap();
+        backend.initialize(&config).expect("Initialization should succeed");
         assert_eq!(backend.name(), "mock-backend");
 
-        let health = backend.health_check().unwrap();
+        let health = backend.health_check().expect("Health check should succeed");
         assert!(matches!(health.status, HealthStatus::Healthy));
     }
 
@@ -1296,20 +1301,20 @@ mod tests {
         // Register mock factory
         registry
             .register_factory("test-mock".to_string(), Box::new(MockBackendFactory))
-            .unwrap();
+            .expect("Factory should be registered");
 
-        let factories = registry.list_factories().unwrap();
+        let factories = registry.list_factories().expect("Failed to list factories");
         assert!(factories.contains(&"test-mock".to_string()));
 
         // Create backend
         let config = BackendConfig::default();
-        registry.create_backend("test-mock", &config).unwrap();
+        registry.create_backend("test-mock", &config).expect("Failed to create backend");
 
-        let backends = registry.list_backends().unwrap();
+        let backends = registry.list_backends().expect("Failed to list backends");
         assert!(backends.contains(&"test-mock".to_string()));
 
         // Get backend
-        let backend = registry.get_backend("test-mock").unwrap();
+        let backend = registry.get_backend("test-mock").expect("Backend should exist");
         assert_eq!(backend.name(), "mock-backend");
     }
 }

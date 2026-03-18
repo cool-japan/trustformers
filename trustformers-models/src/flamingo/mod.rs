@@ -232,12 +232,14 @@ mod tests {
     #[test]
     fn test_flamingo_perceiver_functionality() {
         // Use much smaller config to prevent SIGSEGV
-        let mut config = FlamingoPerceiverConfig::default();
-        config.num_latents = 8; // Much smaller for memory safety
-        config.latent_dim = 128; // Much smaller
-        config.num_layers = 1; // Single layer only
-        config.num_heads = 2; // Minimal heads
-        config.mlp_hidden_size = 256; // Much smaller MLP
+        let config = FlamingoPerceiverConfig {
+            num_latents: 8,       // Much smaller for memory safety
+            latent_dim: 128,      // Much smaller
+            num_layers: 1,        // Single layer only
+            num_heads: 2,         // Minimal heads
+            mlp_hidden_size: 256, // Much smaller MLP
+            ..FlamingoPerceiverConfig::default()
+        };
 
         let input_dim = 128; // Match latent_dim for simplicity
         let perceiver =

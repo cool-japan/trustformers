@@ -138,9 +138,9 @@ impl MetalBackend {
     /// - Expected speedup: ~40-50% for FFN operations
     ///
     /// # Arguments
-    /// * `a` - Input matrix [M, K]
-    /// * `b` - Weight matrix [K, N]
-    /// * `bias` - Bias vector [N]
+    /// * `a` - Input matrix \[M, K\]
+    /// * `b` - Weight matrix \[K, N\]
+    /// * `bias` - Bias vector \[N\]
     /// * `m` - Number of rows in A
     /// * `k` - Number of columns in A (= rows in B)
     /// * `n` - Number of columns in B
@@ -308,8 +308,8 @@ mod tests {
         // Random data
         use scirs2_core::random::*;
         let mut rng = thread_rng();
-        let a: Vec<f32> = (0..m * k).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let b: Vec<f32> = (0..k * n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let a: Vec<f32> = (0..m * k).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let b: Vec<f32> = (0..k * n).map(|_| rng.random_range(-1.0..1.0)).collect();
 
         // Warmup
         let _ = backend.matmul_gelu_f32(&a, &b, m, k, n)?;
@@ -417,9 +417,9 @@ mod tests {
         // Random data
         use scirs2_core::random::*;
         let mut rng = thread_rng();
-        let a: Vec<f32> = (0..m * k).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let b: Vec<f32> = (0..k * n).map(|_| rng.gen_range(-1.0..1.0)).collect();
-        let bias: Vec<f32> = (0..n).map(|_| rng.gen_range(-0.1..0.1)).collect();
+        let a: Vec<f32> = (0..m * k).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let b: Vec<f32> = (0..k * n).map(|_| rng.random_range(-1.0..1.0)).collect();
+        let bias: Vec<f32> = (0..n).map(|_| rng.random_range(-0.1..0.1)).collect();
 
         // Warmup
         let _ = backend.matmul_bias_gelu_f32(&a, &b, &bias, m, k, n)?;

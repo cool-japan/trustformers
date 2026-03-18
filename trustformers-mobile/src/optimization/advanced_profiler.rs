@@ -1510,7 +1510,7 @@ impl AdvancedProfiler {
 
         // Sort by execution time descending
         let mut sorted_traces: Vec<_> = stack_traces.into_iter().collect();
-        sorted_traces.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted_traces.sort_by_key(|item| std::cmp::Reverse(item.1));
 
         for (stack, time_us) in sorted_traces {
             flamegraph_data.push_str(&format!("{} {}\n", stack, time_us));
