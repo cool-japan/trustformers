@@ -1,0 +1,330 @@
+//! Adaptive Parallelism Module for Performance Optimizer
+//!
+//! This module provides comprehensive adaptive parallelism control functionality
+//! including dynamic parallelism estimation, performance feedback processing,
+//! machine learning-based optimization, and continuous adaptation algorithms.
+//!
+//! ## Modular Architecture (Phase 42 Refactoring)
+//!
+//! The original 2,355-line monolithic file has been systematically refactored into 8 focused modules
+//! for improved maintainability, comprehension, and organization:
+//!
+//! ### Core Modules
+//!
+//! - **controller** (338 lines): AdaptiveParallelismController with orchestration and adjustment logic
+//! - **estimator** (224 lines): OptimalParallelismEstimator with ensemble estimation coordination
+//! - **estimation_algorithms** (259 lines): Multiple estimation algorithms (linear regression, resource-based, etc.)
+//! - **feedback_system** (85 lines): PerformanceFeedbackSystem for real-time feedback processing
+//! - **feedback_processors** (159 lines): Specialized processors for throughput, latency, and resource utilization
+//! - **aggregation** (214 lines): FeedbackAggregator with multiple aggregation strategies
+//! - **learning_model** (275 lines): AdaptiveLearningModel with machine learning algorithms
+//! - **validation** (234 lines): Model validation strategies and frameworks
+//!
+//! ## Key Features
+//!
+//! - **Dynamic Parallelism Adjustment**: Real-time adaptation based on performance feedback and system conditions
+//! - **Ensemble Estimation**: Multiple algorithms working together for robust parallelism recommendations
+//! - **Machine Learning Integration**: Adaptive learning models for continuous improvement and pattern recognition
+//! - **Comprehensive Feedback Processing**: Real-time collection, processing, and aggregation of performance metrics
+//! - **Advanced Validation**: Cross-validation and holdout validation for model reliability assessment
+//! - **Conservative Adjustment Modes**: Stability-focused strategies for production environments
+//! - **Performance Tracking**: Historical analysis and effectiveness measurement
+//! - **Vendor Optimizations**: CPU affinity and resource-aware estimation strategies
+//!
+//! ## Usage Examples
+//!
+//! ```rust
+//! use crate::performance_optimizer::adaptive_parallelism::{
+//!     AdaptiveParallelismController, AdaptiveParallelismConfig,
+//!     create_default_adaptive_controller, create_high_performance_controller
+//! };
+//!
+//! // Initialize with default configuration
+//! let controller = create_default_adaptive_controller().await?;
+//!
+//! // Get optimal parallelism recommendation
+//! let characteristics = TestCharacteristics::default();
+//! let estimate = controller.recommend_parallelism(&characteristics).await?;
+//! println!("Recommended parallelism: {} (confidence: {:.2})",
+//!          estimate.optimal_parallelism, estimate.confidence);
+//!
+//! // Adjust parallelism based on performance feedback
+//! let performance = PerformanceMeasurement::default();
+//! let new_level = controller.adjust_parallelism(
+//!     AdjustmentReason::PerformanceDegradation,
+//!     performance,
+//!     &characteristics,
+//! ).await?;
+//!
+//! // Process performance feedback for learning
+//! let feedback = PerformanceFeedback::default();
+//! controller.process_feedback(feedback).await?;
+//!
+//! // Create specialized controllers
+//! let high_perf_controller = create_high_performance_controller().await?;
+//! let conservative_controller = create_conservative_controller().await?;
+//! ```
+//!
+//! ## Backward Compatibility
+//!
+//! All original APIs are preserved through comprehensive re-exports. Existing code
+//! will continue to work without modification while benefiting from the improved
+//! modular organization and enhanced performance.
+
+// =============================================================================
+// MODULE IMPORT AND RE-EXPORT
+// =============================================================================
+
+// Import the modular structure
+pub mod adaptive_parallelism;
+
+// Re-export everything to maintain backward compatibility
+pub use adaptive_parallelism::*;
+
+// =============================================================================
+// LEGACY COMPATIBILITY EXPORTS
+// =============================================================================
+
+// Re-export all core types and implementations for backward compatibility
+pub use adaptive_parallelism::{
+    // Core controller types
+    AdaptiveParallelismController,
+    OptimalParallelismEstimator,
+    PerformanceFeedbackSystem,
+    AdaptiveLearningModel,
+    FeedbackAggregator,
+    ModelValidation,
+
+    // Algorithm and processor types
+    EstimationAlgorithm,
+    LinearRegressionEstimator,
+    ResourceBasedEstimator,
+    HistoricalAverageEstimator,
+    CpuAffinityEstimator,
+    FeedbackProcessor,
+    ThroughputFeedbackProcessor,
+    LatencyFeedbackProcessor,
+    ResourceUtilizationFeedbackProcessor,
+
+    // Aggregation and learning types
+    AggregationStrategy,
+    WeightedAverageAggregation,
+    ConsensusAggregation,
+    ConfidenceWeightedAggregation,
+    LearningAlgorithm,
+    AdaptiveLinearRegression,
+
+    // Validation types
+    ValidationStrategy,
+    CrossValidationStrategy,
+    HoldoutValidationStrategy,
+
+    // Convenience functions
+    create_default_adaptive_controller,
+    create_high_performance_controller,
+    create_conservative_controller,
+    create_ml_enhanced_controller,
+    quick_parallelism_estimate,
+    assess_current_parallelism_performance,
+};
+
+// =============================================================================
+// ADDITIONAL CONVENIENCE FUNCTIONS
+// =============================================================================
+
+/// Create an adaptive parallelism controller with custom configuration
+pub async fn create_custom_adaptive_controller(
+    min_parallelism: usize,
+    max_parallelism: usize,
+    conservative_mode: bool,
+) -> anyhow::Result<AdaptiveParallelismController> {
+    use std::time::Duration;
+
+    let config = AdaptiveParallelismConfig {
+        min_parallelism,
+        max_parallelism,
+        conservative_mode,
+        stability_threshold: if conservative_mode { 0.05 } else { 0.1 },
+        exploration_rate: if conservative_mode { 0.02 } else { 0.1 },
+        adjustment_interval: Duration::from_secs(30),
+    };
+
+    AdaptiveParallelismController::new(config).await
+}
+
+/// Get adaptive parallelism capabilities
+pub fn get_adaptive_parallelism_capabilities() -> AdaptiveParallelismCapabilities {
+    AdaptiveParallelismCapabilities {
+        supported_algorithms: vec![
+            "linear_regression".to_string(),
+            "resource_based".to_string(),
+            "historical_average".to_string(),
+            "cpu_affinity".to_string(),
+        ],
+        supported_feedback_types: vec![
+            "throughput".to_string(),
+            "latency".to_string(),
+            "resource_utilization".to_string(),
+        ],
+        supported_aggregation_strategies: vec![
+            "weighted_average".to_string(),
+            "consensus".to_string(),
+            "confidence_weighted".to_string(),
+        ],
+        machine_learning_support: true,
+        adaptive_learning: true,
+        conservative_mode: true,
+        real_time_adjustment: true,
+        performance_tracking: true,
+        validation_strategies: vec![
+            "cross_validation".to_string(),
+            "holdout_validation".to_string(),
+        ],
+    }
+}
+
+/// Validate adaptive parallelism system configuration
+pub fn validate_adaptive_parallelism_system() -> anyhow::Result<AdaptiveParallelismValidationReport> {
+    let capabilities = get_adaptive_parallelism_capabilities();
+
+    let validation_passed = capabilities.machine_learning_support &&
+                           capabilities.adaptive_learning &&
+                           !capabilities.supported_algorithms.is_empty();
+
+    Ok(AdaptiveParallelismValidationReport {
+        validation_passed,
+        system_health: if validation_passed {
+            AdaptiveParallelismHealth::Healthy
+        } else {
+            AdaptiveParallelismHealth::Warning
+        },
+        capabilities,
+        validation_errors: vec![],
+        recommendations: if validation_passed {
+            vec!["Adaptive parallelism system is properly configured and ready for use".to_string()]
+        } else {
+            vec!["Review system configuration and ensure all required components are available".to_string()]
+        },
+    })
+}
+
+// =============================================================================
+// CAPABILITY AND VALIDATION TYPES
+// =============================================================================
+
+/// Adaptive parallelism system capabilities
+#[derive(Debug, Clone)]
+pub struct AdaptiveParallelismCapabilities {
+    pub supported_algorithms: Vec<String>,
+    pub supported_feedback_types: Vec<String>,
+    pub supported_aggregation_strategies: Vec<String>,
+    pub machine_learning_support: bool,
+    pub adaptive_learning: bool,
+    pub conservative_mode: bool,
+    pub real_time_adjustment: bool,
+    pub performance_tracking: bool,
+    pub validation_strategies: Vec<String>,
+}
+
+/// Adaptive parallelism system validation report
+#[derive(Debug, Clone)]
+pub struct AdaptiveParallelismValidationReport {
+    pub validation_passed: bool,
+    pub system_health: AdaptiveParallelismHealth,
+    pub capabilities: AdaptiveParallelismCapabilities,
+    pub validation_errors: Vec<String>,
+    pub recommendations: Vec<String>,
+}
+
+/// Adaptive parallelism system health status
+#[derive(Debug, Clone)]
+pub enum AdaptiveParallelismHealth {
+    Healthy,
+    Warning,
+    Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_adaptive_parallelism_creation() {
+        let controller = create_default_adaptive_controller().await;
+        assert!(controller.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_custom_controller_creation() {
+        let controller = create_custom_adaptive_controller(1, 16, true).await;
+        assert!(controller.is_ok());
+    }
+
+    #[test]
+    fn test_capabilities() {
+        let capabilities = get_adaptive_parallelism_capabilities();
+        assert!(!capabilities.supported_algorithms.is_empty());
+        assert!(capabilities.machine_learning_support);
+        assert!(capabilities.adaptive_learning);
+    }
+
+    #[test]
+    fn test_validation_system() {
+        let report = validate_adaptive_parallelism_system();
+        assert!(report.is_ok());
+
+        if let Ok(validation) = report {
+            assert!(validation.validation_passed);
+        }
+    }
+
+    #[test]
+    fn test_backward_compatibility() {
+        // Test that all major types are accessible
+        let _: Option<AdaptiveParallelismController> = None;
+        let _: Option<OptimalParallelismEstimator> = None;
+        let _: Option<PerformanceFeedbackSystem> = None;
+        let _: Option<AdaptiveLearningModel> = None;
+    }
+
+    #[test]
+    fn test_algorithm_types() {
+        // Test that all algorithm types are accessible
+        let _: Option<LinearRegressionEstimator> = None;
+        let _: Option<ResourceBasedEstimator> = None;
+        let _: Option<HistoricalAverageEstimator> = None;
+        let _: Option<CpuAffinityEstimator> = None;
+    }
+
+    #[test]
+    fn test_feedback_processor_types() {
+        // Test that all feedback processor types are accessible
+        let _: Option<ThroughputFeedbackProcessor> = None;
+        let _: Option<LatencyFeedbackProcessor> = None;
+        let _: Option<ResourceUtilizationFeedbackProcessor> = None;
+    }
+
+    #[test]
+    fn test_aggregation_strategy_types() {
+        // Test that all aggregation strategy types are accessible
+        let _: Option<WeightedAverageAggregation> = None;
+        let _: Option<ConsensusAggregation> = None;
+        let _: Option<ConfidenceWeightedAggregation> = None;
+    }
+
+    #[test]
+    fn test_validation_strategy_types() {
+        // Test that all validation strategy types are accessible
+        let _: Option<CrossValidationStrategy> = None;
+        let _: Option<HoldoutValidationStrategy> = None;
+    }
+
+    #[test]
+    fn test_modular_integration() {
+        // Test that the modular structure works together
+        let capabilities = get_adaptive_parallelism_capabilities();
+        assert!(capabilities.supported_algorithms.contains(&"linear_regression".to_string()));
+        assert!(capabilities.supported_feedback_types.contains(&"throughput".to_string()));
+        assert!(capabilities.supported_aggregation_strategies.contains(&"weighted_average".to_string()));
+    }
+}

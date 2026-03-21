@@ -1,0 +1,935 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Image Captioning Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            line-height: 1.6;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #667eea;
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(102, 126, 234, 0.1);
+            border-radius: 10px;
+            font-size: 0.9rem;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+            min-height: calc(100vh - 160px);
+        }
+
+        .image-area {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .controls-panel {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            overflow-y: auto;
+        }
+
+        .upload-area {
+            border: 3px dashed #667eea;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            background: rgba(102, 126, 234, 0.05);
+        }
+
+        .upload-area:hover {
+            border-color: #764ba2;
+            background: rgba(118, 75, 162, 0.05);
+        }
+
+        .upload-area.dragover {
+            border-color: #764ba2;
+            background: rgba(118, 75, 162, 0.1);
+        }
+
+        .upload-icon {
+            font-size: 3rem;
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+
+        .upload-text {
+            font-size: 1.1rem;
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .upload-subtext {
+            font-size: 0.9rem;
+            color: #888;
+        }
+
+        .image-preview {
+            max-width: 100%;
+            max-height: 400px;
+            border-radius: 10px;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .caption-result {
+            flex: 1;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            min-height: 200px;
+            overflow-y: auto;
+        }
+
+        .caption-text {
+            font-size: 1.1rem;
+            line-height: 1.6;
+            color: #333;
+            margin-bottom: 15px;
+        }
+
+        .confidence-score {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            background: rgba(102, 126, 234, 0.1);
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+
+        .control-group {
+            margin-bottom: 20px;
+        }
+
+        .control-group h3 {
+            margin-bottom: 10px;
+            color: #667eea;
+            font-size: 1.1rem;
+        }
+
+        .model-selector {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+            margin-bottom: 15px;
+        }
+
+        .caption-btn {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+
+        .caption-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .caption-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .examples-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .example-image {
+            width: 100%;
+            height: 80px;
+            object-fit: cover;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 2px solid transparent;
+        }
+
+        .example-image:hover {
+            transform: scale(1.05);
+            border-color: #667eea;
+        }
+
+        .metrics-display {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .metrics-display h3 {
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+
+        .advanced-options {
+            background: rgba(255, 255, 255, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+
+        .checkbox-group {
+            margin-bottom: 10px;
+        }
+
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+        }
+
+        .hidden-input {
+            display: none;
+        }
+
+        .loading-indicator {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .export-section {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .export-btn {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        .export-btn:hover {
+            background: #218838;
+        }
+
+        .alternative-captions {
+            margin-top: 15px;
+        }
+
+        .alternative-captions h4 {
+            margin-bottom: 10px;
+            color: #667eea;
+            font-size: 1rem;
+        }
+
+        .alt-caption {
+            background: rgba(102, 126, 234, 0.1);
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 0.95rem;
+        }
+
+        @media (max-width: 1000px) {
+            .main-content {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr auto;
+            }
+            
+            .controls-panel {
+                max-height: 400px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖼️ TrustformeRS Image Captioning Demo</h1>
+            <p>Advanced image understanding with multimodal transformer models</p>
+            <div class="status-bar">
+                <span id="model-status">Model: Not loaded</span>
+                <span id="device-info">Device: Detecting...</span>
+                <span id="memory-info">Memory: 0 MB</span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="image-area">
+                <div class="upload-area" id="upload-area">
+                    <div class="upload-icon">📷</div>
+                    <div class="upload-text">Drop an image here or click to upload</div>
+                    <div class="upload-subtext">Supports JPG, PNG, GIF, WebP (max 10MB)</div>
+                </div>
+                
+                <input type="file" id="file-input" class="hidden-input" accept="image/*">
+                <img id="image-preview" class="image-preview" alt="Uploaded image">
+                
+                <div class="loading-indicator" id="loading-indicator">
+                    <div class="spinner"></div>
+                    <p>Generating caption...</p>
+                </div>
+                
+                <div class="caption-result" id="caption-result">
+                    <div class="caption-text" id="caption-text">
+                        Upload an image to see its AI-generated caption here...
+                    </div>
+                    
+                    <div class="confidence-score" id="confidence-score" style="display: none;">
+                        <span>Confidence:</span>
+                        <span id="confidence-value">0%</span>
+                    </div>
+                    
+                    <div class="alternative-captions" id="alternative-captions" style="display: none;">
+                        <h4>Alternative Captions:</h4>
+                        <div id="alt-captions-list"></div>
+                    </div>
+                </div>
+
+                <div class="export-section">
+                    <button class="export-btn" onclick="exportResults('json')">Export as JSON</button>
+                    <button class="export-btn" onclick="exportResults('txt')">Export as Text</button>
+                    <button class="export-btn" onclick="shareResults()">Share Results</button>
+                    <button class="export-btn" onclick="clearResults()">Clear</button>
+                </div>
+            </div>
+
+            <div class="controls-panel">
+                <div class="control-group">
+                    <h3>Model Selection</h3>
+                    <select id="model-select" class="model-selector">
+                        <option value="blip2-opt-2.7b">BLIP-2 OPT 2.7B</option>
+                        <option value="blip2-opt-6.7b">BLIP-2 OPT 6.7B</option>
+                        <option value="llava-7b">LLaVA 7B</option>
+                        <option value="llava-13b">LLaVA 13B</option>
+                        <option value="cogvlm-chat-17b">CogVLM Chat 17B</option>
+                        <option value="clip-vit-large">CLIP ViT-Large</option>
+                    </select>
+                    
+                    <button id="caption-btn" class="caption-btn">Generate Caption</button>
+                    
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progress-fill"></div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Example Images</h3>
+                    <div class="examples-grid">
+                        <canvas class="example-image" data-scene="cat" width="120" height="80"></canvas>
+                        <canvas class="example-image" data-scene="city" width="120" height="80"></canvas>
+                        <canvas class="example-image" data-scene="nature" width="120" height="80"></canvas>
+                        <canvas class="example-image" data-scene="food" width="120" height="80"></canvas>
+                        <canvas class="example-image" data-scene="car" width="120" height="80"></canvas>
+                        <canvas class="example-image" data-scene="beach" width="120" height="80"></canvas>
+                    </div>
+                </div>
+
+                <div class="metrics-display">
+                    <h3>Performance Metrics</h3>
+                    <div class="metric-item">
+                        <span>Processing Time:</span>
+                        <span id="processing-time">0ms</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Image Size:</span>
+                        <span id="image-size">0x0</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Memory Usage:</span>
+                        <span id="memory-usage">0 MB</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>GPU Utilization:</span>
+                        <span id="gpu-usage">N/A</span>
+                    </div>
+                </div>
+
+                <div class="advanced-options">
+                    <h3>Advanced Options</h3>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="detailed-captions" checked>
+                            Detailed Captions
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="multiple-captions">
+                            Generate Multiple Captions
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="object-detection">
+                            Object Detection
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="sentiment-analysis">
+                            Sentiment Analysis
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="gpu-acceleration" checked>
+                            GPU Acceleration
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { 
+            TrustformersWasm, 
+            InferenceSession, 
+            WasmTensor,
+            get_memory_stats,
+            is_webgpu_supported
+        } from '../pkg/trustformers_wasm.js';
+
+        class ImageCaptioningDemo {
+            constructor() {
+                this.session = null;
+                this.currentImage = null;
+                this.isProcessing = false;
+                this.captionHistory = [];
+                
+                this.initializeUI();
+                this.initializeWasm();
+                this.generateExampleImages();
+            }
+
+            async initializeWasm() {
+                try {
+                    // Initialize TrustformeRS
+                    const tf = new TrustformersWasm();
+                    console.log('TrustformeRS Version:', tf.version);
+                    
+                    // Create inference session for multimodal tasks
+                    this.session = new InferenceSession('image-captioning');
+                    
+                    // Initialize with automatic device selection
+                    await this.session.initialize_with_auto_device();
+                    
+                    // Load default model
+                    await this.loadModel('blip2-opt-2.7b');
+                    
+                    this.updateStatus();
+                    
+                } catch (error) {
+                    console.error('Failed to initialize WASM:', error);
+                    this.showError('Failed to initialize TrustformeRS: ' + error.message);
+                }
+            }
+
+            async loadModel(modelId) {
+                try {
+                    const modelInfo = this.getModelInfo(modelId);
+                    document.getElementById('model-status').textContent = `Model: Loading ${modelInfo.name}...`;
+                    
+                    // In a real implementation, you would load the actual multimodal model
+                    // For demo purposes, we'll simulate model loading
+                    const mockModelData = new Uint8Array(modelInfo.size * 1024 * 1024);
+                    await this.session.load_model(mockModelData);
+                    
+                    document.getElementById('model-status').textContent = `Model: ${modelInfo.name}`;
+                    
+                } catch (error) {
+                    console.error('Failed to load model:', error);
+                    this.showError('Failed to load model: ' + error.message);
+                }
+            }
+
+            getModelInfo(modelId) {
+                const models = {
+                    'blip2-opt-2.7b': { name: 'BLIP-2 OPT 2.7B', size: 5400 },
+                    'blip2-opt-6.7b': { name: 'BLIP-2 OPT 6.7B', size: 13400 },
+                    'llava-7b': { name: 'LLaVA 7B', size: 14000 },
+                    'llava-13b': { name: 'LLaVA 13B', size: 26000 },
+                    'cogvlm-chat-17b': { name: 'CogVLM Chat 17B', size: 34000 },
+                    'clip-vit-large': { name: 'CLIP ViT-Large', size: 1700 }
+                };
+                return models[modelId] || models['blip2-opt-2.7b'];
+            }
+
+            initializeUI() {
+                // File upload
+                const uploadArea = document.getElementById('upload-area');
+                const fileInput = document.getElementById('file-input');
+                
+                uploadArea.addEventListener('click', () => fileInput.click());
+                uploadArea.addEventListener('dragover', this.handleDragOver.bind(this));
+                uploadArea.addEventListener('drop', this.handleDrop.bind(this));
+                
+                fileInput.addEventListener('change', this.handleFileSelect.bind(this));
+                
+                // Caption button
+                document.getElementById('caption-btn').addEventListener('click', () => {
+                    this.generateCaption();
+                });
+                
+                // Model selector
+                document.getElementById('model-select').addEventListener('change', (e) => {
+                    this.loadModel(e.target.value);
+                });
+                
+                // Example images
+                document.querySelectorAll('.example-image').forEach(img => {
+                    img.addEventListener('click', () => {
+                        this.loadExampleImage(img);
+                    });
+                });
+            }
+
+            handleDragOver(e) {
+                e.preventDefault();
+                document.getElementById('upload-area').classList.add('dragover');
+            }
+
+            handleDrop(e) {
+                e.preventDefault();
+                document.getElementById('upload-area').classList.remove('dragover');
+                
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    this.processFile(files[0]);
+                }
+            }
+
+            handleFileSelect(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    this.processFile(file);
+                }
+            }
+
+            processFile(file) {
+                if (!file.type.startsWith('image/')) {
+                    this.showError('Please select an image file');
+                    return;
+                }
+
+                if (file.size > 10 * 1024 * 1024) {
+                    this.showError('File size must be less than 10MB');
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    this.displayImage(e.target.result);
+                    this.currentImage = e.target.result;
+                    document.getElementById('image-size').textContent = `${file.size / 1024 | 0}KB`;
+                };
+                reader.readAsDataURL(file);
+            }
+
+            displayImage(imageSrc) {
+                const preview = document.getElementById('image-preview');
+                preview.src = imageSrc;
+                preview.style.display = 'block';
+                
+                // Hide upload area
+                document.getElementById('upload-area').style.display = 'none';
+            }
+
+            generateExampleImages() {
+                const examples = [
+                    { scene: 'cat', color: '#FF6B6B', text: '🐱' },
+                    { scene: 'city', color: '#4ECDC4', text: '🏙️' },
+                    { scene: 'nature', color: '#45B7D1', text: '🌲' },
+                    { scene: 'food', color: '#F7DC6F', text: '🍕' },
+                    { scene: 'car', color: '#BB8FCE', text: '🚗' },
+                    { scene: 'beach', color: '#85C1E9', text: '🏖️' }
+                ];
+
+                document.querySelectorAll('.example-image').forEach((canvas, index) => {
+                    const ctx = canvas.getContext('2d');
+                    const example = examples[index];
+                    
+                    // Fill background
+                    ctx.fillStyle = example.color;
+                    ctx.fillRect(0, 0, 120, 80);
+                    
+                    // Add emoji
+                    ctx.font = '30px sans-serif';
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = 'white';
+                    ctx.fillText(example.text, 60, 50);
+                });
+            }
+
+            loadExampleImage(canvas) {
+                const dataURL = canvas.toDataURL();
+                this.displayImage(dataURL);
+                this.currentImage = dataURL;
+                
+                const scene = canvas.dataset.scene;
+                document.getElementById('image-size').textContent = 'Example';
+            }
+
+            async generateCaption() {
+                if (!this.currentImage || this.isProcessing) {
+                    this.showError('Please upload an image first');
+                    return;
+                }
+
+                this.isProcessing = true;
+                this.showLoading(true);
+                
+                const captionBtn = document.getElementById('caption-btn');
+                captionBtn.disabled = true;
+                captionBtn.textContent = 'Generating...';
+
+                try {
+                    const startTime = Date.now();
+                    
+                    // Convert image to tensor (simplified for demo)
+                    const imageData = await this.imageToTensor(this.currentImage);
+                    const imageTensor = new WasmTensor(imageData, [1, 3, 224, 224]);
+                    
+                    // Generate caption using the session
+                    const result = this.session.predict(imageTensor);
+                    
+                    // Simulate caption generation (in real implementation, this would be actual model output)
+                    const caption = await this.simulateCaptionGeneration();
+                    
+                    // Display results
+                    this.displayCaption(caption);
+                    
+                    // Update metrics
+                    const endTime = Date.now();
+                    const duration = endTime - startTime;
+                    this.updateMetrics(duration);
+                    
+                    // Add to history
+                    this.captionHistory.push({
+                        image: this.currentImage,
+                        caption: caption.main,
+                        alternatives: caption.alternatives,
+                        confidence: caption.confidence,
+                        timestamp: new Date().toISOString()
+                    });
+                    
+                } catch (error) {
+                    console.error('Caption generation failed:', error);
+                    this.showError('Caption generation failed: ' + error.message);
+                } finally {
+                    this.isProcessing = false;
+                    this.showLoading(false);
+                    captionBtn.disabled = false;
+                    captionBtn.textContent = 'Generate Caption';
+                }
+            }
+
+            async imageToTensor(imageSrc) {
+                // In a real implementation, this would properly convert the image to a tensor
+                // For demo purposes, we'll create mock image data
+                const size = 3 * 224 * 224; // RGB channels * width * height
+                const data = new Float32Array(size);
+                
+                // Fill with normalized RGB values (mock data)
+                for (let i = 0; i < size; i++) {
+                    data[i] = Math.random() * 2 - 1; // Values between -1 and 1
+                }
+                
+                return data;
+            }
+
+            async simulateCaptionGeneration() {
+                const modelId = document.getElementById('model-select').value;
+                const detailedCaptions = document.getElementById('detailed-captions').checked;
+                const multipleCaptions = document.getElementById('multiple-captions').checked;
+                
+                // Simulate processing time
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                
+                const captions = {
+                    simple: [
+                        "A cat sitting on a windowsill",
+                        "A cityscape with tall buildings",
+                        "A forest with green trees",
+                        "A delicious pizza with toppings",
+                        "A red car parked on the street",
+                        "A beautiful beach with blue water"
+                    ],
+                    detailed: [
+                        "A fluffy orange tabby cat sitting peacefully on a wooden windowsill, looking out at the garden with bright green eyes and a content expression",
+                        "A bustling metropolitan cityscape featuring modern glass skyscrapers reaching toward a cloudy sky, with busy streets and urban life below",
+                        "A serene forest scene with tall evergreen trees, dappled sunlight filtering through the canopy, and a peaceful hiking trail winding through the undergrowth",
+                        "A mouth-watering pizza with melted cheese, fresh basil leaves, sliced tomatoes, and pepperoni, served on a rustic wooden table",
+                        "A sleek red sports car parked on a quiet suburban street, with chrome details gleaming in the afternoon sunlight",
+                        "A pristine tropical beach with crystal-clear turquoise water, white sand, and palm trees swaying gently in the ocean breeze"
+                    ]
+                };
+                
+                const mainCaptions = detailedCaptions ? captions.detailed : captions.simple;
+                const mainCaption = mainCaptions[Math.floor(Math.random() * mainCaptions.length)];
+                
+                const alternatives = multipleCaptions ? [
+                    mainCaptions[(Math.floor(Math.random() * mainCaptions.length))],
+                    mainCaptions[(Math.floor(Math.random() * mainCaptions.length))],
+                    mainCaptions[(Math.floor(Math.random() * mainCaptions.length))]
+                ].filter(alt => alt !== mainCaption) : [];
+                
+                const confidence = 0.75 + Math.random() * 0.24; // Between 75% and 99%
+                
+                return {
+                    main: mainCaption,
+                    alternatives: alternatives,
+                    confidence: confidence
+                };
+            }
+
+            displayCaption(caption) {
+                document.getElementById('caption-text').textContent = caption.main;
+                
+                // Show confidence score
+                const confidenceScore = document.getElementById('confidence-score');
+                const confidenceValue = document.getElementById('confidence-value');
+                confidenceScore.style.display = 'flex';
+                confidenceValue.textContent = `${(caption.confidence * 100).toFixed(1)}%`;
+                
+                // Show alternative captions if available
+                if (caption.alternatives && caption.alternatives.length > 0) {
+                    const altCaptions = document.getElementById('alternative-captions');
+                    const altList = document.getElementById('alt-captions-list');
+                    
+                    altList.innerHTML = '';
+                    caption.alternatives.forEach(alt => {
+                        const div = document.createElement('div');
+                        div.className = 'alt-caption';
+                        div.textContent = alt;
+                        altList.appendChild(div);
+                    });
+                    
+                    altCaptions.style.display = 'block';
+                } else {
+                    document.getElementById('alternative-captions').style.display = 'none';
+                }
+            }
+
+            updateMetrics(duration) {
+                document.getElementById('processing-time').textContent = `${duration}ms`;
+                
+                // Update memory usage
+                if (this.session) {
+                    const memStats = get_memory_stats();
+                    const memoryMB = Math.round(memStats.wasm_memory / 1024 / 1024);
+                    document.getElementById('memory-usage').textContent = `${memoryMB} MB`;
+                    document.getElementById('memory-info').textContent = `Memory: ${memoryMB} MB`;
+                }
+                
+                // Simulate GPU usage
+                if (document.getElementById('gpu-acceleration').checked) {
+                    document.getElementById('gpu-usage').textContent = `${Math.random() * 100 | 0}%`;
+                }
+            }
+
+            updateStatus() {
+                if (this.session) {
+                    const deviceType = this.session.current_device_type || 'CPU';
+                    document.getElementById('device-info').textContent = `Device: ${deviceType}`;
+                }
+            }
+
+            showLoading(show) {
+                document.getElementById('loading-indicator').style.display = show ? 'block' : 'none';
+                this.updateProgress(show ? 50 : 100);
+            }
+
+            updateProgress(percentage) {
+                document.getElementById('progress-fill').style.width = `${percentage}%`;
+            }
+
+            showError(message) {
+                alert(message); // In production, use a proper notification system
+            }
+        }
+
+        // Global functions for UI interactions
+        window.exportResults = function(format) {
+            const caption = document.getElementById('caption-text').textContent;
+            const confidence = document.getElementById('confidence-value').textContent;
+            
+            if (caption === 'Upload an image to see its AI-generated caption here...') {
+                alert('No caption to export');
+                return;
+            }
+            
+            let output, filename, mimeType;
+            
+            switch (format) {
+                case 'txt':
+                    output = `Image Caption: ${caption}\nConfidence: ${confidence}`;
+                    filename = 'image-caption.txt';
+                    mimeType = 'text/plain';
+                    break;
+                case 'json':
+                    output = JSON.stringify({
+                        caption,
+                        confidence,
+                        timestamp: new Date().toISOString(),
+                        model: document.getElementById('model-select').value
+                    }, null, 2);
+                    filename = 'image-caption.json';
+                    mimeType = 'application/json';
+                    break;
+            }
+            
+            const blob = new Blob([output], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        window.shareResults = function() {
+            const caption = document.getElementById('caption-text').textContent;
+            const confidence = document.getElementById('confidence-value').textContent;
+            
+            if (navigator.share) {
+                navigator.share({
+                    title: 'AI Image Caption',
+                    text: `"${caption}" (Confidence: ${confidence})`
+                });
+            } else {
+                // Fallback: copy to clipboard
+                navigator.clipboard.writeText(`"${caption}" (Confidence: ${confidence})`);
+                alert('Caption copied to clipboard!');
+            }
+        };
+
+        window.clearResults = function() {
+            document.getElementById('caption-text').textContent = 'Upload an image to see its AI-generated caption here...';
+            document.getElementById('confidence-score').style.display = 'none';
+            document.getElementById('alternative-captions').style.display = 'none';
+            document.getElementById('image-preview').style.display = 'none';
+            document.getElementById('upload-area').style.display = 'block';
+            document.getElementById('progress-fill').style.width = '0%';
+        };
+
+        // Initialize the demo
+        const demo = new ImageCaptioningDemo();
+        
+        // Make demo available globally for debugging
+        window.demo = demo;
+    </script>
+</body>
+</html>

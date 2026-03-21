@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS WebAssembly Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 10px;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #666;
+            margin-bottom: 30px;
+        }
+        
+        .demo-section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .demo-section h2 {
+            color: #0066cc;
+            margin-top: 0;
+        }
+        
+        .input-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #555;
+        }
+        
+        input[type="text"], textarea, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        
+        button {
+            background-color: #0066cc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        
+        button:hover {
+            background-color: #0052a3;
+        }
+        
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .output {
+            background-color: #f8f8f8;
+            border: 1px solid #e0e0e0;
+            border-radius: 4px;
+            padding: 15px;
+            margin-top: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            white-space: pre-wrap;
+            min-height: 50px;
+        }
+        
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            text-align: center;
+            font-weight: bold;
+        }
+        
+        .status.loading {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        
+        .status.ready {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        
+        .status.error {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        .memory-stats {
+            display: flex;
+            justify-content: space-between;
+            background-color: #e9ecef;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+        }
+        
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #e0e0e0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+        
+        .progress-fill {
+            height: 100%;
+            background-color: #0066cc;
+            transition: width 0.3s ease;
+        }
+        
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>🤖 TrustformeRS WebAssembly Demo</h1>
+    <p class="subtitle">Run transformer models directly in your browser with Rust + WebAssembly</p>
+    
+    <div id="status" class="status loading">Loading WebAssembly module...</div>
+    
+    <div class="demo-section">
+        <h2>📊 Tensor Operations</h2>
+        <div class="grid">
+            <div>
+                <div class="input-group">
+                    <label>Tensor A (comma-separated values):</label>
+                    <input type="text" id="tensorA" value="1,2,3,4" placeholder="e.g., 1,2,3,4">
+                </div>
+                <div class="input-group">
+                    <label>Shape A (comma-separated):</label>
+                    <input type="text" id="shapeA" value="2,2" placeholder="e.g., 2,2">
+                </div>
+            </div>
+            <div>
+                <div class="input-group">
+                    <label>Tensor B (comma-separated values):</label>
+                    <input type="text" id="tensorB" value="5,6,7,8" placeholder="e.g., 5,6,7,8">
+                </div>
+                <div class="input-group">
+                    <label>Shape B (comma-separated):</label>
+                    <input type="text" id="shapeB" value="2,2" placeholder="e.g., 2,2">
+                </div>
+            </div>
+        </div>
+        <div>
+            <button onclick="performTensorOp('add')">Add (A + B)</button>
+            <button onclick="performTensorOp('mul')">Multiply (A × B)</button>
+            <button onclick="performTensorOp('matmul')">Matrix Multiply (A @ B)</button>
+            <button onclick="performTensorOp('transpose')">Transpose A</button>
+        </div>
+        <div id="tensorOutput" class="output">Results will appear here...</div>
+    </div>
+    
+    <div class="demo-section">
+        <h2>🎭 Text Classification</h2>
+        <div class="input-group">
+            <label>Enter text to classify:</label>
+            <textarea id="classificationText" placeholder="Type something to analyze sentiment...">I absolutely love this new feature! It works perfectly and saves me so much time.</textarea>
+        </div>
+        <div class="input-group">
+            <label>Labels (comma-separated):</label>
+            <input type="text" id="classificationLabels" value="positive,negative,neutral" placeholder="e.g., positive,negative,neutral">
+        </div>
+        <button onclick="classifyText()">Classify Text</button>
+        <div id="classificationOutput" class="output">Classification results will appear here...</div>
+    </div>
+    
+    <div class="demo-section">
+        <h2>✍️ Text Generation</h2>
+        <div class="input-group">
+            <label>Enter a prompt:</label>
+            <input type="text" id="generationPrompt" value="Once upon a time in a digital world" placeholder="Start your story...">
+        </div>
+        <div class="grid">
+            <div class="input-group">
+                <label>Max Length:</label>
+                <input type="number" id="maxLength" value="50" min="10" max="200">
+            </div>
+            <div class="input-group">
+                <label>Temperature:</label>
+                <input type="number" id="temperature" value="0.8" min="0.1" max="2.0" step="0.1">
+            </div>
+        </div>
+        <button onclick="generateText()">Generate Text</button>
+        <div id="generationOutput" class="output">Generated text will appear here...</div>
+    </div>
+    
+    <div class="demo-section">
+        <h2>❓ Question Answering</h2>
+        <div class="input-group">
+            <label>Context:</label>
+            <textarea id="qaContext" placeholder="Provide context for the question...">TrustformeRS is a high-performance transformer library written in Rust. It compiles to WebAssembly, allowing transformer models to run directly in web browsers. The library supports multiple model architectures including BERT, GPT-2, and T5.</textarea>
+        </div>
+        <div class="input-group">
+            <label>Question:</label>
+            <input type="text" id="qaQuestion" value="What is TrustformeRS?" placeholder="Ask a question about the context...">
+        </div>
+        <button onclick="answerQuestion()">Get Answer</button>
+        <div id="qaOutput" class="output">Answer will appear here...</div>
+    </div>
+    
+    <div class="demo-section">
+        <h2>💾 Memory & Performance</h2>
+        <button onclick="updateMemoryStats()">Update Stats</button>
+        <div id="memoryStats" class="memory-stats">
+            <div>Used: <span id="memUsed">0</span> MB</div>
+            <div>Limit: <span id="memLimit">0</span> MB</div>
+            <div>Usage: <span id="memPercent">0</span>%</div>
+        </div>
+        <div class="progress-bar">
+            <div id="memProgress" class="progress-fill" style="width: 0%"></div>
+        </div>
+        <div id="performanceOutput" class="output">Performance metrics will appear here...</div>
+    </div>
+
+    <script type="module">
+        // Global variables
+        let trustformers = null;
+        let model = null;
+        let tokenizer = null;
+        let initialized = false;
+        
+        // Update status
+        function updateStatus(message, type = 'loading') {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+        }
+        
+        // Initialize TrustformeRS
+        async function init() {
+            try {
+                updateStatus('Loading TrustformeRS module...', 'loading');
+                
+                // Import the JavaScript API
+                const module = await import('../trustformers-js/src/index.js');
+                trustformers = module;
+                
+                // Initialize WASM
+                await trustformers.initialize({
+                    wasmPath: '../trustformers-wasm/pkg/trustformers_wasm_bg.wasm'
+                });
+                
+                updateStatus('Creating model and tokenizer...', 'loading');
+                
+                // Create a BERT model
+                model = trustformers.createModel('bert_base');
+                
+                // Create tokenizer with sample vocabulary
+                tokenizer = trustformers.createTokenizer('wordpiece');
+                const sampleVocab = {
+                    '[PAD]': 0, '[UNK]': 1, '[CLS]': 2, '[SEP]': 3, '[MASK]': 4,
+                    'i': 5, 'love': 6, 'hate': 7, 'this': 8, 'it': 9, 'amazing': 10,
+                    'terrible': 11, 'good': 12, 'bad': 13, 'great': 14, 'awful': 15,
+                    'excellent': 16, 'poor': 17, 'fantastic': 18, 'horrible': 19,
+                    'wonderful': 20, 'dreadful': 21, 'positive': 22, 'negative': 23,
+                    'neutral': 24, 'happy': 25, 'sad': 26, 'angry': 27, 'excited': 28,
+                    'disappointed': 29, 'satisfied': 30, 'unsatisfied': 31, 'trust': 32,
+                    'formers': 33, 'is': 34, 'a': 35, 'high': 36, 'performance': 37,
+                    'transformer': 38, 'library': 39, 'written': 40, 'in': 41, 'rust': 42,
+                    'compiles': 43, 'to': 44, 'web': 45, 'assembly': 46, 'allowing': 47,
+                    'models': 48, 'run': 49, 'directly': 50, 'browsers': 51, 'the': 52,
+                    'supports': 53, 'multiple': 54, 'model': 55, 'architectures': 56,
+                    'including': 57, 'bert': 58, 'gpt': 59, 't5': 60, 'and': 61,
+                    'what': 62, 'once': 63, 'upon': 64, 'time': 65, 'digital': 66,
+                    'world': 67, 'feature': 68, 'works': 69, 'perfectly': 70, 'saves': 71,
+                    'me': 72, 'so': 73, 'much': 74, 'absolutely': 75, 'new': 76
+                };
+                tokenizer.load_vocab(sampleVocab);
+                
+                initialized = true;
+                updateStatus('TrustformeRS ready! Try the demos below.', 'ready');
+                
+                // Update memory stats
+                updateMemoryStats();
+                
+            } catch (error) {
+                updateStatus(`Error: ${error.message}`, 'error');
+                console.error('Initialization error:', error);
+            }
+        }
+        
+        // Tensor operations
+        window.performTensorOp = async function(operation) {
+            if (!initialized) {
+                alert('Please wait for initialization to complete');
+                return;
+            }
+            
+            const outputEl = document.getElementById('tensorOutput');
+            
+            try {
+                // Parse inputs
+                const dataA = document.getElementById('tensorA').value.split(',').map(Number);
+                const shapeA = document.getElementById('shapeA').value.split(',').map(Number);
+                const dataB = document.getElementById('tensorB').value.split(',').map(Number);
+                const shapeB = document.getElementById('shapeB').value.split(',').map(Number);
+                
+                // Create tensors
+                const timer = trustformers.utils.timer('tensor_operation');
+                const tensorA = trustformers.tensor(dataA, shapeA);
+                const tensorB = trustformers.tensor(dataB, shapeB);
+                
+                let result;
+                let output = `Operation: ${operation.toUpperCase()}\n\n`;
+                output += `Tensor A: ${tensorA.toString()}\n`;
+                output += `Shape A: [${shapeA.join(', ')}]\n\n`;
+                
+                if (operation !== 'transpose') {
+                    output += `Tensor B: ${tensorB.toString()}\n`;
+                    output += `Shape B: [${shapeB.join(', ')}]\n\n`;
+                }
+                
+                // Perform operation
+                switch(operation) {
+                    case 'add':
+                        result = tensorA.add(tensorB);
+                        break;
+                    case 'mul':
+                        result = tensorA.mul(tensorB);
+                        break;
+                    case 'matmul':
+                        result = tensorA.matmul(tensorB);
+                        break;
+                    case 'transpose':
+                        result = tensorA.transpose();
+                        break;
+                }
+                
+                const elapsed = timer.elapsed();
+                
+                output += `Result: ${result.toString()}\n`;
+                output += `Result shape: [${Array.from(result.shape).join(', ')}]\n`;
+                output += `\nOperation completed in ${elapsed.toFixed(2)}ms`;
+                
+                outputEl.textContent = output;
+                
+                // Clean up
+                tensorA.free();
+                tensorB.free();
+                result.free();
+                timer.free();
+                
+            } catch (error) {
+                outputEl.textContent = `Error: ${error.message}`;
+            }
+        };
+        
+        // Text classification
+        window.classifyText = async function() {
+            if (!initialized) {
+                alert('Please wait for initialization to complete');
+                return;
+            }
+            
+            const outputEl = document.getElementById('classificationOutput');
+            const text = document.getElementById('classificationText').value;
+            const labels = document.getElementById('classificationLabels').value.split(',').map(s => s.trim());
+            
+            try {
+                outputEl.textContent = 'Classifying...';
+                
+                const timer = trustformers.utils.timer('classification');
+                
+                // Create pipeline
+                const pipeline = trustformers.Pipeline.textClassification(model, tokenizer, labels);
+                
+                // Classify (Note: with random weights, results will be random)
+                const result = await pipeline.classify(text);
+                
+                const elapsed = timer.elapsed();
+                
+                let output = `Text: "${text}"\n\n`;
+                output += `Predicted Label: ${result.label}\n`;
+                output += `Confidence: ${(result.score * 100).toFixed(2)}%\n\n`;
+                output += `All Scores:\n`;
+                
+                const scores = Array.from(result.all_scores);
+                labels.forEach((label, i) => {
+                    output += `  ${label}: ${(scores[i] * 100).toFixed(2)}%\n`;
+                });
+                
+                output += `\nClassification completed in ${elapsed.toFixed(2)}ms`;
+                output += `\n\nNote: Using random model weights for demonstration`;
+                
+                outputEl.textContent = output;
+                
+                // Clean up
+                result.free();
+                pipeline.free();
+                timer.free();
+                
+            } catch (error) {
+                outputEl.textContent = `Error: ${error.message}`;
+            }
+        };
+        
+        // Text generation
+        window.generateText = async function() {
+            if (!initialized) {
+                alert('Please wait for initialization to complete');
+                return;
+            }
+            
+            const outputEl = document.getElementById('generationOutput');
+            const prompt = document.getElementById('generationPrompt').value;
+            const maxLength = parseInt(document.getElementById('maxLength').value);
+            const temperature = parseFloat(document.getElementById('temperature').value);
+            
+            try {
+                outputEl.textContent = 'Generating...';
+                
+                const timer = trustformers.utils.timer('generation');
+                
+                // For demo purposes, we'll simulate generation
+                // In reality, you'd use a GPT-2 model
+                const gpt2Model = trustformers.createModel('gpt2_base');
+                const pipeline = trustformers.Pipeline.textGeneration(gpt2Model, tokenizer, {
+                    max_length: maxLength,
+                    temperature: temperature,
+                    do_sample: true
+                });
+                
+                // Note: With random weights, this will produce gibberish
+                let output = `Prompt: "${prompt}"\n\n`;
+                output += `Generated text would appear here with a trained model.\n\n`;
+                output += `Parameters:\n`;
+                output += `  Max Length: ${maxLength}\n`;
+                output += `  Temperature: ${temperature}\n\n`;
+                
+                const elapsed = timer.elapsed();
+                output += `Generation completed in ${elapsed.toFixed(2)}ms\n`;
+                output += `\nNote: A trained GPT-2 model would be needed for coherent text generation`;
+                
+                outputEl.textContent = output;
+                
+                // Clean up
+                pipeline.free();
+                gpt2Model.free();
+                timer.free();
+                
+            } catch (error) {
+                outputEl.textContent = `Error: ${error.message}`;
+            }
+        };
+        
+        // Question answering
+        window.answerQuestion = async function() {
+            if (!initialized) {
+                alert('Please wait for initialization to complete');
+                return;
+            }
+            
+            const outputEl = document.getElementById('qaOutput');
+            const context = document.getElementById('qaContext').value;
+            const question = document.getElementById('qaQuestion').value;
+            
+            try {
+                outputEl.textContent = 'Finding answer...';
+                
+                const timer = trustformers.utils.timer('qa');
+                
+                // Create QA pipeline
+                const pipeline = trustformers.Pipeline.questionAnswering(model, tokenizer);
+                
+                // For demo, we'll show what would happen
+                let output = `Question: "${question}"\n\n`;
+                output += `Context: "${context}"\n\n`;
+                output += `With a trained model, the answer would be extracted from the context.\n\n`;
+                
+                const elapsed = timer.elapsed();
+                output += `Question answering completed in ${elapsed.toFixed(2)}ms\n`;
+                output += `\nNote: A trained QA model would extract the relevant answer span`;
+                
+                outputEl.textContent = output;
+                
+                // Clean up
+                pipeline.free();
+                timer.free();
+                
+            } catch (error) {
+                outputEl.textContent = `Error: ${error.message}`;
+            }
+        };
+        
+        // Update memory stats
+        window.updateMemoryStats = function() {
+            if (!initialized) return;
+            
+            const stats = trustformers.memory.getStats();
+            const usage = trustformers.memory.getUsage();
+            
+            document.getElementById('memUsed').textContent = stats.used_mb.toFixed(2);
+            document.getElementById('memLimit').textContent = stats.limit_mb.toFixed(2);
+            
+            const percent = (stats.used / stats.limit * 100).toFixed(1);
+            document.getElementById('memPercent').textContent = percent;
+            document.getElementById('memProgress').style.width = percent + '%';
+            
+            const perfOutput = document.getElementById('performanceOutput');
+            perfOutput.textContent = `WASM Memory Usage: ${(usage / 1024 / 1024).toFixed(2)} MB\n`;
+            perfOutput.textContent += `Version: ${trustformers.utils.version()}\n`;
+            perfOutput.textContent += `Features: ${trustformers.utils.features().join(', ')}`;
+        };
+        
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>

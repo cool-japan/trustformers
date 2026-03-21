@@ -1,0 +1,56 @@
+{
+  "timestamp": "2025-07-27T06:49:27.776973",
+  "platform": "macOS-15.5-arm64-arm-64bit",
+  "python_version": "3.10.14 | packaged by conda-forge | (main, Mar 20 2024, 12:51:49) [Clang 16.0.6 ]",
+  "total_tests": 2,
+  "passed_tests": 1,
+  "failed_tests": 1,
+  "success_rate": 50.0,
+  "results": [
+    {
+      "browser": "chrome",
+      "test_name": "WASM Loading Test",
+      "category": "compatibility",
+      "passed": true,
+      "duration": 1.2,
+      "error_message": null,
+      "performance_metrics": {
+        "load_time": 800
+      },
+      "memory_usage": {},
+      "screenshots": []
+    },
+    {
+      "browser": "firefox",
+      "test_name": "Performance Test",
+      "category": "performance",
+      "passed": false,
+      "duration": 2.5,
+      "error_message": "Timeout exceeded",
+      "performance_metrics": {},
+      "memory_usage": {},
+      "screenshots": []
+    }
+  ],
+  "benchmarks": {
+    "timestamp": "2025-07-26T10:00:00",
+    "browsers": {
+      "chrome": {
+        "passed": true,
+        "duration": 1.2
+      },
+      "firefox": {
+        "passed": false,
+        "error": "Timeout"
+      }
+    },
+    "summary": {
+      "successful_browsers": 1,
+      "average_duration": 1.2
+    }
+  },
+  "browser_support": {
+    "chrome": true,
+    "firefox": false
+  }
+}

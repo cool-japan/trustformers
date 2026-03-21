@@ -1,0 +1,24 @@
+{
+  "languages": [
+    "python",
+    "javascript"
+  ],
+  "model_type": "transformer",
+  "config_fields": [
+    {
+      "name": "vocab_size",
+      "python_type": "int",
+      "default": 30522
+    },
+    {
+      "name": "hidden_size",
+      "python_type": "int",
+      "default": 768
+    },
+    {
+      "name": "num_layers",
+      "python_type": "int",
+      "default": 12
+    }
+  ]
+}

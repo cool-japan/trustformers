@@ -1,0 +1,111 @@
+# EditorConfig for TrustformeRS
+# https://editorconfig.org
+
+# Top-most EditorConfig file
+root = true
+
+# Default settings for all files
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+# Rust files
+[*.rs]
+indent_style = space
+indent_size = 4
+max_line_length = 100
+
+# TOML files (including Cargo.toml)
+[*.toml]
+indent_style = space
+indent_size = 2
+
+# YAML files
+[*.{yml,yaml}]
+indent_style = space
+indent_size = 2
+
+# JSON files
+[*.json]
+indent_style = space
+indent_size = 2
+
+# Markdown files
+[*.{md,markdown}]
+trim_trailing_whitespace = false
+max_line_length = 80
+
+# Shell scripts
+[*.{sh,bash}]
+indent_style = space
+indent_size = 2
+
+# Batch files
+[*.{bat,cmd}]
+end_of_line = crlf
+indent_style = space
+indent_size = 2
+
+# Makefiles must use tabs
+[Makefile]
+indent_style = tab
+
+# Python files (for any Python scripts)
+[*.py]
+indent_style = space
+indent_size = 4
+max_line_length = 88
+
+# JavaScript/TypeScript files (for any web demos)
+[*.{js,jsx,ts,tsx}]
+indent_style = space
+indent_size = 2
+max_line_length = 80
+
+# CSS/SCSS files
+[*.{css,scss,sass}]
+indent_style = space
+indent_size = 2
+
+# HTML files
+[*.{html,htm}]
+indent_style = space
+indent_size = 2
+
+# XML files
+[*.xml]
+indent_style = space
+indent_size = 2
+
+# C/C++ files (for any FFI code)
+[*.{c,cpp,cc,cxx,h,hpp,hxx}]
+indent_style = space
+indent_size = 4
+
+# Protocol Buffer files
+[*.proto]
+indent_style = space
+indent_size = 2
+
+# Dockerfile
+[Dockerfile*]
+indent_style = space
+indent_size = 4
+
+# Git config files
+[.git*]
+indent_style = space
+indent_size = 2
+
+# License files
+[LICENSE*]
+insert_final_newline = false
+
+# Binary files - no processing
+[*.{png,jpg,jpeg,gif,webp,ico,svg,pdf,wasm,so,dylib,dll,exe,bin}]
+insert_final_newline = unset
+trim_trailing_whitespace = unset

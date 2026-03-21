@@ -1,0 +1,138 @@
+//! Test Independence Analysis Engine
+//!
+//! This module provides comprehensive analysis of test independence, dependency detection,
+//! resource conflict identification, and test categorization for optimal parallel execution.
+//!
+//! This module has been refactored from a monolithic architecture into a modular system
+//! with specialized components for better maintainability and performance. The original
+//! functionality is preserved through comprehensive re-exports.
+//!
+//! # Modular Architecture
+//!
+//! The system is now organized into specialized modules:
+//! - `types` - Core type definitions and error handling
+//! - `analysis_cache` - Advanced caching system
+//! - `dependency_graph` - Dependency graph analysis
+//! - `resource_database` - Resource usage tracking
+//! - `conflict_detector` - Resource conflict detection
+//! - `test_grouping_engine` - Intelligent test grouping
+//!
+//! All original functionality is preserved and enhanced through the modular architecture.
+//!
+//! # Example Usage
+//!
+//! ```rust
+//! use trustformers_serve::test_independence_analyzer::TestIndependenceAnalyzer;
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let analyzer = TestIndependenceAnalyzer::new();
+//!
+//! // Analyze test independence for a set of tests
+//! let tests = vec![/* your test contexts */];
+//! let analysis = analyzer.analyze_test_independence(&tests).await?;
+//!
+//! println!("Found {} dependencies", analysis.dependencies.len());
+//! println!("Detected {} conflicts", analysis.conflicts.len());
+//! println!("Created {} optimal test groups", analysis.groups.len());
+//! # Ok(())
+//! # }
+//! ```
+
+// Import the modular architecture
+pub(crate) mod modular;
+
+// Re-export all public types and functions from the modular architecture
+// This maintains backward compatibility with existing code
+pub use modular::*;
+
+// Additional backward compatibility exports for legacy type names
+// These ensure that any existing code using the old type names continues to work
+pub use modular::{
+    TestIndependenceAnalyzer,
+    TestIndependenceAnalysis,
+    AnalysisConfig,
+    AnalysisMetadata,
+    AnalysisRecommendation,
+    ResourceConflict,
+    TestGroup,
+    GroupCharacteristics,
+    GroupRequirements,
+};
+
+// Legacy type aliases for backward compatibility
+use crate::test_parallelization::{TestDependency, TestParallelizationMetadata};
+use crate::test_timeout_optimization::TestExecutionContext;
+
+// Re-export commonly used types from the modular system
+pub type AnalysisResult<T> = Result<T, AnalysisError>;
+
+/// Legacy compatibility function - creates analyzer with old configuration format
+pub fn create_analyzer_with_independence_config(
+    config: crate::test_parallelization::IndependenceAnalysisConfig,
+) -> TestIndependenceAnalyzer {
+    // Convert old config format to new modular config
+    let modular_config = AnalysisConfig {
+        enable_advanced_dependency_analysis: true,
+        enable_ml_conflict_prediction: false,
+        enable_adaptive_grouping: true,
+        max_analysis_time: std::time::Duration::from_secs(60),
+        cache_config: modular::analysis_cache::CacheConfig::default(),
+        conflict_detection_config: modular::conflict_detector::ConflictDetectionConfig::default(),
+        grouping_config: modular::test_grouping_engine::GroupingEngineConfig::default(),
+        database_config: modular::resource_database::DatabaseConfig::default(),
+        enable_performance_metrics: true,
+        quality_thresholds: modular::AnalysisQualityThresholds::default(),
+    };
+
+    TestIndependenceAnalyzer::with_config(modular_config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_timeout_optimization::{TestCategory, TestComplexityHints};
+    use std::time::Duration;
+
+    fn create_test_context(name: &str, category: TestCategory) -> TestExecutionContext {
+        TestExecutionContext {
+            test_name: name.to_string(),
+            category,
+            environment: "test".to_string(),
+            complexity_hints: TestComplexityHints::default(),
+            expected_duration: Some(Duration::from_secs(10)),
+            timeout_multiplier: 1.0,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_backward_compatibility_analyzer_creation() {
+        let analyzer = TestIndependenceAnalyzer::new();
+        let stats = analyzer.get_analysis_statistics();
+        assert_eq!(stats.total_analyses, 0);
+    }
+
+    #[tokio::test]
+    async fn test_backward_compatibility_analysis() {
+        let analyzer = TestIndependenceAnalyzer::new();
+
+        let tests = vec![
+            create_test_context("test1", TestCategory::Unit),
+            create_test_context("test2", TestCategory::Integration),
+        ];
+
+        let analysis = analyzer.analyze_test_independence(&tests).await.unwrap();
+
+        assert_eq!(analysis.tests.len(), 2);
+        assert!(!analysis.groups.is_empty());
+        assert!(analysis.analysis_metadata.analysis_quality >= 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_legacy_config_compatibility() {
+        let config = crate::test_parallelization::IndependenceAnalysisConfig::default();
+        let analyzer = create_analyzer_with_independence_config(config);
+
+        let stats = analyzer.get_analysis_statistics();
+        assert_eq!(stats.total_analyses, 0);
+    }
+}

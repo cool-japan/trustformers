@@ -1,0 +1,103 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trustformers-server
+  namespace: trustformers
+  labels:
+    app: trustformers-server
+    app.kubernetes.io/name: trustformers-server
+    app.kubernetes.io/instance: trustformers
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: trustformers
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: trustformers-server
+  template:
+    metadata:
+      labels:
+        app: trustformers-server
+        app.kubernetes.io/name: trustformers-server
+        app.kubernetes.io/instance: trustformers
+        app.kubernetes.io/component: api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: trustformers-server
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: trustformers-server
+        image: trustformers/server:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8080
+          protocol: TCP
+        env:
+        - name: RUST_LOG
+          value: "info"
+        - name: MODEL_CACHE_DIR
+          value: "/var/cache/trustformers"
+        - name: MAX_MODELS
+          value: "10"
+        - name: PORT
+          value: "8080"
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2"
+          limits:
+            memory: "8Gi"
+            cpu: "4"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: model-cache
+          mountPath: /var/cache/trustformers
+        - name: tmp
+          mountPath: /tmp
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          runAsNonRoot: true
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: model-cache
+        persistentVolumeClaim:
+          claimName: trustformers-cache
+      - name: tmp
+        emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - trustformers-server
+              topologyKey: kubernetes.io/hostname

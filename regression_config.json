@@ -1,0 +1,69 @@
+{
+  "results_dir": "benchmark_results",
+  "thresholds": {
+    "default": {
+      "warning": 0.05,
+      "error": 0.10
+    },
+    "tensor_ops": {
+      "warning": 0.03,
+      "error": 0.05
+    },
+    "model_inference": {
+      "warning": 0.05,
+      "error": 0.10
+    },
+    "optimizer": {
+      "warning": 0.05,
+      "error": 0.10
+    },
+    "tokenizer": {
+      "warning": 0.03,
+      "error": 0.08
+    },
+    "quantization": {
+      "warning": 0.05,
+      "error": 0.10
+    },
+    "memory": {
+      "warning": 0.10,
+      "error": 0.20
+    },
+    "mobile_wasm": {
+      "warning": 0.08,
+      "error": 0.15
+    }
+  },
+  "historical_window": 10,
+  "min_samples": 3,
+  "benchmark_groups": {
+    "critical": [
+      "tensor_creation",
+      "tensor_arithmetic",
+      "model_inference/bert_inference",
+      "model_inference/gpt2_inference"
+    ],
+    "important": [
+      "tensor_reduction",
+      "optimizer/adam_optimizer",
+      "tokenizer/bpe_tokenizer",
+      "quantization/tensor_quantization"
+    ],
+    "standard": [
+      "tensor_manipulation",
+      "optimizer/sgd_optimizer",
+      "tokenizer/batch_tokenization",
+      "memory/tensor_memory"
+    ]
+  },
+  "trend_detection": {
+    "enabled": true,
+    "window_size": 5,
+    "degradation_threshold": 0.02
+  },
+  "reporting": {
+    "include_graphs": true,
+    "include_historical_data": true,
+    "max_benchmarks_per_category": 10
+  }
+}

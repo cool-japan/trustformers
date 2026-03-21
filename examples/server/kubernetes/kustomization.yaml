@@ -1,0 +1,48 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: trustformers
+
+resources:
+  - namespace.yaml
+  - rbac.yaml
+  - configmap.yaml
+  - pvc.yaml
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+
+images:
+  - name: trustformers/server
+    newTag: latest
+
+commonLabels:
+  app.kubernetes.io/managed-by: kustomize
+  app.kubernetes.io/version: v0.1.0
+
+configMapGenerator:
+  - name: trustformers-server-config
+    files:
+      - server.yaml
+      - log4rs.yaml
+
+# Optional: Add secrets
+# secretGenerator:
+#   - name: trustformers-secrets
+#     literals:
+#       - api-key=your-api-key
+#       - model-auth-token=your-token
+
+replicas:
+  - name: trustformers-server
+    count: 2
+
+# Patches for different environments
+patchesStrategicMerge:
+  # Uncomment for production
+  # - patches/production.yaml
+  # Uncomment for staging
+  # - patches/staging.yaml

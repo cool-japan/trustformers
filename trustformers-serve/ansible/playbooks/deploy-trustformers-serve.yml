@@ -1,0 +1,316 @@
+---
+- name: Deploy TrustformeRS Inference Server
+  hosts: trustformers_servers
+  become: yes
+  vars:
+    app_name: trustformers-serve
+    app_version: "{{ trustformers_version | default('latest') }}"
+    app_port: "{{ trustformers_port | default(8080) }}"
+    app_user: trustformers
+    app_group: trustformers
+    app_home: /opt/trustformers
+    config_dir: "{{ app_home }}/config"
+    logs_dir: "{{ app_home }}/logs"
+    data_dir: "{{ app_home }}/data"
+    models_dir: "{{ app_home }}/models"
+    docker_image: "trustformers/serve:{{ app_version }}"
+    
+  tasks:
+    - name: Update system packages
+      package:
+        name: "*"
+        state: latest
+      when: ansible_os_family == "RedHat" or ansible_os_family == "Debian"
+
+    - name: Install required packages
+      package:
+        name:
+          - docker
+          - docker-compose
+          - curl
+          - wget
+          - unzip
+          - htop
+          - nginx
+        state: present
+
+    - name: Start and enable Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    - name: Create application user and group
+      group:
+        name: "{{ app_group }}"
+        state: present
+      
+    - name: Create application user
+      user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        home: "{{ app_home }}"
+        shell: /bin/bash
+        create_home: yes
+        state: present
+
+    - name: Create application directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+      loop:
+        - "{{ app_home }}"
+        - "{{ config_dir }}"
+        - "{{ logs_dir }}"
+        - "{{ data_dir }}"
+        - "{{ models_dir }}"
+
+    - name: Deploy application configuration
+      template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0644'
+      loop:
+        - { src: "server.toml.j2", dest: "{{ config_dir }}/server.toml" }
+        - { src: "docker-compose.yml.j2", dest: "{{ app_home }}/docker-compose.yml" }
+        - { src: "nginx.conf.j2", dest: "/etc/nginx/sites-available/{{ app_name }}" }
+      notify:
+        - restart trustformers-serve
+        - reload nginx
+
+    - name: Enable nginx site
+      file:
+        src: "/etc/nginx/sites-available/{{ app_name }}"
+        dest: "/etc/nginx/sites-enabled/{{ app_name }}"
+        state: link
+      notify: reload nginx
+
+    - name: Create systemd service file
+      template:
+        src: trustformers-serve.service.j2
+        dest: /etc/systemd/system/trustformers-serve.service
+        mode: '0644'
+      notify:
+        - daemon reload
+        - restart trustformers-serve
+
+    - name: Pull Docker image
+      docker_image:
+        name: "{{ docker_image }}"
+        source: pull
+        state: present
+
+    - name: Start TrustformeRS service
+      systemd:
+        name: trustformers-serve
+        state: started
+        enabled: yes
+        daemon_reload: yes
+
+    - name: Configure log rotation
+      template:
+        src: trustformers-serve.logrotate.j2
+        dest: /etc/logrotate.d/trustformers-serve
+        mode: '0644'
+
+    - name: Setup monitoring
+      template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: '0644'
+      loop:
+        - { src: "prometheus.yml.j2", dest: "{{ config_dir }}/prometheus.yml" }
+        - { src: "grafana-dashboard.json.j2", dest: "{{ config_dir }}/grafana-dashboard.json" }
+      when: enable_monitoring | default(false)
+
+    - name: Configure firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - "{{ app_port }}"
+        - "80"
+        - "443"
+        - "9090"  # Prometheus
+        - "3000"  # Grafana
+      when: ansible_os_family == "Debian"
+
+    - name: Configure firewall (RHEL/CentOS)
+      firewalld:
+        port: "{{ item }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      loop:
+        - "{{ app_port }}"
+        - "80"
+        - "443"
+        - "9090"
+        - "3000"
+      when: ansible_os_family == "RedHat"
+
+    - name: Install health check script
+      template:
+        src: health-check.sh.j2
+        dest: "{{ app_home }}/bin/health-check.sh"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+
+    - name: Setup cron job for health checks
+      cron:
+        name: "TrustformeRS Health Check"
+        minute: "*/5"
+        job: "{{ app_home }}/bin/health-check.sh"
+        user: "{{ app_user }}"
+
+    - name: Verify deployment
+      uri:
+        url: "http://localhost:{{ app_port }}/health"
+        method: GET
+        status_code: 200
+        timeout: 30
+      register: health_check
+      retries: 10
+      delay: 10
+      until: health_check.status == 200
+
+    - name: Display deployment status
+      debug:
+        msg: "TrustformeRS Inference Server deployed successfully on port {{ app_port }}"
+
+  handlers:
+    - name: daemon reload
+      systemd:
+        daemon_reload: yes
+
+    - name: restart trustformers-serve
+      systemd:
+        name: trustformers-serve
+        state: restarted
+
+    - name: reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+- name: Setup Load Balancer
+  hosts: loadbalancers
+  become: yes
+  vars:
+    app_name: trustformers-serve
+    
+  tasks:
+    - name: Install HAProxy
+      package:
+        name: haproxy
+        state: present
+
+    - name: Configure HAProxy for TrustformeRS
+      template:
+        src: haproxy.cfg.j2
+        dest: /etc/haproxy/haproxy.cfg
+        backup: yes
+      notify: restart haproxy
+
+    - name: Start and enable HAProxy
+      systemd:
+        name: haproxy
+        state: started
+        enabled: yes
+
+    - name: Configure HAProxy logging
+      lineinfile:
+        path: /etc/rsyslog.conf
+        line: "local0.*    /var/log/haproxy.log"
+        create: yes
+      notify: restart rsyslog
+
+  handlers:
+    - name: restart haproxy
+      systemd:
+        name: haproxy
+        state: restarted
+
+    - name: restart rsyslog
+      systemd:
+        name: rsyslog
+        state: restarted
+
+- name: Setup Monitoring
+  hosts: monitoring
+  become: yes
+  vars:
+    prometheus_port: 9090
+    grafana_port: 3000
+    
+  tasks:
+    - name: Create monitoring directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - /opt/monitoring
+        - /opt/monitoring/prometheus
+        - /opt/monitoring/grafana
+
+    - name: Deploy monitoring stack
+      template:
+        src: monitoring-docker-compose.yml.j2
+        dest: /opt/monitoring/docker-compose.yml
+        mode: '0644'
+
+    - name: Start monitoring services
+      shell: |
+        cd /opt/monitoring
+        docker-compose up -d
+      register: monitoring_result
+
+    - name: Wait for Prometheus to start
+      uri:
+        url: "http://localhost:{{ prometheus_port }}/api/v1/status/config"
+        method: GET
+        status_code: 200
+        timeout: 30
+      register: prometheus_check
+      retries: 10
+      delay: 10
+      until: prometheus_check.status == 200
+
+    - name: Wait for Grafana to start
+      uri:
+        url: "http://localhost:{{ grafana_port }}/api/health"
+        method: GET
+        status_code: 200
+        timeout: 30
+      register: grafana_check
+      retries: 10
+      delay: 10
+      until: grafana_check.status == 200
+
+    - name: Import Grafana dashboards
+      uri:
+        url: "http://localhost:{{ grafana_port }}/api/dashboards/db"
+        method: POST
+        body_format: json
+        body:
+          dashboard: "{{ lookup('file', 'templates/grafana-dashboard.json.j2') | from_json }}"
+          overwrite: true
+        headers:
+          Content-Type: "application/json"
+          Authorization: "Bearer {{ grafana_api_key | default('admin') }}"
+        status_code: 200
+      ignore_errors: yes
+
+    - name: Display monitoring URLs
+      debug:
+        msg:
+          - "Prometheus: http://{{ ansible_default_ipv4.address }}:{{ prometheus_port }}"
+          - "Grafana: http://{{ ansible_default_ipv4.address }}:{{ grafana_port }}"

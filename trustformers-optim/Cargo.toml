@@ -1,0 +1,40 @@
+[package]
+name = "trustformers-optim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/trustformers-optim"
+description = "Optimizers for TrustformeRS"
+keywords = ["optimizer", "adam", "sgd", "machine-learning", "training"]
+categories = ["science", "algorithms"]
+readme = "README.md"
+
+[lints]
+workspace = true
+
+[dependencies]
+trustformers-core.workspace = true
+# Note: ndarray support provided by scirs2-core
+scirs2-core = { workspace = true, features = ["parallel"] }
+num-traits.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+oxicode.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+parking_lot.workspace = true
+num_cpus.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+approx.workspace = true
+
+[features]
+default = []
+
+[[bench]]
+name = "optimizer_benchmark"
+harness = false

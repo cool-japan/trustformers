@@ -1,0 +1,167 @@
+name: 🚀 Feature Request
+description: Suggest a new feature or enhancement for TrustformeRS
+title: "[FEATURE] "
+labels: ["enhancement", "needs-triage"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for suggesting a feature! Please provide as much detail as possible to help us understand your proposal.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: Describe the problem or limitation you're facing
+      placeholder: |
+        Currently, TrustformeRS doesn't support X, which makes it difficult to Y...
+        
+        When working with large models, I need to be able to...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe your proposed solution or feature
+      placeholder: |
+        I propose adding a new API that allows users to...
+        
+        The feature would work by...
+    validations:
+      required: true
+
+  - type: textarea
+    id: api-design
+    attributes:
+      label: API Design
+      description: If applicable, provide a proposed API design
+      placeholder: |
+        ```rust
+        // Proposed new API
+        pub trait ModelSharding {
+            fn shard_across_devices(&self, devices: &[Device]) -> Result<ShardedModel>;
+            fn gather_outputs(&self, sharded_outputs: Vec<Tensor>) -> Result<Tensor>;
+        }
+        
+        // Usage example
+        let sharded_model = model.shard_across_devices(&[Device::cuda(0), Device::cuda(1)])?;
+        ```
+      render: rust
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: What alternatives have you considered?
+      placeholder: |
+        - Alternative 1: Use existing library X, but it doesn't integrate well with TrustformeRS
+        - Alternative 2: Implement workaround Y, but it has performance issues
+        - Alternative 3: Fork and modify component Z, but maintenance would be difficult
+
+  - type: dropdown
+    id: feature-type
+    attributes:
+      label: Feature Type
+      description: What type of feature is this?
+      options:
+        - New Model Architecture
+        - Performance Optimization
+        - API Enhancement
+        - Mobile/Edge Support
+        - Distributed Training
+        - Quantization/Compression
+        - Documentation
+        - Developer Tools
+        - Integration/Compatibility
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: How important is this feature to you?
+      options:
+        - Critical - Blocking my project
+        - High - Would significantly improve my workflow
+        - Medium - Nice to have
+        - Low - Future consideration
+    validations:
+      required: true
+
+  - type: textarea
+    id: use-cases
+    attributes:
+      label: Use Cases
+      description: Describe specific use cases for this feature
+      placeholder: |
+        1. Training large language models across multiple nodes
+        2. Deploying models on edge devices with limited memory
+        3. Fine-tuning models with custom datasets
+      value: |
+        1. 
+        2. 
+        3. 
+
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success Criteria
+      description: How would we know if this feature is successful?
+      placeholder: |
+        - Users can successfully train models 10x larger than before
+        - Memory usage is reduced by 50% without performance degradation
+        - API is intuitive and requires minimal code changes
+
+  - type: dropdown
+    id: breaking-change
+    attributes:
+      label: Breaking Change
+      description: Would this feature require breaking changes?
+      options:
+        - "No - Fully backward compatible"
+        - "Yes - Minor breaking changes"
+        - "Yes - Major breaking changes"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: Any references, papers, or similar implementations
+      placeholder: |
+        - Paper: "Efficient Large-Scale Training" (https://arxiv.org/...)
+        - Similar feature in PyTorch: torch.distributed.pipeline
+        - Blog post explaining the concept: https://...
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      description: Are you willing to contribute to this feature?
+      options:
+        - label: I am willing to implement this feature
+          required: false
+        - label: I can help with design/documentation
+          required: false
+        - label: I can help with testing
+          required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Please check the following before submitting
+      options:
+        - label: I have searched existing issues and this feature hasn't been requested
+          required: true
+        - label: I have provided clear use cases for this feature
+          required: true
+        - label: I have considered the impact on existing users
+          required: false

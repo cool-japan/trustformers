@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Performance Report - TrustformeRS</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background-color: #f5f7fa;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 2rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.9;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .metric-card {
+            background: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            border-left: 4px solid #667eea;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .metric-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .metric-card h3 {
+            color: #667eea;
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #2d3748;
+            margin-bottom: 0.5rem;
+        }
+
+        .metric-description {
+            color: #718096;
+            font-size: 0.9rem;
+        }
+
+        .success {
+            border-left-color: #48bb78;
+        }
+
+        .success .metric-value {
+            color: #48bb78;
+        }
+
+        .warning {
+            border-left-color: #ed8936;
+        }
+
+        .warning .metric-value {
+            color: #ed8936;
+        }
+
+        .danger {
+            border-left-color: #f56565;
+        }
+
+        .danger .metric-value {
+            color: #f56565;
+        }
+
+        .chart-section {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+
+        .chart-section h2 {
+            color: #2d3748;
+            margin-bottom: 1.5rem;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        .chart-placeholder {
+            height: 300px;
+            background: linear-gradient(45deg, #f7fafc 25%, transparent 25%, transparent 75%, #f7fafc 75%, #f7fafc),
+                        linear-gradient(45deg, #f7fafc 25%, transparent 25%, transparent 75%, #f7fafc 75%, #f7fafc);
+            background-size: 20px 20px;
+            background-position: 0 0, 10px 10px;
+            border: 2px dashed #cbd5e0;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #a0aec0;
+            font-size: 1.1rem;
+            font-weight: 500;
+        }
+
+        .table-section {
+            background: white;
+            padding: 2rem;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+            overflow-x: auto;
+        }
+
+        .table-section h2 {
+            color: #2d3748;
+            margin-bottom: 1.5rem;
+            font-size: 1.5rem;
+            font-weight: 600;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 1rem;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        th {
+            background-color: #f7fafc;
+            font-weight: 600;
+            color: #4a5568;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        td {
+            color: #2d3748;
+        }
+
+        tr:hover {
+            background-color: #f7fafc;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .status-success {
+            background-color: #c6f6d5;
+            color: #22543d;
+        }
+
+        .status-warning {
+            background-color: #fefcbf;
+            color: #744210;
+        }
+
+        .status-danger {
+            background-color: #fed7d7;
+            color: #742a2a;
+        }
+
+        .footer {
+            text-align: center;
+            color: #718096;
+            margin-top: 2rem;
+            padding: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background-color: #e2e8f0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #48bb78 0%, #38a169 100%);
+            border-radius: 4px;
+            transition: width 0.3s ease;
+        }
+
+        .alert-section {
+            background: #fed7d7;
+            border: 1px solid #feb2b2;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .alert-section h3 {
+            color: #742a2a;
+            margin-bottom: 0.5rem;
+        }
+
+        .alert-section ul {
+            color: #742a2a;
+            margin-left: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 1rem;
+            }
+
+            .header h1 {
+                font-size: 2rem;
+            }
+
+            .metrics-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .chart-section,
+            .table-section {
+                padding: 1rem;
+            }
+        }
+
+        .optimization-insights {
+            background: linear-gradient(135deg, #e6fffa 0%, #f0fff4 100%);
+            border: 1px solid #9ae6b4;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .optimization-insights h3 {
+            color: #276749;
+            margin-bottom: 1rem;
+            font-size: 1.2rem;
+        }
+
+        .insight-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            color: #2f855a;
+        }
+
+        .insight-item::before {
+            content: "✓";
+            background-color: #48bb78;
+            color: white;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 0.75rem;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Test Performance Report</h1>
+            <p>Generated on {{timestamp}} • TrustformeRS Test Timeout Optimization Framework</p>
+        </div>
+
+        <!-- Performance Metrics Overview -->
+        <div class="metrics-grid">
+            <div class="metric-card {{success_rate_class}}">
+                <h3>Success Rate</h3>
+                <div class="metric-value">{{success_rate}}%</div>
+                <div class="metric-description">{{total_tests}} tests executed</div>
+                <div class="progress-bar">
+                    <div class="progress-fill" style="width: {{success_rate}}%"></div>
+                </div>
+            </div>
+
+            <div class="metric-card">
+                <h3>Average Execution Time</h3>
+                <div class="metric-value">{{avg_execution_time}}</div>
+                <div class="metric-description">Across all test categories</div>
+            </div>
+
+            <div class="metric-card {{timeout_rate_class}}">
+                <h3>Timeout Rate</h3>
+                <div class="metric-value">{{timeout_rate}}%</div>
+                <div class="metric-description">Tests that exceeded timeout</div>
+            </div>
+
+            <div class="metric-card">
+                <h3>Early Terminations</h3>
+                <div class="metric-value">{{early_termination_count}}</div>
+                <div class="metric-description">{{early_termination_rate}}% of total tests</div>
+            </div>
+
+            <div class="metric-card">
+                <h3>Optimizations Applied</h3>
+                <div class="metric-value">{{total_optimizations}}</div>
+                <div class="metric-description">{{optimization_success_rate}}% success rate</div>
+            </div>
+
+            <div class="metric-card success">
+                <h3>Time Saved</h3>
+                <div class="metric-value">{{time_saved}}</div>
+                <div class="metric-description">Through optimization techniques</div>
+            </div>
+        </div>
+
+        <!-- Optimization Insights -->
+        <div class="optimization-insights">
+            <h3>🚀 Optimization Insights</h3>
+            <div class="insight-item">Adaptive timeout optimization reduced false timeouts by {{adaptive_improvement}}%</div>
+            <div class="insight-item">Early termination saved {{early_termination_savings}} of execution time</div>
+            <div class="insight-item">Progress monitoring prevented {{stalled_tests}} tests from hanging</div>
+            <div class="insight-item">Parallel execution improved throughput by {{parallel_improvement}}%</div>
+        </div>
+
+        <!-- Alerts Section (if any active alerts) -->
+        {{#if alerts}}
+        <div class="alert-section">
+            <h3>⚠️ Active Alerts</h3>
+            <ul>
+                {{#each alerts}}
+                <li>{{this.message}} ({{this.severity}})</li>
+                {{/each}}
+            </ul>
+        </div>
+        {{/if}}
+
+        <!-- Execution Time Chart -->
+        <div class="chart-section">
+            <h2>📊 Execution Time Trends</h2>
+            <div class="chart-placeholder">
+                {{charts.execution_time_chart}}
+            </div>
+        </div>
+
+        <!-- Success Rate Chart -->
+        <div class="chart-section">
+            <h2>📈 Success Rate Over Time</h2>
+            <div class="chart-placeholder">
+                {{charts.success_rate_chart}}
+            </div>
+        </div>
+
+        <!-- Test Categories Performance -->
+        <div class="table-section">
+            <h2>📋 Performance by Test Category</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Category</th>
+                        <th>Total Tests</th>
+                        <th>Success Rate</th>
+                        <th>Avg Execution Time</th>
+                        <th>Timeout Rate</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{#each test_categories}}
+                    <tr>
+                        <td>{{this.name}}</td>
+                        <td>{{this.total_tests}}</td>
+                        <td>{{this.success_rate}}%</td>
+                        <td>{{this.avg_execution_time}}</td>
+                        <td>{{this.timeout_rate}}%</td>
+                        <td>
+                            <span class="status-badge {{this.status_class}}">
+                                {{this.status}}
+                            </span>
+                        </td>
+                    </tr>
+                    {{/each}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Top Performing Tests -->
+        <div class="table-section">
+            <h2>🏆 Top Performing Tests</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Test Name</th>
+                        <th>Category</th>
+                        <th>Execution Time</th>
+                        <th>Optimizations Applied</th>
+                        <th>Time Saved</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{#each top_tests}}
+                    <tr>
+                        <td>{{this.name}}</td>
+                        <td>{{this.category}}</td>
+                        <td>{{this.execution_time}}</td>
+                        <td>{{this.optimizations}}</td>
+                        <td><span class="status-badge status-success">{{this.time_saved}}</span></td>
+                    </tr>
+                    {{/each}}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Problematic Tests -->
+        {{#if problematic_tests}}
+        <div class="table-section">
+            <h2>⚠️ Tests Requiring Attention</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Test Name</th>
+                        <th>Category</th>
+                        <th>Issue</th>
+                        <th>Failure Rate</th>
+                        <th>Recommendation</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{#each problematic_tests}}
+                    <tr>
+                        <td>{{this.name}}</td>
+                        <td>{{this.category}}</td>
+                        <td>{{this.issue}}</td>
+                        <td><span class="status-badge status-danger">{{this.failure_rate}}%</span></td>
+                        <td>{{this.recommendation}}</td>
+                    </tr>
+                    {{/each}}
+                </tbody>
+            </table>
+        </div>
+        {{/if}}
+
+        <!-- Performance Regression Detection -->
+        {{#if regressions}}
+        <div class="table-section">
+            <h2>📉 Performance Regressions Detected</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Test Name</th>
+                        <th>Baseline Time</th>
+                        <th>Current Time</th>
+                        <th>Regression</th>
+                        <th>Detected</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{#each regressions}}
+                    <tr>
+                        <td>{{this.test_name}}</td>
+                        <td>{{this.baseline_time}}</td>
+                        <td>{{this.current_time}}</td>
+                        <td><span class="status-badge status-danger">+{{this.regression_percent}}%</span></td>
+                        <td>{{this.detected_at}}</td>
+                    </tr>
+                    {{/each}}
+                </tbody>
+            </table>
+        </div>
+        {{/if}}
+
+        <!-- Framework Statistics -->
+        <div class="table-section">
+            <h2>⚙️ Framework Statistics</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Framework Uptime</td>
+                        <td>{{framework_uptime}}</td>
+                        <td>Time since framework initialization</td>
+                    </tr>
+                    <tr>
+                        <td>Peak Concurrent Tests</td>
+                        <td>{{peak_concurrent_tests}}</td>
+                        <td>Maximum tests running simultaneously</td>
+                    </tr>
+                    <tr>
+                        <td>Total Time Saved</td>
+                        <td>{{framework_time_saved}}</td>
+                        <td>Cumulative time saved through all optimizations</td>
+                    </tr>
+                    <tr>
+                        <td>Optimization Coverage</td>
+                        <td>{{optimization_coverage}}%</td>
+                        <td>Percentage of tests that received optimizations</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="footer">
+            <p>Generated by TrustformeRS Test Timeout Optimization Framework v{{framework_version}}</p>
+            <p>For more information, visit our documentation or contact the development team</p>
+        </div>
+    </div>
+</body>
+</html>

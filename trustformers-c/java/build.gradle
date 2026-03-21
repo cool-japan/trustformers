@@ -1,0 +1,248 @@
+plugins {
+    id 'java-library'
+    id 'maven-publish'
+    id 'signing'
+    id 'jacoco'
+}
+
+group = 'com.trustformers'
+version = '0.1.0-alpha.1'
+description = 'Java JNI bindings for TrustformeRS-C library'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+    withSourcesJar()
+    withJavadocJar()
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // JSON processing
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.15.2'
+    
+    // Logging
+    implementation 'org.slf4j:slf4j-api:2.0.7'
+    
+    // Testing
+    testImplementation platform('org.junit:junit-bom:5.9.3')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.junit.jupiter:junit-jupiter-params'
+    testRuntimeOnly 'ch.qos.logback:logback-classic:1.4.8'
+}
+
+compileJava {
+    options.compilerArgs += ['-h', "${buildDir}/native-headers"]
+    options.encoding = 'UTF-8'
+}
+
+test {
+    useJUnitPlatform()
+    
+    // JVM options for native library loading
+    systemProperty 'java.library.path', "${project.rootDir}/../target/release"
+    
+    // Test configuration
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+    
+    // Fail fast on first test failure
+    failFast = false
+    
+    // Set timeout for tests
+    timeout = Duration.ofMinutes(10)
+}
+
+jacoco {
+    toolVersion = "0.8.8"
+}
+
+jacocoTestReport {
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+javadoc {
+    options.addStringOption('Xdoclint:none', '-quiet')
+    options.encoding = 'UTF-8'
+    options.charSet = 'UTF-8'
+    
+    if (JavaVersion.current().isJava9Compatible()) {
+        options.addBooleanOption('html5', true)
+    }
+}
+
+// Task to build native library
+task buildNativeLibrary(type: Exec) {
+    description = 'Build the TrustformeRS-C native library'
+    workingDir = file('..')
+    commandLine = ['cargo', 'build', '--release']
+}
+
+// Task to generate JNI headers
+task generateJniHeaders(type: JavaCompile, dependsOn: classes) {
+    description = 'Generate JNI header files'
+    source = sourceSets.main.java
+    classpath = sourceSets.main.compileClasspath
+    destinationDirectory = file("${buildDir}/native-headers")
+    options.compilerArgs += ['-h', "${buildDir}/native-headers"]
+}
+
+// Task to copy native libraries to resources
+task copyNativeLibraries(type: Copy) {
+    description = 'Copy native libraries to resources for packaging'
+    
+    def nativeLibDir = file('../target/release')
+    
+    // Linux
+    from(nativeLibDir) {
+        include 'libtrustformers_c.so'
+        into 'native/linux-x86_64'
+    }
+    
+    // macOS
+    from(nativeLibDir) {
+        include 'libtrustformers_c.dylib'
+        into 'native/macos-x86_64'
+    }
+    
+    // Windows
+    from(nativeLibDir) {
+        include 'trustformers_c.dll'
+        into 'native/windows-x86_64'
+    }
+    
+    into "${sourceSets.main.output.resourcesDir}"
+}
+
+// Task to run examples
+task runBasicExample(type: JavaExec, dependsOn: classes) {
+    description = 'Run the basic usage example'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'examples.BasicUsageExample'
+    systemProperty 'java.library.path', "${project.rootDir}/../target/release"
+}
+
+// Custom tasks for different platforms
+task buildLinux(type: Exec) {
+    description = 'Build native library for Linux'
+    workingDir = file('..')
+    commandLine = ['cargo', 'build', '--release', '--target', 'x86_64-unknown-linux-gnu']
+}
+
+task buildMacOS(type: Exec) {
+    description = 'Build native library for macOS'
+    workingDir = file('..')
+    commandLine = ['cargo', 'build', '--release', '--target', 'x86_64-apple-darwin']
+}
+
+task buildWindows(type: Exec) {
+    description = 'Build native library for Windows'
+    workingDir = file('..')
+    commandLine = ['cargo', 'build', '--release', '--target', 'x86_64-pc-windows-gnu']
+}
+
+// Configure jar task to include native libraries
+jar {
+    dependsOn copyNativeLibraries
+    
+    manifest {
+        attributes(
+            'Implementation-Title': project.name,
+            'Implementation-Version': project.version,
+            'Implementation-Vendor': 'TrustformeRS Team',
+            'Created-By': "Gradle ${gradle.gradleVersion}",
+            'Build-Jdk': "${System.properties['java.version']} (${System.properties['java.vendor']} ${System.properties['java.vm.version']})",
+            'Build-OS': "${System.properties['os.name']} ${System.properties['os.arch']} ${System.properties['os.version']}"
+        )
+    }
+}
+
+// Fat JAR with all dependencies
+task fatJar(type: Jar) {
+    description = 'Create a fat JAR with all dependencies'
+    archiveClassifier = 'fat'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    
+    from sourceSets.main.output
+    
+    dependsOn configurations.runtimeClasspath
+    from {
+        configurations.runtimeClasspath.findAll { it.name.endsWith('jar') }.collect { zipTree(it) }
+    }
+    
+    manifest {
+        attributes(
+            'Implementation-Title': project.name,
+            'Implementation-Version': project.version,
+            'Main-Class': 'examples.BasicUsageExample'
+        )
+    }
+}
+
+// Publishing configuration
+publishing {
+    publications {
+        maven(MavenPublication) {
+            from components.java
+            
+            pom {
+                name = 'TrustformeRS Java'
+                description = 'Java JNI bindings for TrustformeRS-C library'
+                url = 'https://github.com/trustformers/trustformers-c'
+                
+                licenses {
+                    license {
+                        name = 'The Apache License, Version 2.0'
+                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+                
+                developers {
+                    developer {
+                        id = 'trustformers-team'
+                        name = 'TrustformeRS Team'
+                        email = 'team@trustformers.ai'
+                    }
+                }
+                
+                scm {
+                    connection = 'scm:git:git://github.com/trustformers/trustformers-c.git'
+                    developerConnection = 'scm:git:ssh://github.com:trustformers/trustformers-c.git'
+                    url = 'https://github.com/trustformers/trustformers-c/tree/main'
+                }
+            }
+        }
+    }
+}
+
+// Signing configuration
+signing {
+    required { gradle.taskGraph.hasTask("publish") }
+    sign publishing.publications.maven
+}
+
+// Custom clean task
+clean {
+    delete "${buildDir}/native-headers"
+    delete "${sourceSets.main.output.resourcesDir}/native"
+}
+
+// Task dependencies
+compileJava.dependsOn buildNativeLibrary
+test.dependsOn buildNativeLibrary
+jar.dependsOn generateJniHeaders
+build.dependsOn jacocoTestReport
+
+// Wrapper configuration
+wrapper {
+    gradleVersion = '8.2'
+    distributionType = Wrapper.DistributionType.ALL
+}

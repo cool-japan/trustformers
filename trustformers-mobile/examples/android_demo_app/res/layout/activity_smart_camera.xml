@@ -1,0 +1,155 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/camera_background"
+    tools:context=".SmartCameraActivity">
+
+    <!-- Camera Preview -->
+    <TextureView
+        android:id="@+id/texture_view"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toTopOf="@+id/controls_layout"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- AI Overlay -->
+    <com.trustformers.example.OverlayView
+        android:id="@+id/overlay_view"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        app:layout_constraintBottom_toTopOf="@+id/controls_layout"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Mode Selection -->
+    <LinearLayout
+        android:id="@+id/mode_layout"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="8dp"
+        android:background="@drawable/mode_selector_background"
+        android:gravity="center_vertical"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Mode:"
+            android:textColor="@color/mode_text_color"
+            android:textSize="16sp"
+            android:layout_marginEnd="8dp" />
+
+        <Spinner
+            android:id="@+id/mode_spinner"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:theme="@style/SpinnerTheme" />
+
+        <Button
+            android:id="@+id/settings_button"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="⚙"
+            android:textSize="18sp"
+            android:minWidth="40dp"
+            android:minHeight="40dp"
+            android:background="@drawable/settings_button_background"
+            android:layout_marginStart="8dp" />
+
+    </LinearLayout>
+
+    <!-- Info Text -->
+    <TextView
+        android:id="@+id/info_text_view"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:text="Ready to scan"
+        android:textColor="@color/info_text_color"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:background="@drawable/info_text_background"
+        android:padding="8dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/detection_recycler" />
+
+    <!-- Detection Results -->
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/detection_recycler"
+        android:layout_width="0dp"
+        android:layout_height="100dp"
+        android:background="@drawable/detection_list_background"
+        android:padding="8dp"
+        app:layout_constraintBottom_toTopOf="@+id/controls_layout"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent" />
+
+    <!-- Controls Layout -->
+    <LinearLayout
+        android:id="@+id/controls_layout"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="16dp"
+        android:background="@drawable/controls_background"
+        android:gravity="center"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <!-- Flash Button -->
+        <Button
+            android:id="@+id/flash_button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Flash: OFF"
+            android:textSize="12sp"
+            android:background="@drawable/control_button_background"
+            android:layout_marginEnd="8dp" />
+
+        <!-- Capture Button -->
+        <Button
+            android:id="@+id/capture_button"
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:text="📷"
+            android:textSize="24sp"
+            android:background="@drawable/capture_button_background"
+            android:layout_marginHorizontal="8dp" />
+
+        <!-- Mode Toggle -->
+        <Button
+            android:id="@+id/mode_toggle_button"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Auto"
+            android:textSize="12sp"
+            android:background="@drawable/control_button_background"
+            android:layout_marginStart="8dp" />
+
+    </LinearLayout>
+
+    <!-- Loading Indicator -->
+    <ProgressBar
+        android:id="@+id/loading_indicator"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+</androidx.constraintlayout.widget.ConstraintLayout>

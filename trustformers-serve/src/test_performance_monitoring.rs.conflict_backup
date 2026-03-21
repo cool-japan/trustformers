@@ -1,0 +1,231 @@
+//! Test Performance Monitoring and Reporting System
+//!
+//! This module has been refactored into a modular architecture for better maintainability.
+//! All functionality has been organized into focused sub-modules while maintaining
+//! backward compatibility through comprehensive re-exports.
+//!
+//! # Architecture Overview
+//!
+//! The monitoring system is organized into the following modules:
+//! - `types`: Core types, enums, and configuration structures
+//! - `metrics`: Performance metrics models and data structures
+//! - `real_time_monitor`: Real-time monitoring capabilities
+//! - `analytics`: Performance analytics and data analysis
+//! - `events`: Event management and streaming
+//! - `historical_data`: Historical data management and storage
+//! - `alerting`: Alert management and notification system
+//! - `reporting`: Report generation and scheduling
+//! - `dashboard`: Dashboard services and widgets
+//! - `subscriptions`: Subscription management and preferences
+//! - `service`: Main service integration and coordination
+//!
+//! # Usage
+//!
+//! All previous functionality remains available at the same import paths:
+//!
+//! ```rust
+//! use trustformers_serve::test_performance_monitoring::{
+//!     TestPerformanceMonitoringConfig, TestPerformanceMonitoringService,
+//!     AlertThresholds, ReportConfig
+//! };
+//! ```
+
+// Import the modular structure
+pub mod test_performance_monitoring;
+
+// Re-export everything to maintain backward compatibility
+pub use test_performance_monitoring::*;
+
+// Legacy re-exports for backward compatibility
+pub use test_performance_monitoring::{
+    // Configuration types
+    TestPerformanceMonitoringConfig, AlertThresholds, ReportConfig,
+    StreamConfig, MonitoringConfig, DataRetentionConfig,
+
+    // Core service types
+    TestPerformanceMonitoringService, ServiceStatus, ServiceHealthCheck,
+    ServiceOperationResult, ServiceError,
+
+    // Metrics types
+    ExecutionMetrics, SystemMetrics, ParallelizationMetrics, EfficiencyMetrics,
+    ReliabilityMetrics, ComprehensiveTestMetrics, StreamingMetrics,
+
+    // Monitoring types
+    RealTimePerformanceMonitor, MonitoringStatus, ActiveTestInfo,
+    ResourceUsageSnapshot, SystemHealth,
+
+    // Analytics types
+    PerformanceAnalyticsEngine, AnalyticsResult, StatisticalAnalysisResult,
+    TrendAnalysisResult, AnomalyAnalysisResult, OptimizationAnalysisResult,
+    BaselineComparisonResult, PerformanceInsight,
+
+    // Event types
+    EventManager, PerformanceEvent, PerformanceEventType, EventData,
+    EventFilter, EventSubscription, StreamingEvent,
+
+    // Historical data types
+    HistoricalDataManager, TimeSeries, TimeSeriesMetadata, HistoricalDataQuery,
+    QueryResult, TimeRange, AggregationSpec,
+
+    // Alert types
+    AlertManager, AlertRule, ActiveAlert, AlertCondition, ThresholdConfig,
+    EscalationPolicy, NotificationChannel,
+
+    // Report types
+    ReportingSystem, ReportTemplate, GeneratedReport, ScheduledReport,
+    ReportType, ExportFormat,
+
+    // Dashboard types
+    DashboardManager, Dashboard, Widget, WidgetType, DashboardUpdate,
+
+    // Subscription types
+    SubscriptionManager, UserSubscriptions, NotificationPreferences,
+};
+
+// Legacy compatibility types (maintain exact same interface as before)
+pub type TestPerformanceMonitoringSystem = TestPerformanceMonitoringService;
+
+// Legacy initialization functions for backward compatibility
+pub use test_performance_monitoring::{
+    init_monitoring_system, init_monitoring_system_with_config, validate_monitoring_config
+};
+
+// Additional convenience functions
+
+/// Create a default monitoring service
+pub async fn create_default_monitoring_service() -> Result<TestPerformanceMonitoringService, ServiceError> {
+    let config = TestPerformanceMonitoringConfig::default();
+    TestPerformanceMonitoringService::new(config).await
+}
+
+/// Create a monitoring service with custom alert thresholds
+pub async fn create_monitoring_service_with_alerts(
+    cpu_threshold: f64,
+    memory_threshold: f64,
+    execution_time_threshold: std::time::Duration,
+) -> Result<TestPerformanceMonitoringService, ServiceError> {
+    let mut config = TestPerformanceMonitoringConfig::default();
+    config.alert_thresholds.cpu_threshold = cpu_threshold;
+    config.alert_thresholds.memory_threshold = memory_threshold;
+    config.alert_thresholds.execution_time_threshold = execution_time_threshold;
+    TestPerformanceMonitoringService::new(config).await
+}
+
+/// Create a monitoring service optimized for high-frequency testing
+pub async fn create_high_frequency_monitoring_service() -> Result<TestPerformanceMonitoringService, ServiceError> {
+    let mut config = TestPerformanceMonitoringConfig::default();
+    config.monitoring_interval = std::time::Duration::from_millis(100);
+    config.enable_real_time = true;
+    TestPerformanceMonitoringService::new(config).await
+}
+
+/// Get monitoring system capabilities
+pub fn get_system_capabilities() -> MonitoringCapabilities {
+    get_monitoring_capabilities()
+}
+
+/// Validate that the monitoring system is properly configured and functional
+pub async fn validate_monitoring_system() -> Result<ValidationReport, ServiceError> {
+    let config = TestPerformanceMonitoringConfig::default();
+    validate_monitoring_config(&config).map_err(|e| ServiceError::ConfigurationError {
+        parameter: "config".to_string(),
+        reason: e.to_string(),
+    })?;
+
+    let service = TestPerformanceMonitoringService::new(config).await?;
+
+    // Test basic service operations
+    let health = service.health_check().await;
+    let status = service.get_status().await;
+
+    let validation_passed = matches!(health.overall_health, HealthStatus::Healthy) &&
+                           !status.is_running; // Service should not be running yet
+
+    Ok(ValidationReport {
+        validation_passed,
+        service_health: health.overall_health,
+        component_status: status.component_status,
+        performance_metrics: status.performance_metrics,
+        validation_errors: vec![],
+        recommendations: health.recommendations,
+    })
+}
+
+/// Monitoring system validation report
+#[derive(Debug, Clone)]
+pub struct ValidationReport {
+    pub validation_passed: bool,
+    pub service_health: HealthStatus,
+    pub component_status: ComponentStatus,
+    pub performance_metrics: ServicePerformanceMetrics,
+    pub validation_errors: Vec<String>,
+    pub recommendations: Vec<HealthRecommendation>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_monitoring_system_creation() {
+        let service = create_default_monitoring_service().await;
+        assert!(service.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_monitoring_service_with_alerts() {
+        let service = create_monitoring_service_with_alerts(
+            80.0,
+            85.0,
+            std::time::Duration::from_secs(30),
+        ).await;
+        assert!(service.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_high_frequency_monitoring() {
+        let service = create_high_frequency_monitoring_service().await;
+        assert!(service.is_ok());
+    }
+
+    #[test]
+    fn test_system_capabilities() {
+        let capabilities = get_system_capabilities();
+        assert!(!capabilities.supported_metrics.is_empty());
+        assert!(capabilities.real_time_monitoring);
+        assert!(capabilities.historical_analysis);
+    }
+
+    #[tokio::test]
+    async fn test_validation_system() {
+        let report = validate_monitoring_system().await;
+        assert!(report.is_ok());
+
+        if let Ok(validation) = report {
+            assert!(validation.validation_passed);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_backward_compatibility() {
+        // Test that old code patterns still work
+        let config = TestPerformanceMonitoringConfig::default();
+        let service = TestPerformanceMonitoringService::new(config).await;
+        assert!(service.is_ok());
+
+        // Test legacy type alias
+        let _legacy_service: TestPerformanceMonitoringSystem = service.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_module_integration() {
+        // Test that all modules work together seamlessly
+        let service = create_default_monitoring_service().await.unwrap();
+
+        let status = service.get_status().await;
+        assert!(!status.is_running); // Should not be running initially
+
+        let health = service.health_check().await;
+        assert!(matches!(health.overall_health, HealthStatus::Healthy));
+    }
+}

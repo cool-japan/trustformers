@@ -1,0 +1,239 @@
+[workspace]
+members = [
+    "trustformers-core",
+    "trustformers-tokenizers",
+    "trustformers-models",
+    "trustformers-optim",
+    "trustformers-training",
+    "trustformers",
+    "trustformers-wasm",
+    "trustformers-mobile",
+    "trustformers-debug",
+    "trustformers-serve",
+]
+exclude = ["examples/server", "examples/grpc-server", "trustformers-py", "trustformers-c"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
+license = "Apache-2.0"
+repository = "https://github.com/cool-japan/trustformers"
+homepage = "https://github.com/cool-japan/trustformers"
+
+[workspace.dependencies]
+# Internal crate dependencies
+trustformers = { version = "0.1.0", path = "trustformers", default-features = false }
+trustformers-core = { version = "0.1.0", path = "trustformers-core", default-features = false }
+trustformers-tokenizers = { version = "0.1.0", path = "trustformers-tokenizers", default-features = false }
+trustformers-models = { version = "0.1.0", path = "trustformers-models", default-features = false }
+trustformers-optim = { version = "0.1.0", path = "trustformers-optim", default-features = false }
+trustformers-training = { version = "0.1.0", path = "trustformers-training", default-features = false }
+trustformers-wasm = { version = "0.1.0", path = "trustformers-wasm", default-features = false }
+trustformers-mobile = { version = "0.1.0", path = "trustformers-mobile", default-features = false }
+trustformers-debug = { version = "0.1.0", path = "trustformers-debug", default-features = false }
+trustformers-serve = { version = "0.1.0", path = "trustformers-serve", default-features = false }
+
+# Core dependencies
+anyhow = "1.0.102"
+thiserror = "2.0.18"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+serde_yaml = "0.9.34"
+semver = { version = "1.0.27", features = ["serde"] }
+tokio = { version = "1.50.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+log = "0.4.29"
+lazy_static = "1.5.0"
+reqwest = { version = "0.13.2", features = ["json", "stream", "blocking", "form", "query"] }
+futures = "0.3.32"
+bytes = "1.11.1"
+indicatif = "0.18.4"
+sha2 = "0.10.9"
+hex = "0.4.3"
+dirs = "6.0.0"
+
+# ML/Math dependencies
+# Note: Per SciRS2 Integration Policy, scientific computing deps are accessed via scirs2-core
+# ndarray, rand, rand_distr, rayon, num-complex removed - all crates now use scirs2-core
+ndarray-rand = "0.16.0"  # TODO: Remove once all usages migrated to scirs2-core
+ndarray-linalg = { version = "0.18.1", features = [] }  # TODO: Replace with scirs2-linalg
+nalgebra = "0.34.1"
+num-traits = "0.2.19"
+ordered-float = "5.1.0"
+half = { version = "2.7.1", features = ["serde"] }
+parking_lot = "0.12.5"
+memmap2 = "0.9.10"
+
+# Tokenizer dependencies
+tokenizers = "0.22"
+unicode-normalization = "0.1"
+regex = "1.12.3"
+
+# Optional dependencies for different backends
+candle-core = "0.9.2"
+candle-nn = "0.9.2"
+tch = { version = "0.23", features = ["download-libtorch"] }
+ort = "1.16"
+safetensors = "0.7"
+
+# Web/Server dependencies  
+axum = { version = "0.8.8", features = ["ws", "macros"] }
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = { version = "10.3", features = ["rust_crypto"] }
+num_cpus = "1.17"
+once_cell = "1.21"
+prometheus = "0.14"
+prost = "0.14"
+tokio-stream = { version = "0.1", features = ["sync"] }
+tonic = "0.14.5"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+uuid = { version = "1.22.0", features = ["v4", "serde"] }
+tonic-build = "0.14.5"
+tonic-prost-build = "0.14.5"
+
+# Serialization dependencies
+rmp-serde = "1.3"
+
+# Python bindings dependencies
+pyo3 = "0.28.2"
+numpy = "0.28.0"
+
+# Additional core dependencies
+oxicode = { version = "0.2", features = ["serde"] }
+byteorder = "1.5"
+dashmap = "6.1"
+oxiarc-zstd = { version = "0.2.5" }
+oxiarc-deflate = { version = "0.2.5" }
+oxiarc-lz4 = { version = "0.2.5" }
+tar = "0.4"
+libc = "0.2.183"
+libloading = "0.9"
+
+# BLAS dependencies - OxiBLAS (Pure Rust BLAS/LAPACK from SciRS2 ecosystem)
+oxiblas = { version = "0.2.1", features = ["parallel"] }
+oxiblas-blas = { version = "0.2.1" }
+oxiblas-matrix = { version = "0.2.1" }
+
+# Server and networking dependencies
+tokio-util = "0.7"
+url = "2.5"
+clap = { version = "4.6", features = ["derive"] }
+colored = "3.1"
+env_logger = "0.11"
+tokio-rustls = "0.26"
+base64 = "0.22"
+mime_guess = "2.0"
+fastrand = "2.3.0"
+toml = "1.0.7"
+
+# Dev dependencies
+criterion = { version = "0.8.2", features = ["html_reports", "async_tokio"] }
+proptest = "1.10"
+rstest = "0.26"
+approx = "0.5"
+pretty_assertions = "1.4"
+axum-test = "19.1"
+tokio-test = "0.4"
+tempfile = "3.27"
+paste = "1.0"
+
+# Debug-specific dependencies
+indexmap = { version = "2.13", features = ["serde"] }
+plotters = "0.3"
+crossterm = "0.29"
+ratatui = "0.30"
+gif = "0.14"
+image = "0.25.10"
+ffmpeg-next = "8.1"
+statrs = "0.18"
+md5 = "0.8"
+
+# MPI dependencies for multi-node training (removed from workspace - now optional per crate)
+# mpi = "0.8"
+# mpi-sys = "0.3"
+
+# Vulkan dependencies for cross-platform GPU computing
+vulkano = "0.35.2"
+vulkano-shaders = "0.35.0"
+bytemuck = { version = "1.25.0", features = ["derive"] }
+
+# SciRS2 dependencies - using crates.io 0.1.x
+# Note: "metal" feature removed from default features as it's Apple-specific
+# Individual crates should enable it conditionally using target-specific dependencies
+scirs2-core = { version = "0.3.4", default-features = false, features = [
+    "array",
+    "simd",
+    "parallel",
+    "linalg",
+    "memory_efficient",
+    "array_protocol",
+    "random",  # Required for SciRS2 Integration Policy
+    "serialization",  # Required for config and model loading
+    "gpu",     # GPU acceleration abstractions
+    # Metal removed - enable via platform-specific dependencies in individual crates
+]}
+scirs2-linalg = { version = "0.3.4" }
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.dev]
+incremental = true
+opt-level = 0
+debug = 1                     # Reduced from 2 for faster builds
+split-debuginfo = "packed"    # Linux: separate debug info
+
+[profile.dev.package."*"]
+debug = 0                     # Disable debug info for dependencies
+
+[profile.dev.build-override]
+opt-level = 0
+debug = false                 # CUDA build optimization
+
+[profile.test]
+opt-level = 2
+
+[profile.bench]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+# WASM-specific optimization profiles
+[profile.release-size]
+inherits = "release"
+opt-level = "z"  # Optimize for size
+strip = true     # Strip symbols
+panic = "abort"  # Smaller panic handling
+codegen-units = 1
+lto = true
+
+# Development profile with some optimizations for faster iteration
+[profile.dev-opt]
+inherits = "dev"
+opt-level = 1
+debug = 1
+
+# Profile for testing performance optimizations
+[profile.perf-test]
+inherits = "release"
+debug = true     # Keep debug info for profiling
+strip = false    # Keep symbols for analysis
+
+[workspace.lints.rust]
+unused_variables = "warn"
+unused_imports = "warn"
+dead_code = "warn"
+unused_mut = "warn"
+unused_assignments = "warn"
+deprecated = "warn"
+
+[workspace.lints.clippy]
+all = "warn"

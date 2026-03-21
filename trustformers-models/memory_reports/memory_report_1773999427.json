@@ -1,0 +1,32 @@
+{
+  "timestamp": {
+    "secs_since_epoch": 1773999427,
+    "nanos_since_epoch": 651299000
+  },
+  "summary": {
+    "total_runtime_seconds": 0.0,
+    "peak_memory_mb": 0.0,
+    "average_memory_mb": 0.0,
+    "memory_efficiency_score": 0.0,
+    "total_allocations": 0,
+    "total_deallocations": 0,
+    "leaked_allocations": 0,
+    "fragmentation_events": 0,
+    "gc_pressure_events": 0,
+    "alert_count_by_severity": {}
+  },
+  "metrics_over_time": [],
+  "alerts": [],
+  "patterns": [],
+  "recommendations": [
+    "Memory usage appears normal - no specific recommendations at this time",
+    "Continue monitoring for any changes in allocation patterns"
+  ],
+  "system_info": {
+    "total_system_memory_gb": 16.0,
+    "available_system_memory_gb": 8.0,
+    "cpu_count": 8,
+    "os_info": "macos",
+    "rust_version": "0.1.0"
+  }
+}

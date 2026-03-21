@@ -1,0 +1,229 @@
+name: ⚡ Performance Issue
+description: Report performance problems or bottlenecks
+title: "[PERF] "
+labels: ["performance", "needs-investigation"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us identify and fix performance issues! Please provide detailed information about the performance problem you're experiencing.
+
+  - type: textarea
+    id: performance-issue
+    attributes:
+      label: Performance Issue Description
+      description: Describe the performance problem you're experiencing
+      placeholder: |
+        Model inference is taking 10x longer than expected...
+        
+        Memory usage grows unbounded during training...
+        
+        GPU utilization is only 20% during forward pass...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-performance
+    attributes:
+      label: Expected Performance
+      description: What performance were you expecting?
+      placeholder: |
+        Based on the model size and hardware, I expected:
+        - Inference time: ~50ms per batch
+        - Memory usage: ~4GB
+        - GPU utilization: >80%
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-performance
+    attributes:
+      label: Actual Performance
+      description: What performance are you actually seeing?
+      placeholder: |
+        Current measurements:
+        - Inference time: 500ms per batch
+        - Memory usage: 40GB and growing
+        - GPU utilization: 20%
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction-code
+    attributes:
+      label: Reproduction Code
+      description: Minimal code to reproduce the performance issue
+      placeholder: |
+        ```rust
+        use trustformers_models::bert::BertModel;
+        use std::time::Instant;
+        
+        fn main() -> Result<()> {
+            let model = BertModel::from_pretrained("bert-large")?;
+            let input = Tensor::randn(&[32, 512], device)?; // batch_size=32, seq_len=512
+            
+            let start = Instant::now();
+            for _ in 0..100 {
+                let _ = model.forward(&input)?;
+            }
+            let elapsed = start.elapsed();
+            
+            println!("Average time: {:?}", elapsed / 100);
+            Ok(())
+        }
+        ```
+      render: rust
+    validations:
+      required: true
+
+  - type: textarea
+    id: profiling-data
+    attributes:
+      label: Profiling Data
+      description: Any profiling data you've collected
+      placeholder: |
+        Output from profiler:
+        - 60% time in matrix multiplication
+        - 30% time in memory allocation
+        - 10% time in data transfer
+        
+        Memory allocator stats:
+        - Peak memory: 40GB
+        - Number of allocations: 1M
+      render: text
+
+  - type: dropdown
+    id: performance-type
+    attributes:
+      label: Performance Issue Type
+      description: What type of performance issue is this?
+      multiple: true
+      options:
+        - High latency/slow execution
+        - High memory usage
+        - Memory leak
+        - Low GPU/CPU utilization
+        - Slow data loading
+        - Compilation time
+        - Startup time
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: workload-type
+    attributes:
+      label: Workload Type
+      description: What type of workload exhibits the issue?
+      options:
+        - Training
+        - Inference
+        - Fine-tuning
+        - Quantization
+        - Model loading/saving
+        - Data preprocessing
+        - Distributed training
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: model-size
+    attributes:
+      label: Model Size
+      description: Size of the model (parameters, memory)
+      placeholder: "e.g., 340M parameters, 1.3GB on disk"
+
+  - type: input
+    id: batch-size
+    attributes:
+      label: Batch Size
+      description: Batch size used when issue occurs
+      placeholder: "e.g., 32"
+
+  - type: input
+    id: sequence-length
+    attributes:
+      label: Sequence Length
+      description: For sequence models, what sequence length?
+      placeholder: "e.g., 512"
+
+  - type: textarea
+    id: hardware-specs
+    attributes:
+      label: Hardware Specifications
+      description: Detailed hardware information
+      placeholder: |
+        - CPU: AMD Ryzen 9 5950X (16 cores)
+        - GPU: NVIDIA RTX 3090 (24GB)
+        - RAM: 64GB DDR4
+        - OS: Ubuntu 22.04
+        - CUDA: 11.8
+        - Driver: 520.61.05
+    validations:
+      required: true
+
+  - type: textarea
+    id: comparison
+    attributes:
+      label: Performance Comparison
+      description: How does this compare to other frameworks?
+      placeholder: |
+        Same model in PyTorch:
+        - Inference time: 50ms
+        - Memory usage: 4GB
+        - GPU utilization: 85%
+
+  - type: textarea
+    id: workarounds
+    attributes:
+      label: Attempted Workarounds
+      description: What have you tried to improve performance?
+      placeholder: |
+        - Tried reducing batch size, but throughput decreased
+        - Enabled mixed precision, saw 10% improvement
+        - Tried different thread counts, no change
+
+  - type: checkboxes
+    id: optimizations
+    attributes:
+      label: Enabled Optimizations
+      description: Which optimizations are you using?
+      options:
+        - label: Mixed precision (FP16/BF16)
+          required: false
+        - label: Quantization
+          required: false
+        - label: Operator fusion
+          required: false
+        - label: Graph optimization
+          required: false
+        - label: Custom CUDA kernels
+          required: false
+        - label: Multi-threading
+          required: false
+        - label: Distributed training
+          required: false
+
+  - type: input
+    id: regression
+    attributes:
+      label: Regression
+      description: Did this work better in a previous version?
+      placeholder: "e.g., Version 0.1.0 was 2x faster"
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Please check the following before submitting
+      options:
+        - label: I have provided profiling data or measurements
+          required: true
+        - label: I have included hardware specifications
+          required: true
+        - label: I have provided a minimal reproduction example
+          required: false
+        - label: I have compared with expected performance
+          required: false

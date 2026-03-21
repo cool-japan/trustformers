@@ -1,0 +1,111 @@
+---
+# Production Inventory for TrustformeRS Serve
+
+all:
+  vars:
+    # Global configuration
+    environment: production
+    deployment_method: docker
+    
+    # Network configuration
+    domain_name: trustformers.example.com
+    use_ssl: true
+    
+    # Security settings
+    firewall_enabled: true
+    enable_fail2ban: true
+    
+  children:
+    trustformers_servers:
+      hosts:
+        trustformers-prod-01:
+          ansible_host: 10.0.1.10
+          ansible_user: ubuntu
+          server_role: primary
+        trustformers-prod-02:
+          ansible_host: 10.0.1.11
+          ansible_user: ubuntu
+          server_role: secondary
+        trustformers-prod-03:
+          ansible_host: 10.0.1.12
+          ansible_user: ubuntu
+          server_role: secondary
+      vars:
+        # Application configuration
+        app_version: "v1.0.0"
+        worker_threads: 4
+        max_memory: "4G"
+        
+        # Performance settings
+        max_batch_size: 64
+        max_sequence_length: 4096
+        
+        # Monitoring
+        monitoring_enabled: true
+        backup_enabled: true
+    
+    database_servers:
+      hosts:
+        trustformers-db-01:
+          ansible_host: 10.0.2.10
+          ansible_user: ubuntu
+          db_role: primary
+        trustformers-db-02:
+          ansible_host: 10.0.2.11
+          ansible_user: ubuntu
+          db_role: replica
+      vars:
+        # Database configuration
+        db_host: 10.0.2.10
+        db_port: 5432
+        db_name: trustformers_prod
+        db_user: trustformers
+        
+        # Redis configuration
+        redis_host: 10.0.2.10
+        redis_port: 6379
+    
+    load_balancers:
+      hosts:
+        trustformers-lb-01:
+          ansible_host: 10.0.0.10
+          ansible_user: ubuntu
+          lb_role: primary
+        trustformers-lb-02:
+          ansible_host: 10.0.0.11
+          ansible_user: ubuntu
+          lb_role: backup
+      vars:
+        # Load balancer configuration
+        ssl_certificate_path: /etc/ssl/certs/trustformers.crt
+        ssl_private_key_path: /etc/ssl/private/trustformers.key
+        
+        # Upstream servers
+        upstream_servers:
+          - server: 10.0.1.10:8080
+            weight: 1
+            max_fails: 3
+            fail_timeout: 30s
+          - server: 10.0.1.11:8080
+            weight: 1
+            max_fails: 3
+            fail_timeout: 30s
+          - server: 10.0.1.12:8080
+            weight: 1
+            max_fails: 3
+            fail_timeout: 30s
+    
+    monitoring_servers:
+      hosts:
+        trustformers-monitor-01:
+          ansible_host: 10.0.3.10
+          ansible_user: ubuntu
+      vars:
+        # Monitoring stack
+        prometheus_enabled: true
+        grafana_enabled: true
+        alertmanager_enabled: true
+        
+        # Data retention
+        prometheus_retention: "30d"
+        grafana_retention: "90d"

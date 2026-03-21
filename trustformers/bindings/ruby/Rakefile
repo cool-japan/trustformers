@@ -1,0 +1,334 @@
+# frozen_string_literal: true
+
+require "bundler/gem_tasks"
+require "rake/testtask"
+require "rake/extensiontask"
+
+# Configure extension compilation
+Rake::ExtensionTask.new("trustformers_native") do |ext|
+  ext.lib_dir = "lib/trustformers"
+  ext.ext_dir = "ext/trustformers"
+  ext.source_pattern = "*.{c,h}"
+end
+
+# Test configuration
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList["test/**/test_*.rb"]
+  t.verbose = true
+end
+
+# Performance tests
+Rake::TestTask.new(:performance) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList["test/performance/**/*_test.rb"]
+  t.verbose = true
+end
+
+# Integration tests (require TrustFormeRS library)
+Rake::TestTask.new(:integration) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList["test/integration/**/*_test.rb"]
+  t.verbose = true
+end
+
+# Documentation generation
+begin
+  require "yard"
+  
+  YARD::Rake::YardocTask.new(:doc) do |t|
+    t.files = ["lib/**/*.rb"]
+    t.options = [
+      "--output-dir", "doc",
+      "--markup", "markdown",
+      "--readme", "README.md",
+      "--title", "TrustFormeRS Ruby Documentation"
+    ]
+  end
+rescue LoadError
+  desc "Generate documentation (yard not available)"
+  task :doc do
+    puts "YARD is not available. Install it with: gem install yard"
+  end
+end
+
+# Code quality checks
+begin
+  require "rubocop/rake_task"
+  
+  RuboCop::RakeTask.new(:rubocop) do |t|
+    t.options = ["--display-cop-names"]
+  end
+  
+  desc "Auto-correct RuboCop offenses"
+  task :rubocop_fix do
+    sh "rubocop --auto-correct"
+  end
+rescue LoadError
+  desc "Run RuboCop (not available)"
+  task :rubocop do
+    puts "RuboCop is not available. Install it with: gem install rubocop"
+  end
+  
+  task :rubocop_fix do
+    puts "RuboCop is not available. Install it with: gem install rubocop"
+  end
+end
+
+# Benchmarking tasks
+desc "Run benchmarks"
+task :benchmark do
+  Dir["benchmark/**/*.rb"].each do |benchmark_file|
+    puts "Running #{benchmark_file}..."
+    ruby benchmark_file
+  end
+end
+
+# Example tasks
+desc "Run all examples"
+task :examples do
+  example_files = Dir["examples/**/*.rb"]
+  
+  if example_files.empty?
+    puts "No examples found in examples/ directory"
+  else
+    example_files.each do |example_file|
+      puts "\n" + "=" * 50
+      puts "Running #{example_file}"
+      puts "=" * 50
+      
+      begin
+        ruby example_file
+      rescue => e
+        puts "Error running #{example_file}: #{e.message}"
+      end
+    end
+  end
+end
+
+desc "Run specific example"
+task :example, [:name] do |t, args|
+  if args[:name]
+    example_file = "examples/#{args[:name]}.rb"
+    if File.exist?(example_file)
+      ruby example_file
+    else
+      puts "Example not found: #{example_file}"
+      puts "Available examples:"
+      Dir["examples/**/*.rb"].each { |f| puts "  #{File.basename(f, '.rb')}" }
+    end
+  else
+    puts "Usage: rake example[name]"
+    puts "Available examples:"
+    Dir["examples/**/*.rb"].each { |f| puts "  #{File.basename(f, '.rb')}" }
+  end
+end
+
+# Clean tasks
+desc "Clean compiled extensions and temporary files"
+task :clean do
+  puts "Cleaning compiled extensions..."
+  FileUtils.rm_rf("lib/trustformers/trustformers_native.so")
+  FileUtils.rm_rf("lib/trustformers/trustformers_native.bundle")
+  FileUtils.rm_rf("lib/trustformers/trustformers_native.dll")
+  
+  puts "Cleaning temporary files..."
+  FileUtils.rm_rf("tmp/")
+  FileUtils.rm_rf("pkg/")
+  
+  # Clean extension build artifacts
+  Dir["ext/**/Makefile"].each { |f| FileUtils.rm_f(f) }
+  Dir["ext/**/*.o"].each { |f| FileUtils.rm_f(f) }
+  Dir["ext/**/*.so"].each { |f| FileUtils.rm_f(f) }
+  Dir["ext/**/*.bundle"].each { |f| FileUtils.rm_f(f) }
+  Dir["ext/**/mkmf.log"].each { |f| FileUtils.rm_f(f) }
+end
+
+desc "Deep clean (including generated documentation)"
+task :deep_clean => :clean do
+  puts "Cleaning documentation..."
+  FileUtils.rm_rf("doc/")
+  FileUtils.rm_rf(".yardoc/")
+  
+  puts "Cleaning coverage reports..."
+  FileUtils.rm_rf("coverage/")
+end
+
+# Build tasks
+desc "Build the gem"
+task :build => [:clean, :compile] do
+  sh "gem build trustformers.gemspec"
+end
+
+desc "Build and install the gem locally"
+task :install => :build do
+  gem_file = Dir["trustformers-*.gem"].last
+  sh "gem install #{gem_file}"
+end
+
+desc "Uninstall the gem"
+task :uninstall do
+  sh "gem uninstall trustformers"
+end
+
+# Release tasks
+desc "Check if ready for release"
+task :release_check do
+  puts "Checking release readiness..."
+  
+  # Check that we're on main branch
+  current_branch = `git rev-parse --abbrev-ref HEAD`.strip
+  unless current_branch == "main" || current_branch == "master"
+    puts "❌ Not on main/master branch (currently on #{current_branch})"
+    exit 1
+  end
+  
+  # Check that working directory is clean
+  unless `git status --porcelain`.strip.empty?
+    puts "❌ Working directory is not clean"
+    sh "git status"
+    exit 1
+  end
+  
+  # Check that tests pass
+  begin
+    Rake::Task[:test].invoke
+    puts "✅ Tests pass"
+  rescue
+    puts "❌ Tests failed"
+    exit 1
+  end
+  
+  # Check code quality
+  begin
+    Rake::Task[:rubocop].invoke
+    puts "✅ Code quality check passed"
+  rescue
+    puts "❌ Code quality issues found"
+    exit 1
+  end
+  
+  puts "✅ Ready for release!"
+end
+
+# CI tasks
+desc "Run CI tasks"
+task :ci do
+  puts "Running CI pipeline..."
+  
+  Rake::Task[:compile].invoke
+  puts "✅ Compilation successful"
+  
+  Rake::Task[:test].invoke
+  puts "✅ Tests passed"
+  
+  Rake::Task[:rubocop].invoke
+  puts "✅ Code quality check passed"
+  
+  puts "🎉 CI pipeline completed successfully!"
+end
+
+# Development setup
+desc "Set up development environment"
+task :setup do
+  puts "Setting up development environment..."
+  
+  # Install dependencies
+  sh "bundle install"
+  
+  # Create necessary directories
+  FileUtils.mkdir_p("tmp")
+  FileUtils.mkdir_p("log")
+  
+  # Compile extensions
+  Rake::Task[:compile].invoke
+  
+  puts "✅ Development environment ready!"
+  puts
+  puts "To run tests: rake test"
+  puts "To run examples: rake examples"
+  puts "To generate docs: rake doc"
+  puts "To check code quality: rake rubocop"
+end
+
+# Default task
+task default: [:compile, :test]
+
+# Custom tasks for TrustFormeRS
+namespace :trustformers do
+  desc "Check TrustFormeRS library availability"
+  task :check do
+    begin
+      require_relative "lib/trustformers"
+      version = TrustFormeRS.version
+      puts "✅ TrustFormeRS library is available"
+      puts "   Version: #{version}"
+      puts "   Devices: #{TrustFormeRS.available_devices.join(', ')}"
+    rescue LoadError => e
+      puts "❌ TrustFormeRS library not available: #{e.message}"
+      puts
+      puts "To build TrustFormeRS:"
+      puts "1. Navigate to the main TrustFormeRS directory"
+      puts "2. Run: cargo build --release --package trustformers-c"
+      puts "3. Ensure the library is in your system path or set TRUSTFORMERS_LIB_DIR"
+    end
+  end
+  
+  desc "Run system information check"
+  task :sysinfo do
+    begin
+      require_relative "lib/trustformers"
+      info = TrustFormeRS.system_info
+      
+      puts "🖥️  System Information:"
+      puts "   TrustFormeRS Version: #{info[:version]}"
+      puts "   Ruby Version: #{info[:ruby_version]}"
+      puts "   Platform: #{info[:platform]}"
+      puts "   Available Devices: #{info[:devices].join(', ')}"
+      puts "   GPU Available: #{info[:gpu_available]}"
+      puts "   CUDA Available: #{info[:cuda_available]}"
+      puts "   Metal Available: #{info[:metal_available]}"
+      
+    rescue LoadError
+      puts "❌ Cannot load TrustFormeRS library"
+      Rake::Task["trustformers:check"].invoke
+    end
+  end
+  
+  desc "Run quick smoke test"
+  task :smoke_test do
+    begin
+      require_relative "lib/trustformers"
+      
+      puts "🧪 Running smoke test..."
+      
+      # Test basic initialization
+      trustformers = TrustFormeRS.new
+      puts "✅ TrustFormeRS initialized"
+      
+      # Test configuration
+      config = TrustFormeRS::Configuration.default
+      puts "✅ Configuration created"
+      
+      # Test tensor operations
+      tensor = TrustFormeRS::Tensor.from_array([1, 2, 3])
+      result = tensor + tensor
+      puts "✅ Tensor operations work"
+      
+      trustformers.close
+      puts "✅ Cleanup successful"
+      
+      puts "🎉 Smoke test passed!"
+      
+    rescue => e
+      puts "❌ Smoke test failed: #{e.message}"
+      exit 1
+    end
+  end
+end
+
+# Add compile dependency to test
+task test: :compile

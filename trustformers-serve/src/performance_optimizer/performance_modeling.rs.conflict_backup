@@ -1,0 +1,501 @@
+//! Performance Modeling Module for TrustformeRS Performance Optimizer
+//!
+//! This module provides comprehensive machine learning-based performance modeling
+//! capabilities including adaptive learning, model validation, training pipelines,
+//! and performance prediction for optimal parallelism estimation and resource
+//! optimization in test execution environments.
+//!
+//! # Key Components
+//!
+//! - **PerformanceModel**: Multiple ML model types for performance prediction
+//! - **AdaptiveLearningModel**: Online learning with continuous adaptation
+//! - **Training Pipeline**: Complete ML training and validation workflow
+//! - **Model Validation**: Cross-validation and holdout validation strategies
+//! - **Feature Engineering**: Advanced feature extraction and preprocessing
+//! - **Performance Prediction**: Real-time performance inference and optimization
+//!
+//! # Architecture
+//!
+//! This module has been refactored into a modular architecture with specialized
+//! sub-modules for better maintainability and performance. The original monolithic
+//! implementation has been preserved through delegation for backward compatibility.
+//!
+//! ## Modular Components
+//!
+//! - [`types`](performance_modeling/types/index.html) - Core type definitions and traits
+//! - [`model_implementations`](performance_modeling/model_implementations/index.html) - ML model implementations
+//! - [`adaptive_learning`](performance_modeling/adaptive_learning/index.html) - Adaptive learning system
+//! - [`model_validation`](performance_modeling/model_validation/index.html) - Validation strategies
+//! - [`feature_engineering`](performance_modeling/feature_engineering/index.html) - Feature engineering
+//! - [`training_pipeline`](performance_modeling/training_pipeline/index.html) - Training orchestration
+//! - [`prediction_engine`](performance_modeling/prediction_engine/index.html) - Prediction engine
+//!
+//! # Example Usage
+//!
+//! ```rust
+//! use crate::performance_optimizer::performance_modeling::{
+//!     PerformanceModelingManager,
+//!     PredictionRequest,
+//!     ModelTypeConfig,
+//! };
+//!
+//! // Create a performance modeling manager
+//! let manager = PerformanceModelingManager::new().await?;
+//!
+//! // Train a model
+//! let model = manager.train_model(&training_data, &ModelTypeConfig::LinearRegression).await?;
+//!
+//! // Make predictions
+//! let request = PredictionRequest { /* ... */ };
+//! let prediction = manager.predict(&request).await?;
+//! ```
+//!
+//! # Backward Compatibility
+//!
+//! All original APIs are preserved through delegation to the new modular implementation.
+//! Existing code will continue to work without modification.
+
+// Re-export the entire modular performance modeling system
+pub mod performance_modeling {
+    pub mod types;
+    pub mod model_implementations;
+    pub mod adaptive_learning;
+    pub mod model_validation;
+    pub mod feature_engineering;
+    pub mod training_pipeline;
+    pub mod prediction_engine;
+
+    // Re-export the mod.rs contents
+    pub use super::performance_modeling::*;
+}
+
+// Re-export all public components from the modular implementation for direct access
+pub use self::performance_modeling::{
+    // Main manager
+    PerformanceModelingManager,
+
+    // Core types
+    PerformanceDataPoint,
+    PerformancePrediction,
+    PredictionRequest,
+    PredictionRequestBatch,
+    SystemState,
+    TestCharacteristics,
+
+    // Configuration types
+    ModelConfig,
+    ModelTypeConfig,
+    PredictionConfig,
+    TrainingConfig,
+    ValidationConfig,
+    FeatureEngineeringConfig,
+    AdaptiveLearningConfig,
+
+    // Result and metric types
+    TrainingResult,
+    ValidationResult,
+    ModelAccuracyMetrics,
+    PredictionMetrics,
+    EngineeredFeatures,
+    FeatureImportance,
+
+    // Error types
+    ModelingError,
+    PredictionError,
+    TrainingError,
+    ValidationError,
+    FeatureEngineeringError,
+
+    // Traits
+    PerformancePredictor,
+    ModelTrainer,
+    ModelValidator,
+    FeatureEngineer,
+    AdaptiveLearner,
+
+    // Enums
+    ModelType,
+    ValidationStrategy,
+    FeatureSelectionMethod,
+    ConceptDriftMethod,
+    ActiveLearningStrategy,
+
+    // Model implementations
+    LinearRegressionModel,
+    PolynomialRegressionModel,
+    ExponentialModel,
+    NeuralNetworkModel,
+    EnsembleModel,
+    ModelFactory,
+    TrainedModel,
+
+    // Adaptive learning components
+    AdaptiveLearningOrchestrator,
+    OnlineLearningManager,
+    ConceptDriftDetector,
+    ActiveLearningManager,
+    AdaptationDecisionEngine,
+    LearningRateScheduler,
+
+    // Model validation components
+    ModelValidationOrchestrator,
+    CrossValidation,
+    HoldoutValidation,
+    TimeSeriesValidation,
+    BootstrapValidation,
+    ValidationMetricsCalculator,
+    ValidationReportGenerator,
+
+    // Feature engineering components
+    FeatureEngineeringOrchestrator,
+    FeatureExtractor,
+    FeatureTransformer,
+    FeatureSelector,
+    FeatureValidator,
+    StatisticalFeatureGenerator,
+    DomainSpecificFeatureGenerator,
+
+    // Training pipeline components
+    TrainingPipelineOrchestrator,
+    DataPreparationEngine,
+    HyperparameterTuner,
+    TrainingMonitor,
+    ModelPersistenceManager,
+    ResourceUsageTracker,
+    TrainingMetricsCollector,
+
+    // Prediction engine components
+    PredictionEngine,
+    PredictionCacheManager,
+    EnsemblePredictionEngine,
+    UncertaintyEstimator,
+    PredictionLatencyTracker,
+    PredictionAccuracyMonitor,
+};
+
+// Additional imports needed for backward compatibility with existing types module
+use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, Utc, Datelike, Timelike};
+use parking_lot::{Mutex, RwLock};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::Duration,
+};
+
+// Import legacy types for backward compatibility
+use super::types::{
+    PerformanceModel, PerformanceModelType, ModelValidationResults,
+    AdaptiveLearningModel, ModelState, LearningAlgorithm, TrainingDataset,
+    TrainingExample, DatasetSplitRatios, DatasetStatistics, FeatureStatistics,
+    TargetStatistics, TargetDistribution, DistributionType, DataQualityMetrics,
+    ModelValidation, ValidationStrategy as LegacyValidationStrategy,
+    ValidationResult as LegacyValidationResult, ValidationDetails,
+    ValidationRecord, LearningHistory, TrainingEpoch, ModelUpdate, ModelUpdateType,
+    ModelPerformanceMetrics, ConvergenceStatus,
+    PerformanceSnapshot, ComparativePerformance,
+    ParallelismEstimate,
+};
+
+// =============================================================================
+// BACKWARD COMPATIBILITY LAYER
+// =============================================================================
+
+/// Legacy PerformanceModel implementation that delegates to the new modular system
+impl PerformanceModel {
+    /// Create a new performance model with specified type
+    pub fn new(model_type: PerformanceModelType) -> Self {
+        Self {
+            model_type,
+            parameters: HashMap::new(),
+            accuracy: 0.0,
+            last_updated: Utc::now(),
+            training_data_size: 0,
+            validation_results: ModelValidationResults {
+                r_squared: 0.0,
+                mean_absolute_error: f32::INFINITY,
+                root_mean_squared_error: f32::INFINITY,
+                cross_validation_scores: Vec::new(),
+                validated_at: Utc::now(),
+            },
+        }
+    }
+
+    /// Train the performance model with provided data
+    pub async fn train(
+        &mut self,
+        training_data: &[super::types::PerformanceDataPoint],
+        validation_data: &[super::types::PerformanceDataPoint],
+    ) -> Result<()> {
+        // Convert legacy data points to new format
+        let new_training_data: Vec<PerformanceDataPoint> = training_data
+            .iter()
+            .map(|dp| self.convert_legacy_data_point(dp))
+            .collect::<Result<Vec<_>>>()?;
+
+        let new_validation_data: Vec<PerformanceDataPoint> = validation_data
+            .iter()
+            .map(|dp| self.convert_legacy_data_point(dp))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Create manager with appropriate configuration
+        let manager = PerformanceModelingManager::new().await?;
+
+        // Convert legacy model type to new format
+        let model_type_config = self.convert_legacy_model_type(&self.model_type)?;
+
+        // Train using the new system
+        let trained_model = manager.train_model(&new_training_data, &model_type_config).await?;
+
+        // Update legacy fields
+        self.training_data_size = training_data.len();
+        let accuracy = trained_model.get_accuracy();
+        self.accuracy = accuracy.overall_accuracy as f64;
+        self.last_updated = Utc::now();
+
+        // Update validation results
+        let validation_result = manager.validate_model(&*trained_model, &new_validation_data).await?;
+        self.validation_results = ModelValidationResults {
+            r_squared: validation_result.overall_score,
+            mean_absolute_error: validation_result.cross_validation_score.unwrap_or(0.0),
+            root_mean_squared_error: validation_result.holdout_score.unwrap_or(0.0),
+            cross_validation_scores: vec![validation_result.overall_score],
+            validated_at: Utc::now(),
+        };
+
+        Ok(())
+    }
+
+    /// Convert legacy data point to new format
+    fn convert_legacy_data_point(&self, legacy_dp: &super::types::PerformanceDataPoint) -> Result<PerformanceDataPoint> {
+        Ok(PerformanceDataPoint {
+            throughput: legacy_dp.throughput,
+            latency: Duration::from_millis(legacy_dp.latency as u64),
+            parallelism: legacy_dp.parallelism,
+            test_characteristics: TestCharacteristics {
+                test_complexity: legacy_dp.test_complexity.unwrap_or(0.5),
+                io_operations: legacy_dp.io_operations.unwrap_or(0),
+                cpu_intensive: legacy_dp.cpu_intensive.unwrap_or(false),
+                memory_usage: legacy_dp.memory_usage.unwrap_or(0),
+                network_calls: legacy_dp.network_calls.unwrap_or(0),
+                database_queries: legacy_dp.database_queries.unwrap_or(0),
+                test_type: legacy_dp.test_type.clone().unwrap_or_else(|| "unit".to_string()),
+                test_size: legacy_dp.test_size.unwrap_or(1),
+            },
+            system_state: SystemState {
+                cpu_usage: legacy_dp.cpu_usage.unwrap_or(0.5),
+                memory_usage: legacy_dp.memory_usage.unwrap_or(0) as f64,
+                available_cores: legacy_dp.available_cores.unwrap_or(1),
+                system_load: legacy_dp.system_load.unwrap_or(0.5),
+                available_memory: legacy_dp.available_memory.unwrap_or(1024 * 1024 * 1024), // Default 1GB
+                disk_io_rate: 0.0, // Not available in legacy format
+                network_io_rate: 0.0, // Not available in legacy format
+            },
+            timestamp: legacy_dp.timestamp,
+            success_rate: legacy_dp.success_rate.unwrap_or(1.0),
+            error_rate: legacy_dp.error_rate.unwrap_or(0.0),
+        })
+    }
+
+    /// Convert legacy model type to new format
+    fn convert_legacy_model_type(&self, legacy_type: &PerformanceModelType) -> Result<ModelTypeConfig> {
+        match legacy_type {
+            PerformanceModelType::LinearRegression => Ok(ModelTypeConfig::LinearRegression),
+            PerformanceModelType::PolynomialRegression { degree } => {
+                Ok(ModelTypeConfig::PolynomialRegression { degree: *degree })
+            }
+            PerformanceModelType::Exponential => Ok(ModelTypeConfig::ExponentialModel),
+            PerformanceModelType::NeuralNetwork { hidden_layers } => {
+                Ok(ModelTypeConfig::NeuralNetwork {
+                    hidden_layers: hidden_layers.clone(),
+                    activation: "relu".to_string(),
+                    optimizer: "adam".to_string(),
+                })
+            }
+            PerformanceModelType::Ensemble { models: _ } => {
+                // Default ensemble configuration
+                Ok(ModelTypeConfig::Ensemble {
+                    base_models: vec![
+                        ModelTypeConfig::LinearRegression,
+                        ModelTypeConfig::PolynomialRegression { degree: 2 },
+                    ],
+                    combination_method: "weighted_average".to_string(),
+                })
+            }
+            PerformanceModelType::Custom(name) => {
+                Ok(ModelTypeConfig::Custom {
+                    name: name.clone(),
+                    parameters: HashMap::new(),
+                })
+            }
+        }
+    }
+
+    /// Predict performance for given parameters (legacy interface)
+    pub async fn predict(
+        &self,
+        parallelism: u32,
+        test_characteristics: &super::types::TestCharacteristics,
+        system_state: &super::types::SystemState,
+    ) -> Result<f64> {
+        // Create manager
+        let manager = PerformanceModelingManager::new().await?;
+
+        // Convert parameters to new request format
+        let request = PredictionRequest {
+            parallelism_levels: vec![parallelism],
+            test_characteristics: TestCharacteristics {
+                test_complexity: test_characteristics.test_complexity,
+                io_operations: test_characteristics.io_operations,
+                cpu_intensive: test_characteristics.cpu_intensive,
+                memory_usage: test_characteristics.memory_usage,
+                network_calls: test_characteristics.network_calls,
+                database_queries: test_characteristics.database_queries,
+                test_type: test_characteristics.test_type.clone(),
+                test_size: test_characteristics.test_size,
+            },
+            system_state: SystemState {
+                cpu_usage: system_state.cpu_usage,
+                memory_usage: system_state.memory_usage,
+                available_cores: system_state.available_cores,
+                system_load: system_state.system_load,
+                available_memory: system_state.available_memory,
+                disk_io_rate: 0.0, // Default value
+                network_io_rate: 0.0, // Default value
+            },
+            prediction_horizon: None,
+            confidence_level: 0.8,
+            include_uncertainty: false,
+        };
+
+        // Make prediction
+        let prediction = manager.predict(&request).await?;
+        Ok(prediction.throughput)
+    }
+
+    /// Get model accuracy (legacy interface)
+    pub fn get_accuracy(&self) -> f64 {
+        self.accuracy
+    }
+
+    /// Get validation results (legacy interface)
+    pub fn get_validation_results(&self) -> &ModelValidationResults {
+        &self.validation_results
+    }
+}
+
+/// Legacy AdaptiveLearningModel implementation that delegates to the new system
+impl AdaptiveLearningModel {
+    /// Create a new adaptive learning model
+    pub fn new(algorithm: LearningAlgorithm) -> Self {
+        Self {
+            algorithm,
+            model_state: ModelState::Initialized,
+            learning_rate: 0.01,
+            adaptation_rate: 0.1,
+            last_updated: Utc::now(),
+            performance_history: Vec::new(),
+            current_accuracy: 0.0,
+        }
+    }
+
+    /// Update the model with new data (legacy interface)
+    pub async fn update(&mut self, new_data: &[super::types::PerformanceDataPoint]) -> Result<()> {
+        // Convert legacy data points
+        let new_data_points: Vec<PerformanceDataPoint> = new_data
+            .iter()
+            .map(|dp| self.convert_legacy_data_point(dp))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Create adaptive learning manager
+        let config = AdaptiveLearningConfig::default();
+        let manager = AdaptiveLearningOrchestrator::new(&config).await?;
+
+        // Process new data
+        manager.process_new_data(&new_data_points).await?;
+
+        // Update legacy fields
+        self.last_updated = Utc::now();
+        self.model_state = ModelState::Updated;
+
+        Ok(())
+    }
+
+    /// Convert legacy data point (same implementation as PerformanceModel)
+    fn convert_legacy_data_point(&self, legacy_dp: &super::types::PerformanceDataPoint) -> Result<PerformanceDataPoint> {
+        Ok(PerformanceDataPoint {
+            throughput: legacy_dp.throughput,
+            latency: Duration::from_millis(legacy_dp.latency as u64),
+            parallelism: legacy_dp.parallelism,
+            test_characteristics: TestCharacteristics {
+                test_complexity: legacy_dp.test_complexity.unwrap_or(0.5),
+                io_operations: legacy_dp.io_operations.unwrap_or(0),
+                cpu_intensive: legacy_dp.cpu_intensive.unwrap_or(false),
+                memory_usage: legacy_dp.memory_usage.unwrap_or(0),
+                network_calls: legacy_dp.network_calls.unwrap_or(0),
+                database_queries: legacy_dp.database_queries.unwrap_or(0),
+                test_type: legacy_dp.test_type.clone().unwrap_or_else(|| "unit".to_string()),
+                test_size: legacy_dp.test_size.unwrap_or(1),
+            },
+            system_state: SystemState {
+                cpu_usage: legacy_dp.cpu_usage.unwrap_or(0.5),
+                memory_usage: legacy_dp.memory_usage.unwrap_or(0) as f64,
+                available_cores: legacy_dp.available_cores.unwrap_or(1),
+                system_load: legacy_dp.system_load.unwrap_or(0.5),
+                available_memory: legacy_dp.available_memory.unwrap_or(1024 * 1024 * 1024),
+                disk_io_rate: 0.0,
+                network_io_rate: 0.0,
+            },
+            timestamp: legacy_dp.timestamp,
+            success_rate: legacy_dp.success_rate.unwrap_or(1.0),
+            error_rate: legacy_dp.error_rate.unwrap_or(0.0),
+        })
+    }
+}
+
+// =============================================================================
+// CONVENIENCE FUNCTIONS AND FACTORY METHODS
+// =============================================================================
+
+/// Create a new performance modeling manager with default configuration
+pub async fn create_performance_modeling_manager() -> Result<PerformanceModelingManager> {
+    PerformanceModelingManager::new().await
+}
+
+/// Create a performance modeling manager with custom configuration
+pub async fn create_performance_modeling_manager_with_config(
+    config: ModelConfig,
+) -> Result<PerformanceModelingManager> {
+    PerformanceModelingManager::with_config(config).await
+}
+
+/// Quick training helper that creates a manager and trains a model
+pub async fn train_performance_model(
+    training_data: &[PerformanceDataPoint],
+    model_type: ModelTypeConfig,
+) -> Result<Arc<dyn PerformancePredictor>> {
+    let manager = PerformanceModelingManager::new().await?;
+    manager.train_model(training_data, &model_type).await
+}
+
+/// Quick prediction helper for simple use cases
+pub async fn predict_performance(
+    training_data: &[PerformanceDataPoint],
+    request: &PredictionRequest,
+) -> Result<PerformancePrediction> {
+    PerformanceModelingManager::quick_predict(training_data, request).await
+}
+
+/// Legacy compatibility function for creating basic performance model
+pub fn create_legacy_performance_model(
+    model_type: PerformanceModelType,
+) -> PerformanceModel {
+    PerformanceModel::new(model_type)
+}
+
+/// Legacy compatibility function for creating adaptive learning model
+pub fn create_legacy_adaptive_model(
+    algorithm: LearningAlgorithm,
+) -> AdaptiveLearningModel {
+    AdaptiveLearningModel::new(algorithm)
+}

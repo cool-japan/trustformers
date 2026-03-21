@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/trustformers-logo.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="TrustformeRS React Sentiment Analyzer - Real-time sentiment analysis powered by machine learning" />
+    <meta name="keywords" content="sentiment analysis, machine learning, AI, React, TrustformeRS, natural language processing" />
+    <meta name="author" content="TrustformeRS Team" />
+    
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://trustformers.example.com/demos/react-sentiment/" />
+    <meta property="og:title" content="TrustformeRS React Sentiment Analyzer" />
+    <meta property="og:description" content="Experience real-time sentiment analysis with TrustformeRS and React" />
+    <meta property="og:image" content="https://trustformers.example.com/og-image.png" />
+
+    <!-- Twitter -->
+    <meta property="twitter:card" content="summary_large_image" />
+    <meta property="twitter:url" content="https://trustformers.example.com/demos/react-sentiment/" />
+    <meta property="twitter:title" content="TrustformeRS React Sentiment Analyzer" />
+    <meta property="twitter:description" content="Experience real-time sentiment analysis with TrustformeRS and React" />
+    <meta property="twitter:image" content="https://trustformers.example.com/og-image.png" />
+
+    <!-- PWA manifest -->
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#3b82f6" />
+    
+    <!-- Preconnect to external domains for performance -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    
+    <!-- Load fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    
+    <!-- Tailwind CSS CDN for demo purposes -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+            },
+            colors: {
+              trustformers: {
+                50: '#eff6ff',
+                100: '#dbeafe',
+                500: '#3b82f6',
+                600: '#2563eb',
+                700: '#1d4ed8',
+              }
+            }
+          }
+        }
+      }
+    </script>
+    
+    <title>TrustformeRS React Sentiment Analyzer</title>
+    
+    <!-- Service Worker Registration -->
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', function() {
+          navigator.serviceWorker.register('/sw.js')
+            .then(function(registration) {
+              console.log('ServiceWorker registration successful');
+            })
+            .catch(function(err) {
+              console.log('ServiceWorker registration failed: ', err);
+            });
+        });
+      }
+    </script>
+    
+    <!-- Performance monitoring -->
+    <script>
+      // Basic performance monitoring
+      window.addEventListener('load', function() {
+        setTimeout(function() {
+          const perfData = performance.getEntriesByType('navigation')[0];
+          console.log('Page load time:', perfData.loadEventEnd - perfData.fetchStart, 'ms');
+          
+          // Report Core Web Vitals
+          if ('web-vital' in window) {
+            getCLS(console.log);
+            getFID(console.log);
+            getLCP(console.log);
+          }
+        }, 0);
+      });
+    </script>
+    
+    <style>
+      /* Critical CSS for initial render */
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        background: linear-gradient(135deg, #ebf8ff 0%, #e6fffa 100%);
+        min-height: 100vh;
+        margin: 0;
+        padding: 0;
+      }
+      
+      /* Loading spinner */
+      .loading-spinner {
+        display: inline-block;
+        width: 20px;
+        height: 20px;
+        border: 3px solid rgba(59, 130, 246, 0.3);
+        border-radius: 50%;
+        border-top-color: #3b82f6;
+        animation: spin 1s ease-in-out infinite;
+      }
+      
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      
+      /* Initial loading state */
+      #loading-fallback {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+        flex-direction: column;
+        gap: 1rem;
+        color: #374151;
+      }
+      
+      /* Hide loading fallback when React takes over */
+      #root:not(:empty) + #loading-fallback {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- React app mount point -->
+    <div id="root"></div>
+    
+    <!-- Loading fallback displayed until React loads -->
+    <div id="loading-fallback">
+      <div class="loading-spinner"></div>
+      <h1 style="font-size: 1.5rem; font-weight: 600; margin: 0;">
+        Loading TrustformeRS Sentiment Analyzer
+      </h1>
+      <p style="color: #6b7280; margin: 0;">
+        Initializing machine learning models...
+      </p>
+    </div>
+    
+    <!-- PWA Install Banner -->
+    <script>
+      let deferredPrompt;
+      
+      window.addEventListener('beforeinstallprompt', (e) => {
+        // Prevent Chrome 67 and earlier from automatically showing the prompt
+        e.preventDefault();
+        // Stash the event so it can be triggered later
+        deferredPrompt = e;
+        
+        // Show custom install banner
+        const installBanner = document.createElement('div');
+        installBanner.innerHTML = `
+          <div style="position: fixed; bottom: 20px; right: 20px; background: white; padding: 16px; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 1000; max-width: 300px;">
+            <p style="margin: 0 0 12px 0; font-weight: 600;">Install Sentiment Analyzer</p>
+            <p style="margin: 0 0 12px 0; color: #6b7280; font-size: 14px;">Add this app to your home screen for quick access</p>
+            <div style="display: flex; gap: 8px;">
+              <button id="install-button" style="background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 500;">Install</button>
+              <button id="install-dismiss" style="background: #f3f4f6; color: #374151; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">Not now</button>
+            </div>
+          </div>
+        `;
+        
+        document.body.appendChild(installBanner);
+        
+        document.getElementById('install-button').addEventListener('click', () => {
+          // Hide the banner
+          installBanner.remove();
+          // Show the install prompt
+          deferredPrompt.prompt();
+          // Wait for the user to respond to the prompt
+          deferredPrompt.userChoice.then((choiceResult) => {
+            if (choiceResult.outcome === 'accepted') {
+              console.log('User accepted the install prompt');
+            }
+            deferredPrompt = null;
+          });
+        });
+        
+        document.getElementById('install-dismiss').addEventListener('click', () => {
+          installBanner.remove();
+        });
+      });
+    </script>
+    
+    <!-- Module loading script -->
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

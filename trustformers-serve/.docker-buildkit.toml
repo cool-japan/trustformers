@@ -1,0 +1,60 @@
+# Docker BuildKit configuration for optimized builds
+# Place this file in ~/.docker/buildx/current/buildkit.toml or use BUILDKIT_CONFIG
+
+debug = false
+
+# Registry configuration for multi-platform builds
+[registry."docker.io"]
+  mirrors = ["mirror.gcr.io"]
+
+# Worker configuration
+[worker.oci]
+  enabled = true
+  # Use more workers for faster builds
+  max-parallelism = 4
+  
+  # Garbage collection configuration
+  gc = true
+  gckeepstorage = "10GB"
+  gcpolicy = [
+    {keepBytes = "512MB", keepDuration = "24h"},
+    {keepBytes = "1GB", keepDuration = "48h"},
+    {keepBytes = "5GB", keepDuration = "72h"}
+  ]
+
+# Cache configuration
+[worker.oci.binary]
+  # Use containerd for better performance
+  containerd-worker = true
+  
+[worker.oci.runtime]
+  name = "runc"
+
+# Frontend configuration
+[frontend.dockerfile.v0]
+  # Enable experimental features
+  experimental = true
+
+# Buildkit daemon configuration
+[buildkitd.grpc]
+  address = ["unix:///run/buildkit/buildkitd.sock", "tcp://0.0.0.0:1234"]
+  uid = 0
+  gid = 0
+
+# Cache mount configuration for better Rust builds
+[buildkitd.cache]
+  # Configure cache mounts for Cargo
+  [[buildkitd.cache.mounts]]
+    type = "cache"
+    source = "cargo-registry"
+    target = "/usr/local/cargo/registry"
+  
+  [[buildkitd.cache.mounts]]
+    type = "cache" 
+    source = "cargo-git"
+    target = "/usr/local/cargo/git"
+    
+  [[buildkitd.cache.mounts]]
+    type = "cache"
+    source = "target-cache"
+    target = "/tmp/target"

@@ -1,0 +1,232 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+apply plugin: 'maven-publish'
+apply plugin: 'signing'
+
+android {
+    compileSdkVersion 33
+    buildToolsVersion "33.0.2"
+    
+    defaultConfig {
+        minSdkVersion 21
+        targetSdkVersion 33
+        versionCode 1
+        versionName "1.0.0"
+        
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        consumerProguardFiles "consumer-rules.pro"
+        
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
+        }
+        
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_shared'
+                cppFlags '-std=c++14 -frtti -fexceptions'
+            }
+        }
+    }
+    
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        
+        debug {
+            minifyEnabled false
+            debuggable true
+            jniDebuggable true
+        }
+    }
+    
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    
+    kotlinOptions {
+        jvmTarget = '1.8'
+        freeCompilerArgs += [
+            '-Xopt-in=kotlin.RequiresOptIn',
+            '-Xopt-in=kotlinx.coroutines.ExperimentalCoroutinesApi'
+        ]
+    }
+    
+    sourceSets {
+        main {
+            java.srcDirs = ['src/main/java']
+            kotlin.srcDirs = ['src/main/kotlin']
+            jniLibs.srcDirs = ['libs']
+            res.srcDirs = ['src/main/res']
+            assets.srcDirs = ['src/main/assets']
+        }
+    }
+    
+    packagingOptions {
+        pickFirst 'lib/x86/libc++_shared.so'
+        pickFirst 'lib/x86_64/libc++_shared.so'
+        pickFirst 'lib/arm64-v8a/libc++_shared.so'
+        pickFirst 'lib/armeabi-v7a/libc++_shared.so'
+    }
+    
+    externalNativeBuild {
+        cmake {
+            path "src/main/jni/CMakeLists.txt"
+            version "3.18.1"
+        }
+    }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    implementation 'androidx.core:core-ktx:1.10.1'
+    implementation 'androidx.annotation:annotation:1.6.0'
+    
+    // Coroutines
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.1'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1'
+    
+    // JSON
+    implementation 'org.json:json:20230227'
+    
+    // Testing
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
+    androidTestImplementation 'androidx.test:runner:1.5.2'
+    androidTestImplementation 'androidx.test:rules:1.5.0'
+}
+
+// Maven publishing configuration
+afterEvaluate {
+    publishing {
+        publications {
+            release(MavenPublication) {
+                from components.release
+                
+                groupId = 'com.trustformers'
+                artifactId = 'trustformers-android'
+                version = '1.0.0'
+                
+                pom {
+                    name = 'TrustformeRS Android'
+                    description = 'Android library for TrustformeRS mobile inference'
+                    url = 'https://github.com/trustformers/trustformers-mobile'
+                    
+                    licenses {
+                        license {
+                            name = 'The MIT License'
+                            url = 'https://opensource.org/licenses/MIT'
+                        }
+                    }
+                    
+                    developers {
+                        developer {
+                            id = 'trustformers'
+                            name = 'TrustformeRS Team'
+                            email = 'team@trustformers.com'
+                        }
+                    }
+                    
+                    scm {
+                        connection = 'scm:git:git://github.com/trustformers/trustformers-mobile.git'
+                        developerConnection = 'scm:git:ssh://github.com/trustformers/trustformers-mobile.git'
+                        url = 'https://github.com/trustformers/trustformers-mobile'
+                    }
+                }
+            }
+        }
+        
+        repositories {
+            maven {
+                name = "GitHubPackages"
+                url = uri("https://maven.pkg.github.com/trustformers/trustformers-mobile")
+                credentials {
+                    username = project.findProperty("gpr.user") ?: System.getenv("USERNAME")
+                    password = project.findProperty("gpr.key") ?: System.getenv("TOKEN")
+                }
+            }
+            
+            maven {
+                name = "OSSRH"
+                url = version.endsWith('SNAPSHOT') ? 
+                    "https://s01.oss.sonatype.org/content/repositories/snapshots/" :
+                    "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
+                credentials {
+                    username = project.findProperty("ossrh.username") ?: System.getenv("OSSRH_USERNAME")
+                    password = project.findProperty("ossrh.password") ?: System.getenv("OSSRH_PASSWORD")
+                }
+            }
+            
+            // JitPack local publishing
+            mavenLocal()
+        }
+    }
+}
+
+// Task to build native library
+task buildNativeLibrary(type: Exec) {
+    workingDir '../'
+    commandLine './build-android.sh'
+}
+
+// Make sure native library is built before Java compilation
+preBuild.dependsOn buildNativeLibrary
+
+// GPG signing configuration for Maven Central
+signing {
+    def signingKeyId = project.findProperty("signing.keyId") ?: System.getenv("SIGNING_KEY_ID")
+    def signingKey = project.findProperty("signing.key") ?: System.getenv("SIGNING_KEY")
+    def signingPassword = project.findProperty("signing.password") ?: System.getenv("SIGNING_PASSWORD")
+    
+    if (signingKeyId && signingKey && signingPassword) {
+        useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+        sign publishing.publications
+    }
+}
+
+// JitPack compatibility tasks
+task jitpackBuild(type: GradleBuild) {
+    description = 'Build task for JitPack without signing requirements'
+    tasks = ['clean', 'assembleRelease', 'publishToMavenLocal']
+}
+
+// Skip signing for JitPack builds
+gradle.taskGraph.whenReady { taskGraph ->
+    if (taskGraph.hasTask(jitpackBuild)) {
+        signing.required = false
+    }
+}
+
+// Generate javadoc and sources JARs for Maven Central
+android.libraryVariants.all { variant ->
+    def variantName = variant.name.capitalize()
+    
+    // Sources JAR
+    task("generate${variantName}Sources", type: Jar) {
+        classifier = 'sources'
+        from android.sourceSets.main.java.srcDirs
+        from android.sourceSets.main.kotlin.srcDirs
+    }
+    
+    // Javadoc JAR
+    task("generate${variantName}Javadoc", type: Javadoc) {
+        source = android.sourceSets.main.java.srcDirs
+        classpath += project.files(android.getBootClasspath().join(File.pathSeparator))
+        classpath += variant.javaCompileProvider.get().classpath
+        failOnError false
+    }
+    
+    task("generate${variantName}JavadocJar", type: Jar, dependsOn: "generate${variantName}Javadoc") {
+        classifier = 'javadoc'
+        from tasks["generate${variantName}Javadoc"].destinationDir
+    }
+    
+    // Attach artifacts to publication
+    artifacts {
+        archives tasks["generate${variantName}Sources"]
+        archives tasks["generate${variantName}JavadocJar"]
+    }
+}

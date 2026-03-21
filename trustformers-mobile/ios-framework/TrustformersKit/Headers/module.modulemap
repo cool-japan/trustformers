@@ -1,0 +1,19 @@
+framework module TrustformersKit {
+    umbrella header "TrustformersKit.h"
+    
+    export *
+    module * { export * }
+    
+    // Link with required system frameworks
+    link framework "Foundation"
+    link framework "CoreML"
+    link framework "Metal"
+    link framework "MetalPerformanceShaders"
+    link framework "Accelerate"
+    
+    // Export C interface for Rust interop
+    explicit module CInterface {
+        header "TrustformersKit-C.h"
+        export *
+    }
+}

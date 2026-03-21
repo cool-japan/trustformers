@@ -1,0 +1,371 @@
+syntax = "proto3";
+
+package trustformers.v1;
+
+option java_package = "com.trustformers.grpc.v1";
+option java_multiple_files = true;
+option java_outer_classname = "TrustformersProto";
+option csharp_namespace = "TrustformeRS.Grpc.V1";
+option go_package = "github.com/cool-japan/trustformers/proto/trustformers/v1";
+
+// TrustformeRS gRPC service for high-performance model inference
+service TrustformersService {
+  // Text generation methods
+  rpc GenerateText(TextGenerationRequest) returns (TextGenerationResponse);
+  rpc GenerateTextStream(TextGenerationRequest) returns (stream TextGenerationStreamResponse);
+  
+  // Text classification methods
+  rpc ClassifyText(TextClassificationRequest) returns (TextClassificationResponse);
+  rpc ClassifyTextBatch(TextClassificationBatchRequest) returns (TextClassificationBatchResponse);
+  
+  // Question answering
+  rpc AnswerQuestion(QuestionAnsweringRequest) returns (QuestionAnsweringResponse);
+  
+  // Tokenization services
+  rpc EncodeText(EncodeRequest) returns (EncodeResponse);
+  rpc DecodeTokens(DecodeRequest) returns (DecodeResponse);
+  
+  // Model management
+  rpc LoadModel(LoadModelRequest) returns (LoadModelResponse);
+  rpc UnloadModel(UnloadModelRequest) returns (UnloadModelResponse);
+  rpc GetModelInfo(GetModelInfoRequest) returns (GetModelInfoResponse);
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+  
+  // Health and monitoring
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  rpc GetMetrics(GetMetricsRequest) returns (GetMetricsResponse);
+  rpc GetServerInfo(GetServerInfoRequest) returns (GetServerInfoResponse);
+}
+
+// Text Generation Messages
+
+message TextGenerationRequest {
+  string prompt = 1;
+  string model_name = 2;
+  optional uint32 max_length = 3;
+  optional uint32 min_length = 4;
+  optional float temperature = 5;
+  optional uint32 top_k = 6;
+  optional float top_p = 7;
+  optional float repetition_penalty = 8;
+  optional bool do_sample = 9;
+  optional uint32 num_return_sequences = 10;
+  repeated string stop_sequences = 11;
+  optional uint32 seed = 12;
+  map<string, string> generation_config = 13;
+  RequestMetadata metadata = 14;
+}
+
+message TextGenerationResponse {
+  repeated string generated_text = 1;
+  double processing_time_ms = 2;
+  string model_name = 3;
+  uint32 prompt_tokens = 4;
+  uint32 generated_tokens = 5;
+  uint32 total_tokens = 6;
+  string request_id = 7;
+  string instance_id = 8;
+  ResponseMetadata metadata = 9;
+}
+
+message TextGenerationStreamResponse {
+  string token = 1;
+  bool is_final = 2;
+  string request_id = 3;
+  optional TextGenerationResponse final_response = 4;
+}
+
+// Text Classification Messages
+
+message TextClassificationRequest {
+  string text = 1;
+  string model_name = 2;
+  optional bool return_all_scores = 3;
+  optional uint32 top_k = 4;
+  RequestMetadata metadata = 5;
+}
+
+message TextClassificationResponse {
+  repeated ClassificationResult classifications = 1;
+  double processing_time_ms = 2;
+  string model_name = 3;
+  string request_id = 4;
+  string instance_id = 5;
+  ResponseMetadata metadata = 6;
+}
+
+message ClassificationResult {
+  string label = 1;
+  float score = 2;
+}
+
+message TextClassificationBatchRequest {
+  repeated string texts = 1;
+  string model_name = 2;
+  optional bool return_all_scores = 3;
+  optional uint32 top_k = 4;
+  RequestMetadata metadata = 5;
+}
+
+message TextClassificationBatchResponse {
+  repeated TextClassificationResponse responses = 1;
+  double total_processing_time_ms = 2;
+  string request_id = 3;
+}
+
+// Question Answering Messages
+
+message QuestionAnsweringRequest {
+  string question = 1;
+  string context = 2;
+  string model_name = 3;
+  optional uint32 max_answer_length = 4;
+  optional uint32 top_k = 5;
+  RequestMetadata metadata = 6;
+}
+
+message QuestionAnsweringResponse {
+  string answer = 1;
+  float confidence = 2;
+  uint32 start_pos = 3;
+  uint32 end_pos = 4;
+  double processing_time_ms = 5;
+  string model_name = 6;
+  string request_id = 7;
+  string instance_id = 8;
+  ResponseMetadata metadata = 9;
+}
+
+// Tokenization Messages
+
+message EncodeRequest {
+  string text = 1;
+  string tokenizer_name = 2;
+  optional bool add_special_tokens = 3;
+  RequestMetadata metadata = 4;
+}
+
+message EncodeResponse {
+  repeated uint32 token_ids = 1;
+  repeated string tokens = 2;
+  uint32 num_tokens = 3;
+  double processing_time_ms = 4;
+  string request_id = 5;
+}
+
+message DecodeRequest {
+  repeated uint32 token_ids = 1;
+  string tokenizer_name = 2;
+  optional bool skip_special_tokens = 3;
+  RequestMetadata metadata = 4;
+}
+
+message DecodeResponse {
+  string text = 1;
+  double processing_time_ms = 2;
+  string request_id = 3;
+}
+
+// Model Management Messages
+
+message LoadModelRequest {
+  string model_path = 1;
+  string model_name = 2;
+  ModelConfig config = 3;
+  RequestMetadata metadata = 4;
+}
+
+message LoadModelResponse {
+  bool success = 1;
+  string message = 2;
+  ModelInfo model_info = 3;
+  double loading_time_ms = 4;
+  string request_id = 5;
+}
+
+message UnloadModelRequest {
+  string model_name = 1;
+  RequestMetadata metadata = 2;
+}
+
+message UnloadModelResponse {
+  bool success = 1;
+  string message = 2;
+  string request_id = 3;
+}
+
+message GetModelInfoRequest {
+  string model_name = 1;
+  RequestMetadata metadata = 2;
+}
+
+message GetModelInfoResponse {
+  ModelInfo model_info = 1;
+  string request_id = 2;
+}
+
+message ListModelsRequest {
+  RequestMetadata metadata = 1;
+}
+
+message ListModelsResponse {
+  repeated ModelInfo models = 1;
+  uint32 total_count = 2;
+  string request_id = 3;
+}
+
+message ModelConfig {
+  string device = 1; // "cpu", "cuda:0", "rocm:0", "metal"
+  string precision = 2; // "float32", "float16", "int8"
+  optional uint64 max_memory_mb = 3;
+  bool enable_quantization = 4;
+  string quantization_method = 5;
+  bool enable_optimization = 6;
+  uint32 optimization_level = 7;
+  map<string, string> custom_config = 8;
+}
+
+message ModelInfo {
+  string name = 1;
+  string version = 2;
+  string architecture = 3;
+  optional uint64 parameters = 4;
+  optional uint64 size_bytes = 5;
+  optional uint32 vocab_size = 6;
+  optional uint32 max_sequence_length = 7;
+  optional uint32 num_layers = 8;
+  optional uint32 hidden_size = 9;
+  optional uint32 num_attention_heads = 10;
+  string device = 11;
+  string precision = 12;
+  bool is_quantized = 13;
+  string quantization_method = 14;
+  optional uint64 memory_usage_bytes = 15;
+  repeated string capabilities = 16;
+  map<string, string> metadata = 17;
+}
+
+// Health and Monitoring Messages
+
+message HealthCheckRequest {
+  optional string service = 1;
+}
+
+message HealthCheckResponse {
+  enum ServingStatus {
+    UNKNOWN = 0;
+    SERVING = 1;
+    NOT_SERVING = 2;
+    SERVICE_UNKNOWN = 3;
+  }
+  ServingStatus status = 1;
+  string message = 2;
+  repeated string loaded_models = 3;
+  ServerInfo server_info = 4;
+}
+
+message GetMetricsRequest {
+  optional string model_name = 1;
+  RequestMetadata metadata = 2;
+}
+
+message GetMetricsResponse {
+  ServerMetrics metrics = 1;
+  string request_id = 2;
+}
+
+message GetServerInfoRequest {
+  RequestMetadata metadata = 1;
+}
+
+message GetServerInfoResponse {
+  ServerInfo server_info = 1;
+  string request_id = 2;
+}
+
+message ServerInfo {
+  string version = 1;
+  string build_date = 2;
+  string git_commit = 3;
+  HardwareInfo hardware = 4;
+  repeated string supported_features = 5;
+  map<string, string> configuration = 6;
+}
+
+message HardwareInfo {
+  string cpu_info = 1;
+  optional uint64 total_memory_mb = 2;
+  optional uint64 available_memory_mb = 3;
+  repeated GpuInfo gpus = 4;
+}
+
+message GpuInfo {
+  uint32 device_id = 1;
+  string name = 2;
+  string type = 3; // "cuda", "rocm", "metal"
+  optional uint64 total_memory_mb = 4;
+  optional uint64 free_memory_mb = 5;
+  string compute_capability = 6;
+  bool is_available = 7;
+}
+
+message ServerMetrics {
+  uint64 total_requests = 1;
+  uint64 successful_requests = 2;
+  uint64 failed_requests = 3;
+  double average_response_time_ms = 4;
+  uint32 current_connections = 5;
+  uint32 peak_connections = 6;
+  uint64 bytes_sent = 7;
+  uint64 bytes_received = 8;
+  double requests_per_second = 9;
+  map<string, uint64> model_requests = 10;
+  map<string, double> error_rates = 11;
+  double cpu_usage_percent = 12;
+  double memory_usage_percent = 13;
+  repeated ModelMetrics model_metrics = 14;
+}
+
+message ModelMetrics {
+  string model_name = 1;
+  uint64 total_requests = 2;
+  double average_response_time_ms = 3;
+  double tokens_per_second = 4;
+  uint64 memory_usage_bytes = 5;
+  uint32 active_instances = 6;
+  double error_rate = 7;
+}
+
+// Common Messages
+
+message RequestMetadata {
+  string request_id = 1;
+  string client_id = 2;
+  int64 timestamp = 3;
+  map<string, string> headers = 4;
+  string trace_id = 5;
+  string span_id = 6;
+}
+
+message ResponseMetadata {
+  string request_id = 1;
+  int64 timestamp = 2;
+  string server_version = 3;
+  map<string, string> headers = 4;
+  string trace_id = 5;
+  string span_id = 6;
+}
+
+// Error Handling
+
+message ErrorDetails {
+  string code = 1;
+  string message = 2;
+  repeated ErrorInfo details = 3;
+}
+
+message ErrorInfo {
+  string field = 1;
+  string reason = 2;
+  string description = 3;
+}

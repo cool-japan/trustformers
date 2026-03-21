@@ -1,0 +1,24 @@
+{
+  "id": "layer_norm_constant_input",
+  "description": "Regression test for LayerNorm with constant input (zero variance)",
+  "issue": "Issue #105: LayerNorm produces NaN with constant inputs",
+  "category": "layer",
+  "test_data": {
+    "type": "LayerForward",
+    "layer_type": "layer_norm",
+    "config": {
+      "normalized_shape": [4],
+      "eps": 1e-5
+    },
+    "input": {
+      "data": [5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0],
+      "shape": [2, 4]
+    }
+  },
+  "expected": {
+    "type": "TensorOutput",
+    "data": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    "shape": [2, 4],
+    "tolerance": 1e-5
+  }
+}

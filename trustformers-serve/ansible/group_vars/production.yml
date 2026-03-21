@@ -1,0 +1,139 @@
+---
+# Production Environment Variables
+
+# Environment settings
+environment: production
+cloud_provider: aws
+deployment_type: kubernetes  # or ec2
+region: us-west-2
+
+# Infrastructure settings
+deploy_infrastructure: true
+use_load_balancer: true
+enable_auto_scaling: true
+enable_monitoring: true
+
+# Application configuration
+app_version: "v1.0.0"
+container_registry: "123456789012.dkr.ecr.us-west-2.amazonaws.com"
+container_tag: "{{ app_version }}"
+
+# Performance settings
+worker_threads: 8
+max_memory: "8G"
+max_batch_size: 128
+max_sequence_length: 8192
+
+# Security configuration
+enable_ssl: true
+ssl_certificate_arn: "arn:aws:acm:us-west-2:123456789012:certificate/12345678-1234-1234-1234-123456789012"
+firewall_enabled: true
+enable_waf: true
+
+# Database configuration
+database_enabled: true
+db_instance_class: "db.r6g.xlarge"
+db_allocated_storage: 500
+db_backup_retention: 30
+db_multi_az: true
+db_encryption_enabled: true
+
+# Redis configuration
+redis_enabled: true
+redis_node_type: "cache.r6g.xlarge"
+redis_num_nodes: 3
+redis_encryption_enabled: true
+
+# Load balancer configuration
+lb_type: "application"
+lb_scheme: "internet-facing"
+lb_idle_timeout: 60
+
+# Auto scaling configuration
+asg_min_size: 3
+asg_max_size: 20
+asg_desired_capacity: 6
+asg_instance_type: "c6i.2xlarge"
+
+# Monitoring configuration
+monitoring_enabled: true
+log_level: "info"
+metrics_retention_days: 90
+enable_alerts: true
+
+# Backup configuration
+backup_enabled: true
+backup_retention_days: 90
+backup_encryption_enabled: true
+
+# Compliance settings
+enable_audit_logging: true
+enable_compliance_monitoring: true
+data_classification: "confidential"
+
+# Notification settings
+slack_webhook_url: "{{ vault_slack_webhook_url }}"
+pagerduty_service_key: "{{ vault_pagerduty_service_key }}"
+email_notifications: ["platform-team@example.com"]
+
+# Resource tagging
+resource_tags:
+  Environment: production
+  Project: trustformers-serve
+  Team: platform-team
+  CostCenter: ml-platform
+  Backup: required
+  Monitoring: critical
+  Compliance: sox
+
+# High availability settings
+multi_az_deployment: true
+cross_region_backup: true
+disaster_recovery_enabled: true
+rto_minutes: 15  # Recovery Time Objective
+rpo_minutes: 5   # Recovery Point Objective
+
+# Performance thresholds
+performance_thresholds:
+  cpu_warning: 70
+  cpu_critical: 85
+  memory_warning: 80
+  memory_critical: 90
+  disk_warning: 85
+  disk_critical: 95
+  response_time_warning: 2000  # ms
+  response_time_critical: 5000  # ms
+  error_rate_warning: 2  # %
+  error_rate_critical: 5  # %
+
+# Maintenance windows
+maintenance_windows:
+  patching: "sun:03:00-sun:05:00"
+  database: "sun:04:00-sun:06:00"
+  application: "sun:02:00-sun:04:00"
+
+# Rolling update configuration
+rolling_update:
+  batch_size: 2
+  max_unavailable: 1
+  health_check_grace_period: 60
+  deployment_timeout: 1800  # 30 minutes
+
+# Security scanning
+security_scanning:
+  enable_vulnerability_scanning: true
+  enable_compliance_scanning: true
+  scan_schedule: "0 2 * * 1"  # Weekly on Monday at 2 AM
+  
+# Cost optimization
+cost_optimization:
+  enable_spot_instances: false  # Not for production
+  enable_reserved_instances: true
+  enable_auto_shutdown: false
+  
+# Network configuration
+network_config:
+  vpc_cidr: "10.0.0.0/16"
+  enable_nat_gateway: true
+  enable_vpn_gateway: false
+  dns_servers: ["8.8.8.8", "8.8.4.4"]

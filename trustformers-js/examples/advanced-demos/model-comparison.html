@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Model Comparison Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .control-panel {
+            padding: 30px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .control-grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr 1fr;
+            gap: 20px;
+            align-items: end;
+        }
+
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .input-label {
+            font-weight: 600;
+            color: #333;
+        }
+
+        .input-field {
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .input-field:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .select-field {
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+        }
+
+        .run-button {
+            padding: 15px 30px;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .run-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        .run-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .models-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 20px;
+            padding: 30px;
+        }
+
+        .model-card {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+            transition: transform 0.3s;
+        }
+
+        .model-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .model-header {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .model-name {
+            font-size: 1.5em;
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .model-description {
+            font-size: 0.9em;
+            opacity: 0.9;
+        }
+
+        .model-body {
+            padding: 20px;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #6c757d;
+        }
+
+        .status-dot.loading {
+            background: #ffc107;
+            animation: pulse 1s infinite;
+        }
+
+        .status-dot.ready {
+            background: #28a745;
+        }
+
+        .status-dot.error {
+            background: #dc3545;
+        }
+
+        .status-dot.running {
+            background: #007bff;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .status-text {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .result-section {
+            margin-top: 15px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            min-height: 200px;
+        }
+
+        .result-text {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+            margin-bottom: 15px;
+            font-size: 14px;
+            line-height: 1.5;
+            min-height: 80px;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        .metric-item {
+            background: white;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #e0e0e0;
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 1.2em;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .metric-label {
+            font-size: 0.8em;
+            color: #666;
+            margin-top: 2px;
+        }
+
+        .comparison-section {
+            padding: 30px;
+            background: #f8f9fa;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .comparison-title {
+            font-size: 1.8em;
+            text-align: center;
+            margin-bottom: 30px;
+            color: #333;
+        }
+
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .comparison-card {
+            background: white;
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+        }
+
+        .comparison-metric {
+            font-size: 1.3em;
+            font-weight: 600;
+            margin-bottom: 15px;
+            color: #333;
+            text-align: center;
+        }
+
+        .model-ranking {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .ranking-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .ranking-item.first {
+            border-left-color: #28a745;
+            background: #d4edda;
+        }
+
+        .ranking-item.second {
+            border-left-color: #ffc107;
+            background: #fff3cd;
+        }
+
+        .ranking-item.third {
+            border-left-color: #fd7e14;
+            background: #ffeaa7;
+        }
+
+        .ranking-name {
+            font-weight: 600;
+        }
+
+        .ranking-value {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid #f5c6cb;
+            margin: 10px 0;
+            font-size: 0.9em;
+        }
+
+        .loading-spinner {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+
+        .spinner {
+            width: 30px;
+            height: 30px;
+            border: 3px solid #e0e0e0;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .sample-prompts {
+            margin-top: 15px;
+        }
+
+        .sample-button {
+            display: inline-block;
+            padding: 6px 12px;
+            background: #e3f2fd;
+            color: #1976d2;
+            border: none;
+            border-radius: 15px;
+            cursor: pointer;
+            margin: 3px;
+            font-size: 0.85em;
+            transition: all 0.3s;
+        }
+
+        .sample-button:hover {
+            background: #1976d2;
+            color: white;
+        }
+
+        .performance-stats {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.9);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            font-family: monospace;
+            font-size: 0.8em;
+            min-width: 250px;
+            z-index: 1000;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+        }
+
+        @media (max-width: 1200px) {
+            .control-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .models-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .performance-stats {
+                position: relative;
+                top: auto;
+                right: auto;
+                margin: 20px;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                margin: 10px;
+                border-radius: 15px;
+            }
+
+            .header {
+                padding: 20px;
+            }
+
+            .header h1 {
+                font-size: 2em;
+            }
+
+            .control-panel,
+            .models-grid,
+            .comparison-section {
+                padding: 20px;
+            }
+
+            .comparison-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔬 Model Comparison</h1>
+            <p>Compare performance across different TrustformeRS models with real-time benchmarks</p>
+        </div>
+
+        <div class="control-panel">
+            <div class="control-grid">
+                <div class="input-group">
+                    <label class="input-label">Input Prompt</label>
+                    <textarea id="input-prompt" class="input-field" placeholder="Enter your prompt to test across all models...">Write a short story about a robot discovering emotions for the first time.</textarea>
+                    <div class="sample-prompts">
+                        <strong>Quick samples:</strong>
+                        <button class="sample-button" onclick="setPrompt('text-generation')">📝 Text Generation</button>
+                        <button class="sample-button" onclick="setPrompt('question-answering')">❓ Q&A</button>
+                        <button class="sample-button" onclick="setPrompt('summarization')">📄 Summarization</button>
+                        <button class="sample-button" onclick="setPrompt('translation')">🌍 Translation</button>
+                    </div>
+                </div>
+                <div class="input-group">
+                    <label class="input-label">Task Type</label>
+                    <select id="task-type" class="select-field">
+                        <option value="text-generation">Text Generation</option>
+                        <option value="text-classification">Text Classification</option>
+                        <option value="question-answering">Question Answering</option>
+                        <option value="summarization">Summarization</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <button id="run-comparison" class="run-button" onclick="runComparison()">
+                        🚀 Run Comparison
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <div class="models-grid" id="models-grid">
+            <!-- Model cards will be generated dynamically -->
+        </div>
+
+        <div class="comparison-section" id="comparison-section" style="display: none;">
+            <div class="comparison-title">📊 Performance Comparison</div>
+            <div class="comparison-grid" id="comparison-grid">
+                <!-- Comparison results will be generated dynamically -->
+            </div>
+        </div>
+    </div>
+
+    <div class="performance-stats" id="performance-stats">
+        <div class="stat-row">
+            <span>System Status:</span>
+            <span id="system-status">Initializing</span>
+        </div>
+        <div class="stat-row">
+            <span>Models Loaded:</span>
+            <span id="models-loaded">0/4</span>
+        </div>
+        <div class="stat-row">
+            <span>Memory Usage:</span>
+            <span id="memory-usage">-</span>
+        </div>
+        <div class="stat-row">
+            <span>Backend:</span>
+            <span id="backend-type">WebAssembly</span>
+        </div>
+        <div class="stat-row">
+            <span>WebGL:</span>
+            <span id="webgl-status">-</span>
+        </div>
+    </div>
+
+    <script type="module">
+        import { 
+            initializeEnhanced, 
+            createModel, 
+            createTokenizer, 
+            Pipeline,
+            enhanced_inference,
+            performance as perfMonitor
+        } from '../../dist/trustformers.esm.min.js';
+
+        class ModelComparison {
+            constructor() {
+                this.isInitialized = false;
+                this.models = new Map();
+                this.tokenizers = new Map();
+                this.pipelines = new Map();
+                this.results = new Map();
+                this.isRunning = false;
+
+                this.modelConfigs = [
+                    {
+                        id: 'gpt2_base',
+                        name: 'GPT-2 Base',
+                        description: 'Generative language model, 117M parameters',
+                        type: 'generative',
+                        color: '#667eea'
+                    },
+                    {
+                        id: 'bert_base',
+                        name: 'BERT Base',
+                        description: 'Bidirectional encoder, 110M parameters',
+                        type: 'encoder',
+                        color: '#764ba2'
+                    },
+                    {
+                        id: 't5_small',
+                        name: 'T5 Small',
+                        description: 'Text-to-text transformer, 60M parameters',
+                        type: 'encoder-decoder',
+                        color: '#74b9ff'
+                    },
+                    {
+                        id: 'llama_7b',
+                        name: 'LLaMA 7B',
+                        description: 'Large language model, 7B parameters',
+                        type: 'generative',
+                        color: '#0984e3'
+                    }
+                ];
+
+                this.samplePrompts = {
+                    'text-generation': 'Write a short story about a robot discovering emotions for the first time.',
+                    'question-answering': 'Context: The Earth orbits around the Sun. Question: What does the Earth orbit around?',
+                    'summarization': 'Summarize this text: Artificial intelligence has revolutionized many industries by automating complex tasks, improving efficiency, and enabling new capabilities. From healthcare to transportation, AI systems are being deployed to solve real-world problems. However, the rapid advancement of AI also raises important questions about ethics, job displacement, and the need for responsible development practices.',
+                    'translation': 'Translate this English text to French: "The weather is beautiful today and I want to go for a walk in the park."'
+                };
+
+                this.init();
+            }
+
+            async init() {
+                try {
+                    console.log('Initializing TrustformeRS for model comparison...');
+                    this.updateSystemStatus('Initializing TrustformeRS...');
+
+                    const capabilities = await initializeEnhanced({
+                        enableWebGL: true,
+                        enableMemoryPool: true,
+                        enableProfiling: true,
+                        enableZeroCopy: true
+                    });
+
+                    console.log('Capabilities:', capabilities);
+                    this.updateWebGLStatus(capabilities.webgl ? 'Available' : 'Not Available');
+                    
+                    this.createModelCards();
+                    await this.loadAllModels();
+                    
+                    this.isInitialized = true;
+                    this.updateSystemStatus('Ready');
+                    this.startPerformanceMonitoring();
+                    
+                } catch (error) {
+                    console.error('Initialization failed:', error);
+                    this.updateSystemStatus('Error: ' + error.message);
+                }
+            }
+
+            createModelCards() {
+                const modelsGrid = document.getElementById('models-grid');
+                modelsGrid.innerHTML = '';
+
+                this.modelConfigs.forEach(config => {
+                    const card = document.createElement('div');
+                    card.className = 'model-card';
+                    card.innerHTML = `
+                        <div class="model-header" style="background: linear-gradient(135deg, ${config.color}, ${this.darkenColor(config.color)});">
+                            <div class="model-name">${config.name}</div>
+                            <div class="model-description">${config.description}</div>
+                        </div>
+                        <div class="model-body">
+                            <div class="status-indicator">
+                                <div class="status-dot" id="status-${config.id}"></div>
+                                <span class="status-text" id="status-text-${config.id}">Loading...</span>
+                            </div>
+                            <div class="result-section" id="result-${config.id}">
+                                <div class="loading-spinner">
+                                    <div class="spinner"></div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    modelsGrid.appendChild(card);
+                });
+            }
+
+            async loadAllModels() {
+                const loadPromises = this.modelConfigs.map(config => this.loadModel(config));
+                await Promise.allSettled(loadPromises);
+                this.updateModelsLoaded();
+            }
+
+            async loadModel(config) {
+                try {
+                    this.updateModelStatus(config.id, 'loading', 'Loading model...');
+
+                    // Create model
+                    const model = createModel(config.id);
+                    this.models.set(config.id, model);
+
+                    // Create tokenizer
+                    const tokenizerType = this.getTokenizerType(config.type);
+                    const tokenizer = createTokenizer(tokenizerType);
+                    this.tokenizers.set(config.id, tokenizer);
+
+                    // Create pipeline
+                    const pipeline = this.createPipeline(config, model, tokenizer);
+                    this.pipelines.set(config.id, pipeline);
+
+                    this.updateModelStatus(config.id, 'ready', 'Ready for inference');
+
+                    console.log(`Model ${config.name} loaded successfully`);
+                } catch (error) {
+                    console.error(`Failed to load model ${config.name}:`, error);
+                    this.updateModelStatus(config.id, 'error', `Error: ${error.message}`);
+                    this.showModelError(config.id, error.message);
+                }
+            }
+
+            getTokenizerType(modelType) {
+                switch (modelType) {
+                    case 'generative':
+                        return 'bpe';
+                    case 'encoder':
+                        return 'wordpiece';
+                    case 'encoder-decoder':
+                        return 'sentencepiece';
+                    default:
+                        return 'bpe';
+                }
+            }
+
+            createPipeline(config, model, tokenizer) {
+                const taskType = document.getElementById('task-type').value;
+                
+                switch (taskType) {
+                    case 'text-generation':
+                        return Pipeline.textGeneration(model, tokenizer, {
+                            maxLength: 100,
+                            temperature: 0.7,
+                            doSample: true
+                        });
+                    case 'text-classification':
+                        return Pipeline.textClassification(model, tokenizer, ['negative', 'positive']);
+                    case 'question-answering':
+                        return Pipeline.questionAnswering(model, tokenizer);
+                    default:
+                        return Pipeline.textGeneration(model, tokenizer);
+                }
+            }
+
+            async runComparison() {
+                if (!this.isInitialized || this.isRunning) {
+                    return;
+                }
+
+                const prompt = document.getElementById('input-prompt').value.trim();
+                if (!prompt) {
+                    alert('Please enter a prompt to test');
+                    return;
+                }
+
+                this.isRunning = true;
+                this.updateRunButton(true);
+                this.clearResults();
+
+                const runPromises = this.modelConfigs.map(config => this.runModelInference(config, prompt));
+                await Promise.allSettled(runPromises);
+
+                this.displayComparison();
+                this.isRunning = false;
+                this.updateRunButton(false);
+            }
+
+            async runModelInference(config, prompt) {
+                const modelId = config.id;
+                
+                try {
+                    this.updateModelStatus(modelId, 'running', 'Running inference...');
+                    this.showModelSpinner(modelId);
+
+                    const pipeline = this.pipelines.get(modelId);
+                    if (!pipeline) {
+                        throw new Error('Pipeline not available');
+                    }
+
+                    const startTime = performance.now();
+                    
+                    // Run inference with performance monitoring
+                    const result = await perfMonitor.profile(
+                        `inference_${modelId}`,
+                        () => pipeline.run(prompt),
+                        { modelId, prompt: prompt.substring(0, 50) }
+                    );
+
+                    const endTime = performance.now();
+                    const inferenceTime = endTime - startTime;
+
+                    // Calculate additional metrics
+                    const outputLength = typeof result === 'string' ? result.length : result.text?.length || 0;
+                    const tokensPerSecond = outputLength > 0 ? (outputLength / (inferenceTime / 1000)) : 0;
+
+                    const metrics = {
+                        inferenceTime: inferenceTime,
+                        outputLength: outputLength,
+                        tokensPerSecond: tokensPerSecond,
+                        memoryUsage: this.getMemoryUsage(),
+                        success: true,
+                        result: result
+                    };
+
+                    this.results.set(modelId, metrics);
+                    this.displayModelResult(config, metrics);
+                    this.updateModelStatus(modelId, 'ready', 'Inference complete');
+
+                } catch (error) {
+                    console.error(`Inference failed for ${config.name}:`, error);
+                    
+                    const errorMetrics = {
+                        inferenceTime: 0,
+                        outputLength: 0,
+                        tokensPerSecond: 0,
+                        memoryUsage: 0,
+                        success: false,
+                        error: error.message
+                    };
+
+                    this.results.set(modelId, errorMetrics);
+                    this.displayModelError(config, error.message);
+                    this.updateModelStatus(modelId, 'error', 'Inference failed');
+                }
+            }
+
+            displayModelResult(config, metrics) {
+                const resultContainer = document.getElementById(`result-${config.id}`);
+                
+                const resultText = typeof metrics.result === 'string' 
+                    ? metrics.result 
+                    : metrics.result.text || JSON.stringify(metrics.result);
+
+                resultContainer.innerHTML = `
+                    <div class="result-text">${this.escapeHtml(resultText.substring(0, 200))}${resultText.length > 200 ? '...' : ''}</div>
+                    <div class="metrics-grid">
+                        <div class="metric-item">
+                            <div class="metric-value">${metrics.inferenceTime.toFixed(0)}ms</div>
+                            <div class="metric-label">Response Time</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value">${metrics.outputLength}</div>
+                            <div class="metric-label">Output Length</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value">${metrics.tokensPerSecond.toFixed(1)}</div>
+                            <div class="metric-label">Chars/sec</div>
+                        </div>
+                        <div class="metric-item">
+                            <div class="metric-value">${(metrics.memoryUsage / 1024 / 1024).toFixed(1)}MB</div>
+                            <div class="metric-label">Memory</div>
+                        </div>
+                    </div>
+                `;
+            }
+
+            displayModelError(config, errorMessage) {
+                const resultContainer = document.getElementById(`result-${config.id}`);
+                resultContainer.innerHTML = `
+                    <div class="error-message">
+                        <strong>Error:</strong> ${this.escapeHtml(errorMessage)}
+                    </div>
+                `;
+            }
+
+            showModelSpinner(modelId) {
+                const resultContainer = document.getElementById(`result-${modelId}`);
+                resultContainer.innerHTML = `
+                    <div class="loading-spinner">
+                        <div class="spinner"></div>
+                    </div>
+                `;
+            }
+
+            showModelError(modelId, errorMessage) {
+                const resultContainer = document.getElementById(`result-${modelId}`);
+                resultContainer.innerHTML = `
+                    <div class="error-message">
+                        <strong>Loading Error:</strong> ${this.escapeHtml(errorMessage)}
+                    </div>
+                `;
+            }
+
+            displayComparison() {
+                const comparisonSection = document.getElementById('comparison-section');
+                const comparisonGrid = document.getElementById('comparison-grid');
+                
+                comparisonGrid.innerHTML = '';
+
+                const successfulResults = Array.from(this.results.entries())
+                    .filter(([, metrics]) => metrics.success);
+
+                if (successfulResults.length === 0) {
+                    comparisonGrid.innerHTML = '<p>No successful inferences to compare.</p>';
+                    comparisonSection.style.display = 'block';
+                    return;
+                }
+
+                // Performance ranking
+                this.createRankingCard('Response Time', successfulResults, 'inferenceTime', false);
+                this.createRankingCard('Output Quality', successfulResults, 'outputLength', true);
+                this.createRankingCard('Throughput', successfulResults, 'tokensPerSecond', true);
+                this.createRankingCard('Memory Efficiency', successfulResults, 'memoryUsage', false);
+
+                comparisonSection.style.display = 'block';
+            }
+
+            createRankingCard(title, results, metric, higherIsBetter) {
+                const comparisonGrid = document.getElementById('comparison-grid');
+                
+                // Sort results
+                const sortedResults = [...results].sort(([,a], [,b]) => {
+                    const valueA = a[metric];
+                    const valueB = b[metric];
+                    return higherIsBetter ? valueB - valueA : valueA - valueB;
+                });
+
+                const card = document.createElement('div');
+                card.className = 'comparison-card';
+                
+                const rankingItems = sortedResults.map(([modelId, metrics], index) => {
+                    const config = this.modelConfigs.find(c => c.id === modelId);
+                    const rankClass = index === 0 ? 'first' : index === 1 ? 'second' : index === 2 ? 'third' : '';
+                    
+                    let displayValue = metrics[metric];
+                    if (metric === 'inferenceTime') {
+                        displayValue = `${displayValue.toFixed(0)}ms`;
+                    } else if (metric === 'memoryUsage') {
+                        displayValue = `${(displayValue / 1024 / 1024).toFixed(1)}MB`;
+                    } else if (metric === 'tokensPerSecond') {
+                        displayValue = `${displayValue.toFixed(1)} chars/s`;
+                    } else {
+                        displayValue = displayValue.toString();
+                    }
+
+                    return `
+                        <div class="ranking-item ${rankClass}">
+                            <span class="ranking-name">${config.name}</span>
+                            <span class="ranking-value">${displayValue}</span>
+                        </div>
+                    `;
+                }).join('');
+
+                card.innerHTML = `
+                    <div class="comparison-metric">${title}</div>
+                    <div class="model-ranking">
+                        ${rankingItems}
+                    </div>
+                `;
+
+                comparisonGrid.appendChild(card);
+            }
+
+            updateModelStatus(modelId, status, text) {
+                const statusDot = document.getElementById(`status-${modelId}`);
+                const statusText = document.getElementById(`status-text-${modelId}`);
+                
+                if (statusDot) {
+                    statusDot.className = `status-dot ${status}`;
+                }
+                if (statusText) {
+                    statusText.textContent = text;
+                }
+            }
+
+            updateRunButton(isRunning) {
+                const button = document.getElementById('run-comparison');
+                button.disabled = isRunning;
+                button.textContent = isRunning ? '⏳ Running...' : '🚀 Run Comparison';
+            }
+
+            clearResults() {
+                this.results.clear();
+                document.getElementById('comparison-section').style.display = 'none';
+                
+                this.modelConfigs.forEach(config => {
+                    const resultContainer = document.getElementById(`result-${config.id}`);
+                    if (resultContainer) {
+                        resultContainer.innerHTML = '<div style="text-align: center; color: #666; padding: 40px;">Waiting for comparison...</div>';
+                    }
+                });
+            }
+
+            startPerformanceMonitoring() {
+                setInterval(() => {
+                    this.updatePerformanceStats();
+                }, 2000);
+            }
+
+            updatePerformanceStats() {
+                // Memory usage
+                if (performance.memory) {
+                    const memoryMB = (performance.memory.usedJSHeapSize / 1024 / 1024).toFixed(1);
+                    document.getElementById('memory-usage').textContent = `${memoryMB}MB`;
+                }
+            }
+
+            updateSystemStatus(status) {
+                document.getElementById('system-status').textContent = status;
+            }
+
+            updateModelsLoaded() {
+                const loadedCount = Array.from(this.models.keys()).length;
+                document.getElementById('models-loaded').textContent = `${loadedCount}/${this.modelConfigs.length}`;
+            }
+
+            updateWebGLStatus(status) {
+                document.getElementById('webgl-status').textContent = status;
+            }
+
+            getMemoryUsage() {
+                return performance.memory ? performance.memory.usedJSHeapSize : 0;
+            }
+
+            darkenColor(color) {
+                // Simple color darkening
+                const num = parseInt(color.replace("#", ""), 16);
+                const amt = -40;
+                const R = (num >> 16) + amt;
+                const G = (num >> 8 & 0x00FF) + amt;
+                const B = (num & 0x0000FF) + amt;
+                return "#" + (0x1000000 + (R < 255 ? R < 1 ? 0 : R : 255) * 0x10000 +
+                    (G < 255 ? G < 1 ? 0 : G : 255) * 0x100 +
+                    (B < 255 ? B < 1 ? 0 : B : 255)).toString(16).slice(1);
+            }
+
+            escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+        }
+
+        // Global functions
+        window.runComparison = function() {
+            comparison.runComparison();
+        };
+
+        window.setPrompt = function(type) {
+            const promptField = document.getElementById('input-prompt');
+            const taskField = document.getElementById('task-type');
+            
+            if (comparison.samplePrompts[type]) {
+                promptField.value = comparison.samplePrompts[type];
+                taskField.value = type;
+            }
+        };
+
+        // Initialize the comparison tool
+        const comparison = new ModelComparison();
+    </script>
+</body>
+</html>

@@ -1,0 +1,552 @@
+# Enhanced Production Kubernetes Deployment for TrustformeRS Serve
+# Includes advanced production features, security hardening, and observability
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: trustformers-serve-production
+  namespace: trustformers
+  labels:
+    app: trustformers-serve
+    tier: production
+    component: inference-server
+    version: v1.0.0
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+    kubernetes.io/change-cause: "Initial production deployment"
+spec:
+  replicas: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: trustformers-serve
+      tier: production
+  template:
+    metadata:
+      labels:
+        app: trustformers-serve
+        tier: production
+        component: inference-server
+        version: v1.0.0
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+        linkerd.io/inject: enabled
+        sidecar.istio.io/inject: "true"
+        cluster-autoscaler.kubernetes.io/safe-to-evict: "true"
+    spec:
+      serviceAccountName: trustformers-serve-production
+      automountServiceAccountToken: false
+      
+      # Security context for the pod
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        fsGroupChangePolicy: "OnRootMismatch"
+        seccompProfile:
+          type: RuntimeDefault
+        supplementalGroups: [65532]
+      
+      # Anti-affinity to spread pods across nodes
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - trustformers-serve
+              topologyKey: kubernetes.io/hostname
+          - weight: 50
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - trustformers-serve
+              topologyKey: topology.kubernetes.io/zone
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+              - key: node.kubernetes.io/instance-type
+                operator: In
+                values:
+                - m5.2xlarge
+                - m5.4xlarge
+                - c5.2xlarge
+                - c5.4xlarge
+          - weight: 50
+            preference:
+              matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - us-west-2a
+                - us-west-2b
+                - us-west-2c
+      
+      # Node selection and tolerations
+      nodeSelector:
+        kubernetes.io/arch: amd64
+        node.kubernetes.io/instance-type: m5.2xlarge
+        workload-type: inference
+      
+      tolerations:
+      - key: "inference-workload"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 30
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 30
+      - key: "kubernetes.io/memory-pressure"
+        operator: "Exists"
+        effect: "NoSchedule"
+      
+      # Init containers for setup
+      initContainers:
+      - name: model-downloader
+        image: alpine/git:latest
+        command:
+        - sh
+        - -c
+        - |
+          set -e
+          echo "Downloading models..."
+          # Add model download logic here
+          echo "Models downloaded successfully"
+        volumeMounts:
+        - name: models-storage
+          mountPath: /models
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      
+      - name: config-validator
+        image: trustformers-serve:latest
+        command:
+        - /usr/local/bin/trustformers-serve
+        - --validate-config
+        - --config
+        - /app/config/config.toml
+        volumeMounts:
+        - name: config
+          mountPath: /app/config
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      
+      containers:
+      - name: trustformers-serve
+        image: trustformers-serve:v1.0.0
+        imagePullPolicy: IfNotPresent
+        
+        # Command and args
+        command:
+        - /usr/local/bin/trustformers-serve
+        args:
+        - --config
+        - /app/config/config.toml
+        - --log-level
+        - info
+        
+        # Ports
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 9090
+          name: grpc
+          protocol: TCP
+        - containerPort: 9091
+          name: metrics
+          protocol: TCP
+        - containerPort: 8085
+          name: health
+          protocol: TCP
+        
+        # Environment variables
+        env:
+        - name: RUST_LOG
+          value: "info"
+        - name: RUST_BACKTRACE
+          value: "1"
+        - name: SERVER_HOST
+          value: "0.0.0.0"
+        - name: SERVER_PORT
+          value: "8080"
+        - name: GRPC_PORT
+          value: "9090"
+        - name: METRICS_PORT
+          value: "9091"
+        - name: HEALTH_PORT
+          value: "8085"
+        - name: WORKERS
+          value: "auto"
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.nodeName
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: SERVICE_ACCOUNT
+          valueFrom:
+            fieldRef:
+              fieldPath: spec.serviceAccountName
+        
+        # Environment from secrets and configmaps
+        envFrom:
+        - secretRef:
+            name: trustformers-serve-secrets
+        - configMapRef:
+            name: trustformers-serve-env-config
+        
+        # Resource requirements
+        resources:
+          requests:
+            memory: "4Gi"
+            cpu: "2000m"
+            ephemeral-storage: "10Gi"
+          limits:
+            memory: "8Gi"
+            cpu: "4000m"
+            ephemeral-storage: "20Gi"
+        
+        # Health checks
+        livenessProbe:
+          httpGet:
+            path: /health/liveness
+            port: 8085
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+          successThreshold: 1
+        
+        readinessProbe:
+          httpGet:
+            path: /health/readiness
+            port: 8085
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+          successThreshold: 1
+        
+        startupProbe:
+          httpGet:
+            path: /health/startup
+            port: 8085
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+          successThreshold: 1
+        
+        # Volume mounts
+        volumeMounts:
+        - name: models-storage
+          mountPath: /app/models
+          readOnly: true
+        - name: config
+          mountPath: /app/config
+          readOnly: true
+        - name: secrets
+          mountPath: /app/secrets
+          readOnly: true
+        - name: cache-dir
+          mountPath: /app/cache
+        - name: tmp-dir
+          mountPath: /tmp
+        - name: logs-dir
+          mountPath: /app/logs
+        - name: timezone
+          mountPath: /etc/localtime
+          readOnly: true
+        
+        # Security context
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          runAsGroup: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+          seccompProfile:
+            type: RuntimeDefault
+        
+        # Lifecycle hooks
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /bin/sh
+              - -c
+              - |
+                echo "Gracefully shutting down..."
+                kill -TERM 1
+                sleep 10
+      
+      # Sidecar containers
+      - name: log-shipper
+        image: fluent/fluent-bit:2.0
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "100m"
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+        volumeMounts:
+        - name: logs-dir
+          mountPath: /logs
+          readOnly: true
+        - name: fluent-bit-config
+          mountPath: /fluent-bit/etc
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 65532
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+      
+      # Volumes
+      volumes:
+      - name: models-storage
+        persistentVolumeClaim:
+          claimName: trustformers-models-pvc
+      - name: config
+        configMap:
+          name: trustformers-serve-config
+          defaultMode: 0644
+      - name: secrets
+        secret:
+          secretName: trustformers-serve-secrets
+          defaultMode: 0600
+      - name: cache-dir
+        emptyDir:
+          sizeLimit: 5Gi
+      - name: tmp-dir
+        emptyDir:
+          sizeLimit: 1Gi
+      - name: logs-dir
+        emptyDir:
+          sizeLimit: 2Gi
+      - name: timezone
+        hostPath:
+          path: /etc/localtime
+          type: File
+      - name: fluent-bit-config
+        configMap:
+          name: fluent-bit-config
+      
+      # Termination grace period
+      terminationGracePeriodSeconds: 60
+      
+      # DNS configuration
+      dnsPolicy: ClusterFirst
+      dnsConfig:
+        options:
+        - name: ndots
+          value: "2"
+        - name: edns0
+        
+      # Image pull secrets
+      imagePullSecrets:
+      - name: docker-registry-secret
+
+---
+# Persistent Volume Claim for models
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: trustformers-models-pvc
+  namespace: trustformers
+  labels:
+    app: trustformers-serve
+    component: storage
+spec:
+  accessModes:
+  - ReadOnlyMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd
+  volumeMode: Filesystem
+
+---
+# Service for production deployment
+apiVersion: v1
+kind: Service
+metadata:
+  name: trustformers-serve-production
+  namespace: trustformers
+  labels:
+    app: trustformers-serve
+    tier: production
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    prometheus.io/scrape: "false"
+spec:
+  type: LoadBalancer
+  loadBalancerSourceRanges:
+  - 10.0.0.0/8
+  - 172.16.0.0/12
+  - 192.168.0.0/16
+  ports:
+  - port: 80
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  - port: 443
+    targetPort: 8080
+    protocol: TCP
+    name: https
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: grpc
+  selector:
+    app: trustformers-serve
+    tier: production
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 300
+
+---
+# Internal service for metrics
+apiVersion: v1
+kind: Service
+metadata:
+  name: trustformers-serve-metrics-production
+  namespace: trustformers
+  labels:
+    app: trustformers-serve
+    service: metrics
+    tier: production
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9091
+    targetPort: 9091
+    protocol: TCP
+    name: metrics
+  - port: 8085
+    targetPort: 8085
+    protocol: TCP
+    name: health
+  selector:
+    app: trustformers-serve
+    tier: production
+
+---
+# Environment configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: trustformers-serve-env-config
+  namespace: trustformers
+  labels:
+    app: trustformers-serve
+data:
+  ENABLE_METRICS: "true"
+  ENABLE_CACHING: "true"
+  ENABLE_BATCHING: "true"
+  ENABLE_TRACING: "true"
+  CACHE_SIZE_MB: "2048"
+  MAX_BATCH_SIZE: "64"
+  MAX_SEQUENCE_LENGTH: "4096"
+  LOG_FORMAT: "json"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+  JAEGER_ENDPOINT: "http://jaeger-collector:14268/api/traces"
+
+---
+# Fluent Bit configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: trustformers
+  labels:
+    app: trustformers-serve
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush         1
+        Log_Level     info
+        Daemon        off
+        Parsers_File  parsers.conf
+        HTTP_Server   On
+        HTTP_Listen   0.0.0.0
+        HTTP_Port     2020
+
+    [INPUT]
+        Name              tail
+        Path              /logs/*.log
+        Parser            json
+        Tag               trustformers.*
+        Refresh_Interval  5
+        Mem_Buf_Limit     50MB
+
+    [OUTPUT]
+        Name  es
+        Match *
+        Host  elasticsearch.logging.svc.cluster.local
+        Port  9200
+        Index trustformers-logs
+        Type  _doc
+        
+  parsers.conf: |
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    timestamp
+        Time_Format %Y-%m-%dT%H:%M:%S.%L%z

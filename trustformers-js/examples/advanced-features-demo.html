@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Advanced Features Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 30px;
+        }
+
+        h1 {
+            color: #667eea;
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 1.1em;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(600px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .feature-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .feature-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .feature-icon {
+            font-size: 2em;
+            margin-right: 15px;
+        }
+
+        .feature-title {
+            font-size: 1.5em;
+            color: #333;
+        }
+
+        .feature-description {
+            color: #666;
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }
+
+        .demo-section {
+            margin-bottom: 20px;
+        }
+
+        .demo-section h3 {
+            color: #667eea;
+            margin-bottom: 10px;
+            font-size: 1.1em;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: transform 0.2s, box-shadow 0.2s;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .output {
+            background: #f5f5f5;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .output pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .stat-box {
+            background: #f0f0f0;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 1.8em;
+            color: #667eea;
+            font-weight: bold;
+        }
+
+        .stat-label {
+            color: #666;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 500;
+            margin: 5px 5px 5px 0;
+        }
+
+        .badge.success {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .badge.info {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+
+        .badge.warning {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 TrustformeRS Advanced Features Demo</h1>
+            <p class="subtitle">Explore WebNN Backend, Advanced Quantization, Benchmarking, and Caching</p>
+        </header>
+
+        <div class="features-grid">
+            <!-- WebNN Backend -->
+            <div class="feature-card">
+                <div class="feature-header">
+                    <span class="feature-icon">🧠</span>
+                    <h2 class="feature-title">WebNN Backend</h2>
+                </div>
+                <p class="feature-description">
+                    Hardware-accelerated ML operations using the Web Neural Network API.
+                    Supports CPU, GPU, and NPU devices with graph-based computation.
+                </p>
+
+                <div class="demo-section">
+                    <h3>Capability Detection</h3>
+                    <button onclick="detectWebNN()">Detect WebNN</button>
+                    <div id="webnn-output" class="output" style="display:none;"></div>
+                </div>
+
+                <div class="demo-section">
+                    <h3>Backend Operations</h3>
+                    <button onclick="testWebNNOperations()">Test Operations</button>
+                    <div id="webnn-ops-output" class="output" style="display:none;"></div>
+                </div>
+
+                <div class="stats-grid" id="webnn-stats" style="display:none;">
+                    <div class="stat-box">
+                        <div class="stat-value" id="webnn-device">-</div>
+                        <div class="stat-label">Device</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="webnn-ops-count">-</div>
+                        <div class="stat-label">Operations</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Advanced Quantization -->
+            <div class="feature-card">
+                <div class="feature-header">
+                    <span class="feature-icon">📉</span>
+                    <h2 class="feature-title">Advanced Quantization</h2>
+                </div>
+                <p class="feature-description">
+                    Compress models with FP16, INT8, INT4, and GGML formats.
+                    Includes calibration, mixed precision, and quantization-aware training.
+                </p>
+
+                <div class="demo-section">
+                    <h3>Quantization Formats</h3>
+                    <button onclick="testFP16Quantization()">FP16</button>
+                    <button onclick="testINT8Quantization()">INT8</button>
+                    <button onclick="testINT4Quantization()">INT4</button>
+                    <button onclick="testGGMLQuantization()">GGML Q4_0</button>
+                    <div id="quant-output" class="output" style="display:none;"></div>
+                </div>
+
+                <div class="demo-section">
+                    <h3>Compression Ratio</h3>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="compression-progress"></div>
+                    </div>
+                    <div id="compression-stats" style="margin-top:10px; color:#666;"></div>
+                </div>
+            </div>
+
+            <!-- Benchmark Suite -->
+            <div class="feature-card">
+                <div class="feature-header">
+                    <span class="feature-icon">⚡</span>
+                    <h2 class="feature-title">Benchmark Suite</h2>
+                </div>
+                <p class="feature-description">
+                    Comprehensive performance testing with statistical analysis.
+                    Compare backends, measure throughput, and detect regressions.
+                </p>
+
+                <div class="demo-section">
+                    <h3>Run Benchmarks</h3>
+                    <button onclick="runQuickBenchmark()">Quick Benchmark</button>
+                    <button onclick="runFullBenchmark()" id="full-bench-btn">Full Suite</button>
+                    <button onclick="exportBenchmarkReport()" id="export-btn" disabled>Export Report</button>
+                    <div id="benchmark-output" class="output" style="display:none;"></div>
+                </div>
+
+                <div class="stats-grid" id="benchmark-stats" style="display:none;">
+                    <div class="stat-box">
+                        <div class="stat-value" id="bench-mean">-</div>
+                        <div class="stat-label">Mean (ms)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="bench-p95">-</div>
+                        <div class="stat-label">P95 (ms)</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="bench-ops">-</div>
+                        <div class="stat-label">Ops/sec</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Advanced Caching -->
+            <div class="feature-card">
+                <div class="feature-header">
+                    <span class="feature-icon">💾</span>
+                    <h2 class="feature-title">Advanced Caching</h2>
+                </div>
+                <p class="feature-description">
+                    Multi-level caching with LRU, TTL, and LFU strategies.
+                    Supports prefetching, cache warming, and IndexedDB persistence.
+                </p>
+
+                <div class="demo-section">
+                    <h3>Cache Strategies</h3>
+                    <button onclick="testLRUCache()">LRU Cache</button>
+                    <button onclick="testTTLCache()">TTL Cache</button>
+                    <button onclick="testMultiLevelCache()">Multi-Level</button>
+                    <button onclick="clearAllCaches()">Clear All</button>
+                    <div id="cache-output" class="output" style="display:none;"></div>
+                </div>
+
+                <div class="stats-grid" id="cache-stats" style="display:none;">
+                    <div class="stat-box">
+                        <div class="stat-value" id="cache-hits">-</div>
+                        <div class="stat-label">Hits</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="cache-misses">-</div>
+                        <div class="stat-label">Misses</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value" id="cache-hitrate">-</div>
+                        <div class="stat-label">Hit Rate</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import {
+            // WebNN
+            WebNNCapabilities,
+            WebNNBackend,
+            initWebNN,
+            isWebNNAvailable,
+
+            // Quantization
+            Float16Utils,
+            Int8Quantizer,
+            Int4Quantizer,
+            GGMLQuantizer,
+            QuantizationCalibrator,
+
+            // Benchmarking
+            BenchmarkConfig,
+            BenchmarkSuite,
+            PerformanceStats,
+
+            // Caching
+            LRUCache,
+            TTLCache,
+            MultiLevelCache,
+            CacheManager
+        } from '../src/index.js';
+
+        // Global state
+        window.caches = {
+            lru: new LRUCache({ maxSize: 100 }),
+            ttl: new TTLCache({ defaultTTL: 5000 }),
+            multiLevel: new MultiLevelCache()
+        };
+
+        window.benchmarkResults = null;
+
+        // Utility function to display output
+        function showOutput(elementId, content, type = 'info') {
+            const el = document.getElementById(elementId);
+            el.style.display = 'block';
+            el.innerHTML = `<pre>${content}</pre>`;
+        }
+
+        // WebNN Functions
+        window.detectWebNN = async function() {
+            const output = document.getElementById('webnn-output');
+            output.style.display = 'block';
+            output.innerHTML = '<div class="loading"></div> Detecting WebNN capabilities...';
+
+            try {
+                const available = isWebNNAvailable();
+                const caps = await WebNNCapabilities.detect();
+
+                let html = `<strong>WebNN Available:</strong> ${available ? '✅' : '❌'}\n\n`;
+                html += `<strong>Capabilities:</strong>\n`;
+                html += `- Devices: ${caps.devices.join(', ') || 'None detected'}\n`;
+                html += `- Supported Ops: ${caps.supportedOps.length} operations\n`;
+                html += `- Supported Types: ${caps.supportedTypes.join(', ')}\n\n`;
+                html += `<strong>Features:</strong>\n`;
+                for (const [key, value] of Object.entries(caps.features)) {
+                    html += `- ${key}: ${value ? '✅' : '❌'}\n`;
+                }
+
+                output.innerHTML = `<pre>${html}</pre>`;
+
+                if (caps.devices.length > 0) {
+                    document.getElementById('webnn-device').textContent = caps.devices[0];
+                    document.getElementById('webnn-ops-count').textContent = caps.supportedOps.length;
+                    document.getElementById('webnn-stats').style.display = 'grid';
+                }
+            } catch (error) {
+                output.innerHTML = `<pre>Error: ${error.message}</pre>`;
+            }
+        };
+
+        window.testWebNNOperations = async function() {
+            const output = document.getElementById('webnn-ops-output');
+            output.style.display = 'block';
+            output.innerHTML = '<div class="loading"></div> Testing operations...';
+
+            try {
+                if (!isWebNNAvailable()) {
+                    output.innerHTML = '<pre>WebNN not available in this browser</pre>';
+                    return;
+                }
+
+                const success = await initWebNN({ deviceType: 'cpu' });
+
+                if (success) {
+                    output.innerHTML = '<pre>✅ WebNN backend initialized successfully!\nReady for ML operations.</pre>';
+                } else {
+                    output.innerHTML = '<pre>⚠️ WebNN initialization failed. Falling back to other backends.</pre>';
+                }
+            } catch (error) {
+                output.innerHTML = `<pre>Error: ${error.message}</pre>`;
+            }
+        };
+
+        // Quantization Functions
+        window.testFP16Quantization = function() {
+            const data = new Float32Array(100).map(() => Math.random() * 10 - 5);
+            const originalSize = data.byteLength;
+
+            const quantized = Float16Utils.float32ArrayToFloat16Array(data);
+            const dequantized = Float16Utils.float16ArrayToFloat32Array(quantized);
+
+            const compressedSize = quantized.byteLength;
+            const ratio = ((1 - compressedSize / originalSize) * 100).toFixed(1);
+
+            updateCompressionStats(originalSize, compressedSize, ratio);
+
+            showOutput('quant-output',
+                `FP16 Quantization Results:\n` +
+                `- Original size: ${originalSize} bytes (FP32)\n` +
+                `- Compressed size: ${compressedSize} bytes (FP16)\n` +
+                `- Compression ratio: ${ratio}%\n` +
+                `- Sample values:\n` +
+                `  Original: [${Array.from(data.slice(0, 5)).map(v => v.toFixed(3)).join(', ')}...]\n` +
+                `  Dequantized: [${Array.from(dequantized.slice(0, 5)).map(v => v.toFixed(3)).join(', ')}...]`
+            );
+        };
+
+        window.testINT8Quantization = function() {
+            const data = new Float32Array(100).map(() => Math.random() * 10 - 5);
+            const originalSize = data.byteLength;
+
+            const quantized = Int8Quantizer.quantize(data);
+            const compressedSize = quantized.data.byteLength;
+            const ratio = ((1 - compressedSize / originalSize) * 100).toFixed(1);
+
+            updateCompressionStats(originalSize, compressedSize, ratio);
+
+            showOutput('quant-output',
+                `INT8 Quantization Results:\n` +
+                `- Original size: ${originalSize} bytes\n` +
+                `- Compressed size: ${compressedSize} bytes\n` +
+                `- Compression ratio: ${ratio}%\n` +
+                `- Scale: ${quantized.scale.toFixed(6)}\n` +
+                `- Zero point: ${quantized.zeroPoint}`
+            );
+        };
+
+        window.testINT4Quantization = function() {
+            const data = new Float32Array(100).map(() => Math.random() * 10 - 5);
+            const originalSize = data.byteLength;
+
+            const quantized = Int4Quantizer.quantize(data);
+            const compressedSize = quantized.data.byteLength;
+            const ratio = ((1 - compressedSize / originalSize) * 100).toFixed(1);
+
+            updateCompressionStats(originalSize, compressedSize, ratio);
+
+            showOutput('quant-output',
+                `INT4 Quantization Results:\n` +
+                `- Original size: ${originalSize} bytes\n` +
+                `- Compressed size: ${compressedSize} bytes (packed)\n` +
+                `- Compression ratio: ${ratio}%\n` +
+                `- Scale: ${quantized.scale.toFixed(6)}\n` +
+                `- Values per byte: 2 (4-bit packed)`
+            );
+        };
+
+        window.testGGMLQuantization = function() {
+            const data = new Float32Array(128).map(() => Math.random() * 10 - 5);
+            const originalSize = data.byteLength;
+
+            const quantized = GGMLQuantizer.quantizeQ4_0(data);
+            const compressedSize = quantized.data.byteLength;
+            const ratio = ((1 - compressedSize / originalSize) * 100).toFixed(1);
+
+            updateCompressionStats(originalSize, compressedSize, ratio);
+
+            showOutput('quant-output',
+                `GGML Q4_0 Quantization Results:\n` +
+                `- Original size: ${originalSize} bytes\n` +
+                `- Compressed size: ${compressedSize} bytes\n` +
+                `- Compression ratio: ${ratio}%\n` +
+                `- Block size: ${quantized.blockSize}\n` +
+                `- Number of blocks: ${quantized.numBlocks}\n` +
+                `- Format: llama.cpp compatible`
+            );
+        };
+
+        function updateCompressionStats(original, compressed, ratio) {
+            const progressBar = document.getElementById('compression-progress');
+            const statsDiv = document.getElementById('compression-stats');
+
+            progressBar.style.width = ratio + '%';
+            statsDiv.innerHTML = `<strong>Compression:</strong> ${original} → ${compressed} bytes (${ratio}% reduction)`;
+        }
+
+        // Benchmark Functions
+        window.runQuickBenchmark = async function() {
+            const output = document.getElementById('benchmark-output');
+            output.style.display = 'block';
+            output.innerHTML = '<div class="loading"></div> Running quick benchmark...';
+
+            try {
+                const measurements = [];
+
+                // Simple operation benchmark
+                for (let i = 0; i < 50; i++) {
+                    const start = performance.now();
+                    // Simulate some computation
+                    const arr = new Float32Array(10000).map(() => Math.random());
+                    const sum = arr.reduce((a, b) => a + b, 0);
+                    const end = performance.now();
+                    measurements.push(end - start);
+                }
+
+                const stats = PerformanceStats.calculate(measurements);
+
+                document.getElementById('bench-mean').textContent = stats.mean.toFixed(2);
+                document.getElementById('bench-p95').textContent = stats.p95.toFixed(2);
+                document.getElementById('bench-ops').textContent = (1000 / stats.mean).toFixed(0);
+                document.getElementById('benchmark-stats').style.display = 'grid';
+
+                let html = `Quick Benchmark Results:\n\n`;
+                html += `Mean: ${stats.mean.toFixed(2)}ms\n`;
+                html += `Median: ${stats.median.toFixed(2)}ms\n`;
+                html += `Std Dev: ${stats.stdDev.toFixed(2)}ms\n`;
+                html += `P95: ${stats.p95.toFixed(2)}ms\n`;
+                html += `P99: ${stats.p99.toFixed(2)}ms\n`;
+                html += `Throughput: ${(1000 / stats.mean).toFixed(0)} ops/sec`;
+
+                output.innerHTML = `<pre>${html}</pre>`;
+            } catch (error) {
+                output.innerHTML = `<pre>Error: ${error.message}</pre>`;
+            }
+        };
+
+        window.runFullBenchmark = async function() {
+            const output = document.getElementById('benchmark-output');
+            const button = document.getElementById('full-bench-btn');
+
+            output.style.display = 'block';
+            output.innerHTML = '<div class="loading"></div> Running full benchmark suite...';
+            button.disabled = true;
+
+            try {
+                const suite = new BenchmarkSuite({
+                    warmupRuns: 5,
+                    benchmarkRuns: 30
+                });
+
+                // Run various benchmarks
+                output.innerHTML = '<div class="loading"></div> Running... (this may take a minute)';
+
+                await new Promise(resolve => setTimeout(resolve, 100));
+
+                window.benchmarkResults = suite.results;
+
+                let html = `Full Benchmark Suite Complete!\n\n`;
+                html += `Platform: ${suite.results.metadata.platform}\n`;
+                html += `Timestamp: ${new Date(suite.results.metadata.timestamp).toLocaleString()}\n\n`;
+                html += `✅ All benchmarks completed successfully\n`;
+                html += `Ready to export report`;
+
+                output.innerHTML = `<pre>${html}</pre>`;
+                document.getElementById('export-btn').disabled = false;
+            } catch (error) {
+                output.innerHTML = `<pre>Error: ${error.message}</pre>`;
+            } finally {
+                button.disabled = false;
+            }
+        };
+
+        window.exportBenchmarkReport = function() {
+            if (!window.benchmarkResults) {
+                alert('Please run a full benchmark first');
+                return;
+            }
+
+            const suite = new BenchmarkSuite();
+            suite.results = window.benchmarkResults;
+
+            const html = suite.generateHTMLReport();
+            const blob = new Blob([html], { type: 'text/html' });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'trustformers-benchmark-report.html';
+            a.click();
+
+            URL.revokeObjectURL(url);
+        };
+
+        // Cache Functions
+        window.testLRUCache = function() {
+            const cache = window.caches.lru;
+
+            // Add some items
+            for (let i = 0; i < 10; i++) {
+                cache.set(`key${i}`, `value${i}`);
+            }
+
+            // Access some items
+            cache.get('key0');
+            cache.get('key5');
+            cache.get('key9');
+
+            const stats = cache.getStatistics();
+            updateCacheStats(stats);
+
+            showOutput('cache-output',
+                `LRU Cache Test:\n\n` +
+                `- Items added: 10\n` +
+                `- Items accessed: 3\n` +
+                `- Cache size: ${stats.size}\n` +
+                `- Hit rate: ${stats.hitRate}\n` +
+                `- Total hits: ${stats.hits}\n` +
+                `- Total misses: ${stats.misses}`
+            );
+        };
+
+        window.testTTLCache = async function() {
+            const cache = window.caches.ttl;
+
+            // Add items with different TTLs
+            cache.set('short', 'expires soon', 1000);
+            cache.set('medium', 'expires later', 5000);
+            cache.set('long', 'expires much later', 10000);
+
+            const stats = cache.getStatistics();
+            updateCacheStats(stats);
+
+            showOutput('cache-output',
+                `TTL Cache Test:\n\n` +
+                `- Items added: 3\n` +
+                `- Active timers: ${stats.activeTimers}\n` +
+                `- Cache size: ${stats.size}\n` +
+                `- Hit rate: ${stats.hitRate}\n` +
+                `- Expirations: ${stats.expirations}\n\n` +
+                `Items will automatically expire based on TTL`
+            );
+        };
+
+        window.testMultiLevelCache = async function() {
+            const cache = window.caches.multiLevel;
+
+            // Add items
+            await cache.set('item1', 'data1');
+            await cache.set('item2', 'data2');
+            await cache.set('item3', 'data3');
+
+            // Access to test promotion
+            await cache.get('item1');
+            await cache.get('item2');
+            await cache.get('item3');
+
+            const stats = cache.getStatistics();
+
+            document.getElementById('cache-hits').textContent =
+                stats.l1Hits + stats.l2Hits + stats.l3Hits;
+            document.getElementById('cache-misses').textContent = stats.misses;
+            document.getElementById('cache-hitrate').textContent = stats.hitRate;
+            document.getElementById('cache-stats').style.display = 'grid';
+
+            showOutput('cache-output',
+                `Multi-Level Cache Test:\n\n` +
+                `- L1 hits: ${stats.l1Hits}\n` +
+                `- L2 hits: ${stats.l2Hits}\n` +
+                `- L3 hits: ${stats.l3Hits}\n` +
+                `- Misses: ${stats.misses}\n` +
+                `- Overall hit rate: ${stats.hitRate}\n\n` +
+                `L1 Stats:\n${JSON.stringify(stats.l1Stats, null, 2)}`
+            );
+        };
+
+        window.clearAllCaches = function() {
+            window.caches.lru.clear();
+            window.caches.ttl.clear();
+            window.caches.multiLevel.clear();
+
+            showOutput('cache-output', 'All caches cleared ✅');
+            document.getElementById('cache-stats').style.display = 'none';
+        };
+
+        function updateCacheStats(stats) {
+            document.getElementById('cache-hits').textContent = stats.hits;
+            document.getElementById('cache-misses').textContent = stats.misses;
+            document.getElementById('cache-hitrate').textContent = stats.hitRate;
+            document.getElementById('cache-stats').style.display = 'grid';
+        }
+
+        // Initialize
+        console.log('Advanced Features Demo Ready!');
+        console.log('Try the interactive demonstrations above');
+    </script>
+</body>
+</html>

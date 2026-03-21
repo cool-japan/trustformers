@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Tensor Playground</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f0f2f5;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #1a1a1a;
+        }
+        
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        
+        .tensor-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(60px, 1fr));
+            gap: 5px;
+            margin: 10px 0;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        
+        .tensor-cell {
+            background: white;
+            border: 1px solid #dee2e6;
+            padding: 10px;
+            text-align: center;
+            font-family: monospace;
+            font-size: 14px;
+            border-radius: 4px;
+        }
+        
+        .tensor-cell input {
+            width: 100%;
+            border: none;
+            text-align: center;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        
+        button:hover {
+            background: #0056b3;
+        }
+        
+        button.secondary {
+            background: #6c757d;
+        }
+        
+        button.secondary:hover {
+            background: #5a6268;
+        }
+        
+        .shape-input {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            margin: 10px 0;
+        }
+        
+        .shape-input input {
+            width: 60px;
+            padding: 5px;
+            border: 1px solid #ced4da;
+            border-radius: 4px;
+            text-align: center;
+        }
+        
+        .result-section {
+            margin-top: 30px;
+            padding: 20px;
+            background: #e9ecef;
+            border-radius: 8px;
+        }
+        
+        .tensor-info {
+            font-size: 14px;
+            color: #495057;
+            margin: 5px 0;
+        }
+        
+        #status {
+            text-align: center;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        
+        .loading { background: #fff3cd; color: #856404; }
+        .ready { background: #d4edda; color: #155724; }
+        .error { background: #f8d7da; color: #721c24; }
+        
+        .visualization {
+            margin: 20px 0;
+        }
+        
+        canvas {
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            max-width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <h1>🧮 TrustformeRS Tensor Playground</h1>
+    
+    <div id="status" class="loading">Loading WebAssembly module...</div>
+    
+    <div class="container">
+        <h2>Create and Manipulate Tensors</h2>
+        
+        <div class="shape-input">
+            <label>Shape:</label>
+            <input type="number" id="rows" value="3" min="1" max="10"> ×
+            <input type="number" id="cols" value="3" min="1" max="10">
+            <button onclick="createTensorGrid()">Create Grid</button>
+            <button class="secondary" onclick="fillRandom()">Fill Random</button>
+            <button class="secondary" onclick="fillSequence()">Fill Sequence</button>
+        </div>
+        
+        <div id="tensorInput"></div>
+        
+        <div class="tensor-info" id="tensorAInfo"></div>
+        
+        <div class="controls">
+            <button onclick="performOp('transpose')">Transpose</button>
+            <button onclick="performOp('relu')">ReLU</button>
+            <button onclick="performOp('softmax')">Softmax</button>
+            <button onclick="performOp('normalize')">Normalize</button>
+            <button onclick="performOp('square')">Square</button>
+            <button onclick="performOp('sqrt')">Square Root</button>
+            <button onclick="performOp('exp')">Exponential</button>
+            <button onclick="performOp('log')">Logarithm</button>
+        </div>
+        
+        <h3>Two-Tensor Operations</h3>
+        
+        <div class="shape-input">
+            <label>Second Tensor Shape:</label>
+            <input type="number" id="rows2" value="3" min="1" max="10"> ×
+            <input type="number" id="cols2" value="3" min="1" max="10">
+            <button onclick="createSecondTensor()">Create Second Tensor</button>
+        </div>
+        
+        <div id="tensorBInput"></div>
+        <div class="tensor-info" id="tensorBInfo"></div>
+        
+        <div class="controls">
+            <button onclick="performBinaryOp('add')">Add (A + B)</button>
+            <button onclick="performBinaryOp('sub')">Subtract (A - B)</button>
+            <button onclick="performBinaryOp('mul')">Multiply (A × B)</button>
+            <button onclick="performBinaryOp('matmul')">Matrix Multiply (A @ B)</button>
+        </div>
+        
+        <div class="result-section">
+            <h3>Result</h3>
+            <div id="resultGrid"></div>
+            <div class="tensor-info" id="resultInfo"></div>
+            <canvas id="visualization" width="400" height="300" style="display:none;"></canvas>
+        </div>
+    </div>
+
+    <script type="module">
+        let trustformers = null;
+        let currentTensorA = null;
+        let currentTensorB = null;
+        let initialized = false;
+        
+        async function init() {
+            try {
+                document.getElementById('status').textContent = 'Loading TrustformeRS...';
+                
+                const module = await import('../trustformers-js/src/index.js');
+                trustformers = module;
+                
+                await trustformers.initialize({
+                    wasmPath: '../trustformers-wasm/pkg/trustformers_wasm_bg.wasm'
+                });
+                
+                initialized = true;
+                document.getElementById('status').className = 'ready';
+                document.getElementById('status').textContent = 'Ready! Create tensors and try operations.';
+                
+                // Create initial tensor grid
+                createTensorGrid();
+                
+            } catch (error) {
+                document.getElementById('status').className = 'error';
+                document.getElementById('status').textContent = `Error: ${error.message}`;
+                console.error(error);
+            }
+        }
+        
+        window.createTensorGrid = function() {
+            const rows = parseInt(document.getElementById('rows').value);
+            const cols = parseInt(document.getElementById('cols').value);
+            const container = document.getElementById('tensorInput');
+            
+            container.innerHTML = '<h4>Tensor A</h4>';
+            const grid = document.createElement('div');
+            grid.className = 'tensor-grid';
+            grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+            
+            for (let i = 0; i < rows * cols; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'tensor-cell';
+                cell.innerHTML = `<input type="number" value="0" step="0.1" id="cellA${i}">`;
+                grid.appendChild(cell);
+            }
+            
+            container.appendChild(grid);
+            updateTensorAInfo();
+        };
+        
+        window.createSecondTensor = function() {
+            const rows = parseInt(document.getElementById('rows2').value);
+            const cols = parseInt(document.getElementById('cols2').value);
+            const container = document.getElementById('tensorBInput');
+            
+            container.innerHTML = '<h4>Tensor B</h4>';
+            const grid = document.createElement('div');
+            grid.className = 'tensor-grid';
+            grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+            
+            for (let i = 0; i < rows * cols; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'tensor-cell';
+                cell.innerHTML = `<input type="number" value="0" step="0.1" id="cellB${i}">`;
+                grid.appendChild(cell);
+            }
+            
+            container.appendChild(grid);
+            updateTensorBInfo();
+        };
+        
+        window.fillRandom = function() {
+            const rows = parseInt(document.getElementById('rows').value);
+            const cols = parseInt(document.getElementById('cols').value);
+            
+            for (let i = 0; i < rows * cols; i++) {
+                const input = document.getElementById(`cellA${i}`);
+                if (input) {
+                    input.value = (Math.random() * 2 - 1).toFixed(2);
+                }
+            }
+            updateTensorAInfo();
+        };
+        
+        window.fillSequence = function() {
+            const rows = parseInt(document.getElementById('rows').value);
+            const cols = parseInt(document.getElementById('cols').value);
+            
+            for (let i = 0; i < rows * cols; i++) {
+                const input = document.getElementById(`cellA${i}`);
+                if (input) {
+                    input.value = i + 1;
+                }
+            }
+            updateTensorAInfo();
+        };
+        
+        function getTensorAData() {
+            const rows = parseInt(document.getElementById('rows').value);
+            const cols = parseInt(document.getElementById('cols').value);
+            const data = [];
+            
+            for (let i = 0; i < rows * cols; i++) {
+                const input = document.getElementById(`cellA${i}`);
+                data.push(parseFloat(input.value) || 0);
+            }
+            
+            return { data, shape: [rows, cols] };
+        }
+        
+        function getTensorBData() {
+            const rows = parseInt(document.getElementById('rows2').value);
+            const cols = parseInt(document.getElementById('cols2').value);
+            const data = [];
+            
+            for (let i = 0; i < rows * cols; i++) {
+                const input = document.getElementById(`cellB${i}`);
+                data.push(parseFloat(input.value) || 0);
+            }
+            
+            return { data, shape: [rows, cols] };
+        }
+        
+        function updateTensorAInfo() {
+            const { data, shape } = getTensorAData();
+            const info = document.getElementById('tensorAInfo');
+            const sum = data.reduce((a, b) => a + b, 0);
+            const mean = sum / data.length;
+            const min = Math.min(...data);
+            const max = Math.max(...data);
+            
+            info.innerHTML = `Shape: [${shape.join(', ')}] | Sum: ${sum.toFixed(2)} | Mean: ${mean.toFixed(2)} | Min: ${min.toFixed(2)} | Max: ${max.toFixed(2)}`;
+        }
+        
+        function updateTensorBInfo() {
+            const { data, shape } = getTensorBData();
+            const info = document.getElementById('tensorBInfo');
+            const sum = data.reduce((a, b) => a + b, 0);
+            const mean = sum / data.length;
+            
+            info.innerHTML = `Shape: [${shape.join(', ')}] | Sum: ${sum.toFixed(2)} | Mean: ${mean.toFixed(2)}`;
+        }
+        
+        function displayResult(tensor, operation) {
+            const container = document.getElementById('resultGrid');
+            const shape = Array.from(tensor.shape);
+            const data = Array.from(tensor.data);
+            
+            container.innerHTML = `<h4>Result of ${operation}</h4>`;
+            const grid = document.createElement('div');
+            grid.className = 'tensor-grid';
+            grid.style.gridTemplateColumns = `repeat(${shape[shape.length - 1]}, 1fr)`;
+            
+            data.forEach(value => {
+                const cell = document.createElement('div');
+                cell.className = 'tensor-cell';
+                cell.textContent = value.toFixed(4);
+                grid.appendChild(cell);
+            });
+            
+            container.appendChild(grid);
+            
+            // Update result info
+            const info = document.getElementById('resultInfo');
+            const sum = data.reduce((a, b) => a + b, 0);
+            const mean = sum / data.length;
+            const min = Math.min(...data);
+            const max = Math.max(...data);
+            
+            info.innerHTML = `Shape: [${shape.join(', ')}] | Sum: ${sum.toFixed(2)} | Mean: ${mean.toFixed(2)} | Min: ${min.toFixed(2)} | Max: ${max.toFixed(2)}`;
+            
+            // Visualize if appropriate
+            if (operation === 'softmax' || operation === 'normalize') {
+                visualizeTensor(data, shape);
+            }
+        }
+        
+        function visualizeTensor(data, shape) {
+            const canvas = document.getElementById('visualization');
+            const ctx = canvas.getContext('2d');
+            canvas.style.display = 'block';
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw bar chart for 1D or flattened data
+            const barWidth = canvas.width / data.length;
+            const maxValue = Math.max(...data);
+            const scale = (canvas.height - 40) / maxValue;
+            
+            data.forEach((value, i) => {
+                const barHeight = value * scale;
+                const x = i * barWidth;
+                const y = canvas.height - barHeight - 20;
+                
+                // Color based on value
+                const hue = (1 - value / maxValue) * 240; // Blue to red
+                ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
+                ctx.fillRect(x, y, barWidth - 2, barHeight);
+                
+                // Value label
+                ctx.fillStyle = '#333';
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(value.toFixed(2), x + barWidth / 2, canvas.height - 5);
+            });
+        }
+        
+        window.performOp = async function(operation) {
+            if (!initialized) return;
+            
+            try {
+                const { data, shape } = getTensorAData();
+                
+                // Clean up previous tensor
+                if (currentTensorA) currentTensorA.free();
+                
+                currentTensorA = trustformers.tensor(data, shape);
+                let result;
+                
+                switch(operation) {
+                    case 'transpose':
+                        result = currentTensorA.transpose();
+                        break;
+                    case 'relu':
+                        result = currentTensorA.relu();
+                        break;
+                    case 'softmax':
+                        result = currentTensorA.softmax(-1);
+                        break;
+                    case 'normalize':
+                        const mean = currentTensorA.mean();
+                        const std = Math.sqrt(data.map(x => Math.pow(x - mean, 2)).reduce((a, b) => a + b) / data.length);
+                        result = currentTensorA.sub(trustformers.tensor(Array(data.length).fill(mean), shape))
+                                              .div(trustformers.tensor(Array(data.length).fill(std), shape));
+                        break;
+                    case 'square':
+                        result = currentTensorA.mul(currentTensorA);
+                        break;
+                    case 'sqrt':
+                        result = trustformers.tensor(data.map(x => Math.sqrt(Math.abs(x))), shape);
+                        break;
+                    case 'exp':
+                        result = currentTensorA.exp();
+                        break;
+                    case 'log':
+                        result = currentTensorA.log();
+                        break;
+                }
+                
+                displayResult(result, operation);
+                result.free();
+                
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        };
+        
+        window.performBinaryOp = async function(operation) {
+            if (!initialized) return;
+            
+            try {
+                const dataA = getTensorAData();
+                const dataB = getTensorBData();
+                
+                // Clean up previous tensors
+                if (currentTensorA) currentTensorA.free();
+                if (currentTensorB) currentTensorB.free();
+                
+                currentTensorA = trustformers.tensor(dataA.data, dataA.shape);
+                currentTensorB = trustformers.tensor(dataB.data, dataB.shape);
+                
+                let result;
+                
+                switch(operation) {
+                    case 'add':
+                        result = currentTensorA.add(currentTensorB);
+                        break;
+                    case 'sub':
+                        result = currentTensorA.sub(currentTensorB);
+                        break;
+                    case 'mul':
+                        result = currentTensorA.mul(currentTensorB);
+                        break;
+                    case 'matmul':
+                        result = currentTensorA.matmul(currentTensorB);
+                        break;
+                }
+                
+                displayResult(result, `${operation}(A, B)`);
+                result.free();
+                
+            } catch (error) {
+                alert(`Error: ${error.message}`);
+            }
+        };
+        
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>

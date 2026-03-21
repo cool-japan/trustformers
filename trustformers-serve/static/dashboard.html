@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Inference Server - Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.4.4/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.bundle.min.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            color: #ffffff;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: #2a2a2a;
+            padding: 1rem 2rem;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #4CAF50;
+            font-size: 2rem;
+            font-weight: 300;
+        }
+
+        .header-info {
+            display: flex;
+            gap: 2rem;
+            align-items: center;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #4CAF50;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        .nav-tabs {
+            background: #333;
+            padding: 0 2rem;
+            display: flex;
+            gap: 0;
+        }
+
+        .nav-tab {
+            padding: 1rem 2rem;
+            background: transparent;
+            border: none;
+            color: #ccc;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border-bottom: 3px solid transparent;
+        }
+
+        .nav-tab:hover {
+            background: #404040;
+            color: #fff;
+        }
+
+        .nav-tab.active {
+            background: #4CAF50;
+            color: #fff;
+            border-bottom-color: #45a049;
+        }
+
+        .dashboard-container {
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .widget {
+            background: linear-gradient(145deg, #2a2a2a, #1f1f1f);
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            border: 1px solid #404040;
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+
+        .widget:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+        }
+
+        .widget-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .widget h3 {
+            color: #4CAF50;
+            font-size: 1.2rem;
+            font-weight: 500;
+        }
+
+        .widget-value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #fff;
+        }
+
+        .widget-unit {
+            font-size: 1rem;
+            color: #ccc;
+            margin-left: 0.5rem;
+        }
+
+        .widget-trend {
+            font-size: 0.9rem;
+            margin-top: 0.5rem;
+        }
+
+        .trend-up {
+            color: #4CAF50;
+        }
+
+        .trend-down {
+            color: #f44336;
+        }
+
+        .trend-stable {
+            color: #ffc107;
+        }
+
+        .chart-container {
+            position: relative;
+            height: 250px;
+            margin-top: 1rem;
+        }
+
+        .chart-container canvas {
+            border-radius: 8px;
+        }
+
+        .metric-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+
+        .metric-card {
+            background: linear-gradient(145deg, #2a2a2a, #1f1f1f);
+            padding: 1.5rem;
+            border-radius: 12px;
+            text-align: center;
+            border: 1px solid #404040;
+        }
+
+        .metric-card h4 {
+            color: #ccc;
+            font-size: 0.9rem;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .metric-card .value {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #4CAF50;
+        }
+
+        .alerts-panel {
+            background: #2a2a2a;
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            border: 1px solid #404040;
+        }
+
+        .alerts-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .alert-item {
+            background: #1f1f1f;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+            border-left: 4px solid #ffc107;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .alert-item.error {
+            border-left-color: #f44336;
+        }
+
+        .alert-item.warning {
+            border-left-color: #ffc107;
+        }
+
+        .alert-item.info {
+            border-left-color: #2196F3;
+        }
+
+        .alert-time {
+            color: #ccc;
+            font-size: 0.8rem;
+        }
+
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .connection-status.connected {
+            color: #4CAF50;
+        }
+
+        .connection-status.disconnected {
+            color: #f44336;
+        }
+
+        .loading {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 200px;
+            color: #ccc;
+        }
+
+        .spinner {
+            border: 3px solid #404040;
+            border-top: 3px solid #4CAF50;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin-right: 1rem;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error-message {
+            background: #f44336;
+            color: white;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+            text-align: center;
+        }
+
+        @media (max-width: 768px) {
+            .dashboard-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .metric-cards {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            
+            .header {
+                flex-direction: column;
+                gap: 1rem;
+            }
+            
+            .nav-tabs {
+                flex-wrap: wrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>TrustformeRS Dashboard</h1>
+        <div class="header-info">
+            <div class="status-indicator">
+                <div class="status-dot"></div>
+                <span>Server Online</span>
+            </div>
+            <div class="connection-status" id="connectionStatus">
+                <span>Connecting...</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="nav-tabs">
+        <button class="nav-tab active" onclick="showDashboard('system_overview')">System Overview</button>
+        <button class="nav-tab" onclick="showDashboard('performance')">Performance</button>
+        <button class="nav-tab" onclick="showDashboard('model_monitoring')">Model Monitoring</button>
+    </div>
+
+    <div class="dashboard-container">
+        <div class="metric-cards" id="metricCards">
+            <div class="metric-card">
+                <h4>Active Requests</h4>
+                <div class="value" id="activeRequests">-</div>
+            </div>
+            <div class="metric-card">
+                <h4>Requests/sec</h4>
+                <div class="value" id="requestRate">-</div>
+            </div>
+            <div class="metric-card">
+                <h4>Avg Latency</h4>
+                <div class="value" id="avgLatency">-</div>
+            </div>
+            <div class="metric-card">
+                <h4>CPU Usage</h4>
+                <div class="value" id="cpuUsage">-</div>
+            </div>
+        </div>
+
+        <div class="alerts-panel" id="alertsPanel" style="display: none;">
+            <div class="alerts-header">
+                <h3>Active Alerts</h3>
+                <button onclick="clearAlerts()" style="background: #f44336; color: white; border: none; padding: 0.5rem 1rem; border-radius: 4px; cursor: pointer;">Clear All</button>
+            </div>
+            <div id="alertsList"></div>
+        </div>
+
+        <div class="dashboard-grid" id="dashboard">
+            <div class="loading">
+                <div class="spinner"></div>
+                Loading dashboard...
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let charts = {};
+        let currentLayout = 'system_overview';
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 5;
+        let reconnectDelay = 1000;
+        let alerts = [];
+
+        // Initialize dashboard
+        document.addEventListener('DOMContentLoaded', function() {
+            connectWebSocket();
+            loadDashboard(currentLayout);
+            updateConnectionStatus();
+        });
+
+        function connectWebSocket() {
+            try {
+                ws = new WebSocket(`ws://${window.location.hostname}:${window.location.port}/ws`);
+                
+                ws.onopen = function(event) {
+                    console.log('WebSocket connected');
+                    reconnectAttempts = 0;
+                    updateConnectionStatus(true);
+                };
+
+                ws.onmessage = function(event) {
+                    try {
+                        const message = JSON.parse(event.data);
+                        handleWebSocketMessage(message);
+                    } catch (error) {
+                        console.error('Failed to parse WebSocket message:', error);
+                    }
+                };
+
+                ws.onclose = function(event) {
+                    console.log('WebSocket disconnected');
+                    updateConnectionStatus(false);
+                    attemptReconnect();
+                };
+
+                ws.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                    updateConnectionStatus(false);
+                };
+            } catch (error) {
+                console.error('Failed to connect WebSocket:', error);
+                updateConnectionStatus(false);
+                attemptReconnect();
+            }
+        }
+
+        function attemptReconnect() {
+            if (reconnectAttempts < maxReconnectAttempts) {
+                reconnectAttempts++;
+                setTimeout(() => {
+                    console.log(`Attempting to reconnect (${reconnectAttempts}/${maxReconnectAttempts})...`);
+                    connectWebSocket();
+                }, reconnectDelay * reconnectAttempts);
+            }
+        }
+
+        function updateConnectionStatus(connected = false) {
+            const statusElement = document.getElementById('connectionStatus');
+            if (connected) {
+                statusElement.className = 'connection-status connected';
+                statusElement.innerHTML = '<span>●</span> Connected';
+            } else {
+                statusElement.className = 'connection-status disconnected';
+                statusElement.innerHTML = '<span>●</span> Disconnected';
+            }
+        }
+
+        function handleWebSocketMessage(message) {
+            switch (message.type) {
+                case 'WidgetUpdate':
+                    updateWidget(message.data);
+                    break;
+                case 'Alert':
+                    addAlert(message.alert);
+                    break;
+                case 'Ping':
+                    // Respond to ping if needed
+                    break;
+                default:
+                    console.log('Unknown message type:', message.type);
+            }
+        }
+
+        function updateWidget(update) {
+            const chart = charts[update.widget_id];
+            if (chart && update.data.length > 0) {
+                const dataset = chart.data.datasets[0];
+                
+                update.data.forEach(point => {
+                    dataset.data.push({
+                        x: new Date(point.timestamp * 1000),
+                        y: point.value
+                    });
+                });
+
+                // Keep only recent data points
+                const maxPoints = 50;
+                if (dataset.data.length > maxPoints) {
+                    dataset.data.splice(0, dataset.data.length - maxPoints);
+                }
+
+                chart.update('none');
+                
+                // Update metric cards
+                updateMetricCards(update);
+            }
+        }
+
+        function updateMetricCards(update) {
+            const latestValue = update.data[update.data.length - 1]?.value;
+            if (latestValue === undefined) return;
+
+            const formatValue = (value, type) => {
+                switch (type) {
+                    case 'cpu_usage':
+                    case 'memory_usage':
+                    case 'gpu_usage':
+                        return `${Math.round(value)}%`;
+                    case 'request_rate':
+                        return `${Math.round(value)}`;
+                    case 'latency':
+                        return `${Math.round(value)}ms`;
+                    default:
+                        return Math.round(value).toString();
+                }
+            };
+
+            // Update specific metric cards based on widget type
+            if (update.widget_id.includes('cpu')) {
+                document.getElementById('cpuUsage').textContent = formatValue(latestValue, 'cpu_usage');
+            } else if (update.widget_id.includes('latency')) {
+                document.getElementById('avgLatency').textContent = formatValue(latestValue, 'latency');
+            } else if (update.widget_id.includes('request')) {
+                document.getElementById('requestRate').textContent = formatValue(latestValue, 'request_rate');
+            }
+        }
+
+        function addAlert(alert) {
+            alerts.unshift(alert);
+            
+            // Keep only recent alerts
+            if (alerts.length > 10) {
+                alerts = alerts.slice(0, 10);
+            }
+            
+            renderAlerts();
+            showAlertsPanel();
+        }
+
+        function renderAlerts() {
+            const alertsList = document.getElementById('alertsList');
+            alertsList.innerHTML = '';
+            
+            alerts.forEach(alert => {
+                const alertElement = document.createElement('div');
+                alertElement.className = `alert-item ${alert.severity}`;
+                alertElement.innerHTML = `
+                    <div>
+                        <strong>${alert.title}</strong>
+                        <div>${alert.message}</div>
+                    </div>
+                    <div class="alert-time">${new Date(alert.timestamp * 1000).toLocaleTimeString()}</div>
+                `;
+                alertsList.appendChild(alertElement);
+            });
+        }
+
+        function showAlertsPanel() {
+            document.getElementById('alertsPanel').style.display = 'block';
+        }
+
+        function clearAlerts() {
+            alerts = [];
+            renderAlerts();
+            document.getElementById('alertsPanel').style.display = 'none';
+        }
+
+        async function loadDashboard(layoutId) {
+            try {
+                const response = await fetch('/api/layouts');
+                const layouts = await response.json();
+                const layout = layouts.find(l => l.id === layoutId);
+                
+                if (layout) {
+                    renderLayout(layout);
+                } else {
+                    showError('Dashboard layout not found');
+                }
+            } catch (error) {
+                console.error('Failed to load dashboard:', error);
+                showError('Failed to load dashboard');
+            }
+        }
+
+        function renderLayout(layout) {
+            const dashboard = document.getElementById('dashboard');
+            dashboard.innerHTML = '';
+            
+            // Clear existing charts
+            Object.values(charts).forEach(chart => chart.destroy());
+            charts = {};
+            
+            layout.widgets.forEach(widget => {
+                const widgetElement = createWidget(widget);
+                dashboard.appendChild(widgetElement);
+            });
+        }
+
+        function createWidget(widget) {
+            const div = document.createElement('div');
+            div.className = 'widget';
+            div.innerHTML = `
+                <div class="widget-header">
+                    <h3>${widget.title}</h3>
+                    <div class="widget-value">
+                        <span id="value-${widget.id}">-</span>
+                        <span class="widget-unit">${getUnit(widget)}</span>
+                    </div>
+                </div>
+                <div class="widget-trend" id="trend-${widget.id}">
+                    <span class="trend-stable">No data</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="chart-${widget.id}"></canvas>
+                </div>
+            `;
+            
+            // Initialize chart
+            setTimeout(() => {
+                const ctx = div.querySelector(`#chart-${widget.id}`);
+                if (ctx) {
+                    charts[widget.id] = createChart(ctx, widget);
+                    
+                    // Subscribe to widget updates
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        ws.send(JSON.stringify({
+                            type: 'Subscribe',
+                            widget_id: widget.id
+                        }));
+                    }
+                }
+            }, 100);
+            
+            return div;
+        }
+
+        function createChart(ctx, widget) {
+            const chartType = getChartJsType(widget.display_config.chart_type);
+            const color = getColor(widget.display_config.color_scheme);
+            
+            const config = {
+                type: chartType,
+                data: {
+                    datasets: [{
+                        label: widget.title,
+                        data: [],
+                        borderColor: color,
+                        backgroundColor: chartType === 'line' ? color.replace('1)', '0.1)') : color,
+                        tension: 0.4,
+                        fill: chartType === 'line' ? false : true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            display: widget.display_config.show_legend,
+                            labels: {
+                                color: '#ccc'
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'minute',
+                                displayFormats: {
+                                    minute: 'HH:mm'
+                                }
+                            },
+                            grid: {
+                                display: widget.display_config.show_grid,
+                                color: '#404040'
+                            },
+                            ticks: {
+                                color: '#ccc'
+                            }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            min: widget.display_config.min_value,
+                            max: widget.display_config.max_value,
+                            grid: {
+                                display: widget.display_config.show_grid,
+                                color: '#404040'
+                            },
+                            ticks: {
+                                color: '#ccc'
+                            }
+                        }
+                    },
+                    elements: {
+                        point: {
+                            radius: 0,
+                            hitRadius: 10
+                        }
+                    }
+                }
+            };
+            
+            return new Chart(ctx, config);
+        }
+
+        function getChartJsType(type) {
+            const typeMap = {
+                'Line': 'line',
+                'Area': 'line',
+                'Bar': 'bar',
+                'Gauge': 'doughnut'
+            };
+            return typeMap[type] || 'line';
+        }
+
+        function getColor(scheme) {
+            const colors = {
+                'Blue': 'rgba(54, 162, 235, 1)',
+                'Green': 'rgba(75, 192, 192, 1)',
+                'Red': 'rgba(255, 99, 132, 1)',
+                'Purple': 'rgba(153, 102, 255, 1)',
+                'Orange': 'rgba(255, 159, 64, 1)',
+                'Yellow': 'rgba(255, 205, 86, 1)',
+                'BlueGreen': 'rgba(26, 188, 156, 1)',
+                'OrangeRed': 'rgba(231, 76, 60, 1)',
+                'Multicolor': 'rgba(54, 162, 235, 1)'
+            };
+            return colors[scheme] || colors['Blue'];
+        }
+
+        function getUnit(widget) {
+            if (widget.id.includes('usage')) return '%';
+            if (widget.id.includes('latency')) return 'ms';
+            if (widget.id.includes('rate')) return '/s';
+            if (widget.id.includes('size')) return 'MB';
+            return '';
+        }
+
+        function showDashboard(layoutId) {
+            // Update active tab
+            document.querySelectorAll('.nav-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            currentLayout = layoutId;
+            loadDashboard(layoutId);
+        }
+
+        function showError(message) {
+            const dashboard = document.getElementById('dashboard');
+            dashboard.innerHTML = `<div class="error-message">${message}</div>`;
+        }
+
+        // Generate sample data for demonstration
+        function generateSampleData() {
+            if (Object.keys(charts).length === 0) return;
+            
+            Object.keys(charts).forEach(widgetId => {
+                const dataPoint = {
+                    timestamp: Math.floor(Date.now() / 1000),
+                    value: Math.random() * 100,
+                    labels: {}
+                };
+                
+                updateWidget({
+                    widget_id: widgetId,
+                    data: [dataPoint],
+                    timestamp: dataPoint.timestamp
+                });
+            });
+        }
+
+        // Auto-generate sample data every 5 seconds for demo
+        setInterval(generateSampleData, 5000);
+    </script>
+</body>
+</html>

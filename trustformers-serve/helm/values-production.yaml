@@ -1,0 +1,559 @@
+# Production values for trustformers-serve
+# This file contains production-optimized configuration
+
+# Global settings
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+  storageClass: "fast-ssd"
+
+# Deployment configuration
+replicaCount: 5
+
+image:
+  repository: trustformers-serve
+  pullPolicy: IfNotPresent
+  tag: "v1.0.0"
+
+imagePullSecrets:
+  - name: docker-registry-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+# Deployment strategy
+deployment:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 1
+  labels: {}
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+
+# Service Account
+serviceAccount:
+  create: true
+  automountToken: false
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::ACCOUNT:role/TrustformersServeRole"
+  name: ""
+
+# Pod configuration
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "9091"
+  prometheus.io/path: "/metrics"
+
+podLabels:
+  tier: production
+  component: inference-server
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: "OnRootMismatch"
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+    - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# Health checks
+healthCheck:
+  port: 8085
+
+livenessProbe:
+  enabled: true
+  httpGet:
+    path: /health/liveness
+    port: health
+    scheme: HTTP
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+readinessProbe:
+  enabled: true
+  httpGet:
+    path: /health/readiness
+    port: health
+    scheme: HTTP
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+  successThreshold: 1
+
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /health/startup
+    port: health
+    scheme: HTTP
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+  successThreshold: 1
+
+# Service configuration
+service:
+  type: LoadBalancer
+  port: 80
+  grpcPort: 9090
+  metricsPort: 9091
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
+    service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+  loadBalancerSourceRanges:
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/rate-limit: "1000"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: api.trustformers.ai
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: trustformers-serve-tls
+      hosts:
+        - api.trustformers.ai
+
+grpcIngress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/grpc-backend: "true"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: grpc.trustformers.ai
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: trustformers-serve-grpc-tls
+      hosts:
+        - grpc.trustformers.ai
+
+# Resource requirements
+resources:
+  requests:
+    memory: "4Gi"
+    cpu: "2000m"
+    ephemeral-storage: "10Gi"
+  limits:
+    memory: "8Gi"
+    cpu: "4000m"
+    ephemeral-storage: "20Gi"
+
+# Autoscaling
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 50
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 100
+        periodSeconds: 15
+      - type: Pods
+        value: 2
+        periodSeconds: 60
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+      - type: Pods
+        value: 1
+        periodSeconds: 60
+      selectPolicy: Min
+  customMetrics:
+    - type: Pods
+      pods:
+        metric:
+          name: inference_queue_size
+        target:
+          type: AverageValue
+          averageValue: "10"
+
+# VPA configuration
+verticalPodAutoscaler:
+  enabled: true
+  updateMode: "Auto"
+  minAllowed:
+    cpu: 1000m
+    memory: 2Gi
+  maxAllowed:
+    cpu: 8000m
+    memory: 16Gi
+
+# Node selection and scheduling
+nodeSelector:
+  kubernetes.io/arch: amd64
+  node.kubernetes.io/instance-type: m5.2xlarge
+  workload-type: inference
+
+tolerations:
+  - key: "inference-workload"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+  - key: "node.kubernetes.io/unreachable"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 30
+  - key: "node.kubernetes.io/not-ready"
+    operator: "Exists"
+    effect: "NoExecute"
+    tolerationSeconds: 30
+
+# Pod affinity
+affinity:
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+    - weight: 100
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - trustformers-serve
+        topologyKey: kubernetes.io/hostname
+    - weight: 50
+      podAffinityTerm:
+        labelSelector:
+          matchExpressions:
+          - key: app.kubernetes.io/name
+            operator: In
+            values:
+            - trustformers-serve
+        topologyKey: topology.kubernetes.io/zone
+
+# Topology spread constraints
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: trustformers-serve
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 60%
+
+# Network Policy
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            name: ingress-nginx
+      - namespaceSelector:
+          matchLabels:
+            name: istio-system
+      ports:
+      - protocol: TCP
+        port: 8080
+      - protocol: TCP
+        port: 9090
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            name: trustformers-monitoring
+      ports:
+      - protocol: TCP
+        port: 9091
+      - protocol: TCP
+        port: 8085
+  egress:
+    - to: []
+      ports:
+      - protocol: UDP
+        port: 53
+      - protocol: TCP
+        port: 53
+    - to: []
+      ports:
+      - protocol: TCP
+        port: 443
+      - protocol: TCP
+        port: 80
+
+# Application configuration
+config:
+  server:
+    host: "0.0.0.0"
+    port: 8080
+    numWorkers: auto
+    enableMetrics: true
+    enableHealthCheck: true
+    maxConnections: 1000
+    requestTimeout: 30000
+
+  model:
+    modelName: "production-model"
+    device: "Gpu"
+    maxSequenceLength: 4096
+    enableCaching: true
+    precision: "float16"
+
+  batching:
+    maxBatchSize: 64
+    maxWaitTimeMs: 25
+    enableAdaptiveBatching: true
+    strategy: "performance"
+
+  caching:
+    enableDistributed: true
+    enableWarming: true
+    resultCache:
+      maxSizeBytes: 2147483648  # 2GB
+      maxEntries: 200000
+      defaultTtl: 3600
+      evictionPolicy: "LRU"
+    embeddingCache:
+      maxSizeBytes: 1073741824  # 1GB
+      maxEntries: 100000
+      defaultTtl: 7200
+    kvCache:
+      maxSizeBytes: 4294967296  # 4GB
+      maxSequences: 2000
+      maxLayers: 80
+      sharingEnabled: true
+
+  auth:
+    issuer: "trustformers.ai"
+    audience: "trustformers-clients"
+    tokenExpiration: 3600
+
+  metrics:
+    enablePrometheus: true
+    metricsPath: "/metrics"
+    namespace: "trustformers"
+
+  logging:
+    level: "info"
+    format: "json"
+
+# Persistence
+persistence:
+  modelCache:
+    enabled: true
+    size: 100Gi
+    storageClass: "fast-ssd"
+    accessMode: ReadOnlyMany
+    readOnly: true
+  logs:
+    enabled: true
+    sizeLimit: 5Gi
+
+# Volume configurations
+tmpVolume:
+  sizeLimit: "2Gi"
+
+cacheVolume:
+  sizeLimit: "10Gi"
+
+# Init containers
+initContainers:
+  modelDownloader:
+    enabled: true
+    image:
+      repository: alpine/git
+      tag: latest
+      pullPolicy: IfNotPresent
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "Downloading production models..."
+        # Add model download logic here
+        echo "Models downloaded successfully"
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "100m"
+      limits:
+        memory: "256Mi"
+        cpu: "200m"
+
+# Sidecar containers
+sidecarContainers:
+  enabled: true
+  containers:
+    - name: log-shipper
+      image: fluent/fluent-bit:2.0
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "100m"
+        limits:
+          memory: "128Mi"
+          cpu: "200m"
+      volumeMounts:
+        - name: logs
+          mountPath: /logs
+          readOnly: true
+
+# Environment variables
+env:
+  - name: ENVIRONMENT
+    value: "production"
+  - name: LOG_LEVEL
+    value: "info"
+  - name: ENABLE_METRICS
+    value: "true"
+  - name: ENABLE_TRACING
+    value: "true"
+
+envFrom:
+  configMaps:
+    - trustformers-serve-env-config
+  secrets:
+    - trustformers-serve-secrets
+
+# Lifecycle hooks
+lifecycle:
+  preStop:
+    exec:
+      command:
+        - /bin/sh
+        - -c
+        - |
+          echo "Gracefully shutting down..."
+          kill -TERM 1
+          sleep 30
+
+terminationGracePeriodSeconds: 60
+
+# Monitoring
+monitoring:
+  prometheus:
+    scrape: true
+    path: "/metrics"
+    port: 9091
+  serviceMonitor:
+    enabled: true
+    interval: 15s
+    path: /metrics
+    honorLabels: true
+    scrapeTimeout: 10s
+    metricRelabelings:
+      - sourceLabels: [__name__]
+        regex: 'go_.*'
+        action: drop
+
+# Tracing
+tracing:
+  enabled: true
+  jaegerEndpoint: "http://jaeger-collector.trustformers-monitoring:14268/api/traces"
+  otlpEndpoint: "http://otel-collector.trustformers-monitoring:4317"
+  samplingRate: 0.1
+
+# Service mesh
+serviceMesh:
+  istio:
+    enabled: true
+  linkerd:
+    enabled: false
+
+# Redis configuration
+redis:
+  enabled: true
+  host: "redis-master.trustformers"
+  port: 6379
+  database: 0
+  auth:
+    enabled: true
+    existingSecret: "redis-auth"
+    existingSecretPasswordKey: "redis-password"
+
+# Secrets (use external secret management in production)
+existingSecret: "trustformers-serve-secrets"
+
+secrets:
+  jwtSecret: ""  # Provided via external secret
+  redisPassword: ""  # Provided via external secret
+  apiKey: ""  # Provided via external secret
+
+# Logging
+logging:
+  level: "info"
+  format: "json"
+
+# Priority class
+priorityClassName: "high-priority"
+
+# Runtime class
+runtimeClassName: ""
+
+# DNS configuration
+dnsPolicy: "ClusterFirst"
+dnsConfig:
+  options:
+    - name: ndots
+      value: "2"
+    - name: edns0
+
+# Common labels and annotations
+commonLabels:
+  environment: production
+  team: ml-platform
+
+commonAnnotations:
+  deployed-by: helm
+  
+# Extra volumes and volume mounts
+extraVolumes: []
+extraVolumeMounts: []
+
+# Command and args override
+command: []
+args: []

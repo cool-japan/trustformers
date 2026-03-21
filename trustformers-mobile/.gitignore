@@ -1,0 +1,124 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Android
+*.iml
+.gradle
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+
+# Android Library
+android-lib/build/
+android-lib/libs/
+android-lib/.cxx/
+
+# Gradle files
+.gradle/
+build/
+*/build/
+gradle.properties
+local.properties
+
+# IDE
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Native libraries
+*.so
+*.dylib
+*.dll
+
+# Logs
+*.log
+
+# JitPack
+.jitpack/
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Rust target directories
+*/target/
+trustformers-*/target/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Unity
+/unity-package/Library/
+/unity-package/Temp/
+/unity-package/Obj/
+/unity-package/Build/
+/unity-package/Builds/
+/unity-package/UserSettings/
+/unity-package/MemoryCaptures/
+/unity-package/Logs/
+/unity-package/Assets/AssetStoreTools*
+
+# iOS
+ios-framework/build/
+ios-framework/DerivedData/
+ios-framework/*.xcworkspace/xcuserdata/
+ios-framework/*.xcodeproj/xcuserdata/
+ios-framework/*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Flutter
+flutter-plugin/.dart_tool/
+flutter-plugin/.flutter-plugins
+flutter-plugin/.flutter-plugins-dependencies
+flutter-plugin/.packages
+flutter-plugin/pubspec.lock
+
+# React Native
+react-native-plugin/node_modules/
+react-native-plugin/lib/
+react-native-plugin/android/build/
+react-native-plugin/ios/build/
+
+# Secrets and keys
+*.key
+*.pem
+keystore.jks
+*.keystore
+signing.properties
+secrets.properties
+
+# Performance and profiling
+*.profile
+*.trace
+*.hprof

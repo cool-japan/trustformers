@@ -1,0 +1,65 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: trustformers-server
+  namespace: trustformers
+  labels:
+    app: trustformers-server
+    app.kubernetes.io/name: trustformers-server
+    app.kubernetes.io/instance: trustformers
+    app.kubernetes.io/component: security
+spec:
+  podSelector:
+    matchLabels:
+      app: trustformers-server
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  # Allow traffic from ingress controller
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 8080
+  # Allow traffic from monitoring namespace
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: monitoring
+    ports:
+    - protocol: TCP
+      port: 8080
+  # Allow traffic from same namespace
+  - from:
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 8080
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow access to model download endpoints
+  - to:
+    - namespaceSelector: {}
+    - podSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+  # Allow access to external APIs
+  - to:
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80

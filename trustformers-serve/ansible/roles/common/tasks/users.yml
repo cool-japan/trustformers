@@ -1,0 +1,72 @@
+---
+# User and group management tasks
+
+- name: Create application group
+  group:
+    name: "{{ app_group }}"
+    gid: "{{ app_gid }}"
+    state: present
+  tags: [users, groups]
+
+- name: Create application user
+  user:
+    name: "{{ app_user }}"
+    uid: "{{ app_uid }}"
+    group: "{{ app_group }}"
+    home: "{{ app_home }}"
+    shell: "{{ app_shell }}"
+    create_home: true
+    system: true
+    state: present
+  tags: [users]
+
+- name: Create application directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  loop: "{{ app_directories }}"
+  tags: [directories]
+
+- name: Set up sudo access for application user
+  copy:
+    dest: "/etc/sudoers.d/{{ app_user }}"
+    content: |
+      # Allow {{ app_user }} to manage application services
+      {{ app_user }} ALL=(ALL) NOPASSWD: /bin/systemctl start trustformers-serve
+      {{ app_user }} ALL=(ALL) NOPASSWD: /bin/systemctl stop trustformers-serve
+      {{ app_user }} ALL=(ALL) NOPASSWD: /bin/systemctl restart trustformers-serve
+      {{ app_user }} ALL=(ALL) NOPASSWD: /bin/systemctl reload trustformers-serve
+      {{ app_user }} ALL=(ALL) NOPASSWD: /bin/systemctl status trustformers-serve
+    mode: '0440'
+    validate: 'visudo -cf %s'
+  tags: [sudo, security]
+
+- name: Configure user shell environment
+  template:
+    src: bashrc.j2
+    dest: "{{ app_home }}/.bashrc"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+  tags: [shell, environment]
+
+- name: Create SSH directory for application user
+  file:
+    path: "{{ app_home }}/.ssh"
+    state: directory
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0700'
+  tags: [ssh]
+
+- name: Set up authorized keys for application user
+  authorized_key:
+    user: "{{ app_user }}"
+    key: "{{ item }}"
+    state: present
+  loop: "{{ authorized_keys | default([]) }}"
+  when: authorized_keys is defined
+  tags: [ssh, keys]

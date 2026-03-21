@@ -1,0 +1,227 @@
+name: 🤖 Model Request
+description: Request implementation of a new model architecture
+title: "[MODEL] "
+labels: ["model-request", "enhancement"]
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Request a new model architecture to be implemented in TrustformeRS! Please provide detailed information about the model.
+
+  - type: input
+    id: model-name
+    attributes:
+      label: Model Name
+      description: Official name of the model
+      placeholder: "e.g., BERT, GPT-4, LLaMA, CLIP, etc."
+    validations:
+      required: true
+
+  - type: textarea
+    id: model-description
+    attributes:
+      label: Model Description
+      description: Brief description of the model and its purpose
+      placeholder: |
+        CLIP (Contrastive Language-Image Pre-training) is a multimodal model that learns visual concepts from natural language descriptions...
+        
+        The model is particularly useful for zero-shot image classification, image-text retrieval, and...
+    validations:
+      required: true
+
+  - type: input
+    id: paper-link
+    attributes:
+      label: Paper/Documentation Link
+      description: Link to the research paper or official documentation
+      placeholder: "https://arxiv.org/abs/..."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: model-category
+    attributes:
+      label: Model Category
+      description: What type of model is this?
+      options:
+        - Language Model (Encoder)
+        - Language Model (Decoder)
+        - Language Model (Encoder-Decoder)
+        - Vision Model (CNN)
+        - Vision Model (Transformer)
+        - Multimodal Model
+        - Speech/Audio Model
+        - Reinforcement Learning Model
+        - Graph Neural Network
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: architecture-details
+    attributes:
+      label: Architecture Details
+      description: Key architectural components and features
+      placeholder: |
+        - Transformer-based encoder with 12 layers
+        - Hidden dimension: 768
+        - Attention heads: 12
+        - Uses rotary position embeddings
+        - Custom activation function (SwiGLU)
+        - Layer normalization before attention
+    validations:
+      required: true
+
+  - type: textarea
+    id: model-sizes
+    attributes:
+      label: Model Variants
+      description: Different sizes/variants of the model
+      placeholder: |
+        - BERT-Base: 110M parameters
+        - BERT-Large: 340M parameters
+        - BERT-Tiny: 4.4M parameters (for mobile)
+      value: |
+        - 
+        - 
+        - 
+
+  - type: textarea
+    id: use-cases
+    attributes:
+      label: Use Cases
+      description: What are the primary use cases for this model?
+      placeholder: |
+        1. Text classification and sentiment analysis
+        2. Named entity recognition
+        3. Question answering
+        4. Text generation
+        5. Zero-shot classification
+      value: |
+        1. 
+        2. 
+        3. 
+
+  - type: input
+    id: reference-implementation
+    attributes:
+      label: Reference Implementation
+      description: Link to existing implementation (PyTorch, TensorFlow, etc.)
+      placeholder: "https://github.com/huggingface/transformers/tree/main/src/transformers/models/..."
+
+  - type: textarea
+    id: special-requirements
+    attributes:
+      label: Special Requirements
+      description: Any special requirements or features needed
+      placeholder: |
+        - Requires custom attention mechanism (Flash Attention)
+        - Needs support for 8-bit quantization
+        - Uses custom tokenizer with 100k vocabulary
+        - Requires grouped query attention (GQA)
+
+  - type: dropdown
+    id: pretrained-weights
+    attributes:
+      label: Pretrained Weights Available
+      description: Are pretrained weights publicly available?
+      options:
+        - "Yes - Freely available"
+        - "Yes - With registration/license"
+        - "No - Need to train from scratch"
+        - "Partial - Some variants available"
+    validations:
+      required: true
+
+  - type: input
+    id: weights-location
+    attributes:
+      label: Weights Location
+      description: Where can pretrained weights be found?
+      placeholder: "https://huggingface.co/..."
+
+  - type: dropdown
+    id: priority-reasoning
+    attributes:
+      label: Priority/Impact
+      description: Why should this model be prioritized?
+      options:
+        - State-of-the-art performance on key benchmarks
+        - Widely used in production systems
+        - Enables new use cases not currently supported
+        - Significant community demand
+        - Mobile/edge deployment friendly
+        - Other (explain in additional context)
+    validations:
+      required: true
+
+  - type: textarea
+    id: benchmarks
+    attributes:
+      label: Benchmark Results
+      description: Key benchmark results that demonstrate model performance
+      placeholder: |
+        - GLUE Score: 89.3
+        - ImageNet Top-1: 84.2%
+        - WER on LibriSpeech: 2.3%
+
+  - type: checkboxes
+    id: implementation-complexity
+    attributes:
+      label: Implementation Complexity
+      description: What components need to be implemented?
+      options:
+        - label: New layer types
+          required: false
+        - label: Custom attention mechanism
+          required: false
+        - label: Special positional encodings
+          required: false
+        - label: Custom tokenizer
+          required: false
+        - label: Novel activation functions
+          required: false
+        - label: Special loss functions
+          required: false
+        - label: Custom data preprocessing
+          required: false
+
+  - type: textarea
+    id: integration-considerations
+    attributes:
+      label: Integration Considerations
+      description: How would this integrate with existing TrustformeRS features?
+      placeholder: |
+        - Compatible with existing quantization methods
+        - Can use standard optimizers
+        - Works with distributed training setup
+        - Mobile deployment considerations
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      description: Would you like to help implement this model?
+      options:
+        - label: I can help implement this model
+          required: false
+        - label: I can help test the implementation
+          required: false
+        - label: I can provide expertise/guidance
+          required: false
+        - label: I can help with documentation
+          required: false
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Please check the following before submitting
+      options:
+        - label: I have searched existing issues and this model hasn't been requested
+          required: true
+        - label: I have provided links to papers/documentation
+          required: true
+        - label: I have described the use cases for this model
+          required: true

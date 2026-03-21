@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  grpc-server:
+    build:
+      context: ../..
+      dockerfile: examples/grpc-server/Dockerfile
+    ports:
+      - "50051:50051"
+    environment:
+      - RUST_LOG=info,trustformers_grpc_server=debug
+      - GRPC_PORT=50051
+      - MAX_MODELS=10
+      - DEFAULT_DEVICE=cpu
+    volumes:
+      # Mount local model cache
+      - ./models:/models
+      # Mount for development (optional)
+      # - ./src:/app/examples/grpc-server/src:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50051"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    
+  # Optional: Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    depends_on:
+      - grpc-server
+    profiles:
+      - monitoring
+    
+  # Optional: Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    profiles:
+      - monitoring
+
+  # Optional: grpcui for debugging
+  grpcui:
+    image: fullstorydev/grpcui:latest
+    ports:
+      - "8080:8080"
+    command: ["-plaintext", "-port", "8080", "grpc-server:50051"]
+    depends_on:
+      - grpc-server
+    profiles:
+      - debug
+
+volumes:
+  prometheus-data:
+  grafana-data:

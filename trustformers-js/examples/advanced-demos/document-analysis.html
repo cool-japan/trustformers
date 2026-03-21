@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Document Analysis Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #74b9ff 0%, #0984e3 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(90deg, #74b9ff, #0984e3);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0;
+            min-height: 600px;
+        }
+
+        .input-section {
+            padding: 30px;
+            border-right: 1px solid #e0e0e0;
+        }
+
+        .results-section {
+            padding: 30px;
+            background: #f8f9fa;
+        }
+
+        .section-title {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .upload-area {
+            border: 3px dashed #74b9ff;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 20px;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .upload-area:hover {
+            border-color: #0984e3;
+            background: #f0f8ff;
+        }
+
+        .upload-area.dragover {
+            border-color: #0984e3;
+            background: #e6f3ff;
+        }
+
+        .upload-icon {
+            font-size: 3em;
+            margin-bottom: 15px;
+        }
+
+        .upload-text {
+            font-size: 1.1em;
+            color: #666;
+            margin-bottom: 10px;
+        }
+
+        .upload-hint {
+            font-size: 0.9em;
+            color: #999;
+        }
+
+        .file-input {
+            display: none;
+        }
+
+        .text-input {
+            width: 100%;
+            min-height: 200px;
+            padding: 15px;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            resize: vertical;
+            font-family: inherit;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+
+        .text-input:focus {
+            outline: none;
+            border-color: #74b9ff;
+            box-shadow: 0 0 0 3px rgba(116, 185, 255, 0.1);
+        }
+
+        .analysis-options {
+            margin: 20px 0;
+            padding: 20px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .options-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+        }
+
+        .option-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .option-checkbox {
+            width: 18px;
+            height: 18px;
+        }
+
+        .option-label {
+            font-size: 0.9em;
+            color: #333;
+            cursor: pointer;
+        }
+
+        .analyze-button {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(90deg, #74b9ff, #0984e3);
+            color: white;
+            border: none;
+            border-radius: 10px;
+            font-size: 1.1em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .analyze-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(116, 185, 255, 0.3);
+        }
+
+        .analyze-button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .results-container {
+            display: none;
+        }
+
+        .results-container.show {
+            display: block;
+        }
+
+        .result-card {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .result-header {
+            display: flex;
+            align-items: center;
+            justify-content: between;
+            margin-bottom: 15px;
+        }
+
+        .result-title {
+            font-size: 1.2em;
+            font-weight: 600;
+            color: #333;
+            flex: 1;
+        }
+
+        .result-score {
+            background: #74b9ff;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 600;
+        }
+
+        .result-content {
+            color: #666;
+            line-height: 1.6;
+        }
+
+        .keyword-tag {
+            display: inline-block;
+            background: #e3f2fd;
+            color: #1976d2;
+            padding: 4px 12px;
+            border-radius: 15px;
+            margin: 3px;
+            font-size: 0.85em;
+        }
+
+        .sentiment-positive {
+            background: #e8f5e8;
+            color: #4caf50;
+        }
+
+        .sentiment-negative {
+            background: #ffebee;
+            color: #f44336;
+        }
+
+        .sentiment-neutral {
+            background: #f0f0f0;
+            color: #666;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #74b9ff, #0984e3);
+            border-radius: 3px;
+            transition: width 0.3s;
+            width: 0%;
+        }
+
+        .loading-spinner {
+            display: none;
+            justify-content: center;
+            align-items: center;
+            padding: 40px;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #e0e0e0;
+            border-top: 4px solid #74b9ff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 15px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #74b9ff;
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .error-message {
+            background: #ffebee;
+            border: 1px solid #f44336;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+
+        .sample-texts {
+            margin: 20px 0;
+        }
+
+        .sample-button {
+            display: inline-block;
+            padding: 8px 16px;
+            background: #e3f2fd;
+            color: #1976d2;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+            margin: 5px;
+            font-size: 0.9em;
+            transition: all 0.3s;
+        }
+
+        .sample-button:hover {
+            background: #1976d2;
+            color: white;
+        }
+
+        @media (max-width: 1200px) {
+            .main-content {
+                grid-template-columns: 1fr;
+            }
+
+            .input-section {
+                border-right: none;
+                border-bottom: 1px solid #e0e0e0;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                margin: 10px;
+                border-radius: 15px;
+            }
+
+            .header {
+                padding: 20px;
+            }
+
+            .header h1 {
+                font-size: 2em;
+            }
+
+            .input-section,
+            .results-section {
+                padding: 20px;
+            }
+
+            .options-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📄 Document Analysis</h1>
+            <p>Analyze text documents with advanced AI-powered insights using TrustformeRS</p>
+        </div>
+
+        <div class="main-content">
+            <div class="input-section">
+                <div class="section-title">
+                    📝 Input Document
+                </div>
+
+                <div class="upload-area" id="upload-area" onclick="triggerFileInput()">
+                    <div class="upload-icon">📄</div>
+                    <div class="upload-text">Drop a text file here or click to browse</div>
+                    <div class="upload-hint">Supports .txt, .md, .json files up to 10MB</div>
+                </div>
+
+                <input type="file" id="file-input" class="file-input" accept=".txt,.md,.json" onchange="handleFileSelect(event)">
+
+                <textarea id="text-input" class="text-input" placeholder="Or paste your text here for analysis..."></textarea>
+
+                <div class="sample-texts">
+                    <strong>Try sample texts:</strong><br>
+                    <button class="sample-button" onclick="loadSample('news')">📰 News Article</button>
+                    <button class="sample-button" onclick="loadSample('review')">⭐ Product Review</button>
+                    <button class="sample-button" onclick="loadSample('email')">📧 Email</button>
+                    <button class="sample-button" onclick="loadSample('research')">🔬 Research Abstract</button>
+                </div>
+
+                <div class="analysis-options">
+                    <strong>Analysis Options:</strong>
+                    <div class="options-grid">
+                        <div class="option-group">
+                            <input type="checkbox" id="sentiment" class="option-checkbox" checked>
+                            <label for="sentiment" class="option-label">Sentiment Analysis</label>
+                        </div>
+                        <div class="option-group">
+                            <input type="checkbox" id="keywords" class="option-checkbox" checked>
+                            <label for="keywords" class="option-label">Key Phrases</label>
+                        </div>
+                        <div class="option-group">
+                            <input type="checkbox" id="summary" class="option-checkbox" checked>
+                            <label for="summary" class="option-label">Text Summary</label>
+                        </div>
+                        <div class="option-group">
+                            <input type="checkbox" id="topics" class="option-checkbox" checked>
+                            <label for="topics" class="option-label">Topic Detection</label>
+                        </div>
+                        <div class="option-group">
+                            <input type="checkbox" id="entities" class="option-checkbox" checked>
+                            <label for="entities" class="option-label">Named Entities</label>
+                        </div>
+                        <div class="option-group">
+                            <input type="checkbox" id="readability" class="option-checkbox" checked>
+                            <label for="readability" class="option-label">Readability Score</label>
+                        </div>
+                    </div>
+                </div>
+
+                <button id="analyze-button" class="analyze-button" onclick="analyzeDocument()">
+                    🔍 Analyze Document
+                </button>
+
+                <div class="progress-bar" id="progress-bar" style="display: none;">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+            </div>
+
+            <div class="results-section">
+                <div class="section-title">
+                    📊 Analysis Results
+                </div>
+
+                <div id="loading-spinner" class="loading-spinner">
+                    <div class="spinner"></div>
+                </div>
+
+                <div id="results-container" class="results-container">
+                    <div class="stats-grid" id="stats-grid">
+                        <!-- Dynamic stats will be populated here -->
+                    </div>
+
+                    <div id="results-list">
+                        <!-- Dynamic results will be populated here -->
+                    </div>
+                </div>
+
+                <div id="error-container"></div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { 
+            initializeEnhanced, 
+            createModel, 
+            createTokenizer, 
+            Pipeline,
+            tensor_ops,
+            enhanced_inference
+        } from '../../dist/trustformers.esm.min.js';
+
+        class DocumentAnalyzer {
+            constructor() {
+                this.isInitialized = false;
+                this.models = {};
+                this.tokenizers = {};
+                this.pipelines = {};
+                this.currentText = '';
+                this.analysisResults = {};
+
+                this.init();
+                this.setupEventListeners();
+            }
+
+            async init() {
+                try {
+                    console.log('Initializing TrustformeRS for document analysis...');
+                    
+                    const capabilities = await initializeEnhanced({
+                        enableWebGL: true,
+                        enableMemoryPool: true,
+                        enableProfiling: true,
+                        enableZeroCopy: true
+                    });
+
+                    console.log('Capabilities:', capabilities);
+                    
+                    // Load models for different analysis tasks
+                    await this.loadModels();
+                    
+                    this.isInitialized = true;
+                    console.log('Document analyzer ready');
+                    
+                } catch (error) {
+                    console.error('Initialization failed:', error);
+                    this.showError('Failed to initialize: ' + error.message);
+                }
+            }
+
+            async loadModels() {
+                try {
+                    // Load models for different tasks
+                    this.models.sentiment = createModel('bert_base');
+                    this.models.summarization = createModel('t5_small');
+                    this.models.classification = createModel('bert_base');
+
+                    // Load tokenizers
+                    this.tokenizers.bert = createTokenizer('wordpiece');
+                    this.tokenizers.t5 = createTokenizer('sentencepiece');
+
+                    // Create pipelines
+                    this.pipelines.sentiment = Pipeline.textClassification(
+                        this.models.sentiment, 
+                        this.tokenizers.bert,
+                        ['negative', 'neutral', 'positive']
+                    );
+
+                    this.pipelines.summarization = Pipeline.textGeneration(
+                        this.models.summarization,
+                        this.tokenizers.t5,
+                        { maxLength: 150, temperature: 0.7 }
+                    );
+
+                    console.log('Models loaded successfully');
+                } catch (error) {
+                    throw new Error(`Model loading failed: ${error.message}`);
+                }
+            }
+
+            setupEventListeners() {
+                // Drag and drop
+                const uploadArea = document.getElementById('upload-area');
+                
+                uploadArea.addEventListener('dragover', (e) => {
+                    e.preventDefault();
+                    uploadArea.classList.add('dragover');
+                });
+
+                uploadArea.addEventListener('dragleave', () => {
+                    uploadArea.classList.remove('dragover');
+                });
+
+                uploadArea.addEventListener('drop', (e) => {
+                    e.preventDefault();
+                    uploadArea.classList.remove('dragover');
+                    this.handleFiles(e.dataTransfer.files);
+                });
+            }
+
+            handleFiles(files) {
+                if (files.length === 0) return;
+                
+                const file = files[0];
+                if (!this.isValidFile(file)) {
+                    this.showError('Please select a valid text file (.txt, .md, .json)');
+                    return;
+                }
+
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const text = e.target.result;
+                    document.getElementById('text-input').value = text;
+                    this.currentText = text;
+                };
+                reader.readAsText(file);
+            }
+
+            isValidFile(file) {
+                const validTypes = ['text/plain', 'text/markdown', 'application/json'];
+                const validExtensions = ['.txt', '.md', '.json'];
+                
+                return validTypes.includes(file.type) || 
+                       validExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
+            }
+
+            async analyzeDocument() {
+                const text = document.getElementById('text-input').value.trim();
+                
+                if (!text) {
+                    this.showError('Please provide text to analyze');
+                    return;
+                }
+
+                if (!this.isInitialized) {
+                    this.showError('System not initialized yet. Please wait...');
+                    return;
+                }
+
+                this.currentText = text;
+                this.showLoading(true);
+                this.clearResults();
+                
+                try {
+                    const options = this.getSelectedOptions();
+                    const results = {};
+
+                    // Update progress
+                    this.updateProgress(10);
+
+                    if (options.sentiment) {
+                        results.sentiment = await this.analyzeSentiment(text);
+                        this.updateProgress(25);
+                    }
+
+                    if (options.keywords) {
+                        results.keywords = await this.extractKeywords(text);
+                        this.updateProgress(40);
+                    }
+
+                    if (options.summary) {
+                        results.summary = await this.generateSummary(text);
+                        this.updateProgress(60);
+                    }
+
+                    if (options.topics) {
+                        results.topics = await this.detectTopics(text);
+                        this.updateProgress(75);
+                    }
+
+                    if (options.entities) {
+                        results.entities = await this.extractEntities(text);
+                        this.updateProgress(90);
+                    }
+
+                    if (options.readability) {
+                        results.readability = this.calculateReadability(text);
+                        this.updateProgress(100);
+                    }
+
+                    this.analysisResults = results;
+                    this.displayResults(results);
+                    
+                } catch (error) {
+                    console.error('Analysis failed:', error);
+                    this.showError('Analysis failed: ' + error.message);
+                } finally {
+                    this.showLoading(false);
+                }
+            }
+
+            getSelectedOptions() {
+                return {
+                    sentiment: document.getElementById('sentiment').checked,
+                    keywords: document.getElementById('keywords').checked,
+                    summary: document.getElementById('summary').checked,
+                    topics: document.getElementById('topics').checked,
+                    entities: document.getElementById('entities').checked,
+                    readability: document.getElementById('readability').checked
+                };
+            }
+
+            async analyzeSentiment(text) {
+                try {
+                    const sentences = this.splitIntoSentences(text);
+                    const sentiments = [];
+                    
+                    for (const sentence of sentences.slice(0, 10)) { // Limit to 10 sentences
+                        const result = await this.pipelines.sentiment.run(sentence);
+                        sentiments.push({
+                            text: sentence,
+                            sentiment: result.label,
+                            confidence: result.score
+                        });
+                    }
+
+                    // Calculate overall sentiment
+                    const sentimentCounts = { positive: 0, negative: 0, neutral: 0 };
+                    sentiments.forEach(s => sentimentCounts[s.sentiment]++);
+                    
+                    const totalSentences = sentiments.length;
+                    const overallSentiment = Object.keys(sentimentCounts).reduce((a, b) => 
+                        sentimentCounts[a] > sentimentCounts[b] ? a : b
+                    );
+
+                    return {
+                        overall: overallSentiment,
+                        confidence: Math.max(...sentiments.map(s => s.confidence)),
+                        breakdown: {
+                            positive: (sentimentCounts.positive / totalSentences * 100).toFixed(1),
+                            negative: (sentimentCounts.negative / totalSentences * 100).toFixed(1),
+                            neutral: (sentimentCounts.neutral / totalSentences * 100).toFixed(1)
+                        },
+                        sentences: sentiments
+                    };
+                } catch (error) {
+                    console.error('Sentiment analysis failed:', error);
+                    return {
+                        overall: 'neutral',
+                        confidence: 0,
+                        breakdown: { positive: '0', negative: '0', neutral: '100' },
+                        sentences: []
+                    };
+                }
+            }
+
+            async extractKeywords(text) {
+                // Simple keyword extraction using TF-IDF-like approach
+                const words = text.toLowerCase()
+                    .replace(/[^\w\s]/g, ' ')
+                    .split(/\s+/)
+                    .filter(word => word.length > 3);
+
+                const stopWords = new Set([
+                    'this', 'that', 'with', 'have', 'will', 'from', 'they', 'know',
+                    'want', 'been', 'good', 'much', 'some', 'time', 'very', 'when',
+                    'come', 'here', 'just', 'like', 'long', 'make', 'many', 'over',
+                    'such', 'take', 'than', 'them', 'well', 'were'
+                ]);
+
+                const wordFreq = {};
+                words.forEach(word => {
+                    if (!stopWords.has(word)) {
+                        wordFreq[word] = (wordFreq[word] || 0) + 1;
+                    }
+                });
+
+                // Get top keywords
+                const keywords = Object.entries(wordFreq)
+                    .sort(([,a], [,b]) => b - a)
+                    .slice(0, 15)
+                    .map(([word, freq]) => ({
+                        word: word,
+                        frequency: freq,
+                        importance: Math.min(freq / Math.max(...Object.values(wordFreq)), 1)
+                    }));
+
+                return keywords;
+            }
+
+            async generateSummary(text) {
+                try {
+                    if (text.length < 100) {
+                        return { text: text, quality: 'low' };
+                    }
+
+                    // Simple extractive summarization
+                    const sentences = this.splitIntoSentences(text);
+                    if (sentences.length <= 3) {
+                        return { text: text, quality: 'medium' };
+                    }
+
+                    // Score sentences based on keyword frequency and position
+                    const keywords = await this.extractKeywords(text);
+                    const keywordSet = new Set(keywords.slice(0, 10).map(k => k.word));
+
+                    const scoredSentences = sentences.map((sentence, index) => {
+                        const words = sentence.toLowerCase().split(/\s+/);
+                        const keywordScore = words.filter(word => keywordSet.has(word)).length;
+                        const positionScore = index < sentences.length * 0.3 ? 2 : 1; // Boost early sentences
+                        const lengthScore = sentence.length > 50 && sentence.length < 200 ? 1.5 : 1;
+                        
+                        return {
+                            sentence,
+                            score: keywordScore * positionScore * lengthScore,
+                            index
+                        };
+                    });
+
+                    // Select top 3 sentences
+                    const topSentences = scoredSentences
+                        .sort((a, b) => b.score - a.score)
+                        .slice(0, 3)
+                        .sort((a, b) => a.index - b.index)
+                        .map(s => s.sentence);
+
+                    return {
+                        text: topSentences.join(' '),
+                        quality: 'medium'
+                    };
+                } catch (error) {
+                    console.error('Summary generation failed:', error);
+                    return { text: 'Summary generation failed', quality: 'low' };
+                }
+            }
+
+            async detectTopics(text) {
+                // Simple topic detection based on keyword clustering
+                const keywords = await this.extractKeywords(text);
+                
+                const topicClusters = {
+                    'Technology': ['technology', 'computer', 'software', 'digital', 'internet', 'data', 'system', 'network'],
+                    'Business': ['business', 'company', 'market', 'customer', 'product', 'service', 'revenue', 'profit'],
+                    'Science': ['research', 'study', 'analysis', 'experiment', 'scientific', 'method', 'results', 'theory'],
+                    'Health': ['health', 'medical', 'treatment', 'patient', 'doctor', 'medicine', 'healthcare', 'disease'],
+                    'Education': ['education', 'learning', 'student', 'teacher', 'school', 'university', 'knowledge', 'course'],
+                    'Entertainment': ['entertainment', 'movie', 'music', 'game', 'show', 'media', 'content', 'video']
+                };
+
+                const topicScores = {};
+                Object.keys(topicClusters).forEach(topic => {
+                    topicScores[topic] = 0;
+                });
+
+                keywords.forEach(keyword => {
+                    Object.entries(topicClusters).forEach(([topic, words]) => {
+                        if (words.includes(keyword.word)) {
+                            topicScores[topic] += keyword.frequency;
+                        }
+                    });
+                });
+
+                const topics = Object.entries(topicScores)
+                    .filter(([, score]) => score > 0)
+                    .sort(([,a], [,b]) => b - a)
+                    .slice(0, 5)
+                    .map(([topic, score]) => ({
+                        topic,
+                        relevance: Math.min(score / 10, 1).toFixed(2)
+                    }));
+
+                return topics;
+            }
+
+            async extractEntities(text) {
+                // Simple named entity recognition using patterns
+                const entities = {
+                    people: [],
+                    organizations: [],
+                    locations: [],
+                    dates: [],
+                    numbers: []
+                };
+
+                // People (capitalized words that might be names)
+                const namePattern = /\b[A-Z][a-z]+ [A-Z][a-z]+\b/g;
+                const names = text.match(namePattern) || [];
+                entities.people = [...new Set(names)].slice(0, 10);
+
+                // Organizations (Inc, Corp, LLC, etc.)
+                const orgPattern = /\b[A-Z][a-zA-Z\s]+(Inc|Corp|LLC|Ltd|Company|Corporation)\b/g;
+                const orgs = text.match(orgPattern) || [];
+                entities.organizations = [...new Set(orgs)].slice(0, 10);
+
+                // Locations (capitalized geographic terms)
+                const locationPattern = /\b[A-Z][a-z]+(,?\s+[A-Z][a-z]+)*(?:\s+(City|State|Country|Street|Avenue|Road))?\b/g;
+                const locations = text.match(locationPattern) || [];
+                entities.locations = [...new Set(locations)].slice(0, 10);
+
+                // Dates
+                const datePattern = /\b\d{1,2}\/\d{1,2}\/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b|\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s+\d{4}\b/g;
+                const dates = text.match(datePattern) || [];
+                entities.dates = [...new Set(dates)].slice(0, 10);
+
+                // Numbers and percentages
+                const numberPattern = /\b\d+(?:\.\d+)?%?\b/g;
+                const numbers = text.match(numberPattern) || [];
+                entities.numbers = [...new Set(numbers)].slice(0, 15);
+
+                return entities;
+            }
+
+            calculateReadability(text) {
+                const sentences = this.splitIntoSentences(text);
+                const words = text.split(/\s+/).filter(word => word.length > 0);
+                const syllables = words.reduce((count, word) => count + this.countSyllables(word), 0);
+
+                // Flesch Reading Ease Score
+                const avgSentenceLength = words.length / sentences.length;
+                const avgSyllablesPerWord = syllables / words.length;
+                
+                const fleschScore = 206.835 - (1.015 * avgSentenceLength) - (84.6 * avgSyllablesPerWord);
+                
+                let level = 'Graduate';
+                if (fleschScore >= 90) level = 'Very Easy';
+                else if (fleschScore >= 80) level = 'Easy';
+                else if (fleschScore >= 70) level = 'Fairly Easy';
+                else if (fleschScore >= 60) level = 'Standard';
+                else if (fleschScore >= 50) level = 'Fairly Difficult';
+                else if (fleschScore >= 30) level = 'Difficult';
+
+                return {
+                    score: Math.max(0, Math.min(100, Math.round(fleschScore))),
+                    level: level,
+                    stats: {
+                        sentences: sentences.length,
+                        words: words.length,
+                        characters: text.length,
+                        avgWordsPerSentence: Math.round(avgSentenceLength),
+                        avgSyllablesPerWord: avgSyllablesPerWord.toFixed(2)
+                    }
+                };
+            }
+
+            countSyllables(word) {
+                word = word.toLowerCase();
+                if (word.length <= 3) return 1;
+                
+                const vowels = word.match(/[aeiouy]+/g);
+                let count = vowels ? vowels.length : 1;
+                
+                if (word.endsWith('e')) count--;
+                if (word.endsWith('le')) count++;
+                
+                return Math.max(1, count);
+            }
+
+            splitIntoSentences(text) {
+                return text.split(/[.!?]+/)
+                    .map(s => s.trim())
+                    .filter(s => s.length > 0);
+            }
+
+            displayResults(results) {
+                const statsGrid = document.getElementById('stats-grid');
+                const resultsList = document.getElementById('results-list');
+                
+                // Clear previous results
+                statsGrid.innerHTML = '';
+                resultsList.innerHTML = '';
+
+                // Display stats
+                const stats = [
+                    { label: 'Words', value: this.currentText.split(/\s+/).length },
+                    { label: 'Characters', value: this.currentText.length },
+                    { label: 'Sentences', value: this.splitIntoSentences(this.currentText).length },
+                    { label: 'Readability', value: results.readability?.score || 'N/A' }
+                ];
+
+                stats.forEach(stat => {
+                    const statElement = document.createElement('div');
+                    statElement.className = 'stat-item';
+                    statElement.innerHTML = `
+                        <div class="stat-value">${stat.value}</div>
+                        <div class="stat-label">${stat.label}</div>
+                    `;
+                    statsGrid.appendChild(statElement);
+                });
+
+                // Display detailed results
+                if (results.sentiment) {
+                    this.displaySentimentResult(results.sentiment, resultsList);
+                }
+
+                if (results.keywords) {
+                    this.displayKeywordsResult(results.keywords, resultsList);
+                }
+
+                if (results.summary) {
+                    this.displaySummaryResult(results.summary, resultsList);
+                }
+
+                if (results.topics) {
+                    this.displayTopicsResult(results.topics, resultsList);
+                }
+
+                if (results.entities) {
+                    this.displayEntitiesResult(results.entities, resultsList);
+                }
+
+                if (results.readability) {
+                    this.displayReadabilityResult(results.readability, resultsList);
+                }
+
+                document.getElementById('results-container').classList.add('show');
+            }
+
+            displaySentimentResult(sentiment, container) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                
+                const sentimentClass = `sentiment-${sentiment.overall}`;
+                
+                card.innerHTML = `
+                    <div class="result-header">
+                        <div class="result-title">😊 Sentiment Analysis</div>
+                        <div class="result-score ${sentimentClass}">${sentiment.overall.toUpperCase()}</div>
+                    </div>
+                    <div class="result-content">
+                        <p><strong>Overall sentiment:</strong> ${sentiment.overall} (${(sentiment.confidence * 100).toFixed(1)}% confidence)</p>
+                        <div style="margin: 15px 0;">
+                            <div>Positive: ${sentiment.breakdown.positive}%</div>
+                            <div>Neutral: ${sentiment.breakdown.neutral}%</div>
+                            <div>Negative: ${sentiment.breakdown.negative}%</div>
+                        </div>
+                    </div>
+                `;
+                
+                container.appendChild(card);
+            }
+
+            displayKeywordsResult(keywords, container) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                
+                card.innerHTML = `
+                    <div class="result-header">
+                        <div class="result-title">🔑 Key Phrases</div>
+                        <div class="result-score">${keywords.length} found</div>
+                    </div>
+                    <div class="result-content">
+                        ${keywords.map(keyword => 
+                            `<span class="keyword-tag">${keyword.word} (${keyword.frequency})</span>`
+                        ).join('')}
+                    </div>
+                `;
+                
+                container.appendChild(card);
+            }
+
+            displaySummaryResult(summary, container) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                
+                card.innerHTML = `
+                    <div class="result-header">
+                        <div class="result-title">📄 Summary</div>
+                        <div class="result-score">${summary.quality}</div>
+                    </div>
+                    <div class="result-content">
+                        <p>${summary.text}</p>
+                    </div>
+                `;
+                
+                container.appendChild(card);
+            }
+
+            displayTopicsResult(topics, container) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                
+                card.innerHTML = `
+                    <div class="result-header">
+                        <div class="result-title">🏷️ Topics</div>
+                        <div class="result-score">${topics.length} detected</div>
+                    </div>
+                    <div class="result-content">
+                        ${topics.map(topic => 
+                            `<div style="margin: 8px 0;"><strong>${topic.topic}</strong> (${(topic.relevance * 100).toFixed(0)}% relevance)</div>`
+                        ).join('')}
+                    </div>
+                `;
+                
+                container.appendChild(card);
+            }
+
+            displayEntitiesResult(entities, container) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                
+                const totalEntities = Object.values(entities).reduce((sum, arr) => sum + arr.length, 0);
+                
+                card.innerHTML = `
+                    <div class="result-header">
+                        <div class="result-title">🎯 Named Entities</div>
+                        <div class="result-score">${totalEntities} found</div>
+                    </div>
+                    <div class="result-content">
+                        ${Object.entries(entities).map(([type, items]) => 
+                            items.length > 0 ? 
+                            `<div style="margin: 10px 0;"><strong>${type.charAt(0).toUpperCase() + type.slice(1)}:</strong><br>
+                            ${items.map(item => `<span class="keyword-tag">${item}</span>`).join('')}</div>` : ''
+                        ).join('')}
+                    </div>
+                `;
+                
+                container.appendChild(card);
+            }
+
+            displayReadabilityResult(readability, container) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                
+                card.innerHTML = `
+                    <div class="result-header">
+                        <div class="result-title">📊 Readability</div>
+                        <div class="result-score">${readability.score}/100</div>
+                    </div>
+                    <div class="result-content">
+                        <p><strong>Level:</strong> ${readability.level}</p>
+                        <div style="margin: 15px 0;">
+                            <div>Sentences: ${readability.stats.sentences}</div>
+                            <div>Words: ${readability.stats.words}</div>
+                            <div>Avg words per sentence: ${readability.stats.avgWordsPerSentence}</div>
+                            <div>Avg syllables per word: ${readability.stats.avgSyllablesPerWord}</div>
+                        </div>
+                    </div>
+                `;
+                
+                container.appendChild(card);
+            }
+
+            showLoading(show) {
+                const loadingSpinner = document.getElementById('loading-spinner');
+                const analyzeButton = document.getElementById('analyze-button');
+                const progressBar = document.getElementById('progress-bar');
+                
+                if (show) {
+                    loadingSpinner.style.display = 'flex';
+                    progressBar.style.display = 'block';
+                    analyzeButton.disabled = true;
+                    analyzeButton.textContent = 'Analyzing...';
+                } else {
+                    loadingSpinner.style.display = 'none';
+                    progressBar.style.display = 'none';
+                    analyzeButton.disabled = false;
+                    analyzeButton.textContent = '🔍 Analyze Document';
+                }
+            }
+
+            updateProgress(percent) {
+                const progressFill = document.getElementById('progress-fill');
+                progressFill.style.width = percent + '%';
+            }
+
+            clearResults() {
+                document.getElementById('results-container').classList.remove('show');
+                this.clearErrors();
+            }
+
+            showError(message) {
+                const errorContainer = document.getElementById('error-container');
+                errorContainer.innerHTML = `<div class="error-message">${message}</div>`;
+            }
+
+            clearErrors() {
+                document.getElementById('error-container').innerHTML = '';
+            }
+        }
+
+        // Sample texts
+        const sampleTexts = {
+            news: `Breaking News: Scientists at Stanford University have developed a revolutionary new AI system that can predict climate patterns with unprecedented accuracy. The system, called ClimateAI, uses advanced machine learning algorithms to analyze vast amounts of atmospheric data and provide forecasts up to six months in advance. This breakthrough could significantly improve our ability to prepare for extreme weather events and help governments make better policy decisions about climate change mitigation strategies.`,
+            
+            review: `I recently purchased the TechPhone Pro and I have mixed feelings about it. The camera quality is absolutely stunning - the photos are crisp and vibrant, especially in good lighting conditions. The battery life is also impressive, lasting easily through a full day of heavy use. However, I'm disappointed with the user interface which feels cluttered and confusing compared to my previous phone. The price point of $899 seems quite steep for what you get, though the build quality is solid. Overall, it's a decent phone but there are better options available for the money.`,
+            
+            email: `Subject: Quarterly Review Meeting\n\nHi Team,\n\nI hope this email finds you well. I wanted to schedule our quarterly review meeting for next week. We'll be discussing our progress on the current projects, reviewing our KPIs, and planning for the upcoming quarter.\n\nPlease let me know your availability for Tuesday or Wednesday afternoon. The meeting should take approximately 2 hours.\n\nAlso, please prepare a brief summary of your key achievements and any challenges you've faced this quarter.\n\nThanks,\nSarah`,
+            
+            research: `Abstract: This study investigates the effectiveness of machine learning algorithms in predicting stock market volatility using historical trading data and social media sentiment analysis. We employed a hybrid approach combining Long Short-Term Memory (LSTM) neural networks with sentiment scores derived from Twitter data to forecast market movements. Our methodology was tested on S&P 500 data spanning five years (2018-2023). Results indicate that the hybrid model achieved 73.2% accuracy in predicting daily volatility, representing a 12% improvement over traditional time-series analysis methods. These findings suggest that incorporating social media sentiment significantly enhances the predictive power of financial forecasting models.`
+        };
+
+        // Global functions
+        window.triggerFileInput = function() {
+            document.getElementById('file-input').click();
+        };
+
+        window.handleFileSelect = function(event) {
+            analyzer.handleFiles(event.target.files);
+        };
+
+        window.analyzeDocument = function() {
+            analyzer.analyzeDocument();
+        };
+
+        window.loadSample = function(type) {
+            if (sampleTexts[type]) {
+                document.getElementById('text-input').value = sampleTexts[type];
+            }
+        };
+
+        // Initialize the analyzer
+        const analyzer = new DocumentAnalyzer();
+    </script>
+</body>
+</html>

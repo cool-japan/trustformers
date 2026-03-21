@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS WASM Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .demo-section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .input-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        input[type="text"], textarea, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        .output {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 10px;
+            margin-top: 10px;
+            min-height: 50px;
+            white-space: pre-wrap;
+        }
+        .loading {
+            display: none;
+            color: #666;
+            font-style: italic;
+        }
+        .error {
+            color: #d32f2f;
+            margin-top: 10px;
+        }
+        .success {
+            color: #388e3c;
+            margin-top: 10px;
+        }
+        .info-box {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196f3;
+            padding: 10px;
+            margin-bottom: 15px;
+        }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin-top: 15px;
+        }
+        .metric {
+            background-color: #f5f5f5;
+            padding: 10px;
+            border-radius: 4px;
+            text-align: center;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #2196f3;
+        }
+        .metric-label {
+            font-size: 12px;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <h1>🦀 TrustformeRS WASM Demo</h1>
+    
+    <div class="info-box">
+        <strong>Welcome!</strong> This demo showcases TrustformeRS running entirely in your browser using WebAssembly.
+        No server required - all processing happens locally!
+    </div>
+
+    <div class="demo-section">
+        <h2>System Information</h2>
+        <div class="metrics" id="system-metrics">
+            <div class="metric">
+                <div class="metric-value" id="wasm-support">Checking...</div>
+                <div class="metric-label">WASM Support</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="simd-support">Checking...</div>
+                <div class="metric-label">SIMD Support</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="memory-usage">0 MB</div>
+                <div class="metric-label">Memory Usage</div>
+            </div>
+            <div class="metric">
+                <div class="metric-value" id="lib-version">Loading...</div>
+                <div class="metric-label">Library Version</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="demo-section">
+        <h2>Tensor Operations</h2>
+        <div class="input-group">
+            <label for="tensor-shape">Tensor Shape (comma-separated):</label>
+            <input type="text" id="tensor-shape" value="2, 3" placeholder="e.g., 2, 3">
+        </div>
+        <div class="input-group">
+            <label for="tensor-op">Operation:</label>
+            <select id="tensor-op">
+                <option value="random">Random</option>
+                <option value="zeros">Zeros</option>
+                <option value="ones">Ones</option>
+                <option value="add">Add Random</option>
+                <option value="matmul">Matrix Multiply</option>
+                <option value="softmax">Softmax</option>
+                <option value="relu">ReLU</option>
+            </select>
+        </div>
+        <button onclick="runTensorOp()">Run Operation</button>
+        <div class="loading" id="tensor-loading">Processing...</div>
+        <div class="output" id="tensor-output"></div>
+    </div>
+
+    <div class="demo-section">
+        <h2>Tokenization</h2>
+        <div class="input-group">
+            <label for="tokenizer-type">Tokenizer Type:</label>
+            <select id="tokenizer-type">
+                <option value="WordPiece">WordPiece (BERT)</option>
+                <option value="BPE">BPE (GPT-2)</option>
+                <option value="SentencePiece">SentencePiece</option>
+            </select>
+        </div>
+        <div class="input-group">
+            <label for="tokenize-input">Text to Tokenize:</label>
+            <textarea id="tokenize-input" rows="3" placeholder="Enter text to tokenize...">Hello, how are you doing today?</textarea>
+        </div>
+        <button onclick="runTokenization()">Tokenize</button>
+        <div class="loading" id="tokenize-loading">Processing...</div>
+        <div class="output" id="tokenize-output"></div>
+    </div>
+
+    <div class="demo-section">
+        <h2>Model Inference (Demo)</h2>
+        <div class="input-group">
+            <label for="model-type">Model Architecture:</label>
+            <select id="model-type">
+                <option value="Bert">BERT</option>
+                <option value="GPT2">GPT-2</option>
+                <option value="T5">T5</option>
+                <option value="Llama">LLaMA</option>
+                <option value="Mistral">Mistral</option>
+            </select>
+        </div>
+        <div class="input-group">
+            <label for="inference-input">Input Text:</label>
+            <textarea id="inference-input" rows="3" placeholder="Enter text for inference...">The capital of France is</textarea>
+        </div>
+        <button onclick="runInference()">Run Inference</button>
+        <div class="loading" id="inference-loading">Loading model and running inference...</div>
+        <div class="output" id="inference-output"></div>
+    </div>
+
+    <div class="demo-section">
+        <h2>Performance Benchmark</h2>
+        <div class="input-group">
+            <label for="bench-size">Matrix Size:</label>
+            <select id="bench-size">
+                <option value="10">10x10</option>
+                <option value="50">50x50</option>
+                <option value="100">100x100</option>
+                <option value="200">200x200</option>
+                <option value="500">500x500</option>
+            </select>
+        </div>
+        <button onclick="runBenchmark()">Run Benchmark</button>
+        <div class="loading" id="bench-loading">Running benchmark...</div>
+        <div class="output" id="bench-output"></div>
+    </div>
+
+    <script type="module">
+        import init, {
+            TrustformersWasm,
+            WasmTensor,
+            WasmTokenizer,
+            TokenizerType,
+            WasmModel,
+            ModelConfig,
+            ModelArchitecture,
+            Timer,
+            RuntimeInfo,
+            MemoryStats,
+            get_version,
+            enable_simd,
+        } from './pkg-web/trustformers_wasm.js';
+
+        let wasm = null;
+        let initialized = false;
+
+        // Initialize WASM module
+        async function initializeWasm() {
+            try {
+                await init();
+                wasm = new TrustformersWasm();
+                initialized = true;
+                
+                // Update system info
+                document.getElementById('lib-version').textContent = get_version();
+                document.getElementById('wasm-support').textContent = '✓';
+                document.getElementById('simd-support').textContent = enable_simd() ? '✓' : '✗';
+                
+                // Update memory usage periodically
+                setInterval(updateMemoryUsage, 1000);
+                
+                console.log('TrustformeRS WASM initialized successfully!');
+            } catch (error) {
+                console.error('Failed to initialize WASM:', error);
+                document.getElementById('wasm-support').textContent = '✗';
+                alert('Failed to initialize WebAssembly module. Please check console for details.');
+            }
+        }
+
+        function updateMemoryUsage() {
+            if (!initialized) return;
+            const stats = new MemoryStats();
+            document.getElementById('memory-usage').textContent = `${stats.used_mb.toFixed(1)} MB`;
+        }
+
+        // Tensor operations
+        window.runTensorOp = async function() {
+            if (!initialized) {
+                alert('WASM not initialized yet. Please wait...');
+                return;
+            }
+
+            const shapeInput = document.getElementById('tensor-shape').value;
+            const operation = document.getElementById('tensor-op').value;
+            const output = document.getElementById('tensor-output');
+            const loading = document.getElementById('tensor-loading');
+
+            try {
+                loading.style.display = 'block';
+                output.textContent = '';
+
+                // Parse shape
+                const shape = shapeInput.split(',').map(s => parseInt(s.trim()));
+                
+                const timer = new Timer("Tensor Operation");
+                let tensor;
+
+                switch (operation) {
+                    case 'random':
+                        tensor = WasmTensor.random(shape);
+                        break;
+                    case 'zeros':
+                        tensor = WasmTensor.zeros(shape);
+                        break;
+                    case 'ones':
+                        tensor = WasmTensor.ones(shape);
+                        break;
+                    case 'add':
+                        const a = WasmTensor.random(shape);
+                        const b = WasmTensor.random(shape);
+                        tensor = a.add(b);
+                        output.textContent = `A: ${formatTensor(a)}\nB: ${formatTensor(b)}\nResult: `;
+                        break;
+                    case 'matmul':
+                        if (shape.length !== 2) {
+                            throw new Error('Matrix multiplication requires 2D shape');
+                        }
+                        const m1 = WasmTensor.random(shape);
+                        const m2 = WasmTensor.random([shape[1], shape[0]]);
+                        tensor = m1.matmul(m2);
+                        output.textContent = `A (${shape}): ${formatTensor(m1)}\nB (${shape[1]}x${shape[0]}): ${formatTensor(m2)}\nResult: `;
+                        break;
+                    case 'softmax':
+                        const input = WasmTensor.random(shape);
+                        tensor = input.softmax(-1);
+                        output.textContent = `Input: ${formatTensor(input)}\nSoftmax: `;
+                        break;
+                    case 'relu':
+                        const reluInput = WasmTensor.random(shape);
+                        tensor = reluInput.relu();
+                        output.textContent = `Input: ${formatTensor(reluInput)}\nReLU: `;
+                        break;
+                }
+
+                timer.stop();
+                output.textContent += formatTensor(tensor);
+                output.textContent += `\n\nShape: [${tensor.shape.join(', ')}]`;
+                output.textContent += `\nTime: ${timer.elapsed().toFixed(2)}ms`;
+            } catch (error) {
+                output.textContent = `Error: ${error.message}`;
+                output.className = 'output error';
+            } finally {
+                loading.style.display = 'none';
+            }
+        };
+
+        // Tokenization
+        window.runTokenization = async function() {
+            if (!initialized) {
+                alert('WASM not initialized yet. Please wait...');
+                return;
+            }
+
+            const tokenizerType = document.getElementById('tokenizer-type').value;
+            const text = document.getElementById('tokenize-input').value;
+            const output = document.getElementById('tokenize-output');
+            const loading = document.getElementById('tokenize-loading');
+
+            try {
+                loading.style.display = 'block';
+                output.textContent = '';
+
+                const timer = new Timer("Tokenization");
+                
+                // Create tokenizer
+                const type = TokenizerType[tokenizerType];
+                const tokenizer = new WasmTokenizer(type);
+                
+                // Tokenize
+                const tokens = tokenizer.encode(text, true);
+                
+                // Decode back
+                const decoded = tokenizer.decode(tokens, false);
+                
+                timer.stop();
+
+                output.textContent = `Tokenizer: ${tokenizerType}\n`;
+                output.textContent += `Original: "${text}"\n\n`;
+                output.textContent += `Token IDs: [${tokens.join(', ')}]\n`;
+                output.textContent += `Num Tokens: ${tokens.length}\n\n`;
+                output.textContent += `Decoded: "${decoded}"\n\n`;
+                output.textContent += `Vocab Size: ${tokenizer.vocab_size}\n`;
+                output.textContent += `Time: ${timer.elapsed().toFixed(2)}ms`;
+            } catch (error) {
+                output.textContent = `Error: ${error.message}`;
+                output.className = 'output error';
+            } finally {
+                loading.style.display = 'none';
+            }
+        };
+
+        // Model inference
+        window.runInference = async function() {
+            if (!initialized) {
+                alert('WASM not initialized yet. Please wait...');
+                return;
+            }
+
+            const modelType = document.getElementById('model-type').value;
+            const text = document.getElementById('inference-input').value;
+            const output = document.getElementById('inference-output');
+            const loading = document.getElementById('inference-loading');
+
+            try {
+                loading.style.display = 'block';
+                output.textContent = '';
+
+                const timer = new Timer("Model Inference");
+                
+                // Create model config
+                const architecture = ModelArchitecture[modelType];
+                const config = new ModelConfig(architecture);
+                
+                // Create model
+                const model = new WasmModel(config);
+                
+                output.textContent = `Model: ${modelType}\n`;
+                output.textContent += `Architecture: ${config.architecture}\n`;
+                output.textContent += `Hidden Size: ${config.hidden_size}\n`;
+                output.textContent += `Num Layers: ${config.num_layers}\n`;
+                output.textContent += `Num Heads: ${config.num_heads}\n`;
+                output.textContent += `Vocab Size: ${config.vocab_size}\n\n`;
+                
+                // Note: Actual inference would require loading real weights
+                output.textContent += `Note: This is a demo with random weights.\n`;
+                output.textContent += `In production, you would load pre-trained weights.\n\n`;
+                
+                // Create dummy input
+                const dummyInput = WasmTensor.random([1, 10]); // Batch size 1, sequence length 10
+                
+                timer.stop();
+                output.textContent += `Input Shape: [1, 10]\n`;
+                output.textContent += `Memory Usage: ${model.memory_usage_mb().toFixed(2)} MB\n`;
+                output.textContent += `Time: ${timer.elapsed().toFixed(2)}ms`;
+            } catch (error) {
+                output.textContent = `Error: ${error.message}`;
+                output.className = 'output error';
+            } finally {
+                loading.style.display = 'none';
+            }
+        };
+
+        // Benchmark
+        window.runBenchmark = async function() {
+            if (!initialized) {
+                alert('WASM not initialized yet. Please wait...');
+                return;
+            }
+
+            const size = parseInt(document.getElementById('bench-size').value);
+            const output = document.getElementById('bench-output');
+            const loading = document.getElementById('bench-loading');
+
+            try {
+                loading.style.display = 'block';
+                output.textContent = '';
+
+                output.textContent = `Running benchmark with ${size}x${size} matrices...\n\n`;
+
+                // Matrix multiplication benchmark
+                const results = [];
+                const numRuns = 10;
+
+                for (let i = 0; i < numRuns; i++) {
+                    const a = WasmTensor.random([size, size]);
+                    const b = WasmTensor.random([size, size]);
+                    
+                    const start = performance.now();
+                    const c = a.matmul(b);
+                    const elapsed = performance.now() - start;
+                    
+                    results.push(elapsed);
+                }
+
+                const avgTime = results.reduce((a, b) => a + b, 0) / results.length;
+                const minTime = Math.min(...results);
+                const maxTime = Math.max(...results);
+                
+                const flops = 2 * size * size * size; // Approximate FLOPs for matrix multiplication
+                const gflops = (flops / avgTime) / 1e6; // GFLOP/s
+
+                output.textContent += `Matrix Size: ${size}x${size}\n`;
+                output.textContent += `Runs: ${numRuns}\n\n`;
+                output.textContent += `Average Time: ${avgTime.toFixed(2)}ms\n`;
+                output.textContent += `Min Time: ${minTime.toFixed(2)}ms\n`;
+                output.textContent += `Max Time: ${maxTime.toFixed(2)}ms\n\n`;
+                output.textContent += `Estimated Performance: ${gflops.toFixed(2)} GFLOP/s\n`;
+                
+                // Memory benchmark
+                const memBefore = new MemoryStats();
+                const tensors = [];
+                for (let i = 0; i < 10; i++) {
+                    tensors.push(WasmTensor.random([100, 100]));
+                }
+                const memAfter = new MemoryStats();
+                
+                output.textContent += `\nMemory allocated for 10x[100,100] tensors: ${(memAfter.used - memBefore.used) / 1024 / 1024} MB`;
+            } catch (error) {
+                output.textContent = `Error: ${error.message}`;
+                output.className = 'output error';
+            } finally {
+                loading.style.display = 'none';
+            }
+        };
+
+        // Helper function to format tensor data
+        function formatTensor(tensor) {
+            const data = tensor.data;
+            const shape = tensor.shape;
+            
+            if (data.length <= 10) {
+                return `[${data.map(v => v.toFixed(3)).join(', ')}]`;
+            } else {
+                const preview = data.slice(0, 5).map(v => v.toFixed(3)).join(', ');
+                return `[${preview}, ... (${data.length} total elements)]`;
+            }
+        }
+
+        // Initialize on page load
+        window.addEventListener('load', initializeWasm);
+    </script>
+</body>
+</html>

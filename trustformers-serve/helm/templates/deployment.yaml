@@ -1,0 +1,395 @@
+{{/*
+Enhanced Deployment template for TrustformeRS Serve
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "trustformers-serve.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "trustformers-serve.labels" . | nindent 4 }}
+    {{- with .Values.deployment.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  annotations:
+    deployment.kubernetes.io/revision: "{{ .Release.Revision }}"
+    {{- with .Values.deployment.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: {{ .Values.deployment.strategy.type | default "RollingUpdate" }}
+    {{- if eq .Values.deployment.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: {{ .Values.deployment.strategy.rollingUpdate.maxSurge | default "25%" }}
+      maxUnavailable: {{ .Values.deployment.strategy.rollingUpdate.maxUnavailable | default "25%" }}
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "trustformers-serve.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        prometheus.io/scrape: "{{ .Values.monitoring.prometheus.scrape }}"
+        prometheus.io/port: "{{ .Values.service.metricsPort }}"
+        prometheus.io/path: "{{ .Values.monitoring.prometheus.path }}"
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if .Values.serviceMesh.linkerd.enabled }}
+        linkerd.io/inject: enabled
+        {{- end }}
+        {{- if .Values.serviceMesh.istio.enabled }}
+        sidecar.istio.io/inject: "true"
+        {{- end }}
+      labels:
+        {{- include "trustformers-serve.selectorLabels" . | nindent 8 }}
+        version: {{ .Values.image.tag | default .Chart.AppVersion }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "trustformers-serve.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountToken | default false }}
+      
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- if .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml .Values.hostAliases | nindent 8 }}
+      {{- end }}
+      
+      {{- if .Values.dnsPolicy }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+      {{- end }}
+      
+      {{- with .Values.dnsConfig }}
+      dnsConfig:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- if .Values.priorityClassName }}
+      priorityClassName: {{ .Values.priorityClassName }}
+      {{- end }}
+      
+      {{- if .Values.runtimeClassName }}
+      runtimeClassName: {{ .Values.runtimeClassName }}
+      {{- end }}
+      
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 30 }}
+      
+      {{- if .Values.initContainers }}
+      initContainers:
+        {{- if .Values.initContainers.modelDownloader.enabled }}
+        - name: model-downloader
+          image: {{ .Values.initContainers.modelDownloader.image.repository }}:{{ .Values.initContainers.modelDownloader.image.tag }}
+          imagePullPolicy: {{ .Values.initContainers.modelDownloader.image.pullPolicy }}
+          command:
+            {{- toYaml .Values.initContainers.modelDownloader.command | nindent 12 }}
+          {{- with .Values.initContainers.modelDownloader.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: models-storage
+              mountPath: /models
+          {{- with .Values.initContainers.modelDownloader.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+        {{- with .Values.initContainers.custom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          
+          {{- if .Values.command }}
+          command:
+            {{- toYaml .Values.command | nindent 12 }}
+          {{- end }}
+          
+          {{- if .Values.args }}
+          args:
+            {{- toYaml .Values.args | nindent 12 }}
+          {{- end }}
+          
+          ports:
+            - name: http
+              containerPort: {{ .Values.config.server.port }}
+              protocol: TCP
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+              protocol: TCP
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+            {{- if .Values.healthCheck.port }}
+            - name: health
+              containerPort: {{ .Values.healthCheck.port }}
+              protocol: TCP
+            {{- end }}
+          
+          env:
+            - name: RUST_LOG
+              value: {{ .Values.logging.level | default "info" }}
+            - name: SERVER_HOST
+              value: {{ .Values.config.server.host }}
+            - name: SERVER_PORT
+              value: "{{ .Values.config.server.port }}"
+            - name: GRPC_PORT
+              value: "{{ .Values.service.grpcPort }}"
+            - name: METRICS_PORT
+              value: "{{ .Values.service.metricsPort }}"
+            - name: WORKERS
+              value: "{{ .Values.config.server.numWorkers }}"
+            
+            # Pod information
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            
+            {{- if .Values.tracing.enabled }}
+            - name: JAEGER_ENDPOINT
+              value: {{ .Values.tracing.jaegerEndpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ .Values.tracing.otlpEndpoint }}
+            {{- end }}
+            
+            {{- range .Values.env }}
+            - name: {{ .name }}
+              {{- if .value }}
+              value: {{ .value | quote }}
+              {{- else if .valueFrom }}
+              valueFrom:
+                {{- toYaml .valueFrom | nindent 16 }}
+              {{- end }}
+            {{- end }}
+          
+          {{- if or .Values.envFrom.configMaps .Values.envFrom.secrets }}
+          envFrom:
+            {{- range .Values.envFrom.configMaps }}
+            - configMapRef:
+                name: {{ . }}
+            {{- end }}
+            {{- range .Values.envFrom.secrets }}
+            - secretRef:
+                name: {{ . }}
+            {{- end }}
+          {{- end }}
+          
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            {{- if .Values.livenessProbe.exec }}
+            exec:
+              {{- toYaml .Values.livenessProbe.exec | nindent 14 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.livenessProbe.httpGet.path }}
+              port: {{ .Values.livenessProbe.httpGet.port | default "health" }}
+              scheme: {{ .Values.livenessProbe.httpGet.scheme | default "HTTP" }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.livenessProbe.successThreshold }}
+          {{- end }}
+          
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            {{- if .Values.readinessProbe.exec }}
+            exec:
+              {{- toYaml .Values.readinessProbe.exec | nindent 14 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.readinessProbe.httpGet.path }}
+              port: {{ .Values.readinessProbe.httpGet.port | default "health" }}
+              scheme: {{ .Values.readinessProbe.httpGet.scheme | default "HTTP" }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.readinessProbe.successThreshold }}
+          {{- end }}
+          
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- if .Values.startupProbe.exec }}
+            exec:
+              {{- toYaml .Values.startupProbe.exec | nindent 14 }}
+            {{- else }}
+            httpGet:
+              path: {{ .Values.startupProbe.httpGet.path }}
+              port: {{ .Values.startupProbe.httpGet.port | default "health" }}
+              scheme: {{ .Values.startupProbe.httpGet.scheme | default "HTTP" }}
+            {{- end }}
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            successThreshold: {{ .Values.startupProbe.successThreshold }}
+          {{- end }}
+          
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          
+          {{- if .Values.lifecycle }}
+          lifecycle:
+            {{- with .Values.lifecycle.preStop }}
+            preStop:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+            {{- with .Values.lifecycle.postStart }}
+            postStart:
+              {{- toYaml . | nindent 14 }}
+            {{- end }}
+          {{- end }}
+          
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            {{- if .Values.persistence.modelCache.enabled }}
+            - name: models-storage
+              mountPath: /app/models
+              readOnly: {{ .Values.persistence.modelCache.readOnly | default true }}
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+            - name: cache
+              mountPath: /app/cache
+            {{- if .Values.persistence.logs.enabled }}
+            - name: logs
+              mountPath: /app/logs
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+        
+        {{- if .Values.sidecarContainers.enabled }}
+        {{- range .Values.sidecarContainers.containers }}
+        - name: {{ .name }}
+          image: {{ .image }}
+          {{- with .resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+        {{- end }}
+        {{- end }}
+      
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "trustformers-serve.fullname" . }}-config
+            defaultMode: 0644
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpVolume.sizeLimit | default "1Gi" }}
+        - name: cache
+          emptyDir:
+            sizeLimit: {{ .Values.cacheVolume.sizeLimit | default "5Gi" }}
+        {{- if .Values.persistence.modelCache.enabled }}
+        - name: models-storage
+          {{- if .Values.persistence.modelCache.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.modelCache.existingClaim }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "trustformers-serve.fullname" . }}-models
+          {{- end }}
+        {{- end }}
+        {{- if .Values.persistence.logs.enabled }}
+        - name: logs
+          {{- if .Values.persistence.logs.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.logs.existingClaim }}
+          {{- else }}
+          emptyDir:
+            sizeLimit: {{ .Values.persistence.logs.sizeLimit | default "2Gi" }}
+          {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}

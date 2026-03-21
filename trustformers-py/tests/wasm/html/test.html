@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS WASM Test Suite</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+        .test-result {
+            padding: 10px;
+            margin: 5px 0;
+            border-radius: 3px;
+        }
+        .test-pass {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .test-fail {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .test-running {
+            background-color: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeaa7;
+        }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+        .metric-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 5px;
+            text-align: center;
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #007bff;
+        }
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background-color: #e9ecef;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+        .progress-fill {
+            height: 100%;
+            background-color: #007bff;
+            transition: width 0.3s ease;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .console {
+            background: #000;
+            color: #00ff00;
+            padding: 15px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            height: 200px;
+            overflow-y: auto;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>TrustformeRS WASM Test Suite</h1>
+        <div id="browser-info"></div>
+        
+        <div class="test-section">
+            <h2>Test Controls</h2>
+            <button onclick="runAllTests()" id="run-all-btn">Run All Tests</button>
+            <button onclick="runCompatibilityTests()" id="run-compat-btn">Compatibility Tests</button>
+            <button onclick="runPerformanceTests()" id="run-perf-btn">Performance Tests</button>
+            <button onclick="runMemoryTests()" id="run-memory-btn">Memory Tests</button>
+            <button onclick="clearResults()" id="clear-btn">Clear Results</button>
+        </div>
+        
+        <div class="test-section">
+            <h2>Test Progress</h2>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+            </div>
+            <div id="progress-text">Ready to start tests</div>
+        </div>
+        
+        <div class="test-section">
+            <h2>Performance Metrics</h2>
+            <div class="metrics">
+                <div class="metric-card">
+                    <div class="metric-value" id="load-time">-</div>
+                    <div>Load Time (ms)</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="inference-time">-</div>
+                    <div>Inference Time (ms)</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="memory-usage">-</div>
+                    <div>Memory Usage (MB)</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-value" id="fps">-</div>
+                    <div>FPS</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="test-section">
+            <h2>Test Results</h2>
+            <div id="test-results"></div>
+        </div>
+        
+        <div class="test-section">
+            <h2>Console Output</h2>
+            <div class="console" id="console"></div>
+        </div>
+    </div>
+    
+    <script src="/js/wasm-test-suite.js"></script>
+</body>
+</html>

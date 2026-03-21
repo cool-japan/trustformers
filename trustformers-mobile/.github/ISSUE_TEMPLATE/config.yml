@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 💬 Discord Community
+    url: https://discord.gg/trustformers
+    about: Join our Discord for real-time discussions and community support
+  - name: 📖 Documentation
+    url: https://docs.trustformers.rs
+    about: Check our comprehensive documentation for guides and API references
+  - name: 💡 Discussions
+    url: https://github.com/trustformers/trustformers/discussions
+    about: For general discussions, ideas, and show-and-tell
+  - name: 🔒 Security Issues
+    url: https://github.com/trustformers/trustformers/security/policy
+    about: Please report security vulnerabilities privately

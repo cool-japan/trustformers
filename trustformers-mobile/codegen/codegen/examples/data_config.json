@@ -1,0 +1,14 @@
+{
+  "dataset_type": "image",
+  "preprocessing": true,
+  "augmentation": true,
+  "supports_augmentation": true,
+  "image_height": 224,
+  "image_width": 224,
+  "batch_fields": [
+    {
+      "name": "metadata",
+      "type": "Dict<String, Any>"
+    }
+  ]
+}

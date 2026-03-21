@@ -1,0 +1,58 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+# Specify your gem's dependencies in trustformers.gemspec
+gemspec
+
+# Development dependencies
+group :development do
+  gem "rake", "~> 13.0"
+  gem "rake-compiler", "~> 1.2"
+  gem "bundler", "~> 2.0"
+  
+  # Documentation
+  gem "yard", "~> 0.9"
+  gem "redcarpet", "~> 3.5" # For YARD markdown support
+  
+  # Code quality
+  gem "rubocop", "~> 1.21"
+  gem "rubocop-minitest", "~> 0.25"
+  gem "rubocop-rake", "~> 0.6"
+  gem "rubocop-performance", "~> 1.15"
+  
+  # Debugging
+  gem "pry", "~> 0.14"
+  gem "pry-byebug", "~> 3.9"
+end
+
+group :test do
+  gem "minitest", "~> 5.0"
+  gem "minitest-reporters", "~> 1.5"
+  gem "simplecov", "~> 0.21"
+  gem "mocha", "~> 1.13"
+end
+
+group :benchmark do
+  gem "benchmark-ips", "~> 2.10"
+  gem "memory_profiler", "~> 1.0"
+  gem "stackprof", "~> 0.2"
+end
+
+# Platform-specific gems
+platforms :ruby do
+  # Native extensions support
+  gem "ffi", "~> 1.15"
+end
+
+# Optional dependencies for enhanced functionality
+group :optional do
+  gem "json", "~> 2.6" # For JSON serialization
+  gem "parallel", "~> 1.22" # For parallel processing
+end
+
+# Rails integration (optional)
+group :rails, optional: true do
+  gem "rails", ">= 6.0"
+  gem "activesupport", ">= 6.0"
+end

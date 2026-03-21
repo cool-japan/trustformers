@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:padding="16dp"
+    android:background="@color/accessibility_background">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical">
+
+        <!-- Header -->
+        <TextView
+            android:id="@+id/title_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="TrustformeRS Accessibility Features"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            android:gravity="center"
+            android:layout_marginBottom="8dp"
+            android:contentDescription="TrustformeRS Accessibility Features. Main screen for accessibility settings." />
+
+        <!-- Description -->
+        <TextView
+            android:id="@+id/description_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="AI-powered accessibility features to enhance your mobile experience"
+            android:textSize="16sp"
+            android:gravity="center"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Main Accessibility Toggle -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:background="@drawable/accessibility_toggle_background"
+            android:padding="16dp"
+            android:layout_marginBottom="16dp"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Enable Accessibility Features"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <Switch
+                android:id="@+id/accessibility_switch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="Enable or disable accessibility features" />
+
+        </LinearLayout>
+
+        <!-- Status -->
+        <TextView
+            android:id="@+id/status_text"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⚠ Accessibility features are inactive"
+            android:textSize="16sp"
+            android:gravity="center"
+            android:background="@drawable/status_background"
+            android:padding="12dp"
+            android:layout_marginBottom="16dp" />
+
+        <!-- Quick Actions -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginBottom="16dp">
+
+            <Button
+                android:id="@+id/tts_button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="🔊 Text-to-Speech"
+                android:textSize="14sp"
+                android:background="@drawable/tts_button_background"
+                android:layout_marginEnd="8dp"
+                android:contentDescription="Toggle text-to-speech feature" />
+
+            <Button
+                android:id="@+id/voice_button"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="🎤 Voice Control"
+                android:textSize="14sp"
+                android:background="@drawable/voice_button_background"
+                android:layout_marginStart="8dp"
+                android:contentDescription="Start voice recognition" />
+
+        </LinearLayout>
+
+        <!-- Settings Button -->
+        <Button
+            android:id="@+id/settings_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="⚙️ Open Accessibility Settings"
+            android:textSize="16sp"
+            android:background="@drawable/settings_button_background"
+            android:layout_marginBottom="16dp"
+            android:contentDescription="Open system accessibility settings" />
+
+        <!-- Features List -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Available Features"
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/features_recycler"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:nestedScrollingEnabled="false" />
+
+        <!-- Help Section -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/help_section_background"
+            android:padding="16dp"
+            android:layout_marginTop="16dp">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="📖 Help & Tips"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="• Enable TrustformeRS Accessibility Service in Settings for full functionality\n• Use voice commands like 'help', 'enable speech', 'increase text size'\n• Tap any feature to toggle it on or off\n• Use gesture navigation with smart gesture recognition\n• Access contextual help by saying 'help' during voice control"
+                android:textSize="14sp"
+                android:lineSpacingExtra="4dp" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</ScrollView>

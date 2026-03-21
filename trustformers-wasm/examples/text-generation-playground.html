@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Text Generation Playground</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            min-height: 100vh;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: center;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #2a5298;
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-top: 15px;
+            padding: 10px;
+            background: rgba(42, 82, 152, 0.1);
+            border-radius: 10px;
+            font-size: 0.9rem;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 1fr 350px;
+            gap: 20px;
+            height: calc(100vh - 160px);
+        }
+
+        .playground-area {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .controls-panel {
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 20px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            overflow-y: auto;
+        }
+
+        .mode-selector {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+
+        .mode-btn {
+            background: #f0f0f0;
+            border: none;
+            padding: 10px 15px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .mode-btn.active {
+            background: #2a5298;
+            color: white;
+        }
+
+        .mode-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+
+        .input-section {
+            margin-bottom: 20px;
+        }
+
+        .input-section label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #2a5298;
+        }
+
+        .prompt-input {
+            width: 100%;
+            height: 100px;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            resize: vertical;
+            transition: border-color 0.3s ease;
+        }
+
+        .prompt-input:focus {
+            outline: none;
+            border-color: #2a5298;
+        }
+
+        .generate-btn {
+            background: linear-gradient(135deg, #2a5298 0%, #1e3c72 100%);
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+
+        .generate-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(42, 82, 152, 0.3);
+        }
+
+        .generate-btn:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .output-section {
+            flex: 1;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        .output-content {
+            white-space: pre-wrap;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 14px;
+            line-height: 1.6;
+            min-height: 100px;
+        }
+
+        .control-group {
+            margin-bottom: 20px;
+        }
+
+        .control-group h3 {
+            margin-bottom: 10px;
+            color: #2a5298;
+            font-size: 1.1rem;
+        }
+
+        .slider-container {
+            margin-bottom: 15px;
+        }
+
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+
+        .slider {
+            width: 100%;
+            height: 6px;
+            border-radius: 3px;
+            background: #e0e0e0;
+            outline: none;
+            -webkit-appearance: none;
+        }
+
+        .slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #2a5298;
+            cursor: pointer;
+        }
+
+        .select-input {
+            width: 100%;
+            padding: 10px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            background: white;
+        }
+
+        .metrics-display {
+            background: rgba(42, 82, 152, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+        }
+
+        .metrics-display h3 {
+            margin-bottom: 10px;
+            color: #2a5298;
+        }
+
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 5px;
+            font-size: 0.9rem;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            overflow: hidden;
+            margin-bottom: 20px;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #2a5298, #1e3c72);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .export-section {
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .export-btn {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        .export-btn:hover {
+            background: #218838;
+        }
+
+        .loading-indicator {
+            display: none;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(255, 255, 255, 0.9);
+            padding: 20px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #2a5298;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 10px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .token-highlight {
+            background: rgba(42, 82, 152, 0.2);
+            padding: 2px 4px;
+            border-radius: 3px;
+            margin: 0 1px;
+        }
+
+        .examples-section {
+            margin-bottom: 20px;
+        }
+
+        .example-prompt {
+            background: rgba(42, 82, 152, 0.1);
+            padding: 10px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 0.9rem;
+        }
+
+        .example-prompt:hover {
+            background: rgba(42, 82, 152, 0.2);
+        }
+
+        @media (max-width: 1200px) {
+            .main-content {
+                grid-template-columns: 1fr;
+                grid-template-rows: 1fr auto;
+            }
+            
+            .controls-panel {
+                max-height: 300px;
+            }
+        }
+
+        .advanced-options {
+            background: rgba(255, 255, 255, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            margin-top: 20px;
+        }
+
+        .checkbox-group {
+            margin-bottom: 10px;
+        }
+
+        .checkbox-group label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 TrustformeRS Text Generation Playground</h1>
+            <p>Explore advanced text generation with WebAssembly-powered transformer models</p>
+            <div class="status-bar">
+                <span id="model-status">Model: Not loaded</span>
+                <span id="device-info">Device: Detecting...</span>
+                <span id="memory-info">Memory: 0 MB</span>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="playground-area">
+                <div class="mode-selector">
+                    <button class="mode-btn active" data-mode="completion">Text Completion</button>
+                    <button class="mode-btn" data-mode="creative">Creative Writing</button>
+                    <button class="mode-btn" data-mode="code">Code Generation</button>
+                    <button class="mode-btn" data-mode="qa">Question Answering</button>
+                </div>
+
+                <div class="input-section">
+                    <label for="prompt-input">Enter your prompt:</label>
+                    <textarea 
+                        id="prompt-input" 
+                        class="prompt-input" 
+                        placeholder="Type your prompt here..."
+                    ></textarea>
+                </div>
+
+                <button id="generate-btn" class="generate-btn">Generate Text</button>
+                
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+
+                <div class="output-section">
+                    <div class="output-content" id="output-content">
+                        Generated text will appear here...
+                    </div>
+                    <div class="loading-indicator" id="loading-indicator">
+                        <div class="spinner"></div>
+                        <p>Generating text...</p>
+                    </div>
+                </div>
+
+                <div class="export-section">
+                    <button class="export-btn" onclick="exportText('txt')">Export as TXT</button>
+                    <button class="export-btn" onclick="exportText('md')">Export as Markdown</button>
+                    <button class="export-btn" onclick="exportText('json')">Export as JSON</button>
+                    <button class="export-btn" onclick="clearOutput()">Clear Output</button>
+                </div>
+            </div>
+
+            <div class="controls-panel">
+                <div class="control-group">
+                    <h3>Model Settings</h3>
+                    <div class="slider-container">
+                        <div class="slider-label">
+                            <span>Model</span>
+                            <span id="model-value">GPT-2 Small</span>
+                        </div>
+                        <select id="model-select" class="select-input">
+                            <option value="gpt2-small">GPT-2 Small (124M)</option>
+                            <option value="gpt2-medium">GPT-2 Medium (355M)</option>
+                            <option value="gpt2-large">GPT-2 Large (774M)</option>
+                            <option value="bert-base">BERT Base (110M)</option>
+                            <option value="t5-small">T5 Small (60M)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <h3>Generation Parameters</h3>
+                    <div class="slider-container">
+                        <div class="slider-label">
+                            <span>Temperature</span>
+                            <span id="temperature-value">0.7</span>
+                        </div>
+                        <input type="range" id="temperature-slider" class="slider" min="0.1" max="2.0" step="0.1" value="0.7">
+                    </div>
+                    
+                    <div class="slider-container">
+                        <div class="slider-label">
+                            <span>Top-k</span>
+                            <span id="top-k-value">50</span>
+                        </div>
+                        <input type="range" id="top-k-slider" class="slider" min="1" max="100" step="1" value="50">
+                    </div>
+                    
+                    <div class="slider-container">
+                        <div class="slider-label">
+                            <span>Top-p</span>
+                            <span id="top-p-value">0.9</span>
+                        </div>
+                        <input type="range" id="top-p-slider" class="slider" min="0.1" max="1.0" step="0.1" value="0.9">
+                    </div>
+                    
+                    <div class="slider-container">
+                        <div class="slider-label">
+                            <span>Max Length</span>
+                            <span id="max-length-value">100</span>
+                        </div>
+                        <input type="range" id="max-length-slider" class="slider" min="10" max="500" step="10" value="100">
+                    </div>
+                </div>
+
+                <div class="metrics-display">
+                    <h3>Performance Metrics</h3>
+                    <div class="metric-item">
+                        <span>Generation Speed:</span>
+                        <span id="generation-speed">0 tokens/s</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Memory Usage:</span>
+                        <span id="memory-usage">0 MB</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>GPU Utilization:</span>
+                        <span id="gpu-usage">N/A</span>
+                    </div>
+                    <div class="metric-item">
+                        <span>Total Tokens:</span>
+                        <span id="total-tokens">0</span>
+                    </div>
+                </div>
+
+                <div class="examples-section">
+                    <h3>Example Prompts</h3>
+                    <div class="example-prompt" onclick="setPrompt('Once upon a time in a distant galaxy,')">
+                        Once upon a time in a distant galaxy,
+                    </div>
+                    <div class="example-prompt" onclick="setPrompt('def fibonacci(n):\n    if n <= 1:\n        return n\n    else:')">
+                        def fibonacci(n): [Code]
+                    </div>
+                    <div class="example-prompt" onclick="setPrompt('The future of artificial intelligence is')">
+                        The future of artificial intelligence is
+                    </div>
+                    <div class="example-prompt" onclick="setPrompt('In a world where climate change has been solved,')">
+                        In a world where climate change has been solved,
+                    </div>
+                </div>
+
+                <div class="advanced-options">
+                    <h3>Advanced Options</h3>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="streaming-mode" checked>
+                            Streaming Mode
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="batch-processing">
+                            Batch Processing
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="gpu-acceleration" checked>
+                            GPU Acceleration
+                        </label>
+                    </div>
+                    <div class="checkbox-group">
+                        <label>
+                            <input type="checkbox" id="quantization">
+                            Model Quantization
+                        </label>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { 
+            TrustformersWasm, 
+            InferenceSession, 
+            WasmTensor,
+            DebugConfig,
+            LogLevel,
+            QuantizationConfig,
+            QuantizationPrecision,
+            BatchConfig,
+            BatchingStrategy,
+            Priority,
+            get_memory_stats,
+            is_webgpu_supported,
+            is_mobile_device
+        } from '../pkg/trustformers_wasm.js';
+
+        class TextGenerationPlayground {
+            constructor() {
+                this.session = null;
+                this.isGenerating = false;
+                this.currentMode = 'completion';
+                this.generationHistory = [];
+                this.performanceMetrics = {
+                    speed: 0,
+                    memoryUsage: 0,
+                    gpuUsage: 0,
+                    totalTokens: 0
+                };
+                
+                this.initializeUI();
+                this.initializeWasm();
+            }
+
+            async initializeWasm() {
+                try {
+                    // Initialize TrustformeRS
+                    const tf = new TrustformersWasm();
+                    console.log('TrustformeRS Version:', tf.version);
+                    
+                    // Create inference session
+                    this.session = new InferenceSession('text-generation');
+                    
+                    // Initialize with automatic device selection
+                    await this.session.initialize_with_auto_device();
+                    
+                    // Setup debug logging
+                    const debugConfig = new DebugConfig();
+                    debugConfig.level = LogLevel.Info;
+                    debugConfig.enable_performance_monitoring = true;
+                    this.session.enable_debug_logging(debugConfig);
+                    
+                    // Initialize storage
+                    await this.session.initialize_storage(500); // 500MB
+                    
+                    // Setup quantization if enabled
+                    if (document.getElementById('quantization').checked) {
+                        const quantConfig = new QuantizationConfig();
+                        quantConfig.precision = QuantizationPrecision.Int8;
+                        this.session.enable_quantization(quantConfig);
+                    }
+                    
+                    // Setup batch processing if enabled
+                    if (document.getElementById('batch-processing').checked) {
+                        const batchConfig = BatchConfig.real_time();
+                        this.session.enable_batch_processing(batchConfig);
+                    }
+                    
+                    // Load default model
+                    await this.loadModel('gpt2-small');
+                    
+                    this.updateStatus();
+                    
+                } catch (error) {
+                    console.error('Failed to initialize WASM:', error);
+                    this.showError('Failed to initialize TrustformeRS: ' + error.message);
+                }
+            }
+
+            async loadModel(modelId) {
+                try {
+                    const modelInfo = this.getModelInfo(modelId);
+                    document.getElementById('model-status').textContent = `Model: Loading ${modelInfo.name}...`;
+                    
+                    // In a real implementation, you would load the actual model
+                    // For demo purposes, we'll simulate model loading
+                    const mockModelData = new Uint8Array(modelInfo.size * 1024 * 1024); // Size in MB
+                    
+                    if (document.getElementById('quantization').checked) {
+                        await this.session.load_model_with_quantization(mockModelData);
+                    } else {
+                        await this.session.load_model(mockModelData);
+                    }
+                    
+                    document.getElementById('model-status').textContent = `Model: ${modelInfo.name} (${modelInfo.size}MB)`;
+                    document.getElementById('model-value').textContent = modelInfo.name;
+                    
+                } catch (error) {
+                    console.error('Failed to load model:', error);
+                    this.showError('Failed to load model: ' + error.message);
+                }
+            }
+
+            getModelInfo(modelId) {
+                const models = {
+                    'gpt2-small': { name: 'GPT-2 Small', size: 124 },
+                    'gpt2-medium': { name: 'GPT-2 Medium', size: 355 },
+                    'gpt2-large': { name: 'GPT-2 Large', size: 774 },
+                    'bert-base': { name: 'BERT Base', size: 110 },
+                    't5-small': { name: 'T5 Small', size: 60 }
+                };
+                return models[modelId] || models['gpt2-small'];
+            }
+
+            initializeUI() {
+                // Mode selector
+                document.querySelectorAll('.mode-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+                        btn.classList.add('active');
+                        this.currentMode = btn.dataset.mode;
+                        this.updatePromptPlaceholder();
+                    });
+                });
+
+                // Generate button
+                document.getElementById('generate-btn').addEventListener('click', () => {
+                    this.generateText();
+                });
+
+                // Model selector
+                document.getElementById('model-select').addEventListener('change', (e) => {
+                    this.loadModel(e.target.value);
+                });
+
+                // Parameter sliders
+                this.setupSliders();
+
+                // Advanced options
+                this.setupAdvancedOptions();
+
+                // Enter key in prompt
+                document.getElementById('prompt-input').addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter' && e.ctrlKey) {
+                        this.generateText();
+                    }
+                });
+            }
+
+            setupSliders() {
+                const sliders = [
+                    { id: 'temperature', display: 'temperature-value' },
+                    { id: 'top-k', display: 'top-k-value' },
+                    { id: 'top-p', display: 'top-p-value' },
+                    { id: 'max-length', display: 'max-length-value' }
+                ];
+
+                sliders.forEach(slider => {
+                    const element = document.getElementById(slider.id + '-slider');
+                    const display = document.getElementById(slider.display);
+                    
+                    element.addEventListener('input', (e) => {
+                        display.textContent = e.target.value;
+                    });
+                });
+            }
+
+            setupAdvancedOptions() {
+                document.getElementById('streaming-mode').addEventListener('change', (e) => {
+                    console.log('Streaming mode:', e.target.checked);
+                });
+
+                document.getElementById('batch-processing').addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        const batchConfig = BatchConfig.real_time();
+                        this.session?.enable_batch_processing(batchConfig);
+                    } else {
+                        this.session?.disable_batch_processing();
+                    }
+                });
+
+                document.getElementById('gpu-acceleration').addEventListener('change', (e) => {
+                    if (e.target.checked && this.session) {
+                        this.session.force_device_type('GPU');
+                    } else if (this.session) {
+                        this.session.force_device_type('CPU');
+                    }
+                    this.updateStatus();
+                });
+
+                document.getElementById('quantization').addEventListener('change', (e) => {
+                    if (e.target.checked) {
+                        const quantConfig = new QuantizationConfig();
+                        quantConfig.precision = QuantizationPrecision.Int8;
+                        this.session?.enable_quantization(quantConfig);
+                    } else {
+                        this.session?.disable_quantization();
+                    }
+                });
+            }
+
+            updatePromptPlaceholder() {
+                const prompts = {
+                    completion: 'Complete this text...',
+                    creative: 'Start your creative story...',
+                    code: 'Write a function that...',
+                    qa: 'Ask a question...'
+                };
+                document.getElementById('prompt-input').placeholder = prompts[this.currentMode];
+            }
+
+            async generateText() {
+                if (this.isGenerating) return;
+                
+                const prompt = document.getElementById('prompt-input').value.trim();
+                if (!prompt) {
+                    this.showError('Please enter a prompt');
+                    return;
+                }
+
+                this.isGenerating = true;
+                this.showLoading(true);
+                
+                const generateBtn = document.getElementById('generate-btn');
+                generateBtn.disabled = true;
+                generateBtn.textContent = 'Generating...';
+
+                try {
+                    const startTime = Date.now();
+                    
+                    // Get generation parameters
+                    const params = this.getGenerationParams();
+                    
+                    // Create input tensor (simplified for demo)
+                    const inputData = new Float32Array(prompt.length);
+                    for (let i = 0; i < prompt.length; i++) {
+                        inputData[i] = prompt.charCodeAt(i) / 255.0;
+                    }
+                    const inputTensor = new WasmTensor(inputData, [1, prompt.length]);
+                    
+                    // Generate text
+                    let result;
+                    if (document.getElementById('batch-processing').checked) {
+                        result = await this.session.predict_with_batching(inputTensor, Priority.High);
+                    } else {
+                        result = this.session.predict(inputTensor);
+                    }
+                    
+                    // Simulate text generation (in real implementation, this would be actual model output)
+                    const generatedText = await this.simulateTextGeneration(prompt, params);
+                    
+                    // Update output
+                    this.displayGeneratedText(generatedText, document.getElementById('streaming-mode').checked);
+                    
+                    // Update metrics
+                    const endTime = Date.now();
+                    const duration = (endTime - startTime) / 1000;
+                    this.updateMetrics(generatedText, duration);
+                    
+                    // Add to history
+                    this.generationHistory.push({
+                        prompt,
+                        generated: generatedText,
+                        params,
+                        timestamp: new Date().toISOString()
+                    });
+                    
+                } catch (error) {
+                    console.error('Generation failed:', error);
+                    this.showError('Generation failed: ' + error.message);
+                } finally {
+                    this.isGenerating = false;
+                    this.showLoading(false);
+                    generateBtn.disabled = false;
+                    generateBtn.textContent = 'Generate Text';
+                }
+            }
+
+            getGenerationParams() {
+                return {
+                    temperature: parseFloat(document.getElementById('temperature-slider').value),
+                    topK: parseInt(document.getElementById('top-k-slider').value),
+                    topP: parseFloat(document.getElementById('top-p-slider').value),
+                    maxLength: parseInt(document.getElementById('max-length-slider').value)
+                };
+            }
+
+            async simulateTextGeneration(prompt, params) {
+                // This is a simulation - in real implementation, this would be actual model inference
+                const templates = {
+                    completion: [
+                        ' and the adventure began with a mysterious letter.',
+                        ' leading to an unexpected discovery that changed everything.',
+                        ' which opened up new possibilities for the future.',
+                        ' resulting in a breakthrough that nobody anticipated.'
+                    ],
+                    creative: [
+                        'The protagonist found themselves in a world unlike any other, where the laws of physics seemed to bend to the will of imagination.',
+                        'As the sun set over the horizon, colors painted the sky in ways that defied natural explanation.',
+                        'The ancient library contained books that wrote themselves, their pages turning with stories yet to be told.'
+                    ],
+                    code: [
+                        '\n    return [i for i in range(n) if i % 2 == 0]',
+                        '\n    result = []\n    for i in range(len(arr)):\n        result.append(arr[i] * 2)\n    return result',
+                        '\n    try:\n        return func(*args, **kwargs)\n    except Exception as e:\n        print(f"Error: {e}")\n        return None'
+                    ],
+                    qa: [
+                        'Based on current research, the answer is that artificial intelligence continues to evolve rapidly.',
+                        'The evidence suggests that this is a complex topic with multiple perspectives to consider.',
+                        'According to recent studies, the most effective approach involves combining multiple methodologies.'
+                    ]
+                };
+                
+                const options = templates[this.currentMode] || templates.completion;
+                const baseResponse = options[Math.floor(Math.random() * options.length)];
+                
+                // Simulate length based on maxLength parameter
+                const targetLength = Math.min(params.maxLength, baseResponse.length + 50);
+                let result = baseResponse.substring(0, targetLength);
+                
+                if (result.length < targetLength) {
+                    result += ' '.repeat(targetLength - result.length);
+                }
+                
+                return result;
+            }
+
+            async displayGeneratedText(text, streaming = false) {
+                const outputElement = document.getElementById('output-content');
+                
+                if (streaming) {
+                    // Simulate streaming by revealing text gradually
+                    outputElement.textContent = '';
+                    for (let i = 0; i < text.length; i++) {
+                        outputElement.textContent += text[i];
+                        await new Promise(resolve => setTimeout(resolve, 50));
+                        this.updateProgress((i + 1) / text.length * 100);
+                    }
+                } else {
+                    outputElement.textContent = text;
+                    this.updateProgress(100);
+                }
+            }
+
+            updateMetrics(text, duration) {
+                const tokens = text.split(/\s+/).length;
+                const speed = tokens / duration;
+                
+                this.performanceMetrics.speed = speed;
+                this.performanceMetrics.totalTokens += tokens;
+                
+                document.getElementById('generation-speed').textContent = `${speed.toFixed(1)} tokens/s`;
+                document.getElementById('total-tokens').textContent = this.performanceMetrics.totalTokens;
+                
+                // Update memory usage
+                if (this.session) {
+                    const memStats = get_memory_stats();
+                    const memoryMB = Math.round(memStats.wasm_memory / 1024 / 1024);
+                    document.getElementById('memory-usage').textContent = `${memoryMB} MB`;
+                    document.getElementById('memory-info').textContent = `Memory: ${memoryMB} MB`;
+                }
+            }
+
+            updateStatus() {
+                if (this.session) {
+                    const deviceType = this.session.current_device_type || 'CPU';
+                    document.getElementById('device-info').textContent = `Device: ${deviceType}`;
+                    
+                    const capabilities = this.session.get_device_capabilities();
+                    if (capabilities && capabilities.device_type === 'GPU') {
+                        document.getElementById('gpu-usage').textContent = `${Math.random() * 100 | 0}%`;
+                    }
+                }
+            }
+
+            updateProgress(percentage) {
+                document.getElementById('progress-fill').style.width = `${percentage}%`;
+            }
+
+            showLoading(show) {
+                document.getElementById('loading-indicator').style.display = show ? 'block' : 'none';
+            }
+
+            showError(message) {
+                alert(message); // In production, use a proper notification system
+            }
+        }
+
+        // Global functions for UI interactions
+        window.setPrompt = function(prompt) {
+            document.getElementById('prompt-input').value = prompt;
+        };
+
+        window.exportText = function(format) {
+            const content = document.getElementById('output-content').textContent;
+            const prompt = document.getElementById('prompt-input').value;
+            
+            let output, filename, mimeType;
+            
+            switch (format) {
+                case 'txt':
+                    output = `Prompt: ${prompt}\n\nGenerated Text:\n${content}`;
+                    filename = 'generated-text.txt';
+                    mimeType = 'text/plain';
+                    break;
+                case 'md':
+                    output = `# Generated Text\n\n**Prompt:** ${prompt}\n\n**Generated Text:**\n\n${content}`;
+                    filename = 'generated-text.md';
+                    mimeType = 'text/markdown';
+                    break;
+                case 'json':
+                    output = JSON.stringify({
+                        prompt,
+                        generated: content,
+                        timestamp: new Date().toISOString(),
+                        parameters: {
+                            temperature: document.getElementById('temperature-slider').value,
+                            topK: document.getElementById('top-k-slider').value,
+                            topP: document.getElementById('top-p-slider').value,
+                            maxLength: document.getElementById('max-length-slider').value
+                        }
+                    }, null, 2);
+                    filename = 'generated-text.json';
+                    mimeType = 'application/json';
+                    break;
+            }
+            
+            const blob = new Blob([output], { type: mimeType });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            a.click();
+            URL.revokeObjectURL(url);
+        };
+
+        window.clearOutput = function() {
+            document.getElementById('output-content').textContent = 'Generated text will appear here...';
+            document.getElementById('progress-fill').style.width = '0%';
+        };
+
+        // Initialize the playground
+        const playground = new TextGenerationPlayground();
+        
+        // Make playground available globally for debugging
+        window.playground = playground;
+    </script>
+</body>
+</html>

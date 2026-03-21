@@ -1,0 +1,70 @@
+# CODEOWNERS for TrustformeRS
+# This file defines who should review PRs for different parts of the codebase
+# Order matters - the last matching pattern takes precedence
+
+# Default owners for everything
+* @trustformers/core-team
+
+# Core tensor and compute functionality
+/trustformers-core/ @trustformers/core-team @trustformers/performance-team
+/trustformers-core/src/tensor/ @trustformers/tensor-experts
+/trustformers-core/src/cuda/ @trustformers/gpu-team
+/trustformers-core/src/parallel/ @trustformers/distributed-team
+
+# Model implementations
+/trustformers-models/ @trustformers/models-team
+/trustformers-models/src/bert/ @trustformers/nlp-team
+/trustformers-models/src/gpt/ @trustformers/nlp-team
+/trustformers-models/src/vision/ @trustformers/vision-team
+/trustformers-models/src/multimodal/ @trustformers/multimodal-team
+
+# Optimization and training
+/trustformers-optim/ @trustformers/optimization-team
+/trustformers-optim/src/distributed/ @trustformers/distributed-team
+/trustformers-optim/src/quantization/ @trustformers/quantization-team
+
+# Mobile and edge deployment
+/trustformers-mobile/ @trustformers/mobile-team
+/trustformers-mobile/ios/ @trustformers/ios-team
+/trustformers-mobile/android/ @trustformers/android-team
+/trustformers-mobile/wasm/ @trustformers/wasm-team
+
+# Serving infrastructure
+/trustformers-serving/ @trustformers/serving-team
+/trustformers-serving/src/grpc/ @trustformers/api-team
+/trustformers-serving/src/http/ @trustformers/api-team
+
+# Documentation
+/docs/ @trustformers/docs-team
+*.md @trustformers/docs-team
+/examples/ @trustformers/docs-team @trustformers/devrel-team
+
+# CI/CD and build system
+/.github/ @trustformers/devops-team
+/Cargo.toml @trustformers/core-team
+/rust-toolchain.toml @trustformers/core-team
+/deny.toml @trustformers/security-team
+
+# Security-sensitive files
+/trustformers-core/src/crypto/ @trustformers/security-team
+/trustformers-serving/src/auth/ @trustformers/security-team
+/.github/SECURITY.md @trustformers/security-team
+
+# Benchmarks and performance tests
+/benches/ @trustformers/performance-team
+/trustformers-core/benches/ @trustformers/performance-team
+/perf/ @trustformers/performance-team
+
+# Legal and licensing
+/LICENSE* @trustformers/legal-team
+/NOTICE @trustformers/legal-team
+/PATENTS @trustformers/legal-team
+
+# Special files that need careful review
+/trustformers-core/src/unsafe/ @trustformers/unsafe-reviewers
+*.cu @trustformers/gpu-team
+*.cuh @trustformers/gpu-team
+
+# Architecture decisions
+/architecture/ @trustformers/architects
+/rfcs/ @trustformers/architects

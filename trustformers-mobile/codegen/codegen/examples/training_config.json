@@ -1,0 +1,14 @@
+{
+  "model_type": "transformer",
+  "dataset_type": "text",
+  "batch_size": 32,
+  "learning_rate": 5e-05,
+  "num_epochs": 3,
+  "optimizer": "adamw",
+  "mixed_precision": true,
+  "is_sequence_model": true,
+  "max_length": 512,
+  "warmup_steps": 500,
+  "scheduler_type": "cosine",
+  "use_scheduler": true
+}

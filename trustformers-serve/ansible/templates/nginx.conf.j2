@@ -1,0 +1,142 @@
+upstream trustformers_backend {
+{% for host in groups['trustformers_servers'] %}
+    server {{ hostvars[host]['ansible_default_ipv4']['address'] }}:{{ hostvars[host]['trustformers_port'] | default(8080) }} max_fails=3 fail_timeout=30s;
+{% endfor %}
+}
+
+server {
+    listen 80;
+    server_name {{ ansible_default_ipv4.address }} {{ ansible_hostname }};
+    
+    # Security headers
+    add_header X-Frame-Options DENY;
+    add_header X-Content-Type-Options nosniff;
+    add_header X-XSS-Protection "1; mode=block";
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+    
+    # Rate limiting
+    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
+    limit_req zone=api burst=20 nodelay;
+    
+    # Client settings
+    client_max_body_size 100M;
+    client_body_timeout 60s;
+    client_header_timeout 60s;
+    
+    # Proxy settings
+    proxy_connect_timeout 60s;
+    proxy_send_timeout 60s;
+    proxy_read_timeout 300s;
+    proxy_buffering off;
+    proxy_buffer_size 4k;
+    
+    # Health check endpoint
+    location /health {
+        proxy_pass http://trustformers_backend/health;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # Health check specific settings
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 10s;
+        access_log off;
+    }
+    
+    # API endpoints
+    location /v1/ {
+        proxy_pass http://trustformers_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # Streaming support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_cache_bypass $http_upgrade;
+    }
+    
+    # Metrics endpoint (internal only)
+    location /metrics {
+        allow 127.0.0.1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        deny all;
+        
+        proxy_pass http://trustformers_backend/metrics;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+    
+    # Admin endpoints (restricted access)
+    location /admin/ {
+        allow 127.0.0.1;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 192.168.0.0/16;
+        deny all;
+        
+        proxy_pass http://trustformers_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # Static files
+    location /static/ {
+        alias {{ app_home }}/static/;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+    
+    # Default location
+    location / {
+        proxy_pass http://trustformers_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+    
+    # Error pages
+    error_page 502 503 504 /50x.html;
+    location = /50x.html {
+        root /var/www/html;
+        internal;
+    }
+    
+    # Logging
+    access_log /var/log/nginx/trustformers_access.log;
+    error_log /var/log/nginx/trustformers_error.log;
+}
+
+{% if enable_ssl | default(false) %}
+server {
+    listen 443 ssl http2;
+    server_name {{ ansible_default_ipv4.address }} {{ ansible_hostname }};
+    
+    ssl_certificate /etc/ssl/certs/trustformers.crt;
+    ssl_certificate_key /etc/ssl/private/trustformers.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+    
+    # Include the same location blocks as HTTP server
+    include /etc/nginx/snippets/trustformers-locations.conf;
+}
+
+# Redirect HTTP to HTTPS
+server {
+    listen 80;
+    server_name {{ ansible_default_ipv4.address }} {{ ansible_hostname }};
+    return 301 https://$server_name$request_uri;
+}
+{% endif %}

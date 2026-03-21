@@ -1,0 +1,302 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="16dp">
+
+        <!-- Header -->
+        <TextView
+            android:id="@+id/tvTitle"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="16dp"
+            android:gravity="center"
+            android:text="Real-time Translation"
+            android:textSize="24sp"
+            android:textStyle="bold"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <!-- Language Selection -->
+        <LinearLayout
+            android:id="@+id/layoutLanguageSelection"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="horizontal"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/tvTitle">
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="From:"
+                    android:textStyle="bold" />
+
+                <Spinner
+                    android:id="@+id/spinnerFromLanguage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp" />
+
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/btnSwapLanguages"
+                android:layout_width="48dp"
+                android:layout_height="48dp"
+                android:layout_gravity="center"
+                android:layout_marginHorizontal="8dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:text="⇄"
+                android:textSize="18sp" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="To:"
+                    android:textStyle="bold" />
+
+                <Spinner
+                    android:id="@+id/spinnerToLanguage"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- Real-time Mode Toggle -->
+        <LinearLayout
+            android:id="@+id/layoutRealTimeMode"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/layoutLanguageSelection">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Real-time Translation"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <Switch
+                android:id="@+id/switchRealTimeMode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+        </LinearLayout>
+
+        <!-- Input Section -->
+        <LinearLayout
+            android:id="@+id/layoutInputSection"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="vertical"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/layoutRealTimeMode">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Input Text:"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/etInputText"
+                android:layout_width="match_parent"
+                android:layout_height="120dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/edittext_background"
+                android:gravity="top|start"
+                android:hint="Enter text to translate or use voice input..."
+                android:inputType="textMultiLine"
+                android:padding="12dp"
+                android:scrollbars="vertical" />
+
+            <!-- Input Actions -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/btnVoiceInput"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:layout_weight="1"
+                    android:drawableLeft="@drawable/ic_mic"
+                    android:text="Voice Input" />
+
+                <Button
+                    android:id="@+id/btnCameraTranslate"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:layout_weight="1"
+                    android:drawableLeft="@drawable/ic_camera"
+                    android:text="Camera" />
+
+                <Button
+                    android:id="@+id/btnClearText"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:drawableLeft="@drawable/ic_clear"
+                    android:text="Clear" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- Translation Section -->
+        <LinearLayout
+            android:id="@+id/layoutTranslationSection"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:orientation="vertical"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/layoutInputSection">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Translation:"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/tvTranslatedText"
+                android:layout_width="match_parent"
+                android:layout_height="120dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/textview_background"
+                android:gravity="top|start"
+                android:hint="Translation will appear here..."
+                android:padding="12dp"
+                android:scrollbars="vertical"
+                android:textSize="16sp" />
+
+            <!-- Translation Info -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:id="@+id/tvConfidenceScore"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Confidence: -"
+                    android:textSize="14sp" />
+
+                <Button
+                    android:id="@+id/btnPlayTranslation"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:drawableLeft="@drawable/ic_play"
+                    android:text="Play" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- Progress Bar -->
+        <ProgressBar
+            android:id="@+id/progressBar"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:visibility="gone"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/layoutTranslationSection" />
+
+        <!-- Translation Info -->
+        <TextView
+            android:id="@+id/tvTranslationInfo"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="Ready to translate"
+            android:textSize="14sp"
+            android:textStyle="italic"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/progressBar" />
+
+        <!-- Translation History -->
+        <LinearLayout
+            android:id="@+id/layoutHistorySection"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:orientation="vertical"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toBottomOf="@id/tvTranslationInfo">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Recent Translations:"
+                android:textStyle="bold" />
+
+            <ScrollView
+                android:id="@+id/scrollViewHistory"
+                android:layout_width="match_parent"
+                android:layout_height="200dp"
+                android:layout_marginTop="8dp"
+                android:background="@drawable/scrollview_background"
+                android:fadeScrollbars="false"
+                android:scrollbars="vertical">
+
+                <LinearLayout
+                    android:id="@+id/layoutTranslationHistory"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical"
+                    android:padding="8dp" />
+
+            </ScrollView>
+
+        </LinearLayout>
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+</ScrollView>

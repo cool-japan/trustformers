@@ -1,0 +1,582 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Performance Benchmark</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+        
+        .benchmark-card {
+            background: white;
+            padding: 20px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .benchmark-controls {
+            display: flex;
+            gap: 15px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+        }
+        
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+        
+        label {
+            font-size: 14px;
+            font-weight: 600;
+            color: #555;
+        }
+        
+        input, select {
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        
+        button {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 10px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+        }
+        
+        button:hover {
+            background: #218838;
+        }
+        
+        button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+        
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        
+        .results-table th,
+        .results-table td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        
+        .results-table th {
+            background-color: #f8f9fa;
+            font-weight: 600;
+            color: #495057;
+        }
+        
+        .results-table tr:hover {
+            background-color: #f8f9fa;
+        }
+        
+        .chart-container {
+            margin-top: 30px;
+            height: 400px;
+        }
+        
+        canvas {
+            max-width: 100%;
+            height: auto;
+        }
+        
+        .status {
+            text-align: center;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        
+        .loading { background: #fff3cd; color: #856404; }
+        .ready { background: #d4edda; color: #155724; }
+        .running { background: #cce5ff; color: #004085; }
+        .error { background: #f8d7da; color: #721c24; }
+        
+        .metric {
+            display: inline-block;
+            padding: 8px 16px;
+            background: #e9ecef;
+            border-radius: 4px;
+            margin: 5px;
+        }
+        
+        .metric-label {
+            font-size: 12px;
+            color: #6c757d;
+        }
+        
+        .metric-value {
+            font-size: 20px;
+            font-weight: bold;
+            color: #212529;
+        }
+    </style>
+</head>
+<body>
+    <h1>⚡ TrustformeRS Performance Benchmark</h1>
+    
+    <div id="status" class="status loading">Loading WebAssembly module...</div>
+    
+    <div class="benchmark-card">
+        <h2>Tensor Operations Benchmark</h2>
+        
+        <div class="benchmark-controls">
+            <div class="control-group">
+                <label>Tensor Size:</label>
+                <select id="tensorSize">
+                    <option value="small">Small (10x10)</option>
+                    <option value="medium" selected>Medium (100x100)</option>
+                    <option value="large">Large (500x500)</option>
+                    <option value="xlarge">X-Large (1000x1000)</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Iterations:</label>
+                <input type="number" id="iterations" value="100" min="10" max="1000">
+            </div>
+            
+            <div class="control-group">
+                <label>Operation:</label>
+                <select id="operation">
+                    <option value="all">All Operations</option>
+                    <option value="add">Addition</option>
+                    <option value="matmul">Matrix Multiplication</option>
+                    <option value="transpose">Transpose</option>
+                    <option value="softmax">Softmax</option>
+                </select>
+            </div>
+            
+            <button onclick="runBenchmark()" id="runBtn">Run Benchmark</button>
+        </div>
+        
+        <div id="results"></div>
+    </div>
+    
+    <div class="benchmark-card">
+        <h2>Model Inference Benchmark</h2>
+        
+        <div class="benchmark-controls">
+            <div class="control-group">
+                <label>Model:</label>
+                <select id="modelType">
+                    <option value="bert_base">BERT Base</option>
+                    <option value="gpt2_base">GPT-2 Base</option>
+                    <option value="t5_small">T5 Small</option>
+                </select>
+            </div>
+            
+            <div class="control-group">
+                <label>Batch Size:</label>
+                <input type="number" id="batchSize" value="1" min="1" max="32">
+            </div>
+            
+            <div class="control-group">
+                <label>Sequence Length:</label>
+                <input type="number" id="seqLength" value="128" min="16" max="512">
+            </div>
+            
+            <button onclick="runModelBenchmark()" id="modelBtn">Run Model Benchmark</button>
+        </div>
+        
+        <div id="modelResults"></div>
+    </div>
+    
+    <div class="benchmark-card">
+        <h2>Performance Chart</h2>
+        <canvas id="performanceChart" width="800" height="400"></canvas>
+    </div>
+
+    <script type="module">
+        let trustformers = null;
+        let initialized = false;
+        let benchmarkResults = [];
+        
+        async function init() {
+            try {
+                updateStatus('Loading TrustformeRS...', 'loading');
+                
+                const module = await import('../trustformers-js/src/index.js');
+                trustformers = module;
+                
+                await trustformers.initialize({
+                    wasmPath: '../trustformers-wasm/pkg/trustformers_wasm_bg.wasm'
+                });
+                
+                initialized = true;
+                updateStatus('Ready to run benchmarks', 'ready');
+                
+                // Show initial memory stats
+                showMemoryStats();
+                
+            } catch (error) {
+                updateStatus(`Error: ${error.message}`, 'error');
+                console.error(error);
+            }
+        }
+        
+        function updateStatus(message, type) {
+            const statusEl = document.getElementById('status');
+            statusEl.textContent = message;
+            statusEl.className = `status ${type}`;
+        }
+        
+        function showMemoryStats() {
+            const stats = trustformers.memory.getStats();
+            const memInfo = `Memory: ${stats.used_mb.toFixed(2)} MB / ${stats.limit_mb.toFixed(2)} MB (${(stats.used / stats.limit * 100).toFixed(1)}%)`;
+            console.log(memInfo);
+        }
+        
+        window.runBenchmark = async function() {
+            if (!initialized) return;
+            
+            const btn = document.getElementById('runBtn');
+            btn.disabled = true;
+            updateStatus('Running benchmark...', 'running');
+            
+            const sizeMap = {
+                'small': [10, 10],
+                'medium': [100, 100],
+                'large': [500, 500],
+                'xlarge': [1000, 1000]
+            };
+            
+            const size = document.getElementById('tensorSize').value;
+            const iterations = parseInt(document.getElementById('iterations').value);
+            const operation = document.getElementById('operation').value;
+            const [rows, cols] = sizeMap[size];
+            
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<h3>Running...</h3>';
+            
+            try {
+                const results = [];
+                const operations = operation === 'all' 
+                    ? ['add', 'matmul', 'transpose', 'softmax']
+                    : [operation];
+                
+                for (const op of operations) {
+                    const result = await benchmarkOperation(op, rows, cols, iterations);
+                    results.push(result);
+                }
+                
+                displayResults(results, resultsDiv);
+                updateChart(results);
+                
+                benchmarkResults = results;
+                updateStatus('Benchmark complete', 'ready');
+                
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+                updateStatus('Benchmark failed', 'error');
+            }
+            
+            btn.disabled = false;
+            showMemoryStats();
+        };
+        
+        async function benchmarkOperation(operation, rows, cols, iterations) {
+            // Create test tensors
+            const size = rows * cols;
+            const dataA = new Array(size).fill(0).map(() => Math.random());
+            const dataB = new Array(size).fill(0).map(() => Math.random());
+            
+            const tensorA = trustformers.tensor(dataA, [rows, cols]);
+            const tensorB = trustformers.tensor(dataB, [rows, cols]);
+            
+            // Warm up
+            performOperation(operation, tensorA, tensorB);
+            
+            // Benchmark
+            const startTime = performance.now();
+            
+            for (let i = 0; i < iterations; i++) {
+                const result = performOperation(operation, tensorA, tensorB);
+                result.free();
+            }
+            
+            const endTime = performance.now();
+            const totalTime = endTime - startTime;
+            const avgTime = totalTime / iterations;
+            const opsPerSecond = 1000 / avgTime;
+            
+            // Calculate FLOPS for matrix operations
+            let flops = 0;
+            if (operation === 'matmul') {
+                flops = 2 * rows * cols * cols; // For square matrices
+            } else if (operation === 'add' || operation === 'mul') {
+                flops = rows * cols;
+            }
+            
+            const gflops = (flops * opsPerSecond) / 1e9;
+            
+            // Clean up
+            tensorA.free();
+            tensorB.free();
+            
+            return {
+                operation,
+                tensorSize: `${rows}x${cols}`,
+                iterations,
+                totalTime: totalTime.toFixed(2),
+                avgTime: avgTime.toFixed(3),
+                opsPerSecond: opsPerSecond.toFixed(1),
+                gflops: gflops.toFixed(3)
+            };
+        }
+        
+        function performOperation(operation, tensorA, tensorB) {
+            switch(operation) {
+                case 'add':
+                    return tensorA.add(tensorB);
+                case 'matmul':
+                    return tensorA.matmul(tensorB);
+                case 'transpose':
+                    return tensorA.transpose();
+                case 'softmax':
+                    return tensorA.softmax(-1);
+                default:
+                    throw new Error(`Unknown operation: ${operation}`);
+            }
+        }
+        
+        function displayResults(results, container) {
+            let html = '<h3>Results</h3>';
+            
+            // Summary metrics
+            html += '<div style="margin-bottom: 20px;">';
+            results.forEach(r => {
+                html += `
+                    <div class="metric">
+                        <div class="metric-label">${r.operation.toUpperCase()}</div>
+                        <div class="metric-value">${r.avgTime} ms</div>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            
+            // Detailed table
+            html += '<table class="results-table">';
+            html += '<thead><tr>';
+            html += '<th>Operation</th>';
+            html += '<th>Tensor Size</th>';
+            html += '<th>Iterations</th>';
+            html += '<th>Total Time (ms)</th>';
+            html += '<th>Avg Time (ms)</th>';
+            html += '<th>Ops/Second</th>';
+            html += '<th>GFLOPS</th>';
+            html += '</tr></thead><tbody>';
+            
+            results.forEach(r => {
+                html += '<tr>';
+                html += `<td>${r.operation}</td>`;
+                html += `<td>${r.tensorSize}</td>`;
+                html += `<td>${r.iterations}</td>`;
+                html += `<td>${r.totalTime}</td>`;
+                html += `<td>${r.avgTime}</td>`;
+                html += `<td>${r.opsPerSecond}</td>`;
+                html += `<td>${r.gflops}</td>`;
+                html += '</tr>';
+            });
+            
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+        
+        window.runModelBenchmark = async function() {
+            if (!initialized) return;
+            
+            const btn = document.getElementById('modelBtn');
+            btn.disabled = true;
+            updateStatus('Running model benchmark...', 'running');
+            
+            const modelType = document.getElementById('modelType').value;
+            const batchSize = parseInt(document.getElementById('batchSize').value);
+            const seqLength = parseInt(document.getElementById('seqLength').value);
+            
+            const resultsDiv = document.getElementById('modelResults');
+            resultsDiv.innerHTML = '<h3>Running...</h3>';
+            
+            try {
+                const model = trustformers.createModel(modelType);
+                const tokenizer = trustformers.createTokenizer('wordpiece');
+                
+                // Simple vocab for testing
+                const vocab = {};
+                for (let i = 0; i < 1000; i++) {
+                    vocab[`token_${i}`] = i;
+                }
+                tokenizer.load_vocab(vocab);
+                
+                // Create input tensor
+                const inputData = new Array(batchSize * seqLength).fill(0).map(() => Math.floor(Math.random() * 1000));
+                const inputTensor = trustformers.tensor(inputData, [batchSize, seqLength]);
+                
+                // Warm up
+                const warmupOutput = model.forward(inputTensor);
+                warmupOutput.free();
+                
+                // Benchmark
+                const iterations = 10;
+                const startTime = performance.now();
+                
+                for (let i = 0; i < iterations; i++) {
+                    const output = model.forward(inputTensor);
+                    output.free();
+                }
+                
+                const endTime = performance.now();
+                const totalTime = endTime - startTime;
+                const avgTime = totalTime / iterations;
+                const throughput = (batchSize * 1000) / avgTime; // sequences per second
+                
+                const results = {
+                    model: modelType,
+                    batchSize,
+                    seqLength,
+                    iterations,
+                    totalTime: totalTime.toFixed(2),
+                    avgTime: avgTime.toFixed(3),
+                    throughput: throughput.toFixed(1),
+                    memoryUsage: model.memory_usage_mb().toFixed(2)
+                };
+                
+                displayModelResults(results, resultsDiv);
+                
+                // Clean up
+                inputTensor.free();
+                model.free();
+                tokenizer.free();
+                
+                updateStatus('Model benchmark complete', 'ready');
+                
+            } catch (error) {
+                resultsDiv.innerHTML = `<div class="error">Error: ${error.message}</div>`;
+                updateStatus('Model benchmark failed', 'error');
+            }
+            
+            btn.disabled = false;
+            showMemoryStats();
+        };
+        
+        function displayModelResults(results, container) {
+            let html = '<h3>Model Inference Results</h3>';
+            
+            html += '<div style="margin-bottom: 20px;">';
+            html += `
+                <div class="metric">
+                    <div class="metric-label">Inference Time</div>
+                    <div class="metric-value">${results.avgTime} ms</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Throughput</div>
+                    <div class="metric-value">${results.throughput} seq/s</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Memory Usage</div>
+                    <div class="metric-value">${results.memoryUsage} MB</div>
+                </div>
+            `;
+            html += '</div>';
+            
+            html += '<table class="results-table">';
+            html += '<thead><tr>';
+            html += '<th>Metric</th>';
+            html += '<th>Value</th>';
+            html += '</tr></thead><tbody>';
+            
+            Object.entries(results).forEach(([key, value]) => {
+                const label = key.charAt(0).toUpperCase() + key.slice(1).replace(/([A-Z])/g, ' $1');
+                html += `<tr><td>${label}</td><td>${value}</td></tr>`;
+            });
+            
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+        
+        function updateChart(results) {
+            const canvas = document.getElementById('performanceChart');
+            const ctx = canvas.getContext('2d');
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            const margin = 40;
+            const chartWidth = canvas.width - 2 * margin;
+            const chartHeight = canvas.height - 2 * margin;
+            
+            // Find max value for scaling
+            const maxTime = Math.max(...results.map(r => parseFloat(r.avgTime)));
+            
+            // Draw axes
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(margin, margin);
+            ctx.lineTo(margin, canvas.height - margin);
+            ctx.lineTo(canvas.width - margin, canvas.height - margin);
+            ctx.stroke();
+            
+            // Draw bars
+            const barWidth = chartWidth / results.length / 2;
+            const barSpacing = chartWidth / results.length;
+            
+            results.forEach((result, index) => {
+                const barHeight = (parseFloat(result.avgTime) / maxTime) * chartHeight;
+                const x = margin + index * barSpacing + barSpacing / 2 - barWidth / 2;
+                const y = canvas.height - margin - barHeight;
+                
+                // Bar
+                ctx.fillStyle = '#007bff';
+                ctx.fillRect(x, y, barWidth, barHeight);
+                
+                // Label
+                ctx.fillStyle = '#333';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(result.operation, x + barWidth / 2, canvas.height - margin + 20);
+                
+                // Value
+                ctx.fillText(`${result.avgTime}ms`, x + barWidth / 2, y - 5);
+            });
+            
+            // Y-axis label
+            ctx.save();
+            ctx.translate(15, canvas.height / 2);
+            ctx.rotate(-Math.PI / 2);
+            ctx.textAlign = 'center';
+            ctx.fillText('Average Time (ms)', 0, 0);
+            ctx.restore();
+        }
+        
+        // Initialize on load
+        init();
+    </script>
+</body>
+</html>

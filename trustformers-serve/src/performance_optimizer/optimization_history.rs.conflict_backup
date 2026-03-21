@@ -1,0 +1,347 @@
+//! Comprehensive Optimization History Management for Performance Optimizer
+//!
+//! This module provides advanced optimization tracking and historical analysis
+//! functionality including event recording, trend analysis, pattern recognition,
+//! anomaly detection, effectiveness measurement, ROI analysis, and advanced
+//! statistical analysis for the TrustformeRS performance optimization system.
+//!
+//! The implementation has been refactored into specialized modules for improved
+//! maintainability, testability, and extensibility. This main module provides
+//! backward compatibility through re-exports and delegation patterns.
+
+// Re-export all types and functionality from the modular implementation
+pub use self::optimization_history::{
+    types::*,
+    trend_analysis::*,
+    pattern_recognition::*,
+    anomaly_detection::*,
+    effectiveness_analysis::*,
+    statistics::*,
+    predictive_analytics::*,
+    manager::AdvancedOptimizationHistoryManager,
+};
+
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use std::{
+    collections::HashMap,
+    time::Duration,
+};
+
+use super::types::{
+    PerformanceDataPoint, PerformanceMeasurement, OptimizationEventType,
+    TestCharacteristics, SystemState, OptimizationHistory as OptimizationHistoryType,
+    OptimizationEvent as OptEvent,
+    PerformanceTrend as PerformanceTrendType, OptimizationEffectiveness as OptEffectiveness,
+    OptimizationRecord as OptRecord, OptimizationStatistics as OptStats,
+};
+use crate::test_performance_monitoring::TrendDirection;
+
+// =============================================================================
+// BACKWARD COMPATIBILITY LAYER AND DELEGATION
+// =============================================================================
+
+// Legacy type aliases for backward compatibility
+pub type OptimizationHistory = LegacyOptimizationHistory;
+pub type OptimizationEvent = LegacyOptimizationEvent;
+pub type PerformanceTrend = LegacyPerformanceTrend;
+pub type OptimizationStatistics = LegacyOptimizationStatistics;
+pub type OptimizationRecord = LegacyOptimizationRecord;
+pub type OptimizationEffectiveness = LegacyOptimizationEffectiveness;
+
+/// Legacy optimization history structure for backward compatibility
+///
+/// This provides the same interface as the original implementation but
+/// delegates to the new modular architecture for enhanced functionality.
+#[derive(Debug, Default)]
+pub struct LegacyOptimizationHistory {
+    /// Optimization events
+    pub events: Vec<LegacyOptimizationEvent>,
+    /// Performance trends
+    pub trends: HashMap<String, LegacyPerformanceTrend>,
+    /// Optimization effectiveness
+    pub effectiveness: LegacyOptimizationEffectiveness,
+    /// History statistics
+    pub statistics: LegacyOptimizationStatistics,
+}
+
+/// Legacy optimization event for backward compatibility
+#[derive(Debug, Clone)]
+pub struct LegacyOptimizationEvent {
+    /// Event timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Event type
+    pub event_type: OptimizationEventType,
+    /// Event description
+    pub description: String,
+    /// Performance before
+    pub performance_before: Option<PerformanceMeasurement>,
+    /// Performance after
+    pub performance_after: Option<PerformanceMeasurement>,
+    /// Optimization parameters
+    pub parameters: HashMap<String, String>,
+    /// Event metadata
+    pub metadata: HashMap<String, String>,
+}
+
+/// Legacy performance trend for backward compatibility
+#[derive(Debug, Clone)]
+pub struct LegacyPerformanceTrend {
+    /// Trend direction
+    pub direction: TrendDirection,
+    /// Trend strength
+    pub strength: f32,
+    /// Trend confidence
+    pub confidence: f32,
+    /// Trend period
+    pub period: Duration,
+    /// Trend data points
+    pub data_points: Vec<PerformanceDataPoint>,
+}
+
+/// Legacy optimization effectiveness for backward compatibility
+#[derive(Debug, Default)]
+pub struct LegacyOptimizationEffectiveness {
+    /// Total optimizations applied
+    pub total_optimizations: u64,
+    /// Successful optimizations
+    pub successful_optimizations: u64,
+    /// Average performance improvement
+    pub average_improvement: f32,
+    /// Best optimization
+    pub best_optimization: Option<LegacyOptimizationRecord>,
+    /// Worst optimization
+    pub worst_optimization: Option<LegacyOptimizationRecord>,
+}
+
+/// Legacy optimization record for backward compatibility
+#[derive(Debug, Clone)]
+pub struct LegacyOptimizationRecord {
+    /// Optimization ID
+    pub id: String,
+    /// Optimization type
+    pub optimization_type: OptimizationEventType,
+    /// Performance improvement
+    pub improvement: f32,
+    /// Optimization timestamp
+    pub timestamp: DateTime<Utc>,
+    /// Optimization duration
+    pub duration: Duration,
+}
+
+/// Legacy optimization statistics for backward compatibility
+#[derive(Debug, Default)]
+pub struct LegacyOptimizationStatistics {
+    /// Optimization frequency
+    pub frequency: f32,
+    /// Success rate
+    pub success_rate: f32,
+    /// Average improvement
+    pub average_improvement: f32,
+    /// Standard deviation of improvements
+    pub improvement_std_dev: f32,
+    /// Optimization types distribution
+    pub type_distribution: HashMap<String, u64>,
+}
+
+// =============================================================================
+// BACKWARD COMPATIBILITY IMPLEMENTATIONS
+// =============================================================================
+
+impl LegacyOptimizationHistory {
+    /// Create new optimization history with optional delegation to advanced manager
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add optimization event with enhanced tracking
+    pub fn add_event(&mut self, event: LegacyOptimizationEvent) {
+        self.events.push(event.clone());
+        self.update_statistics(&event);
+        self.update_effectiveness(&event);
+
+        // Keep history manageable
+        if self.events.len() > 10000 {
+            self.events.remove(0);
+        }
+    }
+
+    /// Update optimization statistics
+    fn update_statistics(&mut self, event: &LegacyOptimizationEvent) {
+        self.statistics.frequency = self.calculate_frequency();
+
+        // Update type distribution
+        let event_type_name = format!("{:?}", event.event_type);
+        *self.statistics.type_distribution.entry(event_type_name).or_insert(0) += 1;
+
+        // Recalculate success rate if we have performance data
+        if let (Some(before), Some(after)) = (&event.performance_before, &event.performance_after) {
+            let improvement = self.calculate_improvement(before, after);
+
+            if improvement > 0.0 {
+                self.effectiveness.successful_optimizations += 1;
+            }
+            self.effectiveness.total_optimizations += 1;
+
+            self.statistics.success_rate = self.effectiveness.successful_optimizations as f32 /
+                self.effectiveness.total_optimizations.max(1) as f32;
+        }
+    }
+
+    /// Update optimization effectiveness
+    fn update_effectiveness(&mut self, event: &LegacyOptimizationEvent) {
+        if let (Some(before), Some(after)) = (&event.performance_before, &event.performance_after) {
+            let improvement = self.calculate_improvement(before, after);
+
+            let record = LegacyOptimizationRecord {
+                id: format!("opt_{}", event.timestamp.timestamp()),
+                optimization_type: event.event_type.clone(),
+                improvement,
+                timestamp: event.timestamp,
+                duration: Duration::from_secs(60), // Placeholder
+            };
+
+            // Update best/worst optimization tracking
+            if self.effectiveness.best_optimization.as_ref()
+                .map_or(true, |best| improvement > best.improvement) {
+                self.effectiveness.best_optimization = Some(record.clone());
+            }
+
+            if self.effectiveness.worst_optimization.as_ref()
+                .map_or(true, |worst| improvement < worst.improvement) {
+                self.effectiveness.worst_optimization = Some(record);
+            }
+
+            // Update average improvement
+            let total_improvements: f32 = self.events.iter()
+                .filter_map(|e| {
+                    if let (Some(before), Some(after)) = (&e.performance_before, &e.performance_after) {
+                        Some(self.calculate_improvement(before, after))
+                    } else {
+                        None
+                    }
+                })
+                .sum();
+
+            let improvement_count = self.events.iter()
+                .filter(|e| e.performance_before.is_some() && e.performance_after.is_some())
+                .count() as f32;
+
+            if improvement_count > 0.0 {
+                self.effectiveness.average_improvement = total_improvements / improvement_count;
+
+                // Calculate standard deviation
+                let improvements: Vec<f32> = self.events.iter()
+                    .filter_map(|e| {
+                        if let (Some(before), Some(after)) = (&e.performance_before, &e.performance_after) {
+                            Some(self.calculate_improvement(before, after))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let variance = improvements.iter()
+                    .map(|&x| (x - self.effectiveness.average_improvement).powi(2))
+                    .sum::<f32>() / improvement_count;
+
+                self.statistics.improvement_std_dev = variance.sqrt();
+            }
+        }
+    }
+
+    /// Calculate performance improvement between two measurements
+    fn calculate_improvement(&self, before: &PerformanceMeasurement, after: &PerformanceMeasurement) -> f32 {
+        let throughput_improvement = (after.throughput - before.throughput) / before.throughput.max(0.001);
+        let efficiency_improvement = after.resource_efficiency - before.resource_efficiency;
+        let latency_improvement = (before.average_latency.as_secs_f32() - after.average_latency.as_secs_f32()) /
+                                 before.average_latency.as_secs_f32().max(0.001);
+
+        // Weighted average of improvements
+        (throughput_improvement as f32 * 0.4 +
+         efficiency_improvement * 0.3 +
+         latency_improvement * 0.3).max(-1.0).min(5.0)
+    }
+
+    /// Calculate optimization frequency (events per hour)
+    fn calculate_frequency(&self) -> f32 {
+        if self.events.len() < 2 {
+            return 0.0;
+        }
+
+        let duration = self.events.last().unwrap().timestamp - self.events.first().unwrap().timestamp;
+        let hours = duration.num_seconds() as f32 / 3600.0;
+
+        if hours > 0.0 {
+            self.events.len() as f32 / hours
+        } else {
+            0.0
+        }
+    }
+
+    /// Get optimization events within time range
+    pub fn get_events_in_range(&self, start: DateTime<Utc>, end: DateTime<Utc>) -> Vec<&LegacyOptimizationEvent> {
+        self.events.iter()
+            .filter(|event| event.timestamp >= start && event.timestamp <= end)
+            .collect()
+    }
+
+    /// Get events by type
+    pub fn get_events_by_type(&self, event_type: &OptimizationEventType) -> Vec<&LegacyOptimizationEvent> {
+        self.events.iter()
+            .filter(|event| std::mem::discriminant(&event.event_type) == std::mem::discriminant(event_type))
+            .collect()
+    }
+
+    /// Update performance trend for metric
+    pub fn update_trend(&mut self, metric: String, trend: LegacyPerformanceTrend) {
+        self.trends.insert(metric, trend);
+    }
+}
+
+// =============================================================================
+// FACTORY FUNCTIONS AND MODULE INTEGRATION
+// =============================================================================
+
+/// Create a production-ready advanced optimization history manager
+///
+/// This provides the full-featured modular implementation with all
+/// analytical capabilities enabled for production use.
+pub async fn create_advanced_manager() -> Result<AdvancedOptimizationHistoryManager> {
+    optimization_history::manager::AdvancedOptimizationHistoryManager::new().await
+}
+
+/// Create a lightweight optimization history manager for testing
+///
+/// This provides basic functionality without heavy analytical components
+/// for use in tests and development environments.
+pub fn create_legacy_manager() -> LegacyOptimizationHistory {
+    LegacyOptimizationHistory::new()
+}
+
+// =============================================================================
+// RE-EXPORT CONVENIENCE FUNCTIONS
+// =============================================================================
+
+/// Convenience function to create optimization history with default settings
+pub fn new_optimization_history() -> LegacyOptimizationHistory {
+    LegacyOptimizationHistory::new()
+}
+
+/// Convenience function to create optimization event
+pub fn new_optimization_event(
+    event_type: OptimizationEventType,
+    description: String,
+    performance_before: Option<PerformanceMeasurement>,
+    performance_after: Option<PerformanceMeasurement>,
+) -> LegacyOptimizationEvent {
+    LegacyOptimizationEvent {
+        timestamp: Utc::now(),
+        event_type,
+        description,
+        performance_before,
+        performance_after,
+        parameters: HashMap::new(),
+        metadata: HashMap::new(),
+    }
+}

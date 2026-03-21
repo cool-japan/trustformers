@@ -1,0 +1,23 @@
+{
+  "id": "softmax_large_values_stability",
+  "description": "Regression test for softmax numerical stability with large input values",
+  "issue": "Issue #78: Softmax overflow with large positive values",
+  "category": "tensor",
+  "test_data": {
+    "type": "TensorOperation",
+    "operation": "softmax",
+    "inputs": [
+      {
+        "data": [100.0, 200.0, 300.0, 400.0],
+        "shape": [1, 4]
+      }
+    ],
+    "params": {}
+  },
+  "expected": {
+    "type": "TensorOutput",
+    "data": [0.0, 0.0, 0.0, 1.0],
+    "shape": [1, 4],
+    "tolerance": 1e-6
+  }
+}

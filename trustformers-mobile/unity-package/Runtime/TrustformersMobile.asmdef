@@ -1,0 +1,24 @@
+{
+    "name": "TrustformersMobile",
+    "rootNamespace": "TrustformersMobile",
+    "references": [
+        "Unity.XR.ARFoundation",
+        "Unity.XR.ARCore",
+        "Unity.XR.ARKit"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": true,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.unity.xr.arfoundation",
+            "expression": "4.0.0",
+            "define": "TRUSTFORMERS_AR_FOUNDATION"
+        }
+    ],
+    "noEngineReferences": false
+}

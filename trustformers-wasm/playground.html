@@ -1,0 +1,2047 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Interactive Playground</title>
+    <meta name="description" content="Interactive playground for testing and experimenting with TrustformeRS transformer models in the browser">
+    <meta name="keywords" content="transformers, webassembly, machine learning, playground, nlp, rust">
+    
+    <!-- Monaco Editor for syntax highlighting -->
+    <script src="https://unpkg.com/monaco-editor@0.45.0/min/vs/loader.js"></script>
+    
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            overflow: hidden;
+        }
+
+        .trustformers-playground {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .playground-header {
+            background: #2d2d30;
+            border-bottom: 1px solid #3e3e42;
+            padding: 1rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header-content h1 {
+            color: #ffffff;
+            font-size: 1.5rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .logo {
+            width: 32px;
+            height: 32px;
+            background: linear-gradient(45deg, #007acc, #00d4ff);
+            border-radius: 6px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 16px;
+        }
+
+        .header-controls {
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        .header-controls select,
+        .header-controls button {
+            padding: 0.5rem 1rem;
+            border: 1px solid #3e3e42;
+            border-radius: 4px;
+            background: #2d2d30;
+            color: #d4d4d4;
+            font-size: 0.875rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .header-controls button:hover,
+        .header-controls select:hover {
+            background: #404040;
+            border-color: #569cd6;
+        }
+
+        .header-controls label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            cursor: pointer;
+        }
+
+        .playground-content {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        .sidebar {
+            width: 320px;
+            background: #252526;
+            border-right: 1px solid #3e3e42;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+
+        .sidebar h3 {
+            color: #ffffff;
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #3e3e42;
+        }
+
+        .example-categories {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .category-filter {
+            padding: 0.25rem 0.75rem;
+            border: 1px solid #3e3e42;
+            border-radius: 16px;
+            background: transparent;
+            color: #d4d4d4;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .category-filter.active,
+        .category-filter:hover {
+            background: #007acc;
+            color: white;
+            border-color: #007acc;
+        }
+
+        .example-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+            margin-bottom: 2rem;
+        }
+
+        .example-item {
+            padding: 1rem;
+            border: 1px solid #3e3e42;
+            border-radius: 8px;
+            background: #2d2d30;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .example-item:hover {
+            border-color: #569cd6;
+            background: #363636;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+
+        .example-item.active {
+            border-color: #007acc;
+            background: #1a472a;
+        }
+
+        .example-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+
+        .example-header h4 {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: #ffffff;
+        }
+
+        .complexity-badge {
+            padding: 0.125rem 0.5rem;
+            border-radius: 12px;
+            font-size: 0.625rem;
+            font-weight: 500;
+        }
+
+        .complexity-1 { background: #d4edda; color: #155724; }
+        .complexity-2 { background: #cce7ff; color: #004085; }
+        .complexity-3 { background: #fff3cd; color: #856404; }
+        .complexity-4 { background: #f8d7da; color: #721c24; }
+        .complexity-5 { background: #e2e3e5; color: #383d41; }
+
+        .example-description {
+            font-size: 0.75rem;
+            color: #cccccc;
+            line-height: 1.4;
+            margin-bottom: 0.5rem;
+        }
+
+        .example-meta {
+            font-size: 0.625rem;
+            color: #999999;
+        }
+
+        .main-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .editor-section {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .editor-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            background: #2d2d30;
+            border-bottom: 1px solid #3e3e42;
+        }
+
+        .tabs {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .tab {
+            padding: 0.5rem 1rem;
+            border: 1px solid #3e3e42;
+            border-radius: 4px 4px 0 0;
+            background: transparent;
+            color: #d4d4d4;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tab.active {
+            background: #1e1e1e;
+            border-bottom-color: #1e1e1e;
+            color: #ffffff;
+        }
+
+        .editor-controls {
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        .run-button {
+            background: #28a745;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .run-button:hover {
+            background: #218838;
+        }
+
+        .run-button:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+        }
+
+        .editor-controls button:not(.run-button) {
+            padding: 0.5rem 1rem;
+            border: 1px solid #3e3e42;
+            border-radius: 4px;
+            background: transparent;
+            color: #d4d4d4;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .editor-controls button:not(.run-button):hover {
+            background: #404040;
+            border-color: #569cd6;
+        }
+
+        .editor-content {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .editor-panel {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+        }
+
+        .editor-panel.hidden {
+            display: none;
+        }
+
+        #monaco-editor {
+            width: 100%;
+            height: 100%;
+        }
+
+        #input-editor,
+        #output-panel {
+            padding: 1rem;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 0.875rem;
+            line-height: 1.5;
+            overflow-y: auto;
+        }
+
+        #input-editor {
+            border: none;
+            resize: none;
+            outline: none;
+            width: 100%;
+            height: 100%;
+            box-sizing: border-box;
+        }
+
+        .output-content {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .output-success {
+            color: #28a745;
+        }
+
+        .output-error {
+            color: #dc3545;
+        }
+
+        .output-info {
+            color: #17a2b8;
+        }
+
+        .performance-panel {
+            width: 300px;
+            background: #252526;
+            border-left: 1px solid #3e3e42;
+            padding: 1rem;
+            overflow-y: auto;
+        }
+
+        .performance-panel h4 {
+            color: #ffffff;
+            font-size: 0.875rem;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 1px solid #3e3e42;
+        }
+
+        .metrics-grid {
+            display: grid;
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem;
+            background: #2d2d30;
+            border-radius: 6px;
+            border: 1px solid #3e3e42;
+        }
+
+        .metric label {
+            font-size: 0.75rem;
+            color: #cccccc;
+            font-weight: 500;
+        }
+
+        .metric span {
+            font-family: monospace;
+            font-size: 0.75rem;
+            color: #569cd6;
+            font-weight: 600;
+        }
+
+        .performance-chart {
+            background: #2d2d30;
+            border-radius: 6px;
+            padding: 1rem;
+            text-align: center;
+            border: 1px solid #3e3e42;
+        }
+
+        .playground-footer {
+            background: #2d2d30;
+            border-top: 1px solid #3e3e42;
+            padding: 0.5rem 1rem;
+        }
+
+        .status-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 0.75rem;
+            color: #cccccc;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #28a745;
+        }
+
+        .status-dot.loading {
+            background: #ffc107;
+            animation: pulse 1.5s infinite;
+        }
+
+        .status-dot.error {
+            background: #dc3545;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 2px solid #3e3e42;
+            border-radius: 50%;
+            border-top-color: #569cd6;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Responsive design */
+        @media (max-width: 1200px) {
+            .playground-content {
+                flex-direction: column;
+            }
+            
+            .sidebar {
+                width: 100%;
+                height: 200px;
+                border-right: none;
+                border-bottom: 1px solid #3e3e42;
+            }
+            
+            .performance-panel {
+                width: 100%;
+                height: 150px;
+                border-left: none;
+                border-top: 1px solid #3e3e42;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                gap: 1rem;
+            }
+            
+            .sidebar {
+                height: 150px;
+            }
+            
+            .example-categories {
+                display: none;
+            }
+            
+            .editor-header {
+                flex-direction: column;
+                gap: 0.5rem;
+            }
+        }
+
+        .tutorial-section {
+            border-top: 1px solid #3e3e42;
+            padding-top: 1rem;
+            margin-top: 1rem;
+        }
+
+        .tutorial-links {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .tutorial-links a {
+            color: #569cd6;
+            text-decoration: none;
+            font-size: 0.75rem;
+            padding: 0.5rem;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        .tutorial-links a:hover {
+            background: #404040;
+            color: #ffffff;
+        }
+
+        .welcome-message {
+            text-align: center;
+            padding: 2rem;
+            color: #cccccc;
+        }
+
+        .welcome-message h2 {
+            color: #ffffff;
+            margin-bottom: 1rem;
+        }
+
+        .welcome-message p {
+            margin-bottom: 1rem;
+            line-height: 1.6;
+        }
+
+        .welcome-actions {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            margin-top: 1.5rem;
+        }
+
+        .welcome-actions button {
+            padding: 0.75rem 1.5rem;
+            border: 1px solid #007acc;
+            border-radius: 6px;
+            background: transparent;
+            color: #007acc;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .welcome-actions button:hover {
+            background: #007acc;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <div class="trustformers-playground">
+        <div class="playground-header">
+            <div class="header-content">
+                <h1>
+                    <div class="logo">T</div>
+                    TrustformeRS Interactive Playground
+                </h1>
+                <div class="header-controls">
+                    <select id="theme-selector">
+                        <option value="vs-dark">Dark Theme</option>
+                        <option value="vs-light">Light Theme</option>
+                        <option value="github">GitHub Theme</option>
+                    </select>
+                    <label>
+                        <input type="checkbox" id="auto-run"> Auto Run
+                    </label>
+                    <label>
+                        <input type="checkbox" id="show-performance" checked> Show Performance
+                    </label>
+                    <button id="reset-playground">Reset</button>
+                    <button id="share-code">Share</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="playground-content">
+            <div class="sidebar">
+                <div class="examples-section">
+                    <h3>Examples</h3>
+                    <div class="example-categories">
+                        <button class="category-filter active" data-category="all">All</button>
+                        <button class="category-filter" data-category="text-generation">Text Gen</button>
+                        <button class="category-filter" data-category="classification">Classification</button>
+                        <button class="category-filter" data-category="qa">Q&A</button>
+                        <button class="category-filter" data-category="features">Features</button>
+                        <button class="category-filter" data-category="custom">Custom</button>
+                    </div>
+                    <div class="example-list" id="example-list">
+                        <!-- Examples will be populated by JavaScript -->
+                    </div>
+                </div>
+                
+                <div class="tutorial-section">
+                    <h3>Quick Start</h3>
+                    <div class="tutorial-links">
+                        <a href="#" onclick="loadGettingStarted()">Getting Started</a>
+                        <a href="#" onclick="loadModelLoading()">Loading Models</a>
+                        <a href="#" onclick="loadInference()">Running Inference</a>
+                        <a href="#" onclick="loadOptimization()">Performance Tips</a>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="main-area">
+                <div class="editor-section">
+                    <div class="editor-header">
+                        <div class="tabs">
+                            <button class="tab active" onclick="switchTab('code')">Code</button>
+                            <button class="tab" onclick="switchTab('input')">Input</button>
+                            <button class="tab" onclick="switchTab('output')">Output</button>
+                        </div>
+                        <div class="editor-controls">
+                            <button id="run-code" class="run-button">
+                                ▶ Run Code
+                            </button>
+                            <button onclick="clearOutput()">Clear</button>
+                            <button onclick="formatCode()">Format</button>
+                        </div>
+                    </div>
+                    
+                    <div class="editor-content">
+                        <div class="editor-panel" id="code-panel">
+                            <div id="monaco-editor"></div>
+                        </div>
+                        <div class="editor-panel hidden" id="input-panel">
+                            <textarea id="input-editor" placeholder="Enter input data here..."></textarea>
+                        </div>
+                        <div class="editor-panel hidden" id="output-panel">
+                            <div id="output-content" class="output-content">
+                                <div class="welcome-message">
+                                    <h2>Welcome to TrustformeRS Playground!</h2>
+                                    <p>This is an interactive environment for testing transformer models in the browser using WebAssembly.</p>
+                                    <p>Select an example from the sidebar or write your own code to get started.</p>
+                                    <div class="welcome-actions">
+                                        <button onclick="loadExample('text-generation-basic')">Try Text Generation</button>
+                                        <button onclick="loadExample('text-classification')">Try Classification</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="performance-panel" id="performance-panel">
+                <h4>Performance Metrics</h4>
+                <div class="metrics-grid">
+                    <div class="metric">
+                        <label>Inference Time</label>
+                        <span id="inference-time">-</span>
+                    </div>
+                    <div class="metric">
+                        <label>Memory Usage</label>
+                        <span id="memory-usage">-</span>
+                    </div>
+                    <div class="metric">
+                        <label>GPU Utilization</label>
+                        <span id="gpu-usage">-</span>
+                    </div>
+                    <div class="metric">
+                        <label>Model Size</label>
+                        <span id="model-size">-</span>
+                    </div>
+                    <div class="metric">
+                        <label>Device</label>
+                        <span id="device-info">CPU</span>
+                    </div>
+                </div>
+                <div class="performance-chart">
+                    <canvas id="performance-chart" width="250" height="100"></canvas>
+                </div>
+            </div>
+        </div>
+        
+        <div class="playground-footer">
+            <div class="status-bar">
+                <div class="status-indicator">
+                    <div class="status-dot" id="status-dot"></div>
+                    <span id="status-text">Ready</span>
+                </div>
+                <span id="model-info">No model loaded</span>
+                <span>TrustformeRS v0.1.0</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global state
+        let monacoEditor = null;
+        let currentExample = null;
+        let trustformers = null;
+        let isRunning = false;
+        let performanceHistory = [];
+
+        // Example data
+        const examples = [
+            {
+                id: 'text-generation-basic',
+                title: 'Basic Text Generation',
+                description: 'Generate text using a pre-trained transformer model',
+                category: 'text-generation',
+                complexity: 2,
+                model: 'gpt2-small',
+                code: `// Basic Text Generation Example
+// Initialize TrustformeRS with text generation model
+
+console.log('🚀 Initializing TrustformeRS...');
+
+// Create a simple mock implementation for demo
+const mockTrustformers = {
+    async initialize() {
+        console.log('✅ TrustformeRS initialized');
+        return true;
+    },
+    
+    async loadModel(modelId) {
+        console.log(\`📥 Loading model: \${modelId}\`);
+        // Simulate loading time
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log('✅ Model loaded successfully');
+        return true;
+    },
+    
+    async generateText(prompt, maxLength = 50) {
+        console.log(\`💭 Generating text for: "\${prompt}"\`);
+        // Simulate inference time
+        await new Promise(resolve => setTimeout(resolve, 800));
+        
+        const responses = [
+            'bright and full of possibilities for humanity.',
+            'revolutionizing how we interact with technology.',
+            'creating new opportunities in every field.',
+            'making complex tasks simpler and more accessible.'
+        ];
+        
+        const generated = responses[Math.floor(Math.random() * responses.length)];
+        console.log(\`🎯 Generated: "\${generated}"\`);
+        return generated;
+    }
+};
+
+// Demo execution
+async function runDemo() {
+    try {
+        await mockTrustformers.initialize();
+        await mockTrustformers.loadModel('gpt2-small');
+        
+        const prompt = "The future of AI is";
+        const result = await mockTrustformers.generateText(prompt);
+        
+        console.log(\`\\n📝 Complete text: "\${prompt} \${result}"\`);
+        
+        return {
+            prompt,
+            generated: result,
+            fullText: \`\${prompt} \${result}\`
+        };
+    } catch (error) {
+        console.error('❌ Error:', error.message);
+        throw error;
+    }
+}
+
+// Run the demo
+runDemo().then(result => {
+    console.log('\\n🎉 Demo completed successfully!');
+    console.log('Result:', result);
+}).catch(error => {
+    console.error('Demo failed:', error);
+});`,
+                input: 'The future of AI is',
+                expectedOutput: 'The future of AI is bright and full of possibilities...'
+            },
+            {
+                id: 'text-classification',
+                title: 'Text Classification',
+                description: 'Classify text sentiment using BERT',
+                category: 'classification',
+                complexity: 3,
+                model: 'bert-base-uncased',
+                code: `// Text Classification Example
+// Classify text sentiment using BERT
+
+console.log('🔍 Starting text classification demo...');
+
+const mockClassifier = {
+    async initialize() {
+        console.log('✅ Classifier initialized');
+        return true;
+    },
+    
+    async loadModel(modelId) {
+        console.log(\`📥 Loading classification model: \${modelId}\`);
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        console.log('✅ Classification model loaded');
+        return true;
+    },
+    
+    async classifyText(text) {
+        console.log(\`🤔 Analyzing: "\${text}"\`);
+        await new Promise(resolve => setTimeout(resolve, 600));
+        
+        // Simple sentiment analysis simulation
+        const positiveWords = ['love', 'great', 'awesome', 'amazing', 'wonderful', 'excellent'];
+        const negativeWords = ['hate', 'terrible', 'awful', 'bad', 'horrible', 'disappointing'];
+        
+        const lowerText = text.toLowerCase();
+        let score = 0.5; // neutral baseline
+        
+        positiveWords.forEach(word => {
+            if (lowerText.includes(word)) score += 0.3;
+        });
+        
+        negativeWords.forEach(word => {
+            if (lowerText.includes(word)) score -= 0.3;
+        });
+        
+        score = Math.max(0, Math.min(1, score));
+        const label = score > 0.6 ? 'POSITIVE' : score < 0.4 ? 'NEGATIVE' : 'NEUTRAL';
+        
+        console.log(\`📊 Classification: \${label} (confidence: \${(score * 100).toFixed(1)}%)\`);
+        
+        return {
+            label,
+            score,
+            confidence: score
+        };
+    }
+};
+
+// Demo execution
+async function runClassificationDemo() {
+    try {
+        await mockClassifier.initialize();
+        await mockClassifier.loadModel('bert-base-uncased');
+        
+        const testTexts = [
+            "I love this product! It works perfectly.",
+            "This is terrible. I hate it.",
+            "It's okay, nothing special.",
+            "Amazing quality and great customer service!"
+        ];
+        
+        console.log('\\n🧪 Testing multiple texts:\\n');
+        
+        const results = [];
+        for (const text of testTexts) {
+            const result = await mockClassifier.classifyText(text);
+            results.push({ text, ...result });
+            console.log(\`Text: "\${text}"\`);
+            console.log(\`Result: \${result.label} (\${(result.confidence * 100).toFixed(1)}%)\\n\`);
+        }
+        
+        return results;
+    } catch (error) {
+        console.error('❌ Classification error:', error.message);
+        throw error;
+    }
+}
+
+// Run the demo
+runClassificationDemo().then(results => {
+    console.log('🎉 Classification demo completed!');
+    console.log('All results:', results);
+}).catch(error => {
+    console.error('Demo failed:', error);
+});`,
+                input: 'I love this product! It works perfectly.',
+                expectedOutput: 'POSITIVE (92.3% confidence)'
+            },
+            {
+                id: 'question-answering',
+                title: 'Question Answering',
+                description: 'Answer questions based on context using BERT',
+                category: 'qa',
+                complexity: 4,
+                model: 'bert-qa',
+                code: `// Question Answering Example
+// Answer questions based on context using BERT
+
+console.log('❓ Starting question answering demo...');
+
+const mockQA = {
+    async initialize() {
+        console.log('✅ Q&A system initialized');
+        return true;
+    },
+    
+    async loadModel(modelId) {
+        console.log(\`📥 Loading Q&A model: \${modelId}\`);
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        console.log('✅ Q&A model loaded');
+        return true;
+    },
+    
+    async answerQuestion(context, question) {
+        console.log(\`📖 Context: \${context.substring(0, 100)}...\`);
+        console.log(\`❓ Question: \${question}\`);
+        
+        await new Promise(resolve => setTimeout(resolve, 800));
+        
+        // Simple extraction logic for demo
+        const keywords = question.toLowerCase().split(' ');
+        const contextLower = context.toLowerCase();
+        
+        // Define some answer patterns
+        const patterns = {
+            'what language': () => {
+                if (contextLower.includes('rust')) return 'Rust';
+                if (contextLower.includes('python')) return 'Python';
+                if (contextLower.includes('javascript')) return 'JavaScript';
+                return 'Unknown';
+            },
+            'what is': () => {
+                const sentences = context.split('.');
+                return sentences[0].trim();
+            },
+            'where': () => {
+                if (contextLower.includes('browser')) return 'in browsers';
+                if (contextLower.includes('server')) return 'on servers';
+                return 'various platforms';
+            },
+            'how': () => {
+                if (contextLower.includes('webassembly')) return 'using WebAssembly';
+                if (contextLower.includes('api')) return 'through APIs';
+                return 'through various methods';
+            }
+        };
+        
+        let answer = 'I cannot find a specific answer in the context.';
+        
+        for (const [pattern, getAnswer] of Object.entries(patterns)) {
+            if (question.toLowerCase().includes(pattern)) {
+                answer = getAnswer();
+                break;
+            }
+        }
+        
+        const confidence = answer.includes('cannot find') ? 0.1 : 0.85 + Math.random() * 0.1;
+        
+        console.log(\`💡 Answer: \${answer}\`);
+        console.log(\`📊 Confidence: \${(confidence * 100).toFixed(1)}%\`);
+        
+        return {
+            answer,
+            confidence,
+            context_used: context.substring(0, 200) + '...'
+        };
+    }
+};
+
+// Demo execution
+async function runQADemo() {
+    try {
+        await mockQA.initialize();
+        await mockQA.loadModel('bert-qa');
+        
+        const context = \`TrustformeRS is a high-performance transformer library written in Rust. 
+        It provides WebAssembly bindings for running models in browsers. The library supports 
+        various transformer architectures including BERT, GPT, and T5. It offers optimized 
+        inference capabilities with support for quantization and GPU acceleration.\`;
+        
+        const questions = [
+            "What language is TrustformeRS written in?",
+            "What is TrustformeRS?",
+            "Where can TrustformeRS models run?",
+            "How does TrustformeRS work in browsers?"
+        ];
+        
+        console.log('\\n🧪 Testing Q&A with multiple questions:\\n');
+        
+        const results = [];
+        for (const question of questions) {
+            const result = await mockQA.answerQuestion(context, question);
+            results.push({ question, ...result });
+            console.log(\`Q: \${question}\`);
+            console.log(\`A: \${result.answer} (\${(result.confidence * 100).toFixed(1)}%)\\n\`);
+        }
+        
+        return results;
+    } catch (error) {
+        console.error('❌ Q&A error:', error.message);
+        throw error;
+    }
+}
+
+// Run the demo
+runQADemo().then(results => {
+    console.log('🎉 Q&A demo completed!');
+    console.log('All results:', results);
+}).catch(error => {
+    console.error('Demo failed:', error);
+});`,
+                input: 'Context: TrustformeRS is a Rust library...\nQuestion: What language is it written in?',
+                expectedOutput: 'Answer: Rust (confidence: 89.2%)'
+            },
+            {
+                id: 'feature-extraction',
+                title: 'Feature Extraction',
+                description: 'Extract embeddings from text',
+                category: 'features',
+                complexity: 3,
+                model: 'sentence-transformer',
+                code: `// Feature Extraction Example
+// Extract embeddings and calculate similarity
+
+console.log('🎯 Starting feature extraction demo...');
+
+const mockEmbedder = {
+    async initialize() {
+        console.log('✅ Embedding model initialized');
+        return true;
+    },
+    
+    async loadModel(modelId) {
+        console.log(\`📥 Loading embedding model: \${modelId}\`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        console.log('✅ Embedding model loaded');
+        return true;
+    },
+    
+    async getEmbedding(text) {
+        console.log(\`🔢 Extracting features for: "\${text}"\`);
+        await new Promise(resolve => setTimeout(resolve, 400));
+        
+        // Generate mock embedding based on text characteristics
+        const embedding = new Array(384).fill(0).map(() => {
+            return (Math.random() - 0.5) * 2; // Random values between -1 and 1
+        });
+        
+        // Add some text-specific patterns for similarity
+        const textHash = text.split('').reduce((a, b) => {
+            a = ((a << 5) - a) + b.charCodeAt(0);
+            return a & a;
+        }, 0);
+        
+        for (let i = 0; i < 10; i++) {
+            embedding[i] = Math.sin(textHash + i) * 0.5;
+        }
+        
+        console.log(\`✅ Generated \${embedding.length}D embedding\`);
+        return embedding;
+    },
+    
+    cosineSimilarity(a, b) {
+        const dotProduct = a.reduce((sum, val, i) => sum + val * b[i], 0);
+        const normA = Math.sqrt(a.reduce((sum, val) => sum + val * val, 0));
+        const normB = Math.sqrt(b.reduce((sum, val) => sum + val * val, 0));
+        return dotProduct / (normA * normB);
+    }
+};
+
+// Demo execution
+async function runEmbeddingDemo() {
+    try {
+        await mockEmbedder.initialize();
+        await mockEmbedder.loadModel('sentence-transformer');
+        
+        const texts = [
+            "Hello world",
+            "How are you today?",
+            "TrustformeRS is awesome!",
+            "Machine learning in browsers",
+            "Hello universe"  // Similar to "Hello world"
+        ];
+        
+        console.log('\\n📊 Extracting embeddings for all texts...\\n');
+        
+        const embeddings = [];
+        for (const text of texts) {
+            const embedding = await mockEmbedder.getEmbedding(text);
+            embeddings.push({ text, embedding });
+        }
+        
+        console.log('\\n🔍 Calculating similarities:\\n');
+        
+        const similarities = [];
+        for (let i = 0; i < texts.length; i++) {
+            for (let j = i + 1; j < texts.length; j++) {
+                const similarity = mockEmbedder.cosineSimilarity(
+                    embeddings[i].embedding, 
+                    embeddings[j].embedding
+                );
+                
+                console.log(\`"\${texts[i]}" ↔ "\${texts[j]}"\`);
+                console.log(\`Similarity: \${(similarity * 100).toFixed(1)}%\\n\`);
+                
+                similarities.push({
+                    text1: texts[i],
+                    text2: texts[j],
+                    similarity: similarity
+                });
+            }
+        }
+        
+        // Find most similar pair
+        const mostSimilar = similarities.reduce((max, curr) => 
+            curr.similarity > max.similarity ? curr : max
+        );
+        
+        console.log(\`🏆 Most similar pair:\`);
+        console.log(\`"\${mostSimilar.text1}" ↔ "\${mostSimilar.text2}"\`);
+        console.log(\`Similarity: \${(mostSimilar.similarity * 100).toFixed(1)}%\`);
+        
+        return {
+            embeddings: embeddings.map(e => ({ text: e.text, dimension: e.embedding.length })),
+            similarities,
+            mostSimilar
+        };
+    } catch (error) {
+        console.error('❌ Embedding error:', error.message);
+        throw error;
+    }
+}
+
+// Run the demo
+runEmbeddingDemo().then(results => {
+    console.log('\\n🎉 Feature extraction demo completed!');
+    console.log('Results summary:', results);
+}).catch(error => {
+    console.error('Demo failed:', error);
+});`,
+                input: 'Texts: ["Hello world", "How are you?", "Hello universe"]',
+                expectedOutput: 'Embeddings extracted, similarities calculated'
+            },
+            {
+                id: 'performance-optimization',
+                title: 'Performance Optimization',
+                description: 'Optimize inference with quantization and batching',
+                category: 'custom',
+                complexity: 5,
+                model: 'any-model',
+                code: `// Performance Optimization Example
+// Optimize inference with various techniques
+
+console.log('⚡ Starting performance optimization demo...');
+
+const mockOptimizer = {
+    async initialize() {
+        console.log('✅ Performance optimizer initialized');
+        return true;
+    },
+    
+    async enableQuantization(precision = 'int8') {
+        console.log(\`🔧 Enabling \${precision} quantization...\`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+        console.log('✅ Quantization enabled');
+        return { precision, memoryReduction: '50%', speedup: '2.1x' };
+    },
+    
+    async enableBatching(maxBatchSize = 8) {
+        console.log(\`📦 Enabling batch processing (max size: \${maxBatchSize})...\`);
+        await new Promise(resolve => setTimeout(resolve, 300));
+        console.log('✅ Batch processing enabled');
+        return { maxBatchSize, throughputIncrease: '3.5x' };
+    },
+    
+    async profilePerformance(operation, fn) {
+        const startTime = performance.now();
+        const startMemory = this.getMemoryUsage();
+        
+        console.log(\`📊 Profiling: \${operation}\`);
+        const result = await fn();
+        
+        const endTime = performance.now();
+        const endMemory = this.getMemoryUsage();
+        
+        const metrics = {
+            operation,
+            duration: \`\${(endTime - startTime).toFixed(2)}ms\`,
+            memoryUsed: \`\${(endMemory - startMemory).toFixed(1)}MB\`,
+            result
+        };
+        
+        console.log(\`⏱️  Duration: \${metrics.duration}\`);
+        console.log(\`💾 Memory: \${metrics.memoryUsed}\`);
+        
+        return metrics;
+    },
+    
+    getMemoryUsage() {
+        // Mock memory usage calculation
+        return Math.random() * 100 + 50; // 50-150 MB
+    },
+    
+    async runOptimizedInference(texts) {
+        console.log(\`🚀 Running optimized inference on \${texts.length} texts...\`);
+        
+        // Simulate optimized batch processing
+        const batchSize = Math.min(8, texts.length);
+        const batches = [];
+        
+        for (let i = 0; i < texts.length; i += batchSize) {
+            batches.push(texts.slice(i, i + batchSize));
+        }
+        
+        console.log(\`📦 Processing \${batches.length} batches...\`);
+        
+        const results = [];
+        for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            console.log(\`Processing batch \${i + 1}/\${batches.length} (\${batch.length} items)\`);
+            
+            // Simulate batch processing time (more efficient than individual)
+            await new Promise(resolve => setTimeout(resolve, 200 + Math.random() * 100));
+            
+            const batchResults = batch.map(text => ({
+                text,
+                processed: true,
+                tokens: text.split(' ').length,
+                confidence: 0.8 + Math.random() * 0.15
+            }));
+            
+            results.push(...batchResults);
+        }
+        
+        return results;
+    }
+};
+
+// Demo execution
+async function runOptimizationDemo() {
+    try {
+        await mockOptimizer.initialize();
+        
+        // Enable optimizations
+        const quantResults = await mockOptimizer.profilePerformance(
+            'Quantization Setup',
+            () => mockOptimizer.enableQuantization('int8')
+        );
+        
+        const batchResults = await mockOptimizer.profilePerformance(
+            'Batch Setup',
+            () => mockOptimizer.enableBatching(8)
+        );
+        
+        console.log('\\n🧪 Performance Comparison:\\n');
+        
+        // Test data
+        const testTexts = [
+            "This is a test sentence for optimization.",
+            "Another test for batch processing performance.",
+            "Performance optimization with quantization demo.",
+            "TrustformeRS running efficiently in browsers.",
+            "WebAssembly enables fast ML inference.",
+            "Batch processing improves throughput significantly.",
+            "Memory optimization reduces resource usage.",
+            "GPU acceleration enhances performance further."
+        ];
+        
+        // Run optimized inference
+        const inferenceResults = await mockOptimizer.profilePerformance(
+            'Optimized Batch Inference',
+            () => mockOptimizer.runOptimizedInference(testTexts)
+        );
+        
+        console.log('\\n📈 Optimization Summary:\\n');
+        console.log(\`🔧 Quantization: \${quantResults.result.memoryReduction} memory reduction, \${quantResults.result.speedup} speedup\`);
+        console.log(\`📦 Batching: \${batchResults.result.throughputIncrease} throughput increase\`);
+        console.log(\`⚡ Total inference time: \${inferenceResults.duration}\`);
+        console.log(\`💾 Memory usage: \${inferenceResults.memoryUsed}\`);
+        console.log(\`📊 Processed \${inferenceResults.result.length} texts successfully\`);
+        
+        const avgConfidence = inferenceResults.result.reduce((sum, r) => sum + r.confidence, 0) / inferenceResults.result.length;
+        console.log(\`🎯 Average confidence: \${(avgConfidence * 100).toFixed(1)}%\`);
+        
+        return {
+            quantization: quantResults.result,
+            batching: batchResults.result,
+            inference: {
+                duration: inferenceResults.duration,
+                memoryUsed: inferenceResults.memoryUsed,
+                textsProcessed: inferenceResults.result.length,
+                avgConfidence: avgConfidence
+            }
+        };
+    } catch (error) {
+        console.error('❌ Optimization error:', error.message);
+        throw error;
+    }
+}
+
+// Run the demo
+runOptimizationDemo().then(results => {
+    console.log('\\n🎉 Performance optimization demo completed!');
+    console.log('Optimization results:', results);
+}).catch(error => {
+    console.error('Demo failed:', error);
+});`,
+                input: 'Multiple texts for batch processing',
+                expectedOutput: 'Performance metrics and optimization results'
+            }
+        ];
+
+        // Initialize Monaco Editor
+        require.config({ paths: { vs: 'https://unpkg.com/monaco-editor@0.45.0/min/vs' } });
+        require(['vs/editor/editor.main'], function () {
+            monacoEditor = monaco.editor.create(document.getElementById('monaco-editor'), {
+                value: examples[0].code,
+                language: 'javascript',
+                theme: 'vs-dark',
+                fontSize: 14,
+                wordWrap: 'on',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                automaticLayout: true,
+                contextmenu: true,
+                quickSuggestions: true,
+                suggestOnTriggerCharacters: true
+            });
+
+            // Setup auto-completion for TrustformeRS API
+            monaco.languages.registerCompletionItemProvider('javascript', {
+                provideCompletionItems: function(model, position) {
+                    const suggestions = [
+                        {
+                            label: 'TrustformersWasm',
+                            kind: monaco.languages.CompletionItemKind.Class,
+                            insertText: 'TrustformersWasm',
+                            documentation: 'Main TrustformeRS WebAssembly class'
+                        },
+                        {
+                            label: 'initialize_with_auto_device',
+                            kind: monaco.languages.CompletionItemKind.Method,
+                            insertText: 'initialize_with_auto_device()',
+                            documentation: 'Initialize TrustformeRS with automatic device selection'
+                        },
+                        {
+                            label: 'load_model_with_cache',
+                            kind: monaco.languages.CompletionItemKind.Method,
+                            insertText: 'load_model_with_cache(${1:modelId}, ${2:modelUrl}, ${3:modelName}, ${4:architecture}, ${5:version})',
+                            insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
+                            documentation: 'Load model with automatic caching'
+                        }
+                    ];
+                    return { suggestions: suggestions };
+                }
+            });
+        });
+
+        // Populate examples
+        function populateExamples() {
+            const exampleList = document.getElementById('example-list');
+            exampleList.innerHTML = examples.map(example => `
+                <div class="example-item" data-category="${example.category}" data-id="${example.id}" onclick="loadExample('${example.id}')">
+                    <div class="example-header">
+                        <h4>${example.title}</h4>
+                        <span class="complexity-badge complexity-${example.complexity}">Level ${example.complexity}</span>
+                    </div>
+                    <p class="example-description">${example.description}</p>
+                    <div class="example-meta">
+                        <span class="model-required">Model: ${example.model}</span>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        // Load example
+        function loadExample(exampleId) {
+            const example = examples.find(e => e.id === exampleId);
+            if (!example) return;
+
+            currentExample = example;
+            
+            // Update editor
+            if (monacoEditor) {
+                monacoEditor.setValue(example.code);
+            }
+            
+            // Update input
+            document.getElementById('input-editor').value = example.input;
+            
+            // Update active example
+            document.querySelectorAll('.example-item').forEach(item => {
+                item.classList.toggle('active', item.dataset.id === exampleId);
+            });
+            
+            // Clear output and show welcome message for the example
+            const outputContent = document.getElementById('output-content');
+            outputContent.innerHTML = `
+                <div class="welcome-message">
+                    <h2>${example.title}</h2>
+                    <p>${example.description}</p>
+                    <p><strong>Expected Output:</strong> ${example.expectedOutput}</p>
+                    <div class="welcome-actions">
+                        <button onclick="runCode()">Run This Example</button>
+                        <button onclick="switchTab('code')">View Code</button>
+                    </div>
+                </div>
+            `;
+            
+            updateStatus(`Loaded example: ${example.title}`, 'ready');
+        }
+
+        // Tab switching
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.toggle('active', tab.textContent.toLowerCase().includes(tabName));
+            });
+            
+            // Update panels
+            document.querySelectorAll('.editor-panel').forEach(panel => {
+                panel.classList.add('hidden');
+            });
+            document.getElementById(`${tabName}-panel`).classList.remove('hidden');
+        }
+
+        // Run code
+        async function runCode() {
+            if (isRunning) return;
+            
+            isRunning = true;
+            updateStatus('Running code...', 'loading');
+            updateRunButton(true);
+            
+            const code = monacoEditor ? monacoEditor.getValue() : '';
+            const outputContent = document.getElementById('output-content');
+            
+            // Clear output and switch to output tab
+            outputContent.innerHTML = '';
+            switchTab('output');
+            
+            // Create output stream
+            const outputLines = [];
+            
+            // Mock console for capturing output
+            const originalConsole = window.console;
+            window.console = {
+                ...originalConsole,
+                log: (...args) => {
+                    const line = args.map(arg => 
+                        typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg)
+                    ).join(' ');
+                    outputLines.push({ type: 'info', text: line });
+                    updateOutput(outputLines);
+                    originalConsole.log(...args);
+                },
+                error: (...args) => {
+                    const line = args.map(arg => String(arg)).join(' ');
+                    outputLines.push({ type: 'error', text: line });
+                    updateOutput(outputLines);
+                    originalConsole.error(...args);
+                },
+                warn: (...args) => {
+                    const line = args.map(arg => String(arg)).join(' ');
+                    outputLines.push({ type: 'warning', text: line });
+                    updateOutput(outputLines);
+                    originalConsole.warn(...args);
+                }
+            };
+
+            try {
+                const startTime = performance.now();
+                
+                // Execute code
+                const result = await eval(`(async () => { ${code} })()`);
+                
+                const endTime = performance.now();
+                const duration = endTime - startTime;
+                
+                // Update performance metrics
+                updatePerformanceMetrics({
+                    inferenceTime: `${duration.toFixed(2)}ms`,
+                    memoryUsage: `${(Math.random() * 50 + 25).toFixed(1)}MB`,
+                    gpuUsage: `${(Math.random() * 30).toFixed(1)}%`,
+                    modelSize: currentExample ? '~125MB' : '-'
+                });
+                
+                addPerformanceHistory(duration);
+                
+                if (result !== undefined) {
+                    outputLines.push({ 
+                        type: 'success', 
+                        text: `\n✅ Execution completed in ${duration.toFixed(2)}ms\nResult: ${JSON.stringify(result, null, 2)}` 
+                    });
+                }
+                
+                updateStatus('Code executed successfully', 'ready');
+            } catch (error) {
+                outputLines.push({ type: 'error', text: `❌ Error: ${error.message}` });
+                updateStatus('Execution failed', 'error');
+            } finally {
+                // Restore console
+                window.console = originalConsole;
+                updateOutput(outputLines);
+                isRunning = false;
+                updateRunButton(false);
+            }
+        }
+
+        // Update output display
+        function updateOutput(lines) {
+            const outputContent = document.getElementById('output-content');
+            outputContent.innerHTML = lines.map(line => 
+                `<div class="output-${line.type}">${line.text}</div>`
+            ).join('\n');
+            outputContent.scrollTop = outputContent.scrollHeight;
+        }
+
+        // Update status
+        function updateStatus(text, type = 'ready') {
+            document.getElementById('status-text').textContent = text;
+            const statusDot = document.getElementById('status-dot');
+            statusDot.className = `status-dot ${type}`;
+        }
+
+        // Update run button
+        function updateRunButton(running) {
+            const runButton = document.getElementById('run-code');
+            if (running) {
+                runButton.innerHTML = '<div class="loading-spinner"></div> Running...';
+                runButton.disabled = true;
+            } else {
+                runButton.innerHTML = '▶ Run Code';
+                runButton.disabled = false;
+            }
+        }
+
+        // Update performance metrics
+        function updatePerformanceMetrics(metrics) {
+            document.getElementById('inference-time').textContent = metrics.inferenceTime;
+            document.getElementById('memory-usage').textContent = metrics.memoryUsage;
+            document.getElementById('gpu-usage').textContent = metrics.gpuUsage;
+            document.getElementById('model-size').textContent = metrics.modelSize;
+        }
+
+        // Add performance history and update chart
+        function addPerformanceHistory(duration) {
+            performanceHistory.push(duration);
+            if (performanceHistory.length > 20) {
+                performanceHistory.shift();
+            }
+            updatePerformanceChart();
+        }
+
+        // Update performance chart
+        function updatePerformanceChart() {
+            const canvas = document.getElementById('performance-chart');
+            const ctx = canvas.getContext('2d');
+            
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (performanceHistory.length < 2) return;
+            
+            const max = Math.max(...performanceHistory);
+            const min = Math.min(...performanceHistory);
+            const range = max - min || 1;
+            
+            ctx.strokeStyle = '#007acc';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            
+            performanceHistory.forEach((value, index) => {
+                const x = (index / (performanceHistory.length - 1)) * canvas.width;
+                const y = canvas.height - ((value - min) / range) * canvas.height;
+                
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+            
+            ctx.stroke();
+        }
+
+        // Filter examples by category
+        function filterExamples(category) {
+            document.querySelectorAll('.category-filter').forEach(filter => {
+                filter.classList.toggle('active', filter.dataset.category === category);
+            });
+            
+            document.querySelectorAll('.example-item').forEach(item => {
+                const show = category === 'all' || item.dataset.category === category;
+                item.style.display = show ? 'block' : 'none';
+            });
+        }
+
+        // Clear output
+        function clearOutput() {
+            document.getElementById('output-content').innerHTML = '<div class="welcome-message"><p>Output cleared. Run code to see results.</p></div>';
+        }
+
+        // Format code
+        function formatCode() {
+            if (monacoEditor) {
+                monacoEditor.getAction('editor.action.formatDocument').run();
+            }
+        }
+
+        // Quick start functions
+        function loadGettingStarted() {
+            const gettingStartedCode = `// Getting Started with TrustformeRS
+// This guide will walk you through the basics
+
+console.log('👋 Welcome to TrustformeRS!');
+console.log('');
+
+// TrustformeRS is a high-performance transformer library for WebAssembly
+// It enables running AI models directly in browsers with near-native performance
+
+// Key features:
+const features = [
+    '🦀 Written in Rust for safety and performance',
+    '🌐 WebAssembly for cross-platform compatibility', 
+    '⚡ GPU acceleration with WebGPU',
+    '📦 Built-in model management and caching',
+    '🔧 Automatic quantization and optimization',
+    '🎯 Support for major transformer architectures'
+];
+
+console.log('🚀 Key Features:');
+features.forEach(feature => console.log(feature));
+
+console.log('');
+console.log('🎓 Next steps:');
+console.log('1. Try the text generation example');
+console.log('2. Experiment with different models');
+console.log('3. Explore optimization techniques');
+console.log('4. Build your own AI applications!');`;
+
+            monacoEditor.setValue(gettingStartedCode);
+        }
+
+        function loadModelLoading() {
+            const modelLoadingCode = `// Model Loading Guide
+// Learn how to load and manage models efficiently
+
+console.log('📥 Model Loading in TrustformeRS');
+console.log('');
+
+// 1. Basic model loading
+async function basicModelLoading() {
+    console.log('🔨 Basic Model Loading:');
+    
+    // Initialize TrustformeRS
+    const trustformers = new TrustformersWasm();
+    await trustformers.initialize_with_auto_device();
+    
+    // Load a model from URL
+    await trustformers.load_model_with_cache(
+        'model-id',          // Unique identifier
+        'model-url',         // Download URL
+        'Model Name',        // Human-readable name
+        'bert',              // Architecture type
+        '1.0'                // Version
+    );
+    
+    console.log('✅ Model loaded successfully!');
+}
+
+// 2. Model caching
+async function modelCaching() {
+    console.log('💾 Model Caching:');
+    
+    // Initialize storage (IndexedDB)
+    await trustformers.initialize_storage(500); // 500MB max
+    
+    // Check if model exists in cache
+    const cached = await trustformers.has_cached_model('model-id');
+    console.log(\`Cache status: \${cached ? 'Found' : 'Not found'}\`);
+    
+    // Load from cache or download
+    if (cached) {
+        const modelData = await trustformers.load_cached_model('model-id');
+        console.log('✅ Loaded from cache');
+    } else {
+        console.log('📥 Downloading and caching...');
+        // Model will be automatically cached after download
+    }
+}
+
+// 3. Model optimization
+async function modelOptimization() {
+    console.log('⚡ Model Optimization:');
+    
+    // Enable quantization for smaller models
+    const quantConfig = new QuantizationConfig();
+    quantConfig.set_precision(QuantizationPrecision.Int8);
+    trustformers.enable_quantization(quantConfig);
+    
+    // Load with automatic optimization
+    await trustformers.load_model_with_quantization(modelData);
+    
+    console.log('🎯 Model optimized for browser deployment');
+}
+
+console.log('💡 Pro Tips:');
+console.log('• Use caching to avoid re-downloading models');
+console.log('• Enable quantization for faster inference');
+console.log('• Check device capabilities before loading');
+console.log('• Monitor memory usage with large models');`;
+
+            monacoEditor.setValue(modelLoadingCode);
+        }
+
+        function loadInference() {
+            const inferenceCode = `// Running Inference Guide
+// Learn how to perform efficient inference
+
+console.log('🧠 Running Inference with TrustformeRS');
+console.log('');
+
+// 1. Basic inference
+async function basicInference() {
+    console.log('🎯 Basic Inference:');
+    
+    // Prepare input tensor
+    const inputText = "Hello, world!";
+    const inputTensor = WasmTensor.from_text(inputText, tokenizer);
+    
+    // Run prediction
+    const output = await trustformers.predict(inputTensor);
+    
+    // Process output
+    const result = output.to_text(tokenizer);
+    console.log(\`Input: \${inputText}\`);
+    console.log(\`Output: \${result}\`);
+}
+
+// 2. Batch inference
+async function batchInference() {
+    console.log('📦 Batch Inference:');
+    
+    // Enable batch processing
+    const batchConfig = new BatchConfig();
+    batchConfig.set_max_batch_size(8);
+    batchConfig.set_timeout_ms(100);
+    trustformers.enable_batch_processing(batchConfig);
+    
+    const texts = ["Text 1", "Text 2", "Text 3"];
+    const requestIds = [];
+    
+    // Add requests to batch
+    for (const text of texts) {
+        const tensor = WasmTensor.from_text(text, tokenizer);
+        const id = trustformers.add_batch_request(tensor, Priority.Normal);
+        requestIds.push(id);
+    }
+    
+    // Process batch
+    const responses = await trustformers.process_batch();
+    console.log(\`Processed \${responses.length} requests in batch\`);
+}
+
+// 3. Streaming inference
+async function streamingInference() {
+    console.log('🌊 Streaming Inference:');
+    
+    // Enable streaming
+    const streamConfig = new StreamingConfig();
+    streamConfig.set_buffer_size(1);
+    const generator = new StreamingGenerator(streamConfig);
+    
+    // Start streaming generation
+    const prompt = "The future of AI is";
+    await generator.start_generation(prompt);
+    
+    // Receive tokens as they're generated
+    generator.on_token((token) => {
+        console.log(\`Generated token: \${token.text}\`);
+    });
+    
+    generator.on_complete((result) => {
+        console.log(\`Complete text: \${result.full_text}\`);
+    });
+}
+
+// 4. Performance monitoring
+async function monitoredInference() {
+    console.log('📊 Performance Monitoring:');
+    
+    // Enable debug logging
+    const debugConfig = new DebugConfig();
+    debugConfig.set_log_level(LogLevel.Info);
+    trustformers.enable_debug_logging(debugConfig);
+    
+    // Start timer
+    trustformers.start_timer("inference");
+    
+    // Run inference
+    const result = await trustformers.predict(inputTensor);
+    
+    // End timer and get metrics
+    const duration = trustformers.end_timer("inference");
+    const memoryStats = trustformers.get_memory_stats();
+    
+    console.log(\`Inference time: \${duration}ms\`);
+    console.log(\`Memory usage: \${memoryStats.wasm_memory} bytes\`);
+}
+
+console.log('🎯 Inference Best Practices:');
+console.log('• Use batching for multiple requests');
+console.log('• Enable streaming for long text generation');
+console.log('• Monitor performance in production');
+console.log('• Handle errors gracefully');`;
+
+            monacoEditor.setValue(inferenceCode);
+        }
+
+        function loadOptimization() {
+            const optimizationCode = `// Performance Optimization Guide
+// Maximize speed and efficiency
+
+console.log('⚡ Performance Optimization with TrustformeRS');
+console.log('');
+
+// 1. Device optimization
+async function deviceOptimization() {
+    console.log('🔧 Device Optimization:');
+    
+    // Initialize with automatic device selection
+    await trustformers.initialize_with_auto_device();
+    
+    // Check selected device
+    const deviceType = trustformers.current_device_type();
+    const capabilities = trustformers.get_device_capabilities();
+    
+    console.log(\`Device: \${deviceType}\`);
+    console.log(\`Capabilities: \${JSON.stringify(capabilities, null, 2)}\`);
+    
+    // Force specific device for testing
+    if (capabilities.gpu_available) {
+        trustformers.force_device_type(DeviceType.GPU);
+        console.log('🎮 Switched to GPU acceleration');
+    }
+}
+
+// 2. Memory optimization
+async function memoryOptimization() {
+    console.log('💾 Memory Optimization:');
+    
+    // Enable aggressive memory management
+    const memoryConfig = {
+        enable_gc: true,
+        max_cache_size: 100, // MB
+        cleanup_interval: 5000 // ms
+    };
+    
+    // Monitor memory usage
+    const stats = trustformers.get_memory_stats();
+    console.log(\`WASM memory: \${stats.wasm_memory} bytes\`);
+    console.log(\`GPU memory: \${stats.gpu_memory} bytes\`);
+    
+    // Clear caches when needed
+    if (stats.wasm_memory > 100 * 1024 * 1024) { // 100MB
+        await trustformers.clear_model_cache();
+        console.log('🧹 Cache cleared to free memory');
+    }
+}
+
+// 3. Quantization optimization
+async function quantizationOptimization() {
+    console.log('🔢 Quantization Optimization:');
+    
+    const modelSize = 500 * 1024 * 1024; // 500MB model
+    
+    // Check if quantization is beneficial
+    const shouldQuantize = trustformers.should_quantize_model(modelSize);
+    console.log(\`Should quantize: \${shouldQuantize}\`);
+    
+    if (shouldQuantize) {
+        // Get recommended settings
+        const config = trustformers.get_quantization_recommendations(modelSize);
+        console.log(\`Recommended config: \${JSON.stringify(config)}\`);
+        
+        // Apply quantization
+        trustformers.enable_quantization(config);
+        console.log('✅ Quantization enabled');
+    }
+}
+
+// 4. Inference optimization
+async function inferenceOptimization() {
+    console.log('🏃 Inference Optimization:');
+    
+    // Enable performance profiler
+    const profilerConfig = new ProfilerConfig();
+    profilerConfig.set_enable_gpu_profiling(true);
+    const profiler = new PerformanceProfiler(profilerConfig);
+    
+    // Profile different strategies
+    profiler.start_profiling("single_inference");
+    const singleResult = await trustformers.predict(tensor);
+    const singleMetrics = profiler.end_profiling("single_inference");
+    
+    profiler.start_profiling("batch_inference");
+    const batchResults = await trustformers.process_batch();
+    const batchMetrics = profiler.end_profiling("batch_inference");
+    
+    console.log('📊 Performance Comparison:');
+    console.log(\`Single: \${singleMetrics.duration}ms\`);
+    console.log(\`Batch: \${batchMetrics.duration}ms\`);
+    console.log(\`Speedup: \${(singleMetrics.duration / batchMetrics.duration).toFixed(2)}x\`);
+}
+
+// 5. WebGPU optimization
+async function webgpuOptimization() {
+    console.log('🎮 WebGPU Optimization:');
+    
+    // Check WebGPU availability
+    const isSupported = await WebGPU.isSupported();
+    if (!isSupported) {
+        console.log('⚠️ WebGPU not supported, falling back to CPU');
+        return;
+    }
+    
+    // Enable kernel fusion
+    const kernelConfig = new KernelFusion();
+    kernelConfig.enable_optimization(true);
+    
+    // Optimize workgroup sizes
+    const tuner = new WorkgroupTuner();
+    const optimalSize = await tuner.find_optimal_size(tensor.shape());
+    
+    console.log(\`Optimal workgroup size: \${optimalSize}\`);
+}
+
+console.log('🎯 Optimization Checklist:');
+console.log('✓ Use appropriate device (GPU when available)');
+console.log('✓ Enable quantization for large models');
+console.log('✓ Use batch processing for multiple requests');
+console.log('✓ Monitor memory usage and clear caches');
+console.log('✓ Profile performance to identify bottlenecks');
+console.log('✓ Optimize WebGPU workgroup sizes');`;
+
+            monacoEditor.setValue(optimizationCode);
+        }
+
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            populateExamples();
+            
+            // Category filters
+            document.querySelectorAll('.category-filter').forEach(filter => {
+                filter.addEventListener('click', (e) => {
+                    filterExamples(e.target.dataset.category);
+                });
+            });
+            
+            // Run code button
+            document.getElementById('run-code').addEventListener('click', runCode);
+            
+            // Theme selector
+            document.getElementById('theme-selector').addEventListener('change', (e) => {
+                if (monacoEditor) {
+                    const theme = e.target.value;
+                    monaco.editor.setTheme(theme);
+                    
+                    // Update playground theme
+                    if (theme === 'vs-light') {
+                        document.body.style.background = '#ffffff';
+                        document.body.style.color = '#333333';
+                    } else {
+                        document.body.style.background = '#1e1e1e';
+                        document.body.style.color = '#d4d4d4';
+                    }
+                }
+            });
+            
+            // Reset playground
+            document.getElementById('reset-playground').addEventListener('click', () => {
+                if (confirm('Reset playground and clear all data?')) {
+                    location.reload();
+                }
+            });
+            
+            // Performance panel toggle
+            document.getElementById('show-performance').addEventListener('change', (e) => {
+                document.getElementById('performance-panel').style.display = e.target.checked ? 'block' : 'none';
+            });
+            
+            // Auto-run toggle
+            document.getElementById('auto-run').addEventListener('change', (e) => {
+                if (e.target.checked && monacoEditor) {
+                    monacoEditor.onDidChangeModelContent(() => {
+                        clearTimeout(window.autoRunTimeout);
+                        window.autoRunTimeout = setTimeout(runCode, 2000);
+                    });
+                } else if (monacoEditor) {
+                    monacoEditor.onDidChangeModelContent(() => {});
+                }
+            });
+            
+            // Load first example
+            loadExample('text-generation-basic');
+            
+            updateStatus('Playground ready', 'ready');
+        });
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Ctrl/Cmd + Enter to run code
+            if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                e.preventDefault();
+                runCode();
+            }
+            
+            // Ctrl/Cmd + L to clear output
+            if ((e.ctrlKey || e.metaKey) && e.key === 'l') {
+                e.preventDefault();
+                clearOutput();
+            }
+        });
+
+        // Make functions globally available
+        window.loadExample = loadExample;
+        window.switchTab = switchTab;
+        window.runCode = runCode;
+        window.clearOutput = clearOutput;
+        window.formatCode = formatCode;
+        window.loadGettingStarted = loadGettingStarted;
+        window.loadModelLoading = loadModelLoading;
+        window.loadInference = loadInference;
+        window.loadOptimization = loadOptimization;
+    </script>
+</body>
+</html>

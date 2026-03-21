@@ -1,0 +1,105 @@
+# TrustformeRS Pre-commit Configuration
+# Install with: pip install pre-commit && pre-commit install
+
+repos:
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-xml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  # Rust formatting
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: cargo fmt --
+        language: system
+        types: [rust]
+        pass_filenames: true
+
+  # Rust linting
+  - repo: local
+    hooks:
+      - id: clippy
+        name: clippy
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        types: [rust]
+        pass_filenames: false
+
+  # Security audit
+  - repo: local
+    hooks:
+      - id: cargo-audit
+        name: cargo audit
+        entry: cargo audit
+        language: system
+        pass_filenames: false
+        types: [rust]
+
+  # Check for typos
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.16.26
+    hooks:
+      - id: typos
+        args: ["--config", ".typos.toml"]
+
+  # EditorConfig compliance
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
+    rev: 2.7.3
+    hooks:
+      - id: editorconfig-checker
+        exclude: ^(target/|vendor/|third_party/)
+
+  # Markdown linting
+  - repo: https://github.com/igorshubovych/markdownlint-cli
+    rev: v0.38.0
+    hooks:
+      - id: markdownlint
+        args: ["--config", ".markdownlint.yaml", "--fix"]
+
+  # YAML linting
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.33.0
+    hooks:
+      - id: yamllint
+        args: ["-c", ".yamllint.yaml"]
+
+  # Shell script linting
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.9.0.6
+    hooks:
+      - id: shellcheck
+
+  # License header check (optional)
+  # - repo: https://github.com/Lucas-C/pre-commit-hooks
+  #   rev: v1.5.4
+  #   hooks:
+  #     - id: insert-license
+  #       files: \.rs$
+  #       args:
+  #         - --license-filepath
+  #         - .license-header.txt
+  #         - --comment-style
+  #         - //
+
+# Configuration
+default_stages: [commit]
+fail_fast: false

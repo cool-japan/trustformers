@@ -1,0 +1,280 @@
+# TrustformeRS Spell Check Configuration
+# Configuration for the typos spell checker
+
+[files]
+# File patterns to check
+extend-glob = [
+    "*.rs",
+    "*.toml", 
+    "*.md",
+    "*.yml",
+    "*.yaml",
+    "*.sh",
+    "*.txt",
+]
+
+# File patterns to ignore
+extend-exclude = [
+    "target/",
+    "*.lock",
+    "*.svg",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.webp",
+    "*.ico",
+    "*.pdf",
+    "*.wasm",
+    "*.so",
+    "*.dylib",
+    "*.dll",
+    "*.a",
+    "*.lib",
+    "*.exe",
+    "*.bin",
+    "*.dat",
+    "*.pkl",
+    "*.pth",
+    "*.onnx",
+    "*.pb",
+    "*.tflite",
+    "*.caffemodel",
+    "*.h5",
+    "*.hdf5",
+    "*.msgpack",
+    "*.npz",
+    "*.npy",
+    "*.safetensors",
+    "*.gguf",
+    "*.ggml",
+    "*.pt",
+    "CHANGELOG*",
+    ".git/",
+    ".github/",
+    "licenses/",
+    "vendor/",
+    "third_party/",
+]
+
+[default]
+# Valid words that might be flagged as typos
+extend-words = {
+    # Project-specific terms
+    "trustformers" = "trustformers",
+    "TrustformeRS" = "TrustformeRS",
+    
+    # Common ML/AI terms
+    "cuda" = "cuda",
+    "CUDA" = "CUDA",
+    "rocm" = "rocm",
+    "ROCm" = "ROCm",
+    "bfloat16" = "bfloat16",
+    "bf16" = "bf16",
+    "fp16" = "fp16",
+    "fp32" = "fp32",
+    "fp64" = "fp64",
+    "uint8" = "uint8",
+    "int8" = "int8",
+    
+    # Model names
+    "bert" = "bert",
+    "BERT" = "BERT",
+    "gpt" = "gpt",
+    "GPT" = "GPT",
+    "gpt2" = "gpt2",
+    "GPT2" = "GPT2",
+    "llama" = "llama",
+    "LLaMA" = "LLaMA",
+    "t5" = "t5",
+    "T5" = "T5",
+    "roberta" = "roberta",
+    "RoBERTa" = "RoBERTa",
+    "electra" = "electra",
+    "ELECTRA" = "ELECTRA",
+    "xlnet" = "xlnet",
+    "XLNet" = "XLNet",
+    "bart" = "bart",
+    "BART" = "BART",
+    "distilbert" = "distilbert",
+    "DistilBERT" = "DistilBERT",
+    
+    # Technical terms
+    "tokenizer" = "tokenizer",
+    "tokenizers" = "tokenizers",
+    "embeddings" = "embeddings",
+    "softmax" = "softmax",
+    "gelu" = "gelu",
+    "relu" = "relu",
+    "silu" = "silu",
+    "swiglu" = "swiglu",
+    "rmsnorm" = "rmsnorm",
+    "layernorm" = "layernorm",
+    "batchnorm" = "batchnorm",
+    "adamw" = "adamw",
+    "AdamW" = "AdamW",
+    "sgd" = "sgd",
+    "SGD" = "SGD",
+    "lars" = "lars",
+    "LARS" = "LARS",
+    "lamb" = "lamb", 
+    "LAMB" = "LAMB",
+    "fsdp" = "fsdp",
+    "FSDP" = "FSDP",
+    "ddp" = "ddp",
+    "DDP" = "DDP",
+    "zero" = "zero",
+    "ZeRO" = "ZeRO",
+    "onnx" = "onnx",
+    "ONNX" = "ONNX",
+    "coreml" = "coreml",
+    "CoreML" = "CoreML",
+    "nnapi" = "nnapi",
+    "NNAPI" = "NNAPI",
+    "wasm" = "wasm",
+    "WASM" = "WASM",
+    "wasi" = "wasi",
+    "WASI" = "WASI",
+    "simd" = "simd",
+    "SIMD" = "SIMD",
+    "avx" = "avx",
+    "AVX" = "AVX",
+    "neon" = "neon",
+    "NEON" = "NEON",
+    
+    # Architecture terms
+    "aarch64" = "aarch64",
+    "x86_64" = "x86_64",
+    "wasm32" = "wasm32",
+    "armv7" = "armv7",
+    "riscv" = "riscv",
+    "riscv64" = "riscv64",
+    
+    # Rust-specific
+    "rustc" = "rustc",
+    "rustup" = "rustup",
+    "rustfmt" = "rustfmt",
+    "clippy" = "clippy",
+    "tokio" = "tokio",
+    "rayon" = "rayon",
+    "serde" = "serde",
+    "ndarray" = "ndarray",
+    "candle" = "candle",
+    "tch" = "tch",
+    "ort" = "ort",
+    "tract" = "tract",
+    "hf" = "hf",
+    "safetensors" = "safetensors",
+    "msgpack" = "msgpack",
+    "bincode" = "bincode",
+    "thiserror" = "thiserror",
+    "anyhow" = "anyhow",
+    "tracing" = "tracing",
+    "reqwest" = "reqwest",
+    "axum" = "axum",
+    "actix" = "actix",
+    
+    # Common abbreviations
+    "impl" = "impl",
+    "fns" = "fns",
+    "perf" = "perf",
+    "alloc" = "alloc",
+    "dealloc" = "dealloc",
+    "num" = "num",
+    "config" = "config",
+    "configs" = "configs",
+    "param" = "param",
+    "params" = "params",
+    "arg" = "arg",
+    "args" = "args",
+    "env" = "env",
+    "envs" = "envs",
+    "repr" = "repr",
+    "attr" = "attr",
+    "attrs" = "attrs",
+    "impl" = "impl",
+    "impls" = "impls",
+    "fn" = "fn",
+    "fns" = "fns",
+    "struct" = "struct",
+    "structs" = "structs",
+    "enum" = "enum",
+    "enums" = "enums",
+    "async" = "async",
+    "await" = "await",
+    "mut" = "mut",
+    "ref" = "ref",
+    "deref" = "deref",
+    
+    # File extensions and formats
+    "toml" = "toml",
+    "yaml" = "yaml", 
+    "json" = "json",
+    "pkl" = "pkl",
+    "pth" = "pth",
+    "ckpt" = "ckpt",
+    "pb" = "pb",
+    "tflite" = "tflite",
+    "caffemodel" = "caffemodel",
+    "hdf5" = "hdf5",
+    "npz" = "npz",
+    "npy" = "npy",
+    "gguf" = "gguf",
+    "ggml" = "ggml",
+    
+    # Companies/Organizations
+    "huggingface" = "huggingface",
+    "HuggingFace" = "HuggingFace",
+    "openai" = "openai",
+    "OpenAI" = "OpenAI",
+    "anthropic" = "anthropic",
+    "Anthropic" = "Anthropic",
+    "pytorch" = "pytorch",
+    "PyTorch" = "PyTorch",
+    "tensorflow" = "tensorflow",
+    "TensorFlow" = "TensorFlow",
+    "jax" = "jax",
+    "JAX" = "JAX",
+    "mila" = "mila",
+    "MILA" = "MILA",
+    "deepmind" = "deepmind",
+    "DeepMind" = "DeepMind",
+    
+    # Common code patterns
+    "todo" = "todo",
+    "TODO" = "TODO",
+    "fixme" = "fixme", 
+    "FIXME" = "FIXME",
+    "hack" = "hack",
+    "HACK" = "HACK",
+    "xxx" = "xxx",
+    "XXX" = "XXX",
+    "dbg" = "dbg",
+    "println" = "println",
+    "eprintln" = "eprintln",
+    
+    # Version control
+    "changelog" = "changelog",
+    "CHANGELOG" = "CHANGELOG",
+    "readme" = "readme",
+    "README" = "README",
+    "commitlog" = "commitlog",
+}
+
+# Ignore hex literals and base64 strings
+[default.extend-identifiers]
+# Hex values like 0xDEADBEEF
+"0x[0-9A-Fa-f]+" = "0x[0-9A-Fa-f]+"
+# Base64 strings
+"[A-Za-z0-9+/]{4,}={0,2}" = "[A-Za-z0-9+/]{4,}={0,2}"
+# UUIDs
+"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}" = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+[type.rust]
+extend-glob = ["*.rs"]
+
+[type.toml]
+extend-glob = ["*.toml", "Cargo.lock"]
+
+[type.markdown]
+extend-glob = ["*.md", "*.markdown"]

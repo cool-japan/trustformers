@@ -1,0 +1,171 @@
+---
+# Docker deployment tasks for TrustformeRS Serve
+
+- name: Ensure Docker is installed
+  package:
+    name: docker.io
+    state: present
+  become: true
+  tags: [docker]
+
+- name: Ensure Docker Compose is installed
+  pip:
+    name: docker-compose
+    state: present
+  become: true
+  tags: [docker, docker-compose]
+
+- name: Add application user to docker group
+  user:
+    name: "{{ app_user }}"
+    groups: docker
+    append: true
+  become: true
+  tags: [docker, users]
+
+- name: Start and enable Docker service
+  systemd:
+    name: docker
+    state: started
+    enabled: true
+  become: true
+  tags: [docker, service]
+
+- name: Pull TrustformeRS Serve Docker image
+  docker_image:
+    name: "{{ docker_config.image }}"
+    source: pull
+    force_source: "{{ force_image_pull | default(false) }}"
+  become: true
+  tags: [docker, image]
+
+- name: Create Docker network for TrustformeRS
+  docker_network:
+    name: trustformers-network
+    driver: bridge
+    ipam_config:
+      - subnet: "172.20.0.0/16"
+  become: true
+  tags: [docker, network]
+
+- name: Stop existing TrustformeRS container
+  docker_container:
+    name: "{{ docker_config.container_name }}"
+    state: stopped
+  become: true
+  failed_when: false
+  tags: [docker, container]
+
+- name: Remove existing TrustformeRS container
+  docker_container:
+    name: "{{ docker_config.container_name }}"
+    state: absent
+  become: true
+  failed_when: false
+  tags: [docker, container]
+
+- name: Create application configuration file
+  template:
+    src: config.toml.j2
+    dest: "{{ app_config_dir }}/config.toml"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+  tags: [configuration]
+
+- name: Create environment file for Docker
+  template:
+    src: docker.env.j2
+    dest: "{{ app_config_dir }}/docker.env"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0600'
+  tags: [configuration, environment]
+
+- name: Create Docker Compose file
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ app_home }}/docker-compose.yml"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0644'
+  tags: [docker, docker-compose]
+
+- name: Start TrustformeRS Serve container
+  docker_container:
+    name: "{{ docker_config.container_name }}"
+    image: "{{ docker_config.image }}"
+    state: started
+    restart_policy: "{{ docker_config.restart_policy }}"
+    network_mode: "{{ docker_config.network_mode }}"
+    ports: "{{ docker_config.ports }}"
+    volumes: "{{ docker_config.volumes }}"
+    env_file: "{{ app_config_dir }}/docker.env"
+    healthcheck: "{{ docker_config.healthcheck }}"
+    memory: "{{ max_memory }}"
+    cpus: "{{ worker_threads | float }}"
+    ulimits:
+      - "nofile:65536:65536"
+      - "nproc:4096:4096"
+    log_driver: "json-file"
+    log_options:
+      max-size: "{{ log_rotation.max_size }}"
+      max-file: "{{ log_rotation.max_files }}"
+  become: true
+  register: container_result
+  tags: [docker, container]
+
+- name: Wait for container to be healthy
+  uri:
+    url: "http://{{ ansible_default_ipv4.address }}:{{ app_port }}/health"
+    method: GET
+    timeout: 10
+  register: health_check
+  retries: 15
+  delay: 10
+  until: health_check.status == 200
+  tags: [docker, health-check]
+
+- name: Create systemd service for Docker container management
+  template:
+    src: trustformers-docker.service.j2
+    dest: /etc/systemd/system/trustformers-serve.service
+    mode: '0644'
+  become: true
+  notify: reload systemd
+  tags: [systemd, service]
+
+- name: Enable TrustformeRS Serve service
+  systemd:
+    name: trustformers-serve
+    enabled: true
+    daemon_reload: true
+  become: true
+  tags: [systemd, service]
+
+- name: Create container monitoring script
+  template:
+    src: monitor_container.sh.j2
+    dest: "{{ app_scripts_dir }}/monitor_container.sh"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  tags: [monitoring, scripts]
+
+- name: Set up container log rotation
+  template:
+    src: docker-logrotate.j2
+    dest: /etc/logrotate.d/trustformers-docker
+    mode: '0644'
+  become: true
+  tags: [logging, logrotate]
+
+- name: Create backup script for Docker volumes
+  template:
+    src: backup_docker.sh.j2
+    dest: "{{ app_scripts_dir }}/backup_docker.sh"
+    owner: "{{ app_user }}"
+    group: "{{ app_group }}"
+    mode: '0755'
+  when: backup_enabled
+  tags: [backup, scripts]

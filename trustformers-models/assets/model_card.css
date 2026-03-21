@@ -1,0 +1,209 @@
+/* Model Card CSS Styles */
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+    background-color: #f8f9fa;
+    color: #333;
+}
+
+h1 {
+    color: #2c3e50;
+    border-bottom: 3px solid #3498db;
+    padding-bottom: 10px;
+    margin-bottom: 20px;
+}
+
+h2 {
+    color: #34495e;
+    margin-top: 30px;
+    margin-bottom: 15px;
+    border-left: 4px solid #3498db;
+    padding-left: 15px;
+}
+
+h3 {
+    color: #555;
+    margin-top: 20px;
+    margin-bottom: 10px;
+}
+
+.version {
+    background-color: #ecf0f1;
+    padding: 8px 12px;
+    border-radius: 4px;
+    display: inline-block;
+    font-weight: bold;
+    color: #2c3e50;
+    margin-bottom: 20px;
+}
+
+p {
+    margin-bottom: 10px;
+}
+
+strong {
+    color: #2c3e50;
+}
+
+ul {
+    padding-left: 20px;
+}
+
+li {
+    margin-bottom: 5px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 20px 0;
+    background-color: white;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+th, td {
+    border: 1px solid #ddd;
+    padding: 12px;
+    text-align: left;
+}
+
+th {
+    background-color: #3498db;
+    color: white;
+    font-weight: bold;
+}
+
+tr:nth-child(even) {
+    background-color: #f2f2f2;
+}
+
+tr:hover {
+    background-color: #e8f4fd;
+}
+
+.risk {
+    padding: 10px;
+    margin: 10px 0;
+    border-radius: 4px;
+    border-left: 4px solid;
+}
+
+.risk-low {
+    background-color: #d4edda;
+    border-left-color: #28a745;
+    color: #155724;
+}
+
+.risk-medium {
+    background-color: #fff3cd;
+    border-left-color: #ffc107;
+    color: #856404;
+}
+
+.risk-high {
+    background-color: #f8d7da;
+    border-left-color: #dc3545;
+    color: #721c24;
+}
+
+.risk-critical {
+    background-color: #f5c6cb;
+    border-left-color: #dc3545;
+    color: #721c24;
+    font-weight: bold;
+}
+
+.metric-card {
+    background-color: white;
+    padding: 15px;
+    margin: 10px 0;
+    border-radius: 6px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.metric-name {
+    font-weight: bold;
+    color: #2c3e50;
+    font-size: 1.1em;
+}
+
+.metric-value {
+    font-size: 1.5em;
+    color: #3498db;
+    font-weight: bold;
+}
+
+.dataset-info {
+    background-color: #f8f9fa;
+    padding: 10px;
+    border-radius: 4px;
+    margin: 5px 0;
+    border-left: 3px solid #6c757d;
+}
+
+.warning {
+    background-color: #fff3cd;
+    color: #856404;
+    padding: 10px;
+    border: 1px solid #ffeaa7;
+    border-radius: 4px;
+    margin: 10px 0;
+}
+
+.info {
+    background-color: #d1ecf1;
+    color: #0c5460;
+    padding: 10px;
+    border: 1px solid #bee5eb;
+    border-radius: 4px;
+    margin: 10px 0;
+}
+
+.success {
+    background-color: #d4edda;
+    color: #155724;
+    padding: 10px;
+    border: 1px solid #c3e6cb;
+    border-radius: 4px;
+    margin: 10px 0;
+}
+
+@media (max-width: 768px) {
+    body {
+        padding: 10px;
+    }
+    
+    table {
+        font-size: 14px;
+    }
+    
+    th, td {
+        padding: 8px;
+    }
+    
+    h1 {
+        font-size: 1.8em;
+    }
+    
+    h2 {
+        font-size: 1.4em;
+    }
+}
+
+@media print {
+    body {
+        background-color: white;
+        color: black;
+    }
+    
+    .risk {
+        border: 1px solid #ccc;
+    }
+    
+    table {
+        box-shadow: none;
+    }
+}

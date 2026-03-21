@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Chat Interface Demo</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .chat-container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            width: 90%;
+            max-width: 800px;
+            height: 80vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+            position: relative;
+        }
+
+        .chat-header h1 {
+            font-size: 1.5rem;
+            margin-bottom: 5px;
+        }
+
+        .chat-header .subtitle {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+
+        .status-indicator {
+            position: absolute;
+            top: 15px;
+            right: 20px;
+            width: 12px;
+            height: 12px;
+            background: #ff4444;
+            border-radius: 50%;
+            transition: background 0.3s;
+        }
+
+        .status-indicator.connected {
+            background: #44ff44;
+        }
+
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 20px;
+            background: #fafafa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: flex-start;
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message.assistant {
+            justify-content: flex-start;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 15px 20px;
+            border-radius: 20px;
+            position: relative;
+            word-wrap: break-word;
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-bottom-right-radius: 5px;
+        }
+
+        .message.assistant .message-content {
+            background: white;
+            color: #333;
+            border: 1px solid #e0e0e0;
+            border-bottom-left-radius: 5px;
+        }
+
+        .message-time {
+            font-size: 0.8rem;
+            opacity: 0.7;
+            margin-top: 5px;
+        }
+
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            padding: 15px 20px;
+            background: white;
+            border-radius: 20px;
+            border-bottom-left-radius: 5px;
+            border: 1px solid #e0e0e0;
+            max-width: 70%;
+        }
+
+        .typing-indicator.active {
+            display: flex;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dot {
+            width: 8px;
+            height: 8px;
+            background: #999;
+            border-radius: 50%;
+            animation: typing 1.4s infinite;
+        }
+
+        .typing-dot:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-dot:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes typing {
+            0%, 60%, 100% {
+                opacity: 0.3;
+            }
+            30% {
+                opacity: 1;
+            }
+        }
+
+        .chat-input {
+            background: white;
+            padding: 20px;
+            border-top: 1px solid #e0e0e0;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .input-container {
+            flex: 1;
+            position: relative;
+        }
+
+        .chat-input input {
+            width: 100%;
+            padding: 15px 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 25px;
+            font-size: 1rem;
+            outline: none;
+            transition: border-color 0.3s;
+        }
+
+        .chat-input input:focus {
+            border-color: #667eea;
+        }
+
+        .chat-input input:disabled {
+            background: #f5f5f5;
+            cursor: not-allowed;
+        }
+
+        .send-button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            width: 50px;
+            height: 50px;
+            border-radius: 50%;
+            cursor: pointer;
+            font-size: 1.2rem;
+            transition: transform 0.2s;
+        }
+
+        .send-button:hover {
+            transform: scale(1.1);
+        }
+
+        .send-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .settings-panel {
+            background: white;
+            padding: 20px;
+            border-top: 1px solid #e0e0e0;
+            display: none;
+        }
+
+        .settings-panel.active {
+            display: block;
+        }
+
+        .settings-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .settings-row label {
+            font-weight: 500;
+            color: #333;
+        }
+
+        .settings-row input[type="range"] {
+            width: 150px;
+        }
+
+        .settings-row input[type="number"] {
+            width: 80px;
+            padding: 5px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+        }
+
+        .settings-toggle {
+            background: none;
+            border: none;
+            color: #667eea;
+            cursor: pointer;
+            font-size: 1.2rem;
+            padding: 10px;
+            border-radius: 50%;
+            transition: background 0.3s;
+        }
+
+        .settings-toggle:hover {
+            background: #f0f0f0;
+        }
+
+        .error-message {
+            background: #ffebee;
+            color: #c62828;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 10px 20px;
+            border-left: 4px solid #c62828;
+        }
+
+        .loading-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .loading-spinner {
+            background: white;
+            padding: 30px;
+            border-radius: 15px;
+            text-align: center;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .chat-container {
+                width: 100%;
+                height: 100vh;
+                border-radius: 0;
+            }
+            
+            .message-content {
+                max-width: 85%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>TrustformeRS Chat</h1>
+            <div class="subtitle">AI-Powered Chat Interface</div>
+            <div class="status-indicator" id="statusIndicator"></div>
+            <button class="settings-toggle" id="settingsToggle">⚙️</button>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="message assistant">
+                <div class="message-content">
+                    <div>Hello! I'm your AI assistant powered by TrustformeRS. How can I help you today?</div>
+                    <div class="message-time" id="initialTime"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="settings-panel" id="settingsPanel">
+            <div class="settings-row">
+                <label>Temperature:</label>
+                <input type="range" id="temperature" min="0.1" max="2.0" step="0.1" value="0.7">
+                <span id="tempValue">0.7</span>
+            </div>
+            <div class="settings-row">
+                <label>Max Tokens:</label>
+                <input type="number" id="maxTokens" min="50" max="1000" value="150">
+            </div>
+            <div class="settings-row">
+                <label>Top-P:</label>
+                <input type="range" id="topP" min="0.1" max="1.0" step="0.1" value="0.9">
+                <span id="topPValue">0.9</span>
+            </div>
+        </div>
+
+        <div class="chat-input">
+            <div class="input-container">
+                <input type="text" id="messageInput" placeholder="Type your message here..." disabled>
+            </div>
+            <button class="send-button" id="sendButton" disabled>➤</button>
+        </div>
+    </div>
+
+    <div class="loading-overlay" id="loadingOverlay">
+        <div class="loading-spinner">
+            <div class="spinner"></div>
+            <div>Initializing TrustformeRS...</div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { TrustformersWasm } from '../trustformers-wasm.js';
+
+        class ChatInterface {
+            constructor() {
+                this.trustformers = null;
+                this.modelId = null;
+                this.conversationHistory = [];
+                this.isInitialized = false;
+                this.isGenerating = false;
+                
+                this.initializeElements();
+                this.setupEventListeners();
+                this.initialize();
+            }
+
+            initializeElements() {
+                this.elements = {
+                    statusIndicator: document.getElementById('statusIndicator'),
+                    settingsToggle: document.getElementById('settingsToggle'),
+                    settingsPanel: document.getElementById('settingsPanel'),
+                    chatMessages: document.getElementById('chatMessages'),
+                    messageInput: document.getElementById('messageInput'),
+                    sendButton: document.getElementById('sendButton'),
+                    loadingOverlay: document.getElementById('loadingOverlay'),
+                    temperature: document.getElementById('temperature'),
+                    maxTokens: document.getElementById('maxTokens'),
+                    topP: document.getElementById('topP'),
+                    tempValue: document.getElementById('tempValue'),
+                    topPValue: document.getElementById('topPValue')
+                };
+
+                // Set initial timestamp
+                document.getElementById('initialTime').textContent = new Date().toLocaleTimeString();
+            }
+
+            setupEventListeners() {
+                // Settings toggle
+                this.elements.settingsToggle.addEventListener('click', () => {
+                    this.elements.settingsPanel.classList.toggle('active');
+                });
+
+                // Input handling
+                this.elements.messageInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        this.sendMessage();
+                    }
+                });
+
+                this.elements.sendButton.addEventListener('click', () => {
+                    this.sendMessage();
+                });
+
+                // Settings updates
+                this.elements.temperature.addEventListener('input', (e) => {
+                    this.elements.tempValue.textContent = e.target.value;
+                });
+
+                this.elements.topP.addEventListener('input', (e) => {
+                    this.elements.topPValue.textContent = e.target.value;
+                });
+
+                // Auto-scroll messages
+                this.elements.chatMessages.addEventListener('scroll', () => {
+                    const { scrollTop, scrollHeight, clientHeight } = this.elements.chatMessages;
+                    const isAtBottom = scrollHeight - scrollTop === clientHeight;
+                    this.shouldAutoScroll = isAtBottom;
+                });
+            }
+
+            async initialize() {
+                try {
+                    this.showLoading(true);
+                    
+                    // Initialize TrustformeRS
+                    this.trustformers = new TrustformersWasm({
+                        memoryLimit: 512 * 1024 * 1024, // 512MB
+                        debug: false
+                    });
+
+                    await this.trustformers.initialize();
+                    
+                    // Enable WebGPU if available
+                    if (await this.trustformers.isWebGPUSupported()) {
+                        await this.trustformers.enableWebGPU();
+                        console.log('WebGPU acceleration enabled');
+                    }
+
+                    // Load a chat model (mock implementation)
+                    this.modelId = await this.loadChatModel();
+                    
+                    this.isInitialized = true;
+                    this.updateStatus(true);
+                    this.enableInput();
+                    
+                } catch (error) {
+                    console.error('Initialization failed:', error);
+                    this.showError('Failed to initialize TrustformeRS: ' + error.message);
+                    this.updateStatus(false);
+                } finally {
+                    this.showLoading(false);
+                }
+            }
+
+            async loadChatModel() {
+                // Mock model loading - in real implementation, this would load an actual model
+                return new Promise((resolve) => {
+                    setTimeout(() => {
+                        resolve('mock-chat-model-id');
+                    }, 1000);
+                });
+            }
+
+            async sendMessage() {
+                if (!this.isInitialized || this.isGenerating) return;
+
+                const message = this.elements.messageInput.value.trim();
+                if (!message) return;
+
+                // Add user message
+                this.addMessage('user', message);
+                this.elements.messageInput.value = '';
+                this.elements.messageInput.disabled = true;
+                this.elements.sendButton.disabled = true;
+
+                try {
+                    this.isGenerating = true;
+                    this.showTypingIndicator();
+                    
+                    // Generate response
+                    const response = await this.generateResponse(message);
+                    
+                    this.hideTypingIndicator();
+                    this.addMessage('assistant', response);
+                    
+                } catch (error) {
+                    this.hideTypingIndicator();
+                    this.showError('Failed to generate response: ' + error.message);
+                } finally {
+                    this.isGenerating = false;
+                    this.elements.messageInput.disabled = false;
+                    this.elements.sendButton.disabled = false;
+                    this.elements.messageInput.focus();
+                }
+            }
+
+            async generateResponse(message) {
+                // Add message to conversation history
+                this.conversationHistory.push({
+                    role: 'user',
+                    content: message
+                });
+
+                // Mock text generation - in real implementation, this would use the model
+                return new Promise((resolve) => {
+                    const responses = [
+                        "That's an interesting question! Let me think about it...",
+                        "I understand your point. Here's what I think...",
+                        "Thank you for sharing that. My perspective is...",
+                        "I can help you with that. Consider this approach...",
+                        "That's a great topic to discuss. In my view...",
+                        "I appreciate you asking. Here's my analysis...",
+                        "Interesting perspective! I would add that...",
+                        "That makes sense. Let me elaborate on that...",
+                        "Good question! Based on my understanding...",
+                        "I see what you're getting at. My response would be..."
+                    ];
+
+                    // Simulate processing time
+                    const delay = 1000 + Math.random() * 2000;
+                    
+                    setTimeout(() => {
+                        const randomResponse = responses[Math.floor(Math.random() * responses.length)];
+                        const enhancedResponse = this.enhanceResponse(randomResponse, message);
+                        
+                        this.conversationHistory.push({
+                            role: 'assistant',
+                            content: enhancedResponse
+                        });
+                        
+                        resolve(enhancedResponse);
+                    }, delay);
+                });
+            }
+
+            enhanceResponse(baseResponse, userMessage) {
+                // Add some context-aware enhancement
+                const keywords = userMessage.toLowerCase().split(' ');
+                
+                if (keywords.includes('help') || keywords.includes('how')) {
+                    return `${baseResponse} I'm here to help! What specific aspect would you like me to focus on?`;
+                }
+                
+                if (keywords.includes('explain') || keywords.includes('what')) {
+                    return `${baseResponse} Let me break this down for you in a clear way.`;
+                }
+                
+                if (keywords.includes('problem') || keywords.includes('issue')) {
+                    return `${baseResponse} I'll help you work through this problem step by step.`;
+                }
+                
+                return baseResponse;
+            }
+
+            addMessage(role, content) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${role}`;
+                
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'message-content';
+                
+                const textDiv = document.createElement('div');
+                textDiv.textContent = content;
+                
+                const timeDiv = document.createElement('div');
+                timeDiv.className = 'message-time';
+                timeDiv.textContent = new Date().toLocaleTimeString();
+                
+                contentDiv.appendChild(textDiv);
+                contentDiv.appendChild(timeDiv);
+                messageDiv.appendChild(contentDiv);
+                
+                this.elements.chatMessages.appendChild(messageDiv);
+                this.scrollToBottom();
+            }
+
+            showTypingIndicator() {
+                const typingDiv = document.createElement('div');
+                typingDiv.className = 'typing-indicator active';
+                typingDiv.id = 'typingIndicator';
+                
+                const dotsDiv = document.createElement('div');
+                dotsDiv.className = 'typing-dots';
+                
+                for (let i = 0; i < 3; i++) {
+                    const dot = document.createElement('div');
+                    dot.className = 'typing-dot';
+                    dotsDiv.appendChild(dot);
+                }
+                
+                typingDiv.appendChild(dotsDiv);
+                this.elements.chatMessages.appendChild(typingDiv);
+                this.scrollToBottom();
+            }
+
+            hideTypingIndicator() {
+                const typingIndicator = document.getElementById('typingIndicator');
+                if (typingIndicator) {
+                    typingIndicator.remove();
+                }
+            }
+
+            scrollToBottom() {
+                setTimeout(() => {
+                    this.elements.chatMessages.scrollTop = this.elements.chatMessages.scrollHeight;
+                }, 100);
+            }
+
+            updateStatus(connected) {
+                if (connected) {
+                    this.elements.statusIndicator.classList.add('connected');
+                } else {
+                    this.elements.statusIndicator.classList.remove('connected');
+                }
+            }
+
+            enableInput() {
+                this.elements.messageInput.disabled = false;
+                this.elements.sendButton.disabled = false;
+                this.elements.messageInput.focus();
+            }
+
+            showLoading(show) {
+                this.elements.loadingOverlay.style.display = show ? 'flex' : 'none';
+            }
+
+            showError(message) {
+                const errorDiv = document.createElement('div');
+                errorDiv.className = 'error-message';
+                errorDiv.textContent = message;
+                
+                this.elements.chatMessages.appendChild(errorDiv);
+                this.scrollToBottom();
+                
+                // Auto-remove after 5 seconds
+                setTimeout(() => {
+                    errorDiv.remove();
+                }, 5000);
+            }
+
+            getSettings() {
+                return {
+                    temperature: parseFloat(this.elements.temperature.value),
+                    maxTokens: parseInt(this.elements.maxTokens.value),
+                    topP: parseFloat(this.elements.topP.value)
+                };
+            }
+        }
+
+        // Initialize the chat interface
+        const chatInterface = new ChatInterface();
+        
+        // Global error handling
+        window.addEventListener('error', (event) => {
+            console.error('Global error:', event.error);
+            if (chatInterface) {
+                chatInterface.showError('An unexpected error occurred. Please refresh the page.');
+            }
+        });
+
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            if (chatInterface.trustformers) {
+                chatInterface.trustformers.cleanup();
+            }
+        });
+    </script>
+</body>
+</html>

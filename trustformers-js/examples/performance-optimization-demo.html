@@ -1,0 +1,1094 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Performance Optimization Demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #4CAF50, #45a049);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 2.5em;
+            font-weight: 300;
+        }
+
+        .header p {
+            margin: 10px 0 0 0;
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .section {
+            margin-bottom: 40px;
+            padding: 25px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            background: #fafafa;
+        }
+
+        .section h2 {
+            margin-top: 0;
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .control-group label {
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: #34495e;
+        }
+
+        .control-group select, .control-group input {
+            padding: 10px;
+            border: 2px solid #bdc3c7;
+            border-radius: 5px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .control-group select:focus, .control-group input:focus {
+            outline: none;
+            border-color: #3498db;
+        }
+
+        .button {
+            background: linear-gradient(135deg, #3498db, #2980b9);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: all 0.3s;
+            margin: 5px;
+            min-width: 120px;
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(52, 152, 219, 0.3);
+        }
+
+        .button:disabled {
+            background: #95a5a6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .button.danger {
+            background: linear-gradient(135deg, #e74c3c, #c0392b);
+        }
+
+        .button.success {
+            background: linear-gradient(135deg, #27ae60, #229954);
+        }
+
+        .results {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .metric {
+            text-align: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 6px;
+            border-left: 4px solid #3498db;
+        }
+
+        .metric-value {
+            font-size: 1.8em;
+            font-weight: 700;
+            color: #2c3e50;
+            display: block;
+        }
+
+        .metric-label {
+            font-size: 0.9em;
+            color: #7f8c8d;
+            margin-top: 5px;
+        }
+
+        .status {
+            padding: 15px;
+            border-radius: 6px;
+            margin: 10px 0;
+            font-weight: 600;
+        }
+
+        .status.success {
+            background: #d5f4e6;
+            color: #27ae60;
+            border-left: 4px solid #27ae60;
+        }
+
+        .status.error {
+            background: #fdf2f2;
+            color: #e74c3c;
+            border-left: 4px solid #e74c3c;
+        }
+
+        .status.info {
+            background: #e3f2fd;
+            color: #1976d2;
+            border-left: 4px solid #1976d2;
+        }
+
+        .capabilities {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 10px;
+            margin: 20px 0;
+        }
+
+        .capability {
+            padding: 10px;
+            text-align: center;
+            border-radius: 6px;
+            font-weight: 600;
+            transition: all 0.3s;
+        }
+
+        .capability.enabled {
+            background: #d5f4e6;
+            color: #27ae60;
+            border: 2px solid #27ae60;
+        }
+
+        .capability.disabled {
+            background: #fdf2f2;
+            color: #e74c3c;
+            border: 2px solid #e74c3c;
+        }
+
+        .logs {
+            background: #2c3e50;
+            color: #ecf0f1;
+            padding: 20px;
+            border-radius: 6px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            max-height: 300px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+
+        .log-entry {
+            margin: 5px 0;
+            padding: 5px 0;
+            border-bottom: 1px solid #34495e;
+        }
+
+        .log-timestamp {
+            color: #95a5a6;
+            font-size: 12px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #ecf0f1;
+            border-radius: 4px;
+            overflow: hidden;
+            margin: 10px 0;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #3498db, #2980b9);
+            transition: width 0.3s ease;
+            width: 0%;
+        }
+
+        .chart-container {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 6px;
+            padding: 20px;
+            margin: 20px 0;
+            min-height: 200px;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                margin: 10px;
+            }
+            
+            .content {
+                padding: 20px;
+            }
+            
+            .controls {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 TrustformeRS Performance Demo</h1>
+            <p>Experience advanced WebGL, memory pooling, zero-copy operations, and performance profiling</p>
+        </div>
+
+        <div class="content">
+            <!-- Initialization Section -->
+            <div class="section">
+                <h2>🔧 Initialization & Capabilities</h2>
+                <div class="controls">
+                    <div class="control-group">
+                        <label>Enable WebGL Backend</label>
+                        <select id="enableWebGL">
+                            <option value="true">Enabled</option>
+                            <option value="false">Disabled</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Enable Memory Pooling</label>
+                        <select id="enableMemoryPool">
+                            <option value="true">Enabled</option>
+                            <option value="false">Disabled</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Enable Performance Profiling</label>
+                        <select id="enableProfiling">
+                            <option value="true">Enabled</option>
+                            <option value="false">Disabled</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Enable Zero-Copy Operations</label>
+                        <select id="enableZeroCopy">
+                            <option value="true">Enabled</option>
+                            <option value="false">Disabled</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <button class="button" onclick="initializeTrustformers()">Initialize TrustformeRS</button>
+                <button class="button danger" onclick="cleanup()">Cleanup & Reset</button>
+                
+                <div id="initStatus" class="status info" style="display: none;">
+                    Initializing TrustformeRS with performance optimizations...
+                </div>
+                
+                <div class="capabilities" id="capabilities" style="display: none;">
+                    <div class="capability" id="cap-wasm">WASM</div>
+                    <div class="capability" id="cap-webgl">WebGL</div>
+                    <div class="capability" id="cap-webgpu">WebGPU</div>
+                    <div class="capability" id="cap-memory">Memory Pool</div>
+                    <div class="capability" id="cap-profiling">Profiling</div>
+                    <div class="capability" id="cap-zerocopy">Zero-Copy</div>
+                </div>
+            </div>
+
+            <!-- Performance Benchmarks Section -->
+            <div class="section">
+                <h2>⚡ Performance Benchmarks</h2>
+                <div class="controls">
+                    <div class="control-group">
+                        <label>Matrix Size</label>
+                        <select id="matrixSize">
+                            <option value="64">64x64 (Quick)</option>
+                            <option value="128">128x128 (Fast)</option>
+                            <option value="256" selected>256x256 (Medium)</option>
+                            <option value="512">512x512 (Slow)</option>
+                            <option value="1024">1024x1024 (Very Slow)</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Backend Selection</label>
+                        <select id="backend">
+                            <option value="auto">Auto (Best Available)</option>
+                            <option value="webgl">WebGL (GPU)</option>
+                            <option value="webgpu">WebGPU (GPU)</option>
+                            <option value="wasm">WASM (CPU)</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Iterations</label>
+                        <select id="iterations">
+                            <option value="1">1 (Quick)</option>
+                            <option value="5" selected>5 (Medium)</option>
+                            <option value="10">10 (Thorough)</option>
+                            <option value="20">20 (Extensive)</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <button class="button" onclick="runMatrixBenchmark()">🧮 Matrix Multiplication</button>
+                <button class="button" onclick="runElementwiseBenchmark()">➕ Element-wise Operations</button>
+                <button class="button" onclick="runActivationBenchmark()">🔥 Activation Functions</button>
+                <button class="button success" onclick="runComprehensiveBenchmark()">🏁 Full Benchmark Suite</button>
+                
+                <div class="progress-bar" id="progressBar" style="display: none;">
+                    <div class="progress-fill" id="progressFill"></div>
+                </div>
+                
+                <div class="results" id="benchmarkResults" style="display: none;">
+                    <h3>📊 Benchmark Results</h3>
+                    <div class="result-grid" id="resultGrid"></div>
+                    <div class="chart-container" id="chartContainer">
+                        <canvas id="performanceChart" width="400" height="200"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Memory Management Section -->
+            <div class="section">
+                <h2>💾 Memory Management</h2>
+                <div class="controls">
+                    <div class="control-group">
+                        <label>Tensor Count</label>
+                        <input type="number" id="tensorCount" value="100" min="10" max="1000" step="10">
+                    </div>
+                    <div class="control-group">
+                        <label>Tensor Size</label>
+                        <select id="tensorSize">
+                            <option value="32">32x32</option>
+                            <option value="64" selected>64x64</option>
+                            <option value="128">128x128</option>
+                            <option value="256">256x256</option>
+                        </select>
+                    </div>
+                </div>
+                
+                <button class="button" onclick="testMemoryPooling()">🏊 Test Memory Pooling</button>
+                <button class="button" onclick="testZeroCopyOperations()">⚡ Test Zero-Copy</button>
+                <button class="button" onclick="memoryStressTest()">💪 Memory Stress Test</button>
+                <button class="button danger" onclick="forceGarbageCollection()">🗑️ Force Cleanup</button>
+                
+                <div class="results" id="memoryResults" style="display: none;">
+                    <h3>🧠 Memory Statistics</h3>
+                    <div class="result-grid" id="memoryGrid"></div>
+                </div>
+            </div>
+
+            <!-- Performance Profiling Section -->
+            <div class="section">
+                <h2>📈 Performance Profiling</h2>
+                <button class="button" onclick="startProfilingSession()">▶️ Start Session</button>
+                <button class="button" onclick="endProfilingSession()">⏹️ End Session</button>
+                <button class="button" onclick="getPerformanceReport()">📊 Generate Report</button>
+                <button class="button danger" onclick="clearProfilingData()">🗑️ Clear Data</button>
+                
+                <div class="results" id="profilingResults" style="display: none;">
+                    <h3>📋 Profiling Results</h3>
+                    <div id="profilingData"></div>
+                </div>
+            </div>
+
+            <!-- System Information -->
+            <div class="section">
+                <h2>🖥️ System Information</h2>
+                <div class="results" id="systemInfo">
+                    <div class="result-grid">
+                        <div class="metric">
+                            <span class="metric-value" id="browserInfo">Loading...</span>
+                            <div class="metric-label">Browser</div>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="memoryLimit">Loading...</span>
+                            <div class="metric-label">Memory Limit</div>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="webglRenderer">Loading...</span>
+                            <div class="metric-label">WebGL Renderer</div>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-value" id="webgpuStatus">Loading...</span>
+                            <div class="metric-label">WebGPU Status</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Real-time Logs -->
+            <div class="section">
+                <h2>📜 Real-time Logs</h2>
+                <button class="button" onclick="clearLogs()">🗑️ Clear Logs</button>
+                <div class="logs" id="logs"></div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        // Global variables
+        let tf = null;
+        let capabilities = null;
+        let currentSession = null;
+        let benchmarkData = [];
+
+        // Logging system
+        function log(message, type = 'info') {
+            const logs = document.getElementById('logs');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+            logEntry.innerHTML = `<span class="log-timestamp">[${timestamp}]</span> ${message}`;
+            logs.appendChild(logEntry);
+            logs.scrollTop = logs.scrollHeight;
+            console.log(`[TrustformeRS] ${message}`);
+        }
+
+        // Status display
+        function showStatus(message, type = 'info') {
+            const status = document.getElementById('initStatus');
+            status.textContent = message;
+            status.className = `status ${type}`;
+            status.style.display = 'block';
+        }
+
+        // Update capabilities display
+        function updateCapabilities(caps) {
+            document.getElementById('capabilities').style.display = 'grid';
+            Object.entries(caps).forEach(([key, enabled]) => {
+                const element = document.getElementById(`cap-${key}`);
+                if (element) {
+                    element.className = `capability ${enabled ? 'enabled' : 'disabled'}`;
+                }
+            });
+        }
+
+        // Initialize TrustformeRS
+        window.initializeTrustformers = async function() {
+            try {
+                showStatus('Loading TrustformeRS module...', 'info');
+                
+                // Import TrustformeRS (in real implementation, this would be from npm)
+                // For demo purposes, we'll simulate the API
+                tf = await simulateTrustformersAPI();
+                
+                const options = {
+                    enableWebGL: document.getElementById('enableWebGL').value === 'true',
+                    enableMemoryPool: document.getElementById('enableMemoryPool').value === 'true',
+                    enableProfiling: document.getElementById('enableProfiling').value === 'true',
+                    enableZeroCopy: document.getElementById('enableZeroCopy').value === 'true',
+                };
+
+                log('Initializing TrustformeRS with enhanced features...');
+                capabilities = await tf.initializeEnhanced(options);
+                
+                updateCapabilities(capabilities);
+                showStatus('TrustformeRS initialized successfully!', 'success');
+                log(`Capabilities: ${JSON.stringify(capabilities)}`);
+                
+                // Update system info
+                updateSystemInfo();
+                
+            } catch (error) {
+                showStatus(`Initialization failed: ${error.message}`, 'error');
+                log(`Error: ${error.message}`, 'error');
+            }
+        };
+
+        // Cleanup
+        window.cleanup = function() {
+            if (tf && tf.performance) {
+                tf.performance.cleanup();
+            }
+            capabilities = null;
+            currentSession = null;
+            benchmarkData = [];
+            
+            document.getElementById('capabilities').style.display = 'none';
+            document.getElementById('initStatus').style.display = 'none';
+            document.getElementById('benchmarkResults').style.display = 'none';
+            document.getElementById('memoryResults').style.display = 'none';
+            document.getElementById('profilingResults').style.display = 'none';
+            
+            log('TrustformeRS cleaned up and reset');
+        };
+
+        // Progress bar management
+        function updateProgress(percent) {
+            document.getElementById('progressBar').style.display = 'block';
+            document.getElementById('progressFill').style.width = percent + '%';
+        }
+
+        function hideProgress() {
+            document.getElementById('progressBar').style.display = 'none';
+        }
+
+        // Benchmark functions
+        window.runMatrixBenchmark = async function() {
+            if (!tf) {
+                alert('Please initialize TrustformeRS first');
+                return;
+            }
+
+            const size = parseInt(document.getElementById('matrixSize').value);
+            const backend = document.getElementById('backend').value;
+            const iterations = parseInt(document.getElementById('iterations').value);
+
+            log(`Starting matrix multiplication benchmark: ${size}x${size}, ${iterations} iterations`);
+            
+            try {
+                updateProgress(0);
+                const results = await simulateMatrixBenchmark(size, backend, iterations);
+                displayBenchmarkResults([results]);
+                log(`Matrix benchmark completed: ${results.time.toFixed(2)}ms average`);
+            } catch (error) {
+                log(`Benchmark error: ${error.message}`, 'error');
+            } finally {
+                hideProgress();
+            }
+        };
+
+        window.runElementwiseBenchmark = async function() {
+            if (!tf) {
+                alert('Please initialize TrustformeRS first');
+                return;
+            }
+
+            const size = parseInt(document.getElementById('matrixSize').value);
+            const backend = document.getElementById('backend').value;
+            const iterations = parseInt(document.getElementById('iterations').value);
+
+            log(`Starting element-wise benchmark: ${size}x${size}, ${iterations} iterations`);
+            
+            try {
+                updateProgress(0);
+                const results = await simulateElementwiseBenchmark(size, backend, iterations);
+                displayBenchmarkResults([results]);
+                log(`Element-wise benchmark completed: ${results.time.toFixed(2)}ms average`);
+            } catch (error) {
+                log(`Benchmark error: ${error.message}`, 'error');
+            } finally {
+                hideProgress();
+            }
+        };
+
+        window.runActivationBenchmark = async function() {
+            if (!tf) {
+                alert('Please initialize TrustformeRS first');
+                return;
+            }
+
+            const size = parseInt(document.getElementById('matrixSize').value);
+            const backend = document.getElementById('backend').value;
+            const iterations = parseInt(document.getElementById('iterations').value);
+
+            log(`Starting activation benchmark: ${size}x${size}, ${iterations} iterations`);
+            
+            try {
+                updateProgress(0);
+                const results = await simulateActivationBenchmark(size, backend, iterations);
+                displayBenchmarkResults([results]);
+                log(`Activation benchmark completed: ${results.time.toFixed(2)}ms average`);
+            } catch (error) {
+                log(`Benchmark error: ${error.message}`, 'error');
+            } finally {
+                hideProgress();
+            }
+        };
+
+        window.runComprehensiveBenchmark = async function() {
+            if (!tf) {
+                alert('Please initialize TrustformeRS first');
+                return;
+            }
+
+            const size = parseInt(document.getElementById('matrixSize').value);
+            const backend = document.getElementById('backend').value;
+            const iterations = parseInt(document.getElementById('iterations').value);
+
+            log('Starting comprehensive benchmark suite...');
+            
+            try {
+                updateProgress(0);
+                
+                const matrixResults = await simulateMatrixBenchmark(size, backend, iterations);
+                updateProgress(33);
+                
+                const elementResults = await simulateElementwiseBenchmark(size, backend, iterations);
+                updateProgress(66);
+                
+                const activationResults = await simulateActivationBenchmark(size, backend, iterations);
+                updateProgress(100);
+                
+                const allResults = [matrixResults, elementResults, activationResults];
+                displayBenchmarkResults(allResults);
+                
+                log('Comprehensive benchmark completed successfully');
+            } catch (error) {
+                log(`Benchmark error: ${error.message}`, 'error');
+            } finally {
+                hideProgress();
+            }
+        };
+
+        // Memory management functions
+        window.testMemoryPooling = async function() {
+            if (!tf) {
+                alert('Please initialize TrustformeRS first');
+                return;
+            }
+
+            const count = parseInt(document.getElementById('tensorCount').value);
+            const size = parseInt(document.getElementById('tensorSize').value);
+
+            log(`Testing memory pooling: ${count} tensors of ${size}x${size}`);
+            
+            try {
+                const results = await simulateMemoryPoolingTest(count, size);
+                displayMemoryResults(results);
+                log(`Memory pooling test completed`);
+            } catch (error) {
+                log(`Memory test error: ${error.message}`, 'error');
+            }
+        };
+
+        window.testZeroCopyOperations = async function() {
+            if (!tf) {
+                alert('Please initialize TrustformeRS first');
+                return;
+            }
+
+            log('Testing zero-copy operations...');
+            
+            try {
+                const results = await simulateZeroCopyTest();
+                displayMemoryResults(results);
+                log('Zero-copy test completed');
+            } catch (error) {
+                log(`Zero-copy test error: ${error.message}`, 'error');
+            }
+        };
+
+        window.memoryStressTest = async function() {
+            if (!tf) {
+                alert('Please initialize TrustformeRS first');
+                return;
+            }
+
+            log('Running memory stress test...');
+            
+            try {
+                const results = await simulateMemoryStressTest();
+                displayMemoryResults(results);
+                log('Memory stress test completed');
+            } catch (error) {
+                log(`Stress test error: ${error.message}`, 'error');
+            }
+        };
+
+        window.forceGarbageCollection = function() {
+            if (tf && tf.performance) {
+                tf.performance.cleanup();
+                log('Forced garbage collection');
+            }
+        };
+
+        // Profiling functions
+        window.startProfilingSession = function() {
+            if (!tf || !capabilities.profiling) {
+                alert('Profiling not available. Please initialize with profiling enabled.');
+                return;
+            }
+
+            currentSession = `session_${Date.now()}`;
+            log(`Started profiling session: ${currentSession}`);
+        };
+
+        window.endProfilingSession = function() {
+            if (!currentSession) {
+                alert('No active profiling session');
+                return;
+            }
+
+            log(`Ended profiling session: ${currentSession}`);
+            currentSession = null;
+        };
+
+        window.getPerformanceReport = function() {
+            if (!tf || !capabilities.profiling) {
+                alert('Profiling not available');
+                return;
+            }
+
+            const report = simulatePerformanceReport();
+            displayProfilingResults(report);
+            log('Generated performance report');
+        };
+
+        window.clearProfilingData = function() {
+            document.getElementById('profilingResults').style.display = 'none';
+            log('Cleared profiling data');
+        };
+
+        // Display functions
+        function displayBenchmarkResults(results) {
+            const container = document.getElementById('benchmarkResults');
+            const grid = document.getElementById('resultGrid');
+            
+            grid.innerHTML = '';
+            
+            results.forEach(result => {
+                const metric = document.createElement('div');
+                metric.className = 'metric';
+                metric.innerHTML = `
+                    <span class="metric-value">${result.time.toFixed(2)}ms</span>
+                    <div class="metric-label">${result.operation} (${result.backend})</div>
+                `;
+                grid.appendChild(metric);
+            });
+
+            // Add performance comparison
+            if (results.length > 1) {
+                const fastest = Math.min(...results.map(r => r.time));
+                const speedup = document.createElement('div');
+                speedup.className = 'metric';
+                speedup.innerHTML = `
+                    <span class="metric-value">${(results[0].time / fastest).toFixed(1)}x</span>
+                    <div class="metric-label">Speedup vs Fastest</div>
+                `;
+                grid.appendChild(speedup);
+            }
+
+            container.style.display = 'block';
+            
+            // Update chart
+            updatePerformanceChart(results);
+        }
+
+        function displayMemoryResults(results) {
+            const container = document.getElementById('memoryResults');
+            const grid = document.getElementById('memoryGrid');
+            
+            grid.innerHTML = '';
+            
+            Object.entries(results).forEach(([key, value]) => {
+                const metric = document.createElement('div');
+                metric.className = 'metric';
+                
+                let displayValue = value;
+                if (typeof value === 'number') {
+                    if (key.includes('Memory') || key.includes('Size')) {
+                        displayValue = formatBytes(value);
+                    } else {
+                        displayValue = value.toLocaleString();
+                    }
+                }
+                
+                metric.innerHTML = `
+                    <span class="metric-value">${displayValue}</span>
+                    <div class="metric-label">${key.replace(/([A-Z])/g, ' $1').trim()}</div>
+                `;
+                grid.appendChild(metric);
+            });
+
+            container.style.display = 'block';
+        }
+
+        function displayProfilingResults(report) {
+            const container = document.getElementById('profilingResults');
+            const data = document.getElementById('profilingData');
+            
+            data.innerHTML = `
+                <h4>📊 Session Summary</h4>
+                <p><strong>Total Operations:</strong> ${report.totalOperations}</p>
+                <p><strong>Average Operation Time:</strong> ${report.averageTime.toFixed(2)}ms</p>
+                <p><strong>Memory Efficiency:</strong> ${(report.memoryEfficiency * 100).toFixed(1)}%</p>
+                
+                <h4>🚀 Performance Recommendations</h4>
+                <ul>
+                    ${report.recommendations.map(rec => `<li>${rec}</li>`).join('')}
+                </ul>
+                
+                <h4>🔧 Operation Breakdown</h4>
+                <div class="result-grid">
+                    ${Object.entries(report.operations).map(([op, stats]) => `
+                        <div class="metric">
+                            <span class="metric-value">${stats.count}</span>
+                            <div class="metric-label">${op} (${stats.avgTime.toFixed(2)}ms avg)</div>
+                        </div>
+                    `).join('')}
+                </div>
+            `;
+
+            container.style.display = 'block';
+        }
+
+        function updatePerformanceChart(results) {
+            const canvas = document.getElementById('performanceChart');
+            const ctx = canvas.getContext('2d');
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Simple bar chart
+            const barWidth = canvas.width / results.length - 20;
+            const maxTime = Math.max(...results.map(r => r.time));
+            
+            results.forEach((result, index) => {
+                const barHeight = (result.time / maxTime) * (canvas.height - 40);
+                const x = index * (barWidth + 20) + 10;
+                const y = canvas.height - barHeight - 20;
+                
+                // Draw bar
+                ctx.fillStyle = '#3498db';
+                ctx.fillRect(x, y, barWidth, barHeight);
+                
+                // Draw label
+                ctx.fillStyle = '#2c3e50';
+                ctx.font = '12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(result.operation, x + barWidth/2, canvas.height - 5);
+                ctx.fillText(`${result.time.toFixed(1)}ms`, x + barWidth/2, y - 5);
+            });
+        }
+
+        function updateSystemInfo() {
+            document.getElementById('browserInfo').textContent = navigator.userAgent.split(' ')[0];
+            
+            if (performance.memory) {
+                document.getElementById('memoryLimit').textContent = formatBytes(performance.memory.jsHeapSizeLimit);
+            } else {
+                document.getElementById('memoryLimit').textContent = 'Unknown';
+            }
+            
+            // WebGL info
+            const canvas = document.createElement('canvas');
+            const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+            if (gl) {
+                const renderer = gl.getParameter(gl.RENDERER);
+                document.getElementById('webglRenderer').textContent = renderer || 'Available';
+            } else {
+                document.getElementById('webglRenderer').textContent = 'Not Available';
+            }
+            
+            // WebGPU info
+            if (navigator.gpu) {
+                document.getElementById('webgpuStatus').textContent = 'Available';
+            } else {
+                document.getElementById('webgpuStatus').textContent = 'Not Available';
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        window.clearLogs = function() {
+            document.getElementById('logs').innerHTML = '';
+        };
+
+        // Simulation functions (in real implementation, these would call actual TrustformeRS APIs)
+        async function simulateTrustformersAPI() {
+            return {
+                initializeEnhanced: async (options) => {
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    return {
+                        wasm: true,
+                        webgl: options.enableWebGL && !!window.WebGLRenderingContext,
+                        webgpu: !!navigator.gpu,
+                        memoryPool: options.enableMemoryPool,
+                        profiling: options.enableProfiling,
+                        zeroCopy: options.enableZeroCopy
+                    };
+                },
+                performance: {
+                    cleanup: () => console.log('Cleanup called')
+                }
+            };
+        }
+
+        async function simulateMatrixBenchmark(size, backend, iterations) {
+            const baseTime = size * size / 10000; // Simulated computation time
+            const backendMultiplier = {
+                'webgl': 0.3,
+                'webgpu': 0.2,
+                'wasm': 1.0,
+                'auto': capabilities?.webgpu ? 0.2 : capabilities?.webgl ? 0.3 : 1.0
+            };
+            
+            for (let i = 0; i < iterations; i++) {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                updateProgress((i + 1) / iterations * 100);
+            }
+            
+            const time = baseTime * backendMultiplier[backend] * (0.8 + Math.random() * 0.4);
+            return {
+                operation: 'Matrix Multiplication',
+                backend: backend === 'auto' ? (capabilities?.webgpu ? 'WebGPU' : capabilities?.webgl ? 'WebGL' : 'WASM') : backend.toUpperCase(),
+                time: time,
+                size: `${size}x${size}`,
+                iterations
+            };
+        }
+
+        async function simulateElementwiseBenchmark(size, backend, iterations) {
+            const baseTime = size * size / 50000;
+            const backendMultiplier = {
+                'webgl': 0.4,
+                'webgpu': 0.3,
+                'wasm': 1.0,
+                'auto': capabilities?.webgpu ? 0.3 : capabilities?.webgl ? 0.4 : 1.0
+            };
+            
+            for (let i = 0; i < iterations; i++) {
+                await new Promise(resolve => setTimeout(resolve, 50));
+                updateProgress((i + 1) / iterations * 100);
+            }
+            
+            const time = baseTime * backendMultiplier[backend] * (0.8 + Math.random() * 0.4);
+            return {
+                operation: 'Element-wise Add',
+                backend: backend === 'auto' ? (capabilities?.webgpu ? 'WebGPU' : capabilities?.webgl ? 'WebGL' : 'WASM') : backend.toUpperCase(),
+                time: time,
+                size: `${size}x${size}`,
+                iterations
+            };
+        }
+
+        async function simulateActivationBenchmark(size, backend, iterations) {
+            const baseTime = size * size / 80000;
+            const backendMultiplier = {
+                'webgl': 0.5,
+                'webgpu': 0.4,
+                'wasm': 1.0,
+                'auto': capabilities?.webgpu ? 0.4 : capabilities?.webgl ? 0.5 : 1.0
+            };
+            
+            for (let i = 0; i < iterations; i++) {
+                await new Promise(resolve => setTimeout(resolve, 30));
+                updateProgress((i + 1) / iterations * 100);
+            }
+            
+            const time = baseTime * backendMultiplier[backend] * (0.8 + Math.random() * 0.4);
+            return {
+                operation: 'ReLU Activation',
+                backend: backend === 'auto' ? (capabilities?.webgpu ? 'WebGPU' : capabilities?.webgl ? 'WebGL' : 'WASM') : backend.toUpperCase(),
+                time: time,
+                size: `${size}x${size}`,
+                iterations
+            };
+        }
+
+        async function simulateMemoryPoolingTest(count, size) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            const tensorSize = size * size * 4; // 4 bytes per float32
+            const totalMemory = count * tensorSize;
+            const poolEfficiency = capabilities?.memoryPool ? 0.3 : 1.0; // 70% memory savings with pooling
+            const actualMemory = totalMemory * poolEfficiency;
+            
+            return {
+                tensorCount: count,
+                tensorSize: `${size}x${size}`,
+                totalMemoryUsed: actualMemory,
+                memorySavings: totalMemory - actualMemory,
+                poolHitRate: capabilities?.memoryPool ? 85 + Math.random() * 10 : 0,
+                allocationTime: capabilities?.memoryPool ? 50 + Math.random() * 30 : 200 + Math.random() * 100
+            };
+        }
+
+        async function simulateZeroCopyTest() {
+            await new Promise(resolve => setTimeout(resolve, 300));
+            
+            return {
+                zeroCopyEnabled: capabilities?.zeroCopy,
+                transferTime: capabilities?.zeroCopy ? 5 + Math.random() * 10 : 50 + Math.random() * 30,
+                memoryOverhead: capabilities?.zeroCopy ? 0 : 1024 * 1024 * 10, // 10MB overhead without zero-copy
+                dataIntegrity: 100,
+                performanceGain: capabilities?.zeroCopy ? 3.5 + Math.random() * 1.5 : 1.0
+            };
+        }
+
+        async function simulateMemoryStressTest() {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            
+            return {
+                maxTensorsAllocated: 500 + Math.floor(Math.random() * 300),
+                peakMemoryUsage: (200 + Math.random() * 300) * 1024 * 1024,
+                garbageCollections: Math.floor(Math.random() * 10),
+                memoryLeaks: 0,
+                testDuration: 1000 + Math.random() * 500,
+                systemStability: 'Stable'
+            };
+        }
+
+        function simulatePerformanceReport() {
+            return {
+                totalOperations: 150 + Math.floor(Math.random() * 100),
+                averageTime: 25 + Math.random() * 20,
+                memoryEfficiency: 0.7 + Math.random() * 0.25,
+                recommendations: [
+                    'Enable WebGL backend for 3x performance improvement',
+                    'Use memory pooling to reduce allocation overhead by 70%',
+                    'Consider zero-copy operations for large tensors',
+                    'Batch operations together for better throughput'
+                ],
+                operations: {
+                    'Matrix Multiply': { count: 50, avgTime: 15.5 },
+                    'Element-wise Add': { count: 75, avgTime: 5.2 },
+                    'ReLU Activation': { count: 60, avgTime: 3.8 },
+                    'Memory Allocation': { count: 200, avgTime: 1.2 }
+                }
+            };
+        }
+
+        // Initialize system info on load
+        updateSystemInfo();
+        log('Performance optimization demo loaded successfully');
+    </script>
+</body>
+</html>

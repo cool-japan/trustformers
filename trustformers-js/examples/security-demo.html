@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TrustformeRS Security Features Demo</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; frame-ancestors 'none';">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #ff6b6b 0%, #ee5a24 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(90deg, #ff6b6b, #ee5a24);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .demo-sections {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0;
+        }
+
+        .demo-section {
+            padding: 30px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .demo-section:nth-child(even) {
+            border-left: 1px solid #e0e0e0;
+            background: #f8f9fa;
+        }
+
+        .section-title {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            color: #333;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .test-area {
+            margin: 20px 0;
+        }
+
+        .test-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 100px;
+            margin-bottom: 10px;
+        }
+
+        .test-input:focus {
+            outline: none;
+            border-color: #ff6b6b;
+            box-shadow: 0 0 0 3px rgba(255, 107, 107, 0.1);
+        }
+
+        .test-button {
+            padding: 10px 20px;
+            background: linear-gradient(90deg, #ff6b6b, #ee5a24);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin: 5px;
+        }
+
+        .test-button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(255, 107, 107, 0.3);
+        }
+
+        .test-button.secondary {
+            background: #6c757d;
+        }
+
+        .result-area {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 13px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .result-success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+
+        .result-error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+
+        .result-warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+        }
+
+        .result-info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+
+        .sample-attacks {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 15px 0;
+        }
+
+        .attack-sample {
+            padding: 6px 12px;
+            background: #ffe6e6;
+            color: #d63031;
+            border: 1px solid #ffb3b3;
+            border-radius: 15px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.3s;
+        }
+
+        .attack-sample:hover {
+            background: #d63031;
+            color: white;
+        }
+
+        .security-metrics {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+
+        .metric-item {
+            text-align: center;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #ff6b6b;
+        }
+
+        .metric-label {
+            font-size: 0.9em;
+            color: #666;
+            margin-top: 5px;
+        }
+
+        .privacy-controls {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .privacy-control {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 15px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .privacy-control:last-child {
+            border-bottom: none;
+        }
+
+        .privacy-label {
+            flex: 1;
+        }
+
+        .privacy-title {
+            font-weight: 600;
+            margin-bottom: 5px;
+        }
+
+        .privacy-description {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .privacy-toggle {
+            width: 50px;
+            height: 25px;
+            background: #ccc;
+            border-radius: 25px;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+
+        .privacy-toggle.active {
+            background: #ff6b6b;
+        }
+
+        .privacy-toggle::after {
+            content: '';
+            position: absolute;
+            width: 21px;
+            height: 21px;
+            background: white;
+            border-radius: 50%;
+            top: 2px;
+            left: 2px;
+            transition: transform 0.3s;
+        }
+
+        .privacy-toggle.active::after {
+            transform: translateX(25px);
+        }
+
+        .csp-status {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 10px 0;
+        }
+
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #28a745;
+        }
+
+        .status-dot.warning {
+            background: #ffc107;
+        }
+
+        .status-dot.error {
+            background: #dc3545;
+        }
+
+        @media (max-width: 1000px) {
+            .demo-sections {
+                grid-template-columns: 1fr;
+            }
+
+            .demo-section:nth-child(even) {
+                border-left: none;
+                border-top: 1px solid #e0e0e0;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                margin: 10px;
+                border-radius: 15px;
+            }
+
+            .header {
+                padding: 20px;
+            }
+
+            .header h1 {
+                font-size: 2em;
+            }
+
+            .demo-section {
+                padding: 20px;
+            }
+
+            .metrics-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🛡️ Security Features Demo</h1>
+            <p>Explore TrustformeRS security and privacy protection capabilities</p>
+        </div>
+
+        <div class="demo-sections">
+            <!-- Input Sanitization Demo -->
+            <div class="demo-section">
+                <div class="section-title">
+                    🧹 Input Sanitization
+                </div>
+                
+                <div class="test-area">
+                    <textarea id="sanitizer-input" class="test-input" placeholder="Enter potentially malicious input to test sanitization..."></textarea>
+                    
+                    <div class="sample-attacks">
+                        <span class="attack-sample" onclick="setSanitizerSample('xss')">&lt;script&gt;alert('XSS')&lt;/script&gt;</span>
+                        <span class="attack-sample" onclick="setSanitizerSample('sql')">'; DROP TABLE users; --</span>
+                        <span class="attack-sample" onclick="setSanitizerSample('command')">| rm -rf /</span>
+                        <span class="attack-sample" onclick="setSanitizerSample('path')">../../etc/passwd</span>
+                    </div>
+                    
+                    <button class="test-button" onclick="testSanitization()">🧹 Sanitize Input</button>
+                    <button class="test-button secondary" onclick="clearSanitizerResult()">Clear</button>
+                </div>
+                
+                <div id="sanitizer-result" class="result-area result-info" style="display: none;"></div>
+            </div>
+
+            <!-- Input Validation Demo -->
+            <div class="demo-section">
+                <div class="section-title">
+                    ✅ Input Validation
+                </div>
+                
+                <div class="test-area">
+                    <select id="validation-schema" style="width: 100%; padding: 10px; margin-bottom: 10px; border: 1px solid #e0e0e0; border-radius: 6px;">
+                        <option value="userInput">User Input Schema</option>
+                        <option value="modelConfig">Model Config Schema</option>
+                        <option value="fileUpload">File Upload Schema</option>
+                        <option value="apiRequest">API Request Schema</option>
+                    </select>
+                    
+                    <textarea id="validation-input" class="test-input" placeholder="Enter JSON to validate against selected schema..."></textarea>
+                    
+                    <button class="test-button" onclick="testValidation()">✅ Validate Input</button>
+                    <button class="test-button secondary" onclick="loadSampleData()">Load Sample</button>
+                    <button class="test-button secondary" onclick="clearValidationResult()">Clear</button>
+                </div>
+                
+                <div id="validation-result" class="result-area result-info" style="display: none;"></div>
+            </div>
+
+            <!-- CSP Monitoring Demo -->
+            <div class="demo-section">
+                <div class="section-title">
+                    🛡️ Content Security Policy
+                </div>
+                
+                <div class="csp-status">
+                    <h4>CSP Status</h4>
+                    <div class="status-indicator">
+                        <div class="status-dot" id="csp-dot"></div>
+                        <span id="csp-status-text">Checking CSP status...</span>
+                    </div>
+                    
+                    <div style="margin: 15px 0;">
+                        <strong>Active CSP Directives:</strong>
+                        <div id="csp-directives" style="font-family: monospace; font-size: 0.9em; margin-top: 8px; color: #666;"></div>
+                    </div>
+                </div>
+                
+                <div class="test-area">
+                    <p>Try these CSP violation tests:</p>
+                    <button class="test-button" onclick="testInlineScript()">Inline Script</button>
+                    <button class="test-button" onclick="testExternalScript()">External Script</button>
+                    <button class="test-button" onclick="testUnsafeEval()">eval() Function</button>
+                </div>
+                
+                <div id="csp-result" class="result-area result-info" style="display: none;"></div>
+            </div>
+
+            <!-- Privacy Controls Demo -->
+            <div class="demo-section">
+                <div class="section-title">
+                    🔒 Privacy Controls
+                </div>
+                
+                <div class="privacy-controls">
+                    <div class="privacy-control">
+                        <div class="privacy-label">
+                            <div class="privacy-title">Analytics Cookies</div>
+                            <div class="privacy-description">Help us understand how you use our site</div>
+                        </div>
+                        <div class="privacy-toggle" id="analytics-toggle" onclick="togglePrivacy('analytics')"></div>
+                    </div>
+                    
+                    <div class="privacy-control">
+                        <div class="privacy-label">
+                            <div class="privacy-title">Marketing Cookies</div>
+                            <div class="privacy-description">Used to show relevant advertisements</div>
+                        </div>
+                        <div class="privacy-toggle" id="marketing-toggle" onclick="togglePrivacy('marketing')"></div>
+                    </div>
+                    
+                    <div class="privacy-control">
+                        <div class="privacy-label">
+                            <div class="privacy-title">Functional Cookies</div>
+                            <div class="privacy-description">Remember your preferences and settings</div>
+                        </div>
+                        <div class="privacy-toggle" id="functional-toggle" onclick="togglePrivacy('functional')"></div>
+                    </div>
+                </div>
+                
+                <div class="test-area">
+                    <button class="test-button" onclick="exportUserData()">📤 Export My Data</button>
+                    <button class="test-button" onclick="anonymizeData()">🔒 Anonymize Data</button>
+                    <button class="test-button secondary" onclick="deleteAllData()">🗑️ Delete All Data</button>
+                </div>
+                
+                <div id="privacy-result" class="result-area result-info" style="display: none;"></div>
+            </div>
+        </div>
+
+        <!-- Security Metrics -->
+        <div class="security-metrics">
+            <h3>Security Metrics</h3>
+            <div class="metrics-grid">
+                <div class="metric-item">
+                    <div class="metric-value" id="threats-blocked">0</div>
+                    <div class="metric-label">Threats Blocked</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="inputs-sanitized">0</div>
+                    <div class="metric-label">Inputs Sanitized</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="validations-performed">0</div>
+                    <div class="metric-label">Validations Performed</div>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-value" id="csp-violations">0</div>
+                    <div class="metric-label">CSP Violations</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { 
+            initializeSecurity, 
+            getSecurityManagers 
+        } from '../src/security/index.js';
+        import { 
+            initializeValidator, 
+            validate, 
+            predefinedSchemas 
+        } from '../src/security/validation.js';
+
+        class SecurityDemo {
+            constructor() {
+                this.security = null;
+                this.validator = null;
+                this.metrics = {
+                    threatsBlocked: 0,
+                    inputsSanitized: 0,
+                    validationsPerformed: 0,
+                    cspViolations: 0
+                };
+
+                this.sampleData = {
+                    userInput: {
+                        text: "Hello, this is a sample user input for testing validation.",
+                        metadata: {
+                            timestamp: new Date().toISOString(),
+                            source: "demo"
+                        }
+                    },
+                    modelConfig: {
+                        modelId: "gpt2_base",
+                        temperature: 0.7,
+                        maxLength: 100,
+                        doSample: true
+                    },
+                    fileUpload: {
+                        filename: "sample.txt",
+                        size: 1024,
+                        type: "text/plain",
+                        content: "Sample file content"
+                    },
+                    apiRequest: {
+                        endpoint: "https://api.example.com/data",
+                        method: "GET",
+                        headers: {
+                            "Content-Type": "application/json"
+                        }
+                    }
+                };
+
+                this.init();
+            }
+
+            async init() {
+                try {
+                    console.log('Initializing security features...');
+                    
+                    // Initialize security managers
+                    this.security = initializeSecurity({
+                        sanitizer: {
+                            maxLength: 10000,
+                            enableXssProtection: true,
+                            enableSqlInjectionPrevention: true,
+                            enableCommandInjectionPrevention: true
+                        },
+                        privacy: {
+                            enableCookieConsent: false // Disabled for demo
+                        },
+                        enableMonitoring: true,
+                        enableCSP: true
+                    });
+
+                    // Initialize validator
+                    this.validator = initializeValidator();
+
+                    // Setup CSP monitoring
+                    this.setupCSPMonitoring();
+                    
+                    // Update UI
+                    this.updatePrivacyToggles();
+                    this.updateCSPStatus();
+                    this.updateMetrics();
+                    
+                    console.log('Security demo initialized');
+                    
+                } catch (error) {
+                    console.error('Failed to initialize security demo:', error);
+                }
+            }
+
+            testSanitization() {
+                const input = document.getElementById('sanitizer-input').value;
+                const resultArea = document.getElementById('sanitizer-result');
+                
+                if (!input.trim()) {
+                    this.showResult(resultArea, 'Please enter some input to sanitize', 'warning');
+                    return;
+                }
+
+                try {
+                    const sanitized = this.security.sanitizer.sanitizeText(input, {
+                        allowHtml: false,
+                        enableXssProtection: true,
+                        enableSqlInjectionPrevention: true,
+                        enableCommandInjectionPrevention: true
+                    });
+
+                    const result = {
+                        original: input,
+                        sanitized: sanitized,
+                        threats_detected: this.detectThreats(input),
+                        safe: sanitized !== input
+                    };
+
+                    this.showResult(resultArea, JSON.stringify(result, null, 2), 'success');
+                    
+                    this.metrics.inputsSanitized++;
+                    if (result.threats_detected.length > 0) {
+                        this.metrics.threatsBlocked += result.threats_detected.length;
+                    }
+                    this.updateMetrics();
+
+                    // Record security event
+                    if (result.threats_detected.length > 0) {
+                        this.security.monitor.recordEvent('input_sanitized', {
+                            threats: result.threats_detected,
+                            input_length: input.length
+                        });
+                    }
+
+                } catch (error) {
+                    this.showResult(resultArea, `Error: ${error.message}`, 'error');
+                }
+            }
+
+            detectThreats(input) {
+                const threats = [];
+                
+                if (/<script[^>]*>.*?<\/script>/gi.test(input)) {
+                    threats.push('XSS_SCRIPT_TAG');
+                }
+                
+                if (/javascript:/gi.test(input)) {
+                    threats.push('XSS_JAVASCRIPT_URL');
+                }
+                
+                if (/('|(\\')|(;|(%3B))|(--|(\\-\\-))/gi.test(input)) {
+                    threats.push('SQL_INJECTION');
+                }
+                
+                if (/(\||&|;|`|\$\(|\$\{)/gi.test(input)) {
+                    threats.push('COMMAND_INJECTION');
+                }
+                
+                if (/(\.\.(\/|\\))+/gi.test(input)) {
+                    threats.push('PATH_TRAVERSAL');
+                }
+
+                return threats;
+            }
+
+            testValidation() {
+                const schemaName = document.getElementById('validation-schema').value;
+                const input = document.getElementById('validation-input').value;
+                const resultArea = document.getElementById('validation-result');
+                
+                if (!input.trim()) {
+                    this.showResult(resultArea, 'Please enter JSON to validate', 'warning');
+                    return;
+                }
+
+                try {
+                    const data = JSON.parse(input);
+                    const result = validate(schemaName, data, { sanitize: true });
+                    
+                    this.showResult(resultArea, JSON.stringify(result, null, 2), 
+                        result.valid ? 'success' : 'error');
+                    
+                    this.metrics.validationsPerformed++;
+                    this.updateMetrics();
+
+                } catch (error) {
+                    this.showResult(resultArea, `JSON Parse Error: ${error.message}`, 'error');
+                }
+            }
+
+            loadSampleData() {
+                const schemaName = document.getElementById('validation-schema').value;
+                const sampleData = this.sampleData[schemaName];
+                
+                if (sampleData) {
+                    document.getElementById('validation-input').value = JSON.stringify(sampleData, null, 2);
+                }
+            }
+
+            setupCSPMonitoring() {
+                // Listen for CSP violations
+                document.addEventListener('securitypolicyviolation', (event) => {
+                    console.log('CSP Violation:', event);
+                    
+                    this.security.csp.handleViolationReport({
+                        'violated-directive': event.violatedDirective,
+                        'blocked-uri': event.blockedURI,
+                        'source-file': event.sourceFile,
+                        'line-number': event.lineNumber,
+                        'column-number': event.columnNumber
+                    });
+
+                    this.metrics.cspViolations++;
+                    this.updateMetrics();
+
+                    const resultArea = document.getElementById('csp-result');
+                    this.showResult(resultArea, 
+                        `CSP Violation Detected:\nDirective: ${event.violatedDirective}\nBlocked URI: ${event.blockedURI}`, 
+                        'error');
+                });
+            }
+
+            testInlineScript() {
+                try {
+                    // This should be blocked by CSP
+                    const script = document.createElement('script');
+                    script.innerHTML = 'console.log("This should be blocked by CSP");';
+                    document.head.appendChild(script);
+                } catch (error) {
+                    console.log('Inline script blocked:', error);
+                }
+            }
+
+            testExternalScript() {
+                try {
+                    // This should be blocked by CSP
+                    const script = document.createElement('script');
+                    script.src = 'https://malicious-site.com/script.js';
+                    document.head.appendChild(script);
+                } catch (error) {
+                    console.log('External script blocked:', error);
+                }
+            }
+
+            testUnsafeEval() {
+                try {
+                    // This should be blocked by CSP
+                    eval('console.log("This should be blocked by CSP");');
+                } catch (error) {
+                    console.log('eval() blocked:', error);
+                    const resultArea = document.getElementById('csp-result');
+                    this.showResult(resultArea, 'eval() function blocked by CSP', 'success');
+                }
+            }
+
+            togglePrivacy(type) {
+                const toggle = document.getElementById(`${type}-toggle`);
+                const isActive = toggle.classList.contains('active');
+                
+                if (isActive) {
+                    toggle.classList.remove('active');
+                    this.security.privacy.saveConsent({ [type]: false });
+                } else {
+                    toggle.classList.add('active');
+                    this.security.privacy.saveConsent({ [type]: true });
+                }
+            }
+
+            updatePrivacyToggles() {
+                ['analytics', 'marketing', 'functional'].forEach(type => {
+                    const toggle = document.getElementById(`${type}-toggle`);
+                    const hasConsent = this.security.privacy.hasConsent(type);
+                    
+                    if (hasConsent) {
+                        toggle.classList.add('active');
+                    } else {
+                        toggle.classList.remove('active');
+                    }
+                });
+            }
+
+            exportUserData() {
+                const data = this.security.privacy.exportUserData();
+                const resultArea = document.getElementById('privacy-result');
+                this.showResult(resultArea, JSON.stringify(data, null, 2), 'info');
+            }
+
+            anonymizeData() {
+                const sampleData = {
+                    ip_address: '192.168.1.1',
+                    user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    session_id: 'abc123def456',
+                    location: {
+                        country: 'US',
+                        region: 'California',
+                        precise_coordinates: { lat: 37.7749, lon: -122.4194 }
+                    }
+                };
+
+                const anonymized = this.security.privacy.anonymizeData(sampleData);
+                const resultArea = document.getElementById('privacy-result');
+                
+                const result = {
+                    original: sampleData,
+                    anonymized: anonymized
+                };
+                
+                this.showResult(resultArea, JSON.stringify(result, null, 2), 'success');
+            }
+
+            deleteAllData() {
+                if (confirm('Are you sure you want to delete all user data? This action cannot be undone.')) {
+                    this.security.privacy.deleteAllUserData();
+                    this.updatePrivacyToggles();
+                    
+                    const resultArea = document.getElementById('privacy-result');
+                    this.showResult(resultArea, 'All user data has been deleted', 'warning');
+                }
+            }
+
+            updateCSPStatus() {
+                const dot = document.getElementById('csp-dot');
+                const text = document.getElementById('csp-status-text');
+                const directives = document.getElementById('csp-directives');
+                
+                // Check if CSP is active
+                const metaCSP = document.querySelector('meta[http-equiv="Content-Security-Policy"]');
+                
+                if (metaCSP) {
+                    dot.className = 'status-dot';
+                    text.textContent = 'CSP Active';
+                    directives.textContent = metaCSP.content;
+                } else {
+                    dot.className = 'status-dot warning';
+                    text.textContent = 'CSP Not Detected';
+                    directives.textContent = 'No CSP meta tag found';
+                }
+            }
+
+            updateMetrics() {
+                document.getElementById('threats-blocked').textContent = this.metrics.threatsBlocked;
+                document.getElementById('inputs-sanitized').textContent = this.metrics.inputsSanitized;
+                document.getElementById('validations-performed').textContent = this.metrics.validationsPerformed;
+                document.getElementById('csp-violations').textContent = this.metrics.cspViolations;
+            }
+
+            showResult(element, content, type) {
+                element.textContent = content;
+                element.className = `result-area result-${type}`;
+                element.style.display = 'block';
+            }
+
+            clearSanitizerResult() {
+                document.getElementById('sanitizer-result').style.display = 'none';
+            }
+
+            clearValidationResult() {
+                document.getElementById('validation-result').style.display = 'none';
+            }
+        }
+
+        // Sample attack patterns for testing
+        const attackSamples = {
+            xss: '<script>alert("XSS Attack!");</script><img src="x" onerror="alert(\'XSS\')">',
+            sql: "'; DROP TABLE users; SELECT * FROM admin WHERE '1'='1",
+            command: 'test | rm -rf / && echo "System compromised"',
+            path: '../../../etc/passwd\x00malicious.txt'
+        };
+
+        // Global functions for UI interactions
+        window.setSanitizerSample = function(type) {
+            document.getElementById('sanitizer-input').value = attackSamples[type];
+        };
+
+        window.testSanitization = function() {
+            demo.testSanitization();
+        };
+
+        window.clearSanitizerResult = function() {
+            demo.clearSanitizerResult();
+        };
+
+        window.testValidation = function() {
+            demo.testValidation();
+        };
+
+        window.loadSampleData = function() {
+            demo.loadSampleData();
+        };
+
+        window.clearValidationResult = function() {
+            demo.clearValidationResult();
+        };
+
+        window.testInlineScript = function() {
+            demo.testInlineScript();
+        };
+
+        window.testExternalScript = function() {
+            demo.testExternalScript();
+        };
+
+        window.testUnsafeEval = function() {
+            demo.testUnsafeEval();
+        };
+
+        window.togglePrivacy = function(type) {
+            demo.togglePrivacy(type);
+        };
+
+        window.exportUserData = function() {
+            demo.exportUserData();
+        };
+
+        window.anonymizeData = function() {
+            demo.anonymizeData();
+        };
+
+        window.deleteAllData = function() {
+            demo.deleteAllData();
+        };
+
+        // Initialize the demo
+        const demo = new SecurityDemo();
+    </script>
+</body>
+</html>

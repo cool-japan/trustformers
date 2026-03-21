@@ -1,0 +1,36 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: trustformers-cache
+  namespace: trustformers
+  labels:
+    app: trustformers-server
+    app.kubernetes.io/name: trustformers-cache
+    app.kubernetes.io/instance: trustformers
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+  - ReadWriteMany
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: standard
+---
+# Optional: If using single-node or need ReadWriteOnce
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: trustformers-cache-rwo
+  namespace: trustformers
+  labels:
+    app: trustformers-server
+    app.kubernetes.io/name: trustformers-cache
+    app.kubernetes.io/instance: trustformers
+    app.kubernetes.io/component: storage
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+  storageClassName: fast-ssd

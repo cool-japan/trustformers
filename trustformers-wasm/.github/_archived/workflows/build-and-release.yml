@@ -1,0 +1,163 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+        
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Install wasm-pack
+      run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      
+    - name: Install optimization tools
+      run: |
+        npm install -g wasm-opt
+        cargo install wasm-snip twiggy
+        
+    - name: Run tests
+      run: |
+        cargo test
+        wasm-pack test --headless --firefox
+        wasm-pack test --headless --chrome
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [web, bundler, nodejs]
+        build-type: [minimal, full]
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+        
+    - name: Cache dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        
+    - name: Install wasm-pack and tools
+      run: |
+        curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        npm install -g wasm-opt
+        cargo install wasm-snip twiggy
+        
+    - name: Build WASM package
+      run: |
+        if [ "${{ matrix.build-type }}" = "minimal" ]; then
+          wasm-pack build --target ${{ matrix.target }} --out-dir pkg-${{ matrix.target }}-minimal -- --features minimal
+        else
+          wasm-pack build --target ${{ matrix.target }} --out-dir pkg-${{ matrix.target }}-full -- --features full
+        fi
+        
+    - name: Optimize build
+      run: ./scripts/optimize-build.sh pkg-${{ matrix.target }}-${{ matrix.build-type }}
+      
+    - name: Generate size report
+      run: ./scripts/size-tracker.sh pkg-${{ matrix.target }}-${{ matrix.build-type }} >> size-report-${{ matrix.target }}-${{ matrix.build-type }}.txt
+      
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: wasm-${{ matrix.target }}-${{ matrix.build-type }}
+        path: |
+          pkg-${{ matrix.target }}-${{ matrix.build-type }}/
+          size-report-${{ matrix.target }}-${{ matrix.build-type }}.txt
+
+  performance:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install dependencies
+      run: |
+        cd tests
+        npm install
+        
+    - name: Run performance benchmarks
+      run: |
+        node tests/performance_benchmarks.js > performance-report.json
+        
+    - name: Check performance regression
+      run: ./scripts/performance-monitor.sh performance-report.json
+      
+    - name: Upload performance report
+      uses: actions/upload-artifact@v4
+      with:
+        name: performance-report
+        path: performance-report.json
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, build, performance]
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      
+    - name: Create release package
+      run: ./scripts/create-release.sh ${{ github.ref_name }}
+      
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          release/*.tar.gz
+          release/*.zip
+          release/size-summary.txt
+          release/performance-summary.json
+        generate_release_notes: true
+        draft: false
+        prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Publish to npm
+      if: "!contains(github.ref_name, 'alpha') && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc')"
+      run: ./scripts/publish-npm.sh
+      env:
+        NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

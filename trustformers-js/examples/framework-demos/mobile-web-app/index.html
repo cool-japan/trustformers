@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#3B82F6">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="TrustformeRS Mobile">
+  <meta name="mobile-web-app-capable" content="yes">
+  
+  <title>TrustformeRS Mobile AI Assistant</title>
+  <meta name="description" content="AI-powered mobile web app using TrustformeRS for real-time text analysis, sentiment detection, and intelligent conversation">
+  
+  <!-- PWA Manifest -->
+  <link rel="manifest" href="./manifest.json">
+  
+  <!-- Icons -->
+  <link rel="icon" type="image/png" sizes="32x32" href="./icons/icon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="./icons/icon-16x16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="./icons/apple-touch-icon.png">
+  <link rel="mask-icon" href="./icons/safari-pinned-tab.svg" color="#3B82F6">
+  
+  <!-- Preload critical resources -->
+  <link rel="preload" href="./css/styles.css" as="style">
+  <link rel="preload" href="./js/main.js" as="script">
+  
+  <!-- Critical CSS inlined for fast loading -->
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: #333;
+      overflow-x: hidden;
+      touch-action: pan-x pan-y;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    
+    .loading-screen {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 9999;
+      transition: opacity 0.5s ease;
+    }
+    
+    .loading-spinner {
+      width: 50px;
+      height: 50px;
+      border: 3px solid rgba(255, 255, 255, 0.3);
+      border-radius: 50%;
+      border-top-color: #fff;
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    
+    .loading-text {
+      color: white;
+      margin-top: 20px;
+      font-size: 18px;
+      font-weight: 500;
+    }
+  </style>
+  
+  <!-- Load main stylesheet -->
+  <link rel="stylesheet" href="./css/styles.css">
+</head>
+<body>
+  <!-- Loading Screen -->
+  <div id="loading-screen" class="loading-screen">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Loading TrustformeRS...</div>
+  </div>
+
+  <!-- PWA Install Banner -->
+  <div id="install-banner" class="install-banner hidden">
+    <div class="install-content">
+      <span>Install TrustformeRS Mobile for the best experience!</span>
+      <div class="install-actions">
+        <button id="install-button" class="btn-install">Install</button>
+        <button id="dismiss-install" class="btn-dismiss">×</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App Container -->
+  <div id="app" class="app-container hidden">
+    <!-- Header with Status -->
+    <header class="app-header">
+      <div class="header-content">
+        <h1 class="app-title">
+          <span class="logo">🤖</span>
+          TrustformeRS Mobile
+        </h1>
+        <div class="status-indicators">
+          <div id="connection-status" class="status-indicator" title="Connection Status">
+            <span class="status-dot"></span>
+          </div>
+          <div id="ai-status" class="status-indicator" title="AI Status">
+            <span class="ai-icon">🧠</span>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Navigation Tabs -->
+    <nav class="tab-navigation">
+      <button class="tab-button active" data-tab="chat">
+        <span class="tab-icon">💬</span>
+        <span class="tab-label">Chat</span>
+      </button>
+      <button class="tab-button" data-tab="analyzer">
+        <span class="tab-icon">🔍</span>
+        <span class="tab-label">Analyzer</span>
+      </button>
+      <button class="tab-button" data-tab="camera">
+        <span class="tab-icon">📷</span>
+        <span class="tab-label">Camera</span>
+      </button>
+      <button class="tab-button" data-tab="voice">
+        <span class="tab-icon">🎤</span>
+        <span class="tab-label">Voice</span>
+      </button>
+    </nav>
+
+    <!-- Chat Tab -->
+    <main id="chat-tab" class="tab-content active">
+      <div class="chat-container">
+        <div id="chat-messages" class="chat-messages">
+          <div class="welcome-message">
+            <div class="assistant-bubble">
+              <div class="bubble-content">
+                <p>👋 Welcome to TrustformeRS Mobile! I'm your AI assistant powered by advanced machine learning.</p>
+                <p>Try asking me anything or use one of these quick actions:</p>
+                <div class="quick-actions">
+                  <button class="quick-action" data-action="How are you feeling today?">😊 Mood Check</button>
+                  <button class="quick-action" data-action="Analyze this text for sentiment">📊 Text Analysis</button>
+                  <button class="quick-action" data-action="Help me write something">✍️ Writing Help</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="chat-input-container">
+          <div class="input-wrapper">
+            <button id="attachment-button" class="attachment-button" title="Attach file or image">
+              📎
+            </button>
+            <textarea 
+              id="chat-input" 
+              class="chat-input" 
+              placeholder="Type your message..."
+              rows="1"
+              maxlength="1000"
+            ></textarea>
+            <button id="send-button" class="send-button" disabled>
+              <span class="send-icon">➤</span>
+            </button>
+          </div>
+          <div id="typing-indicator" class="typing-indicator hidden">
+            <div class="typing-dots">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+            <span>AI is thinking...</span>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Text Analyzer Tab -->
+    <main id="analyzer-tab" class="tab-content">
+      <div class="analyzer-container">
+        <div class="analyzer-header">
+          <h2>📊 Text Analyzer</h2>
+          <p>Get instant insights about any text using advanced ML models</p>
+        </div>
+        
+        <div class="analyzer-input">
+          <textarea 
+            id="analyzer-text" 
+            placeholder="Paste or type text to analyze... The AI will detect sentiment, extract keywords, identify topics, and provide insights."
+            rows="6"
+          ></textarea>
+          <div class="input-actions">
+            <button id="analyze-button" class="btn-primary" disabled>
+              <span class="btn-icon">🔍</span>
+              Analyze Text
+            </button>
+            <button id="clear-analyzer" class="btn-secondary">
+              <span class="btn-icon">🗑️</span>
+              Clear
+            </button>
+          </div>
+        </div>
+
+        <div id="analysis-results" class="analysis-results hidden">
+          <div class="result-cards">
+            <div class="result-card sentiment-card">
+              <div class="card-header">
+                <span class="card-icon">😊</span>
+                <span class="card-title">Sentiment</span>
+              </div>
+              <div class="card-content">
+                <div id="sentiment-result" class="sentiment-display">
+                  <div class="sentiment-label">Neutral</div>
+                  <div class="sentiment-confidence">0%</div>
+                </div>
+                <div class="confidence-bar">
+                  <div id="sentiment-bar" class="confidence-fill"></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="result-card keywords-card">
+              <div class="card-header">
+                <span class="card-icon">🏷️</span>
+                <span class="card-title">Keywords</span>
+              </div>
+              <div class="card-content">
+                <div id="keywords-result" class="keywords-display">
+                  <!-- Keywords will be populated here -->
+                </div>
+              </div>
+            </div>
+
+            <div class="result-card stats-card">
+              <div class="card-header">
+                <span class="card-icon">📈</span>
+                <span class="card-title">Statistics</span>
+              </div>
+              <div class="card-content">
+                <div id="stats-result" class="stats-display">
+                  <div class="stat-item">
+                    <span class="stat-label">Words</span>
+                    <span id="word-count" class="stat-value">0</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Sentences</span>
+                    <span id="sentence-count" class="stat-value">0</span>
+                  </div>
+                  <div class="stat-item">
+                    <span class="stat-label">Reading Time</span>
+                    <span id="reading-time" class="stat-value">0 min</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Camera Tab -->
+    <main id="camera-tab" class="tab-content">
+      <div class="camera-container">
+        <div class="camera-header">
+          <h2>📷 Visual Analysis</h2>
+          <p>Analyze images using computer vision and ML</p>
+        </div>
+        
+        <div class="camera-section">
+          <div id="camera-preview" class="camera-preview">
+            <video id="camera-video" class="camera-video" autoplay muted playsinline></video>
+            <canvas id="camera-canvas" class="camera-canvas hidden"></canvas>
+            <div id="camera-placeholder" class="camera-placeholder">
+              <span class="camera-icon">📷</span>
+              <p>Tap to start camera</p>
+            </div>
+          </div>
+          
+          <div class="camera-controls">
+            <button id="start-camera" class="btn-camera">
+              <span class="btn-icon">📹</span>
+              Start Camera
+            </button>
+            <button id="capture-photo" class="btn-camera hidden">
+              <span class="btn-icon">📸</span>
+              Capture
+            </button>
+            <button id="upload-image" class="btn-camera">
+              <span class="btn-icon">📂</span>
+              Upload Image
+            </button>
+          </div>
+          
+          <input type="file" id="image-upload" accept="image/*" capture="environment" class="hidden">
+        </div>
+
+        <div id="image-analysis" class="image-analysis hidden">
+          <div class="analysis-header">
+            <h3>🔍 Analysis Results</h3>
+          </div>
+          <div id="image-results" class="image-results">
+            <!-- Results will be populated here -->
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Voice Tab -->
+    <main id="voice-tab" class="tab-content">
+      <div class="voice-container">
+        <div class="voice-header">
+          <h2>🎤 Voice Assistant</h2>
+          <p>Speak naturally and get AI-powered responses</p>
+        </div>
+        
+        <div class="voice-section">
+          <div class="voice-visualizer">
+            <div id="voice-animation" class="voice-animation">
+              <div class="wave-container">
+                <div class="wave"></div>
+                <div class="wave"></div>
+                <div class="wave"></div>
+                <div class="wave"></div>
+                <div class="wave"></div>
+              </div>
+            </div>
+            <div id="voice-status" class="voice-status">
+              <span class="status-text">Ready to listen</span>
+            </div>
+          </div>
+          
+          <div class="voice-controls">
+            <button id="start-listening" class="btn-voice">
+              <span class="btn-icon">🎤</span>
+              <span class="btn-text">Tap to Speak</span>
+            </button>
+            <button id="stop-listening" class="btn-voice hidden">
+              <span class="btn-icon">⏹️</span>
+              <span class="btn-text">Stop</span>
+            </button>
+          </div>
+          
+          <div id="voice-transcript" class="voice-transcript hidden">
+            <div class="transcript-header">
+              <span class="transcript-icon">📝</span>
+              <span class="transcript-title">What you said:</span>
+            </div>
+            <div id="transcript-text" class="transcript-text"></div>
+          </div>
+        </div>
+
+        <div id="voice-response" class="voice-response hidden">
+          <div class="response-header">
+            <span class="response-icon">🤖</span>
+            <span class="response-title">AI Response:</span>
+          </div>
+          <div id="response-text" class="response-text"></div>
+          <div class="response-actions">
+            <button id="speak-response" class="btn-secondary">
+              <span class="btn-icon">🔊</span>
+              Speak Response
+            </button>
+            <button id="copy-response" class="btn-secondary">
+              <span class="btn-icon">📋</span>
+              Copy
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <!-- Settings Panel (Slide-out) -->
+    <div id="settings-panel" class="settings-panel">
+      <div class="settings-header">
+        <h3>⚙️ Settings</h3>
+        <button id="close-settings" class="btn-close">×</button>
+      </div>
+      <div class="settings-content">
+        <div class="setting-section">
+          <h4>🎨 Appearance</h4>
+          <div class="setting-item">
+            <label for="theme-select">Theme</label>
+            <select id="theme-select">
+              <option value="auto">Auto</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </div>
+        </div>
+        
+        <div class="setting-section">
+          <h4>🤖 AI Settings</h4>
+          <div class="setting-item">
+            <label for="response-length">Response Length</label>
+            <select id="response-length">
+              <option value="short">Short</option>
+              <option value="medium">Medium</option>
+              <option value="long">Long</option>
+            </select>
+          </div>
+          <div class="setting-item">
+            <label for="ai-personality">Personality</label>
+            <select id="ai-personality">
+              <option value="professional">Professional</option>
+              <option value="friendly">Friendly</option>
+              <option value="casual">Casual</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="setting-section">
+          <h4>📱 Mobile Features</h4>
+          <div class="setting-item">
+            <label class="toggle-label">
+              <input type="checkbox" id="haptic-feedback" checked>
+              <span class="toggle-slider"></span>
+              Haptic Feedback
+            </label>
+          </div>
+          <div class="setting-item">
+            <label class="toggle-label">
+              <input type="checkbox" id="auto-save" checked>
+              <span class="toggle-slider"></span>
+              Auto-save Conversations
+            </label>
+          </div>
+          <div class="setting-item">
+            <label class="toggle-label">
+              <input type="checkbox" id="offline-mode">
+              <span class="toggle-slider"></span>
+              Enable Offline Mode
+            </label>
+          </div>
+        </div>
+
+        <div class="setting-section">
+          <h4>📊 Data & Privacy</h4>
+          <div class="setting-actions">
+            <button id="clear-data" class="btn-danger">
+              <span class="btn-icon">🗑️</span>
+              Clear All Data
+            </button>
+            <button id="export-data" class="btn-secondary">
+              <span class="btn-icon">📤</span>
+              Export Data
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Action Bar -->
+    <div class="bottom-bar">
+      <button id="settings-button" class="bottom-button">
+        <span class="button-icon">⚙️</span>
+        <span class="button-label">Settings</span>
+      </button>
+      <button id="clear-chat" class="bottom-button">
+        <span class="button-icon">🗑️</span>
+        <span class="button-label">Clear</span>
+      </button>
+      <button id="share-button" class="bottom-button">
+        <span class="button-icon">📤</span>
+        <span class="button-label">Share</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- Offline Banner -->
+  <div id="offline-banner" class="offline-banner hidden">
+    <span class="offline-icon">📶</span>
+    <span class="offline-text">You're offline. Some features may be limited.</span>
+  </div>
+
+  <!-- Scripts -->
+  <script type="module" src="./js/main.js"></script>
+  
+  <!-- Register Service Worker -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('./sw.js')
+          .then(registration => {
+            console.log('SW registered: ', registration);
+          })
+          .catch(registrationError => {
+            console.log('SW registration failed: ', registrationError);
+          });
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,282 @@
+# Valgrind Suppressions for TrustformeRS C API
+# This file contains suppressions for known false positives and system-specific issues
+
+# System library suppressions for macOS
+{
+   dyld_shared_cache_missing_symbol
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/usr/lib/dyld*
+}
+
+{
+   system_malloc_zone
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc_zone_*
+   ...
+}
+
+{
+   core_foundation_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/System/Library/Frameworks/CoreFoundation.framework/*
+}
+
+{
+   objc_runtime_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/usr/lib/libobjc.A.dylib
+}
+
+# Metal framework suppressions
+{
+   metal_framework_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/System/Library/Frameworks/Metal.framework/*
+}
+
+{
+   metal_performance_shaders_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/System/Library/Frameworks/MetalPerformanceShaders.framework/*
+}
+
+# CUDA runtime suppressions
+{
+   cuda_driver_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libcuda.so*
+}
+
+{
+   cuda_runtime_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libcudart.so*
+}
+
+{
+   cublas_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libcublas.so*
+}
+
+# Rust runtime suppressions
+{
+   rust_std_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:alloc
+   ...
+   obj:*/libstd-*
+}
+
+{
+   rust_global_allocator
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:*alloc*
+   ...
+   fun:rust_begin_unwind
+}
+
+{
+   tokio_runtime_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:*tokio*
+}
+
+# Thread-local storage suppressions
+{
+   thread_local_storage
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:calloc
+   fun:_dl_allocate_tls
+}
+
+{
+   pthread_once_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:pthread_once
+}
+
+# OpenMP suppressions (for parallel operations)
+{
+   openmp_runtime_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libgomp.so*
+}
+
+{
+   openmp_thread_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libomp.so*
+}
+
+# Accelerate framework (macOS)
+{
+   accelerate_framework_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/System/Library/Frameworks/Accelerate.framework/*
+}
+
+{
+   veclib_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/System/Library/Frameworks/vecLib.framework/*
+}
+
+# Dynamic library loading suppressions
+{
+   dlopen_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:dlopen*
+}
+
+{
+   dlsym_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:dlsym*
+}
+
+# C++ runtime suppressions
+{
+   cpp_global_constructor
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:*operator new*
+   fun:__cxa_get_globals
+}
+
+{
+   cpp_exception_handling
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:__cxa_*
+}
+
+# NSS/SSL library suppressions
+{
+   nss_library_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libnss*
+}
+
+{
+   ssl_library_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:*/libssl*
+}
+
+# Font and graphics system suppressions
+{
+   font_system_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/System/Library/Frameworks/CoreText.framework/*
+}
+
+{
+   coreimage_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   obj:/System/Library/Frameworks/CoreImage.framework/*
+}
+
+# Known Rust allocation patterns
+{
+   rust_vec_allocation
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   fun:alloc
+   ...
+   fun:*Vec*
+}
+
+{
+   rust_box_allocation
+   Memcheck:Leak
+   match-leak-kinds: possible
+   fun:malloc
+   fun:alloc
+   ...
+   fun:*Box*
+}
+
+# System initialization leaks (acceptable)
+{
+   system_init_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:*init*
+   ...
+}
+
+# Locale and internationalization
+{
+   locale_system_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   ...
+   fun:*locale*
+}
+
+# Memory mapping suppressions
+{
+   mmap_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:mmap*
+}
+
+# Static library initialization
+{
+   static_init_leak
+   Memcheck:Leak
+   match-leak-kinds: reachable
+   fun:malloc
+   fun:*static*
+}

@@ -1,0 +1,77 @@
+{{/*
+ConfigMap template for TrustformeRS Serve
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "trustformers-serve.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "trustformers-serve.labels" . | nindent 4 }}
+  annotations:
+    {{- include "trustformers-serve.annotations" . | nindent 4 }}
+data:
+  config.toml: |
+    {{- include "trustformers-serve.configToml" . | nindent 4 }}
+
+{{- if .Values.config.customConfig }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "trustformers-serve.fullname" . }}-custom-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "trustformers-serve.labels" . | nindent 4 }}
+  annotations:
+    {{- include "trustformers-serve.annotations" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config.customConfig }}
+  {{ $key }}: |
+    {{- $value | nindent 4 }}
+  {{- end }}
+{{- end }}
+
+{{- if .Values.envFrom.configMaps }}
+{{- range .Values.envFrom.configMaps }}
+{{- if eq . (printf "%s-env-config" (include "trustformers-serve.fullname" $)) }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "trustformers-serve.fullname" $ }}-env-config
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "trustformers-serve.labels" $ | nindent 4 }}
+  annotations:
+    {{- include "trustformers-serve.annotations" $ | nindent 4 }}
+data:
+  ENVIRONMENT: "{{ $.Values.global.environment | default "production" }}"
+  ENABLE_METRICS: "{{ $.Values.config.server.enableMetrics }}"
+  ENABLE_CACHING: "{{ $.Values.config.model.enableCaching }}"
+  ENABLE_BATCHING: "{{ $.Values.config.batching.enableAdaptiveBatching }}"
+  ENABLE_TRACING: "{{ $.Values.tracing.enabled }}"
+  CACHE_SIZE_MB: "{{ div $.Values.config.caching.resultCache.maxSizeBytes 1048576 }}"
+  MAX_BATCH_SIZE: "{{ $.Values.config.batching.maxBatchSize }}"
+  MAX_SEQUENCE_LENGTH: "{{ $.Values.config.model.maxSequenceLength }}"
+  LOG_FORMAT: "{{ $.Values.config.logging.format | default "json" }}"
+  LOG_LEVEL: "{{ $.Values.config.logging.level | default "info" }}"
+  {{- if $.Values.tracing.otlpEndpoint }}
+  OTEL_EXPORTER_OTLP_ENDPOINT: "{{ $.Values.tracing.otlpEndpoint }}"
+  {{- end }}
+  {{- if $.Values.tracing.jaegerEndpoint }}
+  JAEGER_ENDPOINT: "{{ $.Values.tracing.jaegerEndpoint }}"
+  {{- end }}
+  {{- if $.Values.redis.enabled }}
+  REDIS_HOST: "{{ $.Values.redis.host }}"
+  REDIS_PORT: "{{ $.Values.redis.port }}"
+  REDIS_DATABASE: "{{ $.Values.redis.database }}"
+  {{- end }}
+  {{- range $.Values.env }}
+  {{- if .value }}
+  {{ .name }}: {{ .value | quote }}
+  {{- end }}
+  {{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
