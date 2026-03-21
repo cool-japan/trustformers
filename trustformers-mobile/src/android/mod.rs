@@ -40,7 +40,7 @@ mod integration_tests {
     fn test_android_integration_flow() {
         // Test complete Android integration flow
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("operation failed in test");
 
         // Check device capabilities
         let device_info = AndroidInferenceEngine::check_device_capabilities();
@@ -52,7 +52,7 @@ mod integration_tests {
 
         // Test inference
         let input_data = vec![1.0, 2.0, 3.0, 4.0];
-        let input_tensor = Tensor::from_vec(input_data, &[4]).unwrap();
+        let input_tensor = Tensor::from_vec(input_data, &[4]).expect("tensor operation failed");
 
         let result = engine.inference(&input_tensor);
         assert!(result.is_ok());
@@ -147,7 +147,7 @@ mod integration_tests {
     #[test]
     fn test_engine_lifecycle() {
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("operation failed in test");
 
         // Test initial state
         assert!(!engine.is_model_loaded());
@@ -159,7 +159,7 @@ mod integration_tests {
 
         // Perform inference
         let input_data = vec![1.0; 100];
-        let input_tensor = Tensor::from_vec(input_data, &[100]).unwrap();
+        let input_tensor = Tensor::from_vec(input_data, &[100]).expect("tensor operation failed");
         assert!(engine.inference(&input_tensor).is_ok());
         assert!(engine.get_stats().total_inferences > 0);
 

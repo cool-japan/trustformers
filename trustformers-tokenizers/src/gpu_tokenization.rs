@@ -1538,7 +1538,7 @@ mod tests {
     #[test]
     fn test_batch_tokenization() {
         let tokenizer = create_test_tokenizer();
-        let gpu_tokenizer = GpuTokenizer::new(tokenizer).unwrap();
+        let gpu_tokenizer = GpuTokenizer::new(tokenizer).expect("Construction failed");
         let texts = vec!["Hello world".to_string(), "This is a test".to_string()];
         let result = gpu_tokenizer.tokenize_batch(&texts);
         assert!(result.is_ok());
@@ -1547,11 +1547,13 @@ mod tests {
     #[test]
     fn test_padding_application() {
         let tokenizer = create_test_tokenizer();
-        let gpu_tokenizer = GpuTokenizer::new(tokenizer).unwrap();
+        let gpu_tokenizer = GpuTokenizer::new(tokenizer).expect("Construction failed");
         let mut token_ids = vec![vec![1, 2, 3], vec![4, 5]];
         let mut attention_masks = vec![vec![1, 1, 1], vec![1, 1]];
 
-        gpu_tokenizer.apply_padding(&mut token_ids, &mut attention_masks).unwrap();
+        gpu_tokenizer
+            .apply_padding(&mut token_ids, &mut attention_masks)
+            .expect("Operation failed in test");
 
         assert_eq!(token_ids[0].len(), 3);
         assert_eq!(token_ids[1].len(), 3);
@@ -1562,7 +1564,7 @@ mod tests {
     #[test]
     fn test_gpu_tokenization_stats() {
         let tokenizer = create_test_tokenizer();
-        let gpu_tokenizer = GpuTokenizer::new(tokenizer).unwrap();
+        let gpu_tokenizer = GpuTokenizer::new(tokenizer).expect("Construction failed");
         let stats = gpu_tokenizer.get_stats();
         assert_eq!(stats.total_tokens, 0);
         assert_eq!(stats.total_batches, 0);
@@ -1571,7 +1573,7 @@ mod tests {
     #[test]
     fn test_gpu_tokenizer_configuration() {
         let tokenizer = create_test_tokenizer();
-        let mut gpu_tokenizer = GpuTokenizer::new(tokenizer).unwrap();
+        let mut gpu_tokenizer = GpuTokenizer::new(tokenizer).expect("Construction failed");
 
         gpu_tokenizer.set_batch_size(64);
         gpu_tokenizer.set_device_id(1);

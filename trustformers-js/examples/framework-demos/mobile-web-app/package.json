@@ -41,8 +41,8 @@
     "offline-first",
     "service-worker"
   ],
-  "author": "TrustformeRS Team <team@trustformers.dev>",
-  "license": "MIT",
+  "author": "COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>",
+  "license": "Apache-2.0",
   "homepage": "https://trustformers.dev/demos/mobile-web-app",
   "repository": {
     "type": "git",

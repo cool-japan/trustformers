@@ -310,8 +310,11 @@ impl BehaviorAnalyzer {
         }
 
         // Sort by sensitivity score and assign ranks
-        sensitivities
-            .sort_by(|a, b| b.sensitivity_score.partial_cmp(&a.sensitivity_score).unwrap());
+        sensitivities.sort_by(|a, b| {
+            b.sensitivity_score
+                .partial_cmp(&a.sensitivity_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for (rank, sensitivity) in sensitivities.iter_mut().enumerate() {
             sensitivity.rank = rank + 1;
         }
@@ -344,7 +347,11 @@ impl BehaviorAnalyzer {
         }
 
         // Sort by importance and assign ranks
-        importances.sort_by(|a, b| b.importance_score.partial_cmp(&a.importance_score).unwrap());
+        importances.sort_by(|a, b| {
+            b.importance_score
+                .partial_cmp(&a.importance_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for (rank, importance) in importances.iter_mut().enumerate() {
             importance.rank = rank + 1;
         }
@@ -416,7 +423,7 @@ impl BehaviorAnalyzer {
         let std = variance.sqrt();
 
         let mut sorted_activations = activations.to_vec();
-        sorted_activations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_activations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let min = sorted_activations[0];
         let max = sorted_activations[sorted_activations.len() - 1];

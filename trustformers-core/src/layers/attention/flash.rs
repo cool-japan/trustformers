@@ -776,7 +776,8 @@ mod tests {
 
     #[test]
     fn test_flash_attention_creation() {
-        let attention = FlashAttention::new(512, 8, 0.1, true, None, false).unwrap();
+        let attention =
+            FlashAttention::new(512, 8, 0.1, true, None, false).expect("operation failed in test");
         assert_eq!(attention.config.hidden_size, 512);
         assert_eq!(attention.config.num_heads, 8);
         assert_eq!(attention.config.head_dim, 64);
@@ -784,20 +785,22 @@ mod tests {
 
     #[test]
     fn test_flash_attention_with_custom_block_size() {
-        let attention = FlashAttention::new(512, 8, 0.1, true, Some(128), false).unwrap();
+        let attention = FlashAttention::new(512, 8, 0.1, true, Some(128), false)
+            .expect("operation failed in test");
         assert_eq!(attention.block_size(), 128);
     }
 
     #[test]
     fn test_flash_attention_2_version() {
-        let attention =
-            FlashAttention::new_with_version(512, 8, 0.1, true, None, false, true).unwrap();
+        let attention = FlashAttention::new_with_version(512, 8, 0.1, true, None, false, true)
+            .expect("operation failed in test");
         assert!(attention.is_using_flash_attention_2());
     }
 
     #[test]
     fn test_flash_attention_forward() {
-        let attention = FlashAttention::new(512, 8, 0.1, true, None, false).unwrap();
+        let attention =
+            FlashAttention::new(512, 8, 0.1, true, None, false).expect("operation failed in test");
         let input = Tensor::randn(&[2, 10, 512]).expect("Failed to create random tensor");
         let output = attention.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 10, 512]);
@@ -805,14 +808,16 @@ mod tests {
 
     #[test]
     fn test_memory_estimation() {
-        let attention = FlashAttention::new(512, 8, 0.1, true, None, false).unwrap();
+        let attention =
+            FlashAttention::new(512, 8, 0.1, true, None, false).expect("operation failed in test");
         let memory_usage = attention.estimate_memory_usage(2, 1000);
         assert!(memory_usage > 0);
     }
 
     #[test]
     fn test_optimal_block_size_computation() {
-        let attention = FlashAttention::new(512, 8, 0.1, true, None, false).unwrap();
+        let attention =
+            FlashAttention::new(512, 8, 0.1, true, None, false).expect("operation failed in test");
         let block_size = attention.compute_optimal_block_size(2048, Some(1024));
         assert!(block_size > 0);
         assert!(block_size <= 512);
@@ -821,7 +826,8 @@ mod tests {
     #[test]
     fn test_causal_attention() {
         // Use default block size like the working test
-        let attention = FlashAttention::new(512, 8, 0.1, true, None, true).unwrap();
+        let attention =
+            FlashAttention::new(512, 8, 0.1, true, None, true).expect("operation failed in test");
         let input = Tensor::randn(&[2, 10, 512]).expect("Failed to create random tensor");
         let output = attention.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 10, 512]);

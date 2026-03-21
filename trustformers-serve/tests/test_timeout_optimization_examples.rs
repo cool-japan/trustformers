@@ -106,7 +106,7 @@ async fn example_stress_test() -> Result<()> {
 
             // Wait for all tasks to complete
             for handle in handles {
-                handle.await.unwrap();
+                handle.await.expect("async operation failed");
             }
 
             let final_count = counter.load(Ordering::SeqCst);
@@ -174,7 +174,7 @@ async fn example_chaos_test() -> Result<()> {
 
         // Wait for all operations to complete
         for handle in handles {
-            handle.await.unwrap();
+            handle.await.expect("async operation failed");
         }
 
         let successful_count = successful_operations.load(Ordering::SeqCst);
@@ -291,7 +291,7 @@ async fn example_long_running_test() -> Result<()> {
 
         // Wait for all batches to complete
         for handle in batch_handles {
-            handle.await.unwrap();
+            handle.await.expect("async operation failed");
         }
 
         let final_processed = processed.load(Ordering::SeqCst);
@@ -416,7 +416,10 @@ async fn example_performance_benchmarking() -> Result<()> {
 
             let parsed: serde_json::Value = serde_json::from_str(data)?;
             assert!(parsed["users"].is_array());
-            assert_eq!(parsed["users"].as_array().unwrap().len(), 3);
+            assert_eq!(
+                parsed["users"].as_array().expect("operation failed in test").len(),
+                3
+            );
 
             // Simulate some processing
             sleep(Duration::from_millis(1)).await;

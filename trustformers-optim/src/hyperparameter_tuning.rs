@@ -834,7 +834,7 @@ mod tests {
         let metrics = tuner.simulate_training(&config);
         assert!(metrics.is_ok());
 
-        let metrics = metrics.unwrap();
+        let metrics = metrics.expect("Operation failed in test");
         assert!(metrics.final_loss >= 0.0);
         assert!(metrics.convergence_epoch > 0);
         assert!(metrics.composite_score > 0.0);

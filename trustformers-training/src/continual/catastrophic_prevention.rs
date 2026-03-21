@@ -424,7 +424,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("weight1".to_string(), Array1::from_vec(vec![1.0, 2.0, 3.0]));
 
-        ewc.update("task1", &params).unwrap();
+        ewc.update("task1", &params).expect("operation failed in test");
 
         let mut current_params = HashMap::new();
         current_params.insert("weight1".to_string(), Array1::from_vec(vec![1.1, 2.1, 3.1]));
@@ -453,7 +453,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("weight1".to_string(), Array1::from_vec(vec![1.0, 2.0]));
 
-        combined.update("task1", &params).unwrap();
+        combined.update("task1", &params).expect("operation failed in test");
         let penalty = combined.compute_penalty(&params);
         assert!(penalty >= 0.0);
     }
@@ -488,7 +488,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("weight1".to_string(), Array1::from_vec(vec![1.0, 2.0]));
 
-        si.update("task1", &params).unwrap();
+        si.update("task1", &params).expect("operation failed in test");
 
         let penalty = si.compute_penalty(&params);
         assert!(penalty >= 0.0);

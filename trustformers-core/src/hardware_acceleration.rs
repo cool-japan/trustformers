@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Hardware acceleration integration for TrustformeRS
@@ -732,7 +732,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Result should be all 4s
-        let data = c.data().unwrap();
+        let data = c.data().expect("operation failed in test");
         assert!(data.iter().all(|&x| (x - 4.0).abs() < 1e-6));
     }
 

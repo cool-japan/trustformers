@@ -484,7 +484,7 @@ mod tests {
         exporter.add_input("input", "float32", vec![1, 10]);
         exporter.add_output("output", "float32", vec![1, 5]);
 
-        exporter.export(&output_path).unwrap();
+        exporter.export(&output_path).expect("operation failed in test");
         assert!(output_path.exists());
 
         // Clean up
@@ -533,7 +533,7 @@ mod tests {
         let mut exporter = NetronExporter::new("test", "test");
         exporter.add_input("input", "float32", vec![1, 10]);
 
-        let json = exporter.to_json_string().unwrap();
+        let json = exporter.to_json_string().expect("operation failed in test");
         assert!(json.contains("test"));
         assert!(json.contains("input"));
     }

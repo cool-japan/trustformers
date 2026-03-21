@@ -284,7 +284,7 @@ mod tests {
         assert_eq!(benchmark.name(), "example_benchmark");
         assert!(benchmark.setup().is_ok());
 
-        let iteration = benchmark.run_iteration().unwrap();
+        let iteration = benchmark.run_iteration().expect("operation failed in test");
         assert!(iteration.duration.as_millis() >= 10);
         assert!(iteration.metrics.throughput.is_some());
     }

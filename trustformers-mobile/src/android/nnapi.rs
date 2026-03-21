@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn test_nnapi_model_default_state() {
-        let model = NNAPIModel::new().unwrap();
+        let model = NNAPIModel::new().expect("operation failed in test");
         #[cfg(target_os = "android")]
         {
             assert!(!model.is_loaded());

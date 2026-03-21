@@ -604,7 +604,9 @@ mod tests {
         let text = "Hello world";
         let token_offsets = vec![(0, 5), (6, 11)]; // "Hello", "world"
 
-        let alignments = engine.align_tokens_to_words(text, &token_offsets, None).unwrap();
+        let alignments = engine
+            .align_tokens_to_words(text, &token_offsets, None)
+            .expect("Operation failed in test");
 
         assert_eq!(alignments.len(), 2);
         assert_eq!(alignments[0].word_index, Some(0));
@@ -621,7 +623,9 @@ mod tests {
         let text = "Hello world";
         let token_offsets = vec![(0, 3), (3, 5), (6, 11)]; // "Hel", "lo", "world"
 
-        let alignments = engine.align_tokens_to_words(text, &token_offsets, None).unwrap();
+        let alignments = engine
+            .align_tokens_to_words(text, &token_offsets, None)
+            .expect("Operation failed in test");
 
         assert_eq!(alignments.len(), 3);
         assert_eq!(alignments[0].word_index, Some(0));

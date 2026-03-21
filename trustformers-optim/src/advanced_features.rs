@@ -741,7 +741,9 @@ mod tests {
         let mut trainer = MultiOptimizerTrainer::new();
 
         let adam = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.0);
-        trainer.add_optimizer("adam".to_string(), Box::new(adam), 1.0).unwrap();
+        trainer
+            .add_optimizer("adam".to_string(), Box::new(adam), 1.0)
+            .expect("Construction failed");
 
         let stats = trainer.get_stats();
         assert_eq!(stats.num_optimizers, 1);

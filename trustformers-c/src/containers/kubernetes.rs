@@ -339,7 +339,7 @@ mod integration_tests {
         let generator = KubernetesGenerator::new(config);
 
         // Generate manifests
-        let manifests = generator.generate_manifests().unwrap();
+        let manifests = generator.generate_manifests().expect("generation should succeed in test");
 
         // Verify basic manifests are generated
         assert!(manifests.contains_key("deployment.yaml"));
@@ -372,7 +372,7 @@ mod integration_tests {
         });
 
         let generator = KubernetesGenerator::new(config);
-        let manifests = generator.generate_manifests().unwrap();
+        let manifests = generator.generate_manifests().expect("generation should succeed in test");
 
         // Verify HPA is generated
         assert!(manifests.contains_key("hpa.yaml"));
@@ -387,7 +387,7 @@ mod integration_tests {
         let config = KubernetesConfig::default();
         let generator = KubernetesGenerator::new(config);
 
-        let chart = generator.generate_helm_chart().unwrap();
+        let chart = generator.generate_helm_chart().expect("generation should succeed in test");
 
         // Verify chart files
         assert!(chart.contains_key("Chart.yaml"));
@@ -442,7 +442,7 @@ mod integration_tests {
         });
 
         let generator = KubernetesGenerator::new(config);
-        let manifests = generator.generate_manifests().unwrap();
+        let manifests = generator.generate_manifests().expect("generation should succeed in test");
 
         // Verify ConfigMap and Secret manifests
         assert!(manifests.contains_key("configmap-0.yaml"));
@@ -469,7 +469,7 @@ mod integration_tests {
         config.service_monitor = Some(ServiceMonitorConfig::default());
 
         let generator = KubernetesGenerator::new(config);
-        let manifests = generator.generate_manifests().unwrap();
+        let manifests = generator.generate_manifests().expect("generation should succeed in test");
 
         // Verify all optional manifests are generated
         assert!(manifests.contains_key("ingress.yaml"));

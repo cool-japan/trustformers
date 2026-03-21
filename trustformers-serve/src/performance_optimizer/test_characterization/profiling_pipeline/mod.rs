@@ -15,8 +15,9 @@ pub mod resultsprocessorconfig_traits;
 pub mod stageexecutorconfig_traits;
 pub mod stageresourcerequirements_traits;
 pub mod types;
+pub mod types_pipeline;
 pub mod validationconfig_traits;
 
-// Re-export all types
+// Re-export all types (types_pipeline is re-exported via types.rs)
 pub use functions::*;
 pub use types::*;

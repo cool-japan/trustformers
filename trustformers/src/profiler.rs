@@ -723,34 +723,34 @@ mod tests {
         let profiler = Profiler::new();
         assert!(profiler.is_ok());
 
-        let profiler = profiler.unwrap();
+        let profiler = profiler.expect("operation failed in test");
         assert!(profiler.is_enabled()); // Auto-enabled by default
     }
 
     #[test]
     fn test_session_management() {
-        let profiler = Profiler::new().unwrap();
+        let profiler = Profiler::new().expect("operation failed in test");
 
-        let session_id = profiler.start_session("test_session").unwrap();
+        let session_id = profiler.start_session("test_session").expect("operation failed in test");
         assert!(!session_id.is_empty());
 
         sleep(Duration::from_millis(10));
 
-        let results = profiler.end_session(&session_id).unwrap();
+        let results = profiler.end_session(&session_id).expect("operation failed in test");
         assert_eq!(results.session_id, session_id);
         assert!(results.total_duration > Duration::ZERO);
     }
 
     #[test]
     fn test_profile_function() {
-        let profiler = Profiler::new().unwrap();
+        let profiler = Profiler::new().expect("operation failed in test");
 
         let (result, profile_results) = profiler
             .profile_function("test_operation", || {
                 sleep(Duration::from_millis(10));
                 42
             })
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(result, 42);
         assert!(!profile_results.operations.is_empty());
@@ -759,13 +759,13 @@ mod tests {
 
     #[test]
     fn test_export_formats() {
-        let profiler = Profiler::new().unwrap();
+        let profiler = Profiler::new().expect("operation failed in test");
 
         let (_, results) = profiler
             .profile_function("export_test", || {
                 sleep(Duration::from_millis(5));
             })
-            .unwrap();
+            .expect("operation failed in test");
 
         // Test HTML generation
         let html = profiler.generate_html_report(&results);
@@ -782,7 +782,7 @@ mod tests {
             sleep(Duration::from_millis(5));
             "test"
         })
-        .unwrap();
+        .expect("operation failed in test");
 
         assert_eq!(result, "test");
         assert!(!profile_results.operations.is_empty());

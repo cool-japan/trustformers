@@ -689,7 +689,7 @@ mod tests {
         let phase_encoded = processor.tensor_to_optical(&input, OpticalEncoding::Phase);
         assert!(phase_encoded.is_ok());
 
-        let signals = amplitude_encoded.unwrap();
+        let signals = amplitude_encoded.expect("operation failed in test");
         assert_eq!(signals.len(), 3);
         assert_eq!(signals[0].amplitude[0], 0.5);
         assert_eq!(signals[1].amplitude[0], 1.0);
@@ -708,8 +708,8 @@ mod tests {
         let intensity_decoded = processor.optical_to_tensor(&signals, OpticalDecoding::Intensity);
         assert!(intensity_decoded.is_ok());
 
-        let decoded = intensity_decoded.unwrap();
-        let data = decoded.data().unwrap();
+        let decoded = intensity_decoded.expect("operation failed in test");
+        let data = decoded.data().expect("operation failed in test");
         assert_eq!(data.len(), 3);
         assert_eq!(data[0], 1.0);
         assert_eq!(data[1], 4.0);

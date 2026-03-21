@@ -1,4 +1,4 @@
-use crate::clip::config::{CLIPConfig, CLIPTextConfig, CLIPVisionConfig};
+use crate::clip::config::{CLIPConfig, CLIPEncoderConfig, CLIPTextConfig, CLIPVisionConfig};
 use scirs2_core::ndarray::{s, Array1, Array2, Array3, Array4}; // SciRS2 Integration Policy
 use std::io::Read;
 use trustformers_core::{
@@ -240,9 +240,9 @@ impl Layer for CLIPPatchEmbedding {
 
 /// CLIP text encoder layer
 pub struct CLIPTextTransformer {
-    embeddings: CLIPTextEmbeddings,
-    encoder: CLIPEncoder<CLIPTextConfig>,
-    final_layer_norm: LayerNorm,
+    pub(crate) embeddings: CLIPTextEmbeddings,
+    pub(crate) encoder: CLIPEncoder<CLIPTextConfig>,
+    pub(crate) final_layer_norm: LayerNorm,
     device: Device,
 }
 
@@ -301,9 +301,9 @@ impl Layer for CLIPTextTransformer {
 
 /// CLIP vision encoder layer
 pub struct CLIPVisionTransformer {
-    embeddings: CLIPVisionEmbeddings,
-    encoder: CLIPEncoder<CLIPVisionConfig>,
-    layernorm: LayerNorm,
+    pub(crate) embeddings: CLIPVisionEmbeddings,
+    pub(crate) encoder: CLIPEncoder<CLIPVisionConfig>,
+    pub(crate) layernorm: LayerNorm,
     device: Device,
 }
 
@@ -427,33 +427,29 @@ impl Layer for CLIPTextEmbeddings {
 
 /// Generic CLIP encoder (works for both text and vision)
 pub struct CLIPEncoder<C> {
-    layers: Vec<CLIPEncoderLayer>,
+    pub(crate) layers: Vec<CLIPEncoderLayer>,
     device: Device,
     _phantom: std::marker::PhantomData<C>,
 }
 
 impl<C> CLIPEncoder<C>
 where
-    C: Config + Send + Sync,
+    C: CLIPEncoderConfig + Send + Sync,
 {
-    pub fn new_with_device(_config: &C, device: Device) -> Result<Self> {
-        let mut layers = Vec::new();
-
-        // Note: This is a simplified implementation
-        // In a real implementation, we'd need to extract layer config from C
-        // For now, we'll use placeholder values
+    pub fn new_with_device(config: &C, device: Device) -> Result<Self> {
         let layer_config = CLIPEncoderLayerConfig {
-            hidden_size: 512, // This would come from config
-            num_attention_heads: 8,
-            intermediate_size: 2048,
-            hidden_act: "quick_gelu".to_string(),
-            layer_norm_eps: 1e-5,
-            attention_dropout: 0.0,
-            dropout: 0.0,
+            hidden_size: config.hidden_size(),
+            num_attention_heads: config.num_attention_heads(),
+            intermediate_size: config.intermediate_size(),
+            hidden_act: config.hidden_act().to_string(),
+            layer_norm_eps: config.layer_norm_eps(),
+            attention_dropout: config.attention_dropout(),
+            dropout: config.dropout(),
         };
 
-        for _ in 0..12 {
-            // This would come from config.num_hidden_layers
+        let num_layers = config.num_hidden_layers();
+        let mut layers = Vec::with_capacity(num_layers);
+        for _ in 0..num_layers {
             layers.push(CLIPEncoderLayer::new_with_device(&layer_config, device)?);
         }
 
@@ -464,8 +460,8 @@ where
         })
     }
 
-    pub fn new(_config: &C) -> Result<Self> {
-        Self::new_with_device(_config, Device::CPU)
+    pub fn new(config: &C) -> Result<Self> {
+        Self::new_with_device(config, Device::CPU)
     }
 
     pub fn device(&self) -> Device {
@@ -487,7 +483,7 @@ where
 
 impl<C> Layer for CLIPEncoder<C>
 where
-    C: Config + Send + Sync,
+    C: CLIPEncoderConfig + Send + Sync,
 {
     type Input = Tensor;
     type Output = Tensor;
@@ -636,8 +632,8 @@ impl Layer for CLIPEncoderLayer {
 /// Main CLIP model
 pub struct CLIPModel {
     config: CLIPConfig,
-    text_model: CLIPTextTransformer,
-    vision_model: CLIPVisionTransformer,
+    pub(crate) text_model: CLIPTextTransformer,
+    pub(crate) vision_model: CLIPVisionTransformer,
     text_projection: Linear,
     visual_projection: Linear,
     pub logit_scale: Tensor,
@@ -915,7 +911,7 @@ impl CLIPModel {
             .or_else(|_| std::env::var("HUGGINGFACE_HUB_CACHE"))
             .unwrap_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_default();
-                format!("{}/.cache/huggingface/hub", home)
+                format!("{home}/.cache/huggingface/hub")
             });
 
         let model_base_path =
@@ -1052,6 +1048,169 @@ impl CLIPModel {
             model_name
         );
         Ok(())
+    }
+
+    /// Load model weights layer-by-layer (chunked) to reduce peak memory usage.
+    ///
+    /// Instead of loading every tensor at once, this method loads weights one
+    /// encoder layer at a time and calls the user-supplied `progress` callback
+    /// after each logical chunk has been loaded.  The callback receives:
+    ///   - `chunk_index`: zero-based index of the chunk just loaded
+    ///   - `total_chunks`: total number of chunks that will be loaded
+    ///   - `description`: a human-readable label for the chunk
+    ///
+    /// Errors from individual tensor loads are collected and returned as a
+    /// single combined error at the end, rather than panicking.
+    pub fn load_weights_chunked<F>(
+        &mut self,
+        model_path: impl AsRef<std::path::Path>,
+        mut progress: F,
+    ) -> Result<()>
+    where
+        F: FnMut(usize, usize, &str),
+    {
+        use crate::weight_loading::{auto_create_loader, WeightLoadingConfig};
+
+        let config = WeightLoadingConfig {
+            lazy_loading: true,
+            memory_mapped: false,
+            ..Default::default()
+        };
+
+        let mut loader = auto_create_loader(model_path, Some(config))?;
+
+        // Calculate total chunks:
+        //   1  text embeddings
+        // + N  text encoder layers
+        //   1  text final layer norm
+        //   1  vision embeddings
+        // + M  vision encoder layers
+        //   1  vision layer norm
+        //   1  projections + logit_scale
+        let text_layers = self.text_model.encoder.layers.len();
+        let vision_layers = self.vision_model.encoder.layers.len();
+        let total_chunks = 1 + text_layers + 1 + 1 + vision_layers + 1 + 1;
+
+        let mut chunk: usize = 0;
+        let mut errors: Vec<String> = Vec::new();
+
+        // --- Text model ---
+        // Chunk: text embeddings
+        if let Err(e) = self
+            .text_model
+            .embeddings
+            .load_weights(loader.as_mut(), "text_model.embeddings")
+        {
+            errors.push(format!("text_model.embeddings: {e}"));
+        }
+        progress(chunk, total_chunks, "text_model.embeddings");
+        chunk += 1;
+
+        // Chunks: text encoder layers (one per layer)
+        for i in 0..text_layers {
+            let prefix = format!("text_model.encoder.layers.{i}");
+            if let Err(e) = self.text_model.encoder.layers[i].load_weights(loader.as_mut(), &prefix)
+            {
+                errors.push(format!("{prefix}: {e}"));
+            }
+            progress(chunk, total_chunks, &prefix);
+            chunk += 1;
+        }
+
+        // Chunk: text final layer norm
+        {
+            let prefix = "text_model.final_layer_norm";
+            if let Ok(w) = loader.load_tensor(&format!("{prefix}.weight")) {
+                if let Err(e) = self.text_model.final_layer_norm.set_weight(w) {
+                    errors.push(format!("{prefix}.weight: {e}"));
+                }
+            }
+            if let Ok(b) = loader.load_tensor(&format!("{prefix}.bias")) {
+                if let Err(e) = self.text_model.final_layer_norm.set_bias(b) {
+                    errors.push(format!("{prefix}.bias: {e}"));
+                }
+            }
+            progress(chunk, total_chunks, prefix);
+            chunk += 1;
+        }
+
+        // --- Vision model ---
+        // Chunk: vision embeddings
+        if let Err(e) = self
+            .vision_model
+            .embeddings
+            .load_weights(loader.as_mut(), "vision_model.embeddings")
+        {
+            errors.push(format!("vision_model.embeddings: {e}"));
+        }
+        progress(chunk, total_chunks, "vision_model.embeddings");
+        chunk += 1;
+
+        // Chunks: vision encoder layers (one per layer)
+        for i in 0..vision_layers {
+            let prefix = format!("vision_model.encoder.layers.{i}");
+            if let Err(e) =
+                self.vision_model.encoder.layers[i].load_weights(loader.as_mut(), &prefix)
+            {
+                errors.push(format!("{prefix}: {e}"));
+            }
+            progress(chunk, total_chunks, &prefix);
+            chunk += 1;
+        }
+
+        // Chunk: vision layer norm
+        {
+            let prefix = "vision_model.layernorm";
+            if let Ok(w) = loader.load_tensor(&format!("{prefix}.weight")) {
+                if let Err(e) = self.vision_model.layernorm.set_weight(w) {
+                    errors.push(format!("{prefix}.weight: {e}"));
+                }
+            }
+            if let Ok(b) = loader.load_tensor(&format!("{prefix}.bias")) {
+                if let Err(e) = self.vision_model.layernorm.set_bias(b) {
+                    errors.push(format!("{prefix}.bias: {e}"));
+                }
+            }
+            progress(chunk, total_chunks, prefix);
+            chunk += 1;
+        }
+
+        // Chunk: projections + logit_scale
+        {
+            if let Ok(w) = loader.load_tensor("text_projection.weight") {
+                if let Err(e) = self.text_projection.set_weight(w) {
+                    errors.push(format!("text_projection.weight: {e}"));
+                }
+            }
+            if let Ok(b) = loader.load_tensor("text_projection.bias") {
+                if let Err(e) = self.text_projection.set_bias(b) {
+                    errors.push(format!("text_projection.bias: {e}"));
+                }
+            }
+            if let Ok(w) = loader.load_tensor("visual_projection.weight") {
+                if let Err(e) = self.visual_projection.set_weight(w) {
+                    errors.push(format!("visual_projection.weight: {e}"));
+                }
+            }
+            if let Ok(b) = loader.load_tensor("visual_projection.bias") {
+                if let Err(e) = self.visual_projection.set_bias(b) {
+                    errors.push(format!("visual_projection.bias: {e}"));
+                }
+            }
+            if let Ok(logit_scale_weight) = loader.load_tensor("logit_scale") {
+                self.logit_scale = logit_scale_weight;
+            }
+            progress(chunk, total_chunks, "projections");
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(TrustformersError::io_error(format!(
+                "Errors during chunked weight loading:\n{}",
+                errors.join("\n")
+            )))
+        }
     }
 
     /// Load weights with lazy loading for large models

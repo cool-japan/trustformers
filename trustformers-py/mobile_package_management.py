@@ -289,7 +289,7 @@ end"""
 //  {framework_name}.h
 //  {framework_name}
 //
-//  Copyright © 2025 TrustformeRS Team. All rights reserved.
+//  Copyright © 2025-2026 COOLJAPAN OU (Team KitaSan). All rights reserved.
 //
 
 #import <Foundation/Foundation.h>
@@ -314,7 +314,7 @@ extern void trustformers_free_result(void* result);
 //  TrustformeRSModel.swift
 //  {framework_name}
 //
-//  Copyright © 2025 TrustformeRS Team. All rights reserved.
+//  Copyright © 2025-2026 COOLJAPAN OU (Team KitaSan). All rights reserved.
 //
 
 import Foundation

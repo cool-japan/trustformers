@@ -1125,7 +1125,10 @@ mod tests {
             preemptible: false,
         };
 
-        let task_id = scheduler.submit_task(task).await.unwrap();
+        let task_id = scheduler
+            .submit_task(task)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(task_id, "test-task");
 
         // Wait for processing

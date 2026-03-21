@@ -18,20 +18,26 @@ The `trustformers-wasm` crate enables browser and edge deployment of transformer
 
 ## Current Status
 
+**Version:** 0.1.0 | **Date:** 2026-03-21 | **Status:** Stable
+
 ### Implementation Status
-✅ **PRODUCTION-READY** - Complete WASM infrastructure
-✅ **WEBGPU ENABLED** - Full GPU acceleration in browsers
+✅ **STABLE** - Complete WASM infrastructure
+✅ **WEBGPU ENABLED** - Full GPU acceleration in browsers (wgpu 29.0)
 ✅ **EDGE OPTIMIZED** - Multi-platform edge runtime support
-✅ **FRAMEWORK INTEGRATED** - React, Vue, Angular, Svelte support
+✅ **FRAMEWORK INTEGRATED** - React, Vue, Angular, Web Components support
 ✅ **MOBILE OPTIMIZED** - Battery and network-aware deployment
-✅ **91 TESTS PASSING** - 100% test success rate
+✅ **128 TESTS PASSING** - 100% test success rate
+✅ **BERT WASM MODEL** - Complete BERT implementation in WASM
+✅ **STREAMING INFERENCE** - Token-by-token streaming generation
+✅ **INDEXEDDB CACHING** - Persistent model and KV-cache storage
+✅ **SCIRS2 INTEGRATION** - scirs2-core tensor operations
 
 ### Feature Coverage
-- **WebGPU:** Complete compute shaders, memory management, kernel fusion
-- **WASM:** SIMD128, threads, streaming compilation, binary optimization
+- **WebGPU (wgpu 29.0):** Complete compute shaders, memory management, kernel fusion; `InstanceDescriptor::new_without_display_handle()`, `bind_group_layouts: &[Option<&BindGroupLayout>]`
+- **WASM:** SIMD128, threads, streaming compilation, binary optimization, memory64
 - **Edge:** Cloudflare Workers, Deno Deploy, Vercel Edge, AWS Lambda@Edge
-- **Mobile:** Adaptive loading, touch gestures, camera integration
-- **Frameworks:** React hooks, Vue composables, Angular services, Svelte stores
+- **Mobile:** Adaptive loading, touch gestures, camera integration, battery optimization
+- **Frameworks:** React hooks/components, Vue composables, Angular services, Web Components (framework-agnostic)
 - **Quantization:** FP16, INT8, INT4, INT2, AWQ, GPTQ, QLoRA, GGML, GGUF (12 types)
 
 ---
@@ -502,7 +508,7 @@ const optimized = await autoQuantize(model, {
 **Cross-browser and performance testing**
 
 - ✅ **Test Coverage**
-  - 91 unit tests (100% pass rate)
+  - 128 unit tests (100% pass rate)
   - Cross-browser tests (Chrome, Firefox, Safari)
   - Performance benchmarks
   - Memory leak detection
@@ -657,7 +663,9 @@ svelte = []
 
 ---
 
-**Last Updated:** 2025-11-10 - Alpha.2 enhancements
-**Status:** Production-ready WebAssembly infrastructure with advanced optimizations
-**Test Suite:** 91 tests, 100% pass rate
-**New Features:** WebNN integration, GGUF quantization, Advanced kernel fusion, Memory coalescing, Progressive loading, Core ML export
+**Last Updated:** 2026-03-21
+**Version:** 0.1.0
+**Status:** Stable
+**Test Suite:** 128 tests, 100% pass rate
+**SLoC:** 55,504
+**Key Features:** WebGPU backend (50-100x speedup, wgpu 29.0), Web Workers, IndexedDB caching, BERT WASM model, React/Vue/Angular/Web Components, streaming inference, SIMD, WebNN, GGUF quantization, kernel fusion, memory coalescing, progressive loading, Core ML export

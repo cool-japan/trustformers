@@ -1396,8 +1396,8 @@ mod tests {
         };
         let scaler = LossScaler::new(config);
 
-        let loss = Tensor::ones(&[2, 2]).unwrap();
-        let scaled_loss = scaler.scale_loss(&loss).unwrap();
+        let loss = Tensor::ones(&[2, 2]).expect("tensor operation failed");
+        let scaled_loss = scaler.scale_loss(&loss).expect("operation failed in test");
 
         match (&loss, &scaled_loss) {
             (Tensor::F32(orig), Tensor::F32(scaled)) => {
@@ -1417,13 +1417,16 @@ mod tests {
         let scaler = LossScaler::new(config);
 
         let mut gradients = HashMap::new();
-        gradients.insert("param1".to_string(), Tensor::ones(&[2, 2]).unwrap());
+        gradients.insert(
+            "param1".to_string(),
+            Tensor::ones(&[2, 2]).expect("tensor operation failed"),
+        );
 
-        let overflow = scaler.unscale_gradients(&mut gradients).unwrap();
+        let overflow = scaler.unscale_gradients(&mut gradients).expect("operation failed in test");
         assert!(!overflow);
 
         // Check that gradients are unscaled
-        let gradient = gradients.get("param1").unwrap();
+        let gradient = gradients.get("param1").expect("expected value not found");
         match gradient {
             Tensor::F32(arr) => {
                 assert!((arr[[0, 0]] - 1.0 / 65536.0).abs() < 1e-6);
@@ -1455,9 +1458,11 @@ mod tests {
         let config = utils::default_fp16_config();
         let manager = AMPManager::new(config);
 
-        let tensor = Tensor::from_vec(vec![1.0, 2.5, -3.7, 1000.0], &[2, 2]).unwrap();
-        let half_precision = manager.to_half_precision(&tensor).unwrap();
-        let full_precision = manager.to_full_precision(&half_precision).unwrap();
+        let tensor = Tensor::from_vec(vec![1.0, 2.5, -3.7, 1000.0], &[2, 2])
+            .expect("tensor operation failed");
+        let half_precision = manager.to_half_precision(&tensor).expect("tensor operation failed");
+        let full_precision =
+            manager.to_full_precision(&half_precision).expect("operation failed in test");
 
         // Values should be quantized but still reasonable
         match (&tensor, &full_precision) {
@@ -1472,17 +1477,21 @@ mod tests {
 
     #[test]
     fn test_fp16_safety_check() {
-        let safe_tensor = Tensor::from_vec(vec![1.0, 2.0, -3.0], &[3]).unwrap();
-        assert!(utils::is_fp16_safe(&safe_tensor).unwrap());
+        let safe_tensor =
+            Tensor::from_vec(vec![1.0, 2.0, -3.0], &[3]).expect("tensor operation failed");
+        assert!(utils::is_fp16_safe(&safe_tensor).expect("tensor operation failed"));
 
-        let unsafe_tensor = Tensor::from_vec(vec![1.0, 70000.0, -3.0], &[3]).unwrap();
-        assert!(!utils::is_fp16_safe(&unsafe_tensor).unwrap());
+        let unsafe_tensor =
+            Tensor::from_vec(vec![1.0, 70000.0, -3.0], &[3]).expect("tensor operation failed");
+        assert!(!utils::is_fp16_safe(&unsafe_tensor).expect("tensor operation failed"));
     }
 
     #[test]
     fn test_dynamic_range_calculation() {
-        let tensor = Tensor::from_vec(vec![1.0, 5.0, -2.0, 3.0], &[2, 2]).unwrap();
-        let (min_val, max_val) = utils::calculate_dynamic_range(&tensor).unwrap();
+        let tensor =
+            Tensor::from_vec(vec![1.0, 5.0, -2.0, 3.0], &[2, 2]).expect("tensor operation failed");
+        let (min_val, max_val) =
+            utils::calculate_dynamic_range(&tensor).expect("tensor operation failed");
         assert_eq!(min_val, -2.0);
         assert_eq!(max_val, 5.0);
     }
@@ -1499,12 +1508,12 @@ mod tests {
         let initial_scale = scaler.get_scale();
 
         // Simulate overflow
-        scaler.update_scale(true).unwrap();
+        scaler.update_scale(true).expect("operation failed in test");
         assert_eq!(scaler.get_scale(), initial_scale * 0.5);
         assert!(scaler.overflow_detected());
 
         // Simulate no overflow
-        scaler.update_scale(false).unwrap();
+        scaler.update_scale(false).expect("operation failed in test");
         assert!(!scaler.overflow_detected());
     }
 }

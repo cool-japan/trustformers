@@ -576,8 +576,8 @@ impl TestRunner {
         // Benchmark decoding
         let token_sequences: Vec<Vec<u32>> = test_texts
             .iter()
-            .map(|text| tokenizer.encode(text).unwrap().input_ids)
-            .collect();
+            .map(|text| tokenizer.encode(text).map(|enc| enc.input_ids))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let start = Instant::now();
         for tokens in &token_sequences {
@@ -1154,7 +1154,7 @@ mod tests {
         let mut runner = TestRunner::new(config);
         let tokenizer = MockTokenizer::new();
 
-        let results = runner.run_basic_tests(&tokenizer, "test").unwrap();
+        let results = runner.run_basic_tests(&tokenizer, "test").expect("Operation failed in test");
         assert!(!results.is_empty());
 
         // At least some tests should pass
@@ -1168,7 +1168,9 @@ mod tests {
         let runner = TestRunner::new(config);
         let tokenizer = MockTokenizer::new();
 
-        let metrics = runner.test_encode_decode_cycle(&tokenizer, "hello world").unwrap();
+        let metrics = runner
+            .test_encode_decode_cycle(&tokenizer, "hello world")
+            .expect("Operation failed in test");
         assert!(metrics.contains_key("num_tokens"));
         assert!(metrics.contains_key("input_length"));
     }
@@ -1185,7 +1187,9 @@ mod tests {
             vec![("mock1", &tokenizer1), ("mock2", &tokenizer2)];
 
         let test_cases = vec!["hello world".to_string(), "test".to_string()];
-        let results = validator.compare_tokenizers(tokenizers, &test_cases).unwrap();
+        let results = validator
+            .compare_tokenizers(tokenizers, &test_cases)
+            .expect("Operation failed in test");
 
         assert_eq!(results.tokenizers_compared.len(), 2);
         assert!(results.consistency_score >= 0.0 && results.consistency_score <= 1.0);

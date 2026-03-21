@@ -339,7 +339,7 @@ mod tests {
                 "US-West",
                 MeasurementType::Training,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(measurement.energy_consumed_kwh, 10.0);
         assert_eq!(measurement.carbon_intensity_gco2_kwh, 350.0);

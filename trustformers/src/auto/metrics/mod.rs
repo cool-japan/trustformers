@@ -424,17 +424,23 @@ mod tests {
         // Test classification metric creation
         let metric = AutoMetric::for_task("text-classification");
         assert!(metric.is_ok());
-        assert_eq!(metric.unwrap().name(), "classification");
+        assert_eq!(
+            metric.expect("operation failed in test").name(),
+            "classification"
+        );
 
         // Test generation metric creation
         let metric = AutoMetric::for_task("text-generation");
         assert!(metric.is_ok());
-        assert_eq!(metric.unwrap().name(), "generation");
+        assert_eq!(
+            metric.expect("operation failed in test").name(),
+            "generation"
+        );
 
         // Test unknown task defaults to default metric
         let metric = AutoMetric::for_task("unknown-task");
         assert!(metric.is_ok());
-        assert_eq!(metric.unwrap().name(), "default");
+        assert_eq!(metric.expect("operation failed in test").name(), "default");
     }
 
     #[test]
@@ -442,7 +448,7 @@ mod tests {
         let composite = AutoMetric::composite(&["text-classification", "text-generation"]);
         assert!(composite.is_ok());
 
-        let composite = composite.unwrap();
+        let composite = composite.expect("operation failed in test");
         assert_eq!(composite.metrics().len(), 2);
     }
 

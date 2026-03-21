@@ -498,13 +498,13 @@ impl TaskAdapter {
             TaskType::Regression => {
                 // Mean squared error
                 let diff = prediction - target;
-                let mse = (&diff * &diff).mean().unwrap();
+                let mse = (&diff * &diff).mean().unwrap_or(0.0);
                 Ok(mse)
             },
             _ => {
                 // Default to MSE for other types
                 let diff = prediction - target;
-                let mse = (&diff * &diff).mean().unwrap();
+                let mse = (&diff * &diff).mean().unwrap_or(0.0);
                 Ok(mse)
             },
         }
@@ -660,10 +660,10 @@ mod tests {
     #[test]
     fn test_adapter_layer() {
         let config = AdapterConfig::default();
-        let adapter = AdapterLayer::new(128, config).unwrap();
+        let adapter = AdapterLayer::new(128, config).expect("operation failed in test");
 
         let input = Array2::ones((4, 128)); // batch_size=4, hidden_dim=128
-        let output = adapter.forward(&input).unwrap();
+        let output = adapter.forward(&input).expect("forward pass failed");
 
         assert_eq!(output.shape(), &[4, 128]);
     }
@@ -672,7 +672,7 @@ mod tests {
     fn test_task_adapter_creation() {
         let desc = TaskDescriptor::classification("test".to_string(), 100, 5);
         let config = AdaptationConfig::default();
-        let adapter = TaskAdapter::new(desc, config).unwrap();
+        let adapter = TaskAdapter::new(desc, config).expect("operation failed in test");
 
         assert_eq!(adapter.task_descriptor.task_id, "test");
         assert_eq!(adapter.current_step, 0);
@@ -699,9 +699,9 @@ mod tests {
             ..AdaptationConfig::default()
         };
 
-        let adapter = TaskAdapter::new(desc, config).unwrap();
+        let adapter = TaskAdapter::new(desc, config).expect("operation failed in test");
         let input = Array1::ones(10);
-        let output = adapter.forward(&input).unwrap();
+        let output = adapter.forward(&input).expect("forward pass failed");
 
         assert_eq!(output.len(), 3);
     }
@@ -729,9 +729,10 @@ mod tests {
             activation: ActivationFunction::ReLU,
             ..Default::default()
         };
-        let adapter = AdapterLayer::new(10, config).unwrap();
+        let adapter = AdapterLayer::new(10, config).expect("operation failed in test");
 
-        let input = Array2::from_shape_vec((1, 10), vec![-1.0; 10]).unwrap();
+        let input =
+            Array2::from_shape_vec((1, 10), vec![-1.0; 10]).expect("operation failed in test");
         let activated = adapter.apply_activation(&input);
 
         // ReLU should clip negative values to 0

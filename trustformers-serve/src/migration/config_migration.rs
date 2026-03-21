@@ -412,7 +412,9 @@ workers = 4
 debug = true
 "#;
 
-        let migrated = migrator.migrate_config_content(v1_config).unwrap();
+        let migrated = migrator
+            .migrate_config_content(v1_config)
+            .expect("test operation should succeed");
 
         // Verify the migration worked
         assert!(migrated.contains("[server]"));
@@ -434,7 +436,9 @@ port = 8080
 level = "info"
 "#;
 
-        let results = migrator.validate_config(valid_config).unwrap();
+        let results = migrator
+            .validate_config(valid_config)
+            .expect("validation should succeed in test");
         assert!(results.iter().any(|r| r.status == ValidationStatus::Passed));
     }
 

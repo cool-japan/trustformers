@@ -808,20 +808,26 @@ mod tests {
         let operation_name = "test_operation".to_string();
 
         // Start session
-        profiler.start_session(session_id.clone(), operation_name).await.unwrap();
+        profiler
+            .start_session(session_id.clone(), operation_name)
+            .await
+            .expect("async operation failed");
 
         // Record samples (more than 100 to trigger batch size optimization)
         for i in 0..105 {
             let mut custom_metrics = HashMap::new();
             custom_metrics.insert("iteration".to_string(), i as f64);
-            profiler.record_sample(&session_id, custom_metrics).await.unwrap();
+            profiler
+                .record_sample(&session_id, custom_metrics)
+                .await
+                .expect("async operation failed");
             if i % 20 == 0 {
                 sleep(Duration::from_millis(1)).await; // Reduce sleep frequency for faster test
             }
         }
 
         // End session and get analysis
-        let analysis = profiler.end_session(&session_id).await.unwrap();
+        let analysis = profiler.end_session(&session_id).await.expect("async operation failed");
 
         assert!(analysis.session_summary.total_operations > 0);
         assert!(analysis.session_summary.total_duration_ms > 0.0);
@@ -839,7 +845,7 @@ mod tests {
         profiler
             .start_session(session_id.clone(), "global_test".to_string())
             .await
-            .unwrap();
+            .expect("operation failed in test");
 
         let metrics = profiler.get_global_metrics().await;
         assert!(metrics.total_sessions > 0);
@@ -854,8 +860,11 @@ mod tests {
         profiler
             .start_session(session_id.clone(), "export_test".to_string())
             .await
-            .unwrap();
-        profiler.record_sample(&session_id, HashMap::new()).await.unwrap();
+            .expect("operation failed in test");
+        profiler
+            .record_sample(&session_id, HashMap::new())
+            .await
+            .expect("async operation failed");
 
         // Test JSON export
         let json_export = profiler.export_data(&session_id, ExportFormat::JSON).await;
@@ -865,6 +874,6 @@ mod tests {
         let csv_export = profiler.export_data(&session_id, ExportFormat::CSV).await;
         assert!(csv_export.is_ok());
 
-        profiler.end_session(&session_id).await.unwrap();
+        profiler.end_session(&session_id).await.expect("async operation failed");
     }
 }

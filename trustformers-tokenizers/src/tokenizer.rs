@@ -708,8 +708,8 @@ mod tests {
         let tokenizer = crate::char::CharTokenizer::from_text(text, 1000);
         let wrapper = TokenizerWrapper::Char(tokenizer);
 
-        let encoded = wrapper.encode(text).unwrap();
-        let decoded = wrapper.decode(&encoded.input_ids).unwrap();
+        let encoded = wrapper.encode(text).expect("Encoding failed");
+        let decoded = wrapper.decode(&encoded.input_ids).expect("Decoding failed");
 
         assert!(!encoded.input_ids.is_empty());
         assert!(decoded.contains("Hello"));

@@ -75,7 +75,9 @@ mod tests {
         let detector = ConflictDetector::new();
         let test1 = create_test_metadata("test1", 0.6, 512);
         let test2 = create_test_metadata("test2", 0.5, 256);
-        let conflicts = detector.detect_conflicts_between_tests(&test1, &test2).unwrap();
+        let conflicts = detector
+            .detect_conflicts_between_tests(&test1, &test2)
+            .expect("test operation should succeed");
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_info.resource_type, "CPU");
         assert!(matches!(
@@ -90,7 +92,9 @@ mod tests {
         test1.resource_usage.gpu_devices = vec![0, 1];
         let mut test2 = create_test_metadata("test2", 0.3, 512);
         test2.resource_usage.gpu_devices = vec![1, 2];
-        let conflicts = detector.detect_conflicts_between_tests(&test1, &test2).unwrap();
+        let conflicts = detector
+            .detect_conflicts_between_tests(&test1, &test2)
+            .expect("test operation should succeed");
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].conflict_info.resource_type, "GPU");
         assert!(matches!(
@@ -103,7 +107,9 @@ mod tests {
         let detector = ConflictDetector::new();
         let test1 = create_test_metadata("test1", 0.3, 256);
         let test2 = create_test_metadata("test2", 0.2, 128);
-        let conflicts = detector.detect_conflicts_between_tests(&test1, &test2).unwrap();
+        let conflicts = detector
+            .detect_conflicts_between_tests(&test1, &test2)
+            .expect("test operation should succeed");
         assert_eq!(conflicts.len(), 0);
     }
     #[test]
@@ -115,7 +121,9 @@ mod tests {
         let mut test2 = create_test_metadata("test2", 0.5, 256);
         test2.resource_usage.gpu_devices = vec![0];
         test2.resource_usage.network_ports = vec![8080];
-        let conflicts = detector.detect_conflicts_between_tests(&test1, &test2).unwrap();
+        let conflicts = detector
+            .detect_conflicts_between_tests(&test1, &test2)
+            .expect("test operation should succeed");
         assert!(conflicts.len() >= 2);
         let resource_types: Vec<_> =
             conflicts.iter().map(|c| c.conflict_info.resource_type.as_str()).collect();

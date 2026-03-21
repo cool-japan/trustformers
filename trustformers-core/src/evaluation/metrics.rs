@@ -513,7 +513,7 @@ mod tests {
         let predictions = vec!["pos".to_string(), "neg".to_string(), "pos".to_string()];
         let targets = vec!["pos".to_string(), "neg".to_string(), "neg".to_string()];
 
-        let score = accuracy.compute(&predictions, &targets).unwrap();
+        let score = accuracy.compute(&predictions, &targets).expect("operation failed in test");
         assert!((score - 2.0 / 3.0).abs() < 1e-6);
     }
 
@@ -534,7 +534,7 @@ mod tests {
             "pos".to_string(),
         ];
 
-        let score = f1.compute(&predictions, &targets).unwrap();
+        let score = f1.compute(&predictions, &targets).expect("operation failed in test");
         assert!((0.0..=1.0).contains(&score));
     }
 
@@ -545,7 +545,7 @@ mod tests {
         let predictions = vec!["Hello World".to_string(), "goodbye".to_string()];
         let targets = vec!["hello world".to_string(), "goodbye".to_string()];
 
-        let score = em.compute(&predictions, &targets).unwrap();
+        let score = em.compute(&predictions, &targets).expect("operation failed in test");
         assert_eq!(score, 1.0); // Both should match after normalization
     }
 
@@ -556,7 +556,7 @@ mod tests {
         let predictions = vec!["the cat sat on the mat".to_string()];
         let targets = vec!["the cat is on the mat".to_string()];
 
-        let score = bleu.compute(&predictions, &targets).unwrap();
+        let score = bleu.compute(&predictions, &targets).expect("operation failed in test");
         assert!((0.0..=1.0).contains(&score));
     }
 
@@ -570,7 +570,9 @@ mod tests {
         let predictions = vec!["pos".to_string(), "neg".to_string()];
         let targets = vec!["pos".to_string(), "pos".to_string()];
 
-        let results = collection.compute_all(&predictions, &targets).unwrap();
+        let results = collection
+            .compute_all(&predictions, &targets)
+            .expect("operation failed in test");
 
         assert!(results.contains_key("accuracy"));
         assert!(results.contains_key("f1_macro"));
@@ -583,7 +585,7 @@ mod tests {
         let predictions: Vec<String> = vec![];
         let targets: Vec<String> = vec![];
 
-        let score = accuracy.compute(&predictions, &targets).unwrap();
+        let score = accuracy.compute(&predictions, &targets).expect("operation failed in test");
         assert_eq!(score, 0.0);
     }
 }

@@ -38,7 +38,7 @@ mod tests {
     async fn test_sensitive_data_detector() {
         let config = SensitiveDataDetection::default();
         let detector = SensitiveDataDetector::new(config);
-        detector.start().await.unwrap();
+        detector.start().await.expect("async operation should succeed in test");
         let result = detector
             .scan_data("Contact me at john@example.com", "test_context")
             .await;
@@ -69,7 +69,7 @@ mod tests {
             ),
         );
         let table_manager = TableEncryptionManager::new(config, dek_manager);
-        table_manager.start().await.unwrap();
+        table_manager.start().await.expect("async operation should succeed in test");
         let result = table_manager
             .set_table_status("test_table", TableEncryptionStatus::Encrypted)
             .await;

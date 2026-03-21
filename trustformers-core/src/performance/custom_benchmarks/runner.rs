@@ -532,7 +532,7 @@ mod tests {
             .mode(RunMode::Quick)
             .add_benchmark(benchmark)
             .run()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "test_benchmark");
@@ -555,7 +555,7 @@ mod tests {
             builder = builder.add_benchmark(benchmark);
         }
 
-        let results = builder.run().unwrap();
+        let results = builder.run().expect("operation failed in test");
 
         assert_eq!(results.len(), 4);
     }

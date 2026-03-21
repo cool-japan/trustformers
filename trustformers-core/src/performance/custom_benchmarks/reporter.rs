@@ -550,7 +550,8 @@ mod tests {
     #[test]
     fn test_text_format() {
         let report = create_test_report();
-        let text = Reporter::generate(&report, ReportFormat::Text).unwrap();
+        let text =
+            Reporter::generate(&report, ReportFormat::Text).expect("operation failed in test");
 
         assert!(text.contains("Benchmark: test_benchmark"));
         assert!(text.contains("Average Latency: 11.00ms"));
@@ -559,7 +560,8 @@ mod tests {
     #[test]
     fn test_json_format() {
         let report = create_test_report();
-        let json = Reporter::generate(&report, ReportFormat::Json).unwrap();
+        let json =
+            Reporter::generate(&report, ReportFormat::Json).expect("operation failed in test");
 
         let parsed: BenchmarkReport =
             serde_json::from_str(&json).expect("JSON deserialization failed");

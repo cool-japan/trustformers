@@ -365,7 +365,7 @@ impl LargeModelVisualizer {
         layers.sort_by(|a, b| {
             let score_a = (a.param_count as f64) + (a.compute_flops as f64 / 1e9);
             let score_b = (b.param_count as f64) + (b.compute_flops as f64 / 1e9);
-            score_b.partial_cmp(&score_a).unwrap()
+            score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         layers.iter().take(self.config.max_full_layers).map(|l| l.index).collect()

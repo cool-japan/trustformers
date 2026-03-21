@@ -857,7 +857,7 @@ mod tests {
         let orchestrator =
             TrainingOrchestrator::new(SchedulingStrategy::FIFO, AllocationStrategy::FirstFit);
 
-        let stats = orchestrator.get_statistics().unwrap();
+        let stats = orchestrator.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_jobs_submitted, 0);
     }
 
@@ -924,10 +924,10 @@ mod tests {
             max_retries: 3,
         };
 
-        let job_id = orchestrator.submit_job(job).unwrap();
+        let job_id = orchestrator.submit_job(job).expect("operation failed in test");
         assert!(!job_id.is_empty());
 
-        let retrieved_job = orchestrator.get_job(&job_id).unwrap();
+        let retrieved_job = orchestrator.get_job(&job_id).expect("operation failed in test");
         assert_eq!(retrieved_job.job_name, "test_job");
         assert_eq!(retrieved_job.status, JobStatus::Pending);
     }
@@ -963,9 +963,9 @@ mod tests {
             running_jobs: vec![],
         };
 
-        orchestrator.register_node(node).unwrap();
+        orchestrator.register_node(node).expect("operation failed in test");
 
-        let nodes = orchestrator.get_node_status().unwrap();
+        let nodes = orchestrator.get_node_status().expect("operation failed in test");
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].node_id, "node1");
     }
@@ -1033,10 +1033,10 @@ mod tests {
             max_retries: 3,
         };
 
-        let job_id = orchestrator.submit_job(job).unwrap();
-        orchestrator.cancel_job(&job_id).unwrap();
+        let job_id = orchestrator.submit_job(job).expect("operation failed in test");
+        orchestrator.cancel_job(&job_id).expect("operation failed in test");
 
-        let retrieved_job = orchestrator.get_job(&job_id).unwrap();
+        let retrieved_job = orchestrator.get_job(&job_id).expect("operation failed in test");
         assert_eq!(retrieved_job.status, JobStatus::Cancelled);
     }
 }

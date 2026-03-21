@@ -679,7 +679,7 @@ mod tests {
     #[test]
     fn test_create_fused_node() {
         let config = CompilerConfig::default();
-        let fusion = KernelFusion::new(&config).unwrap();
+        let fusion = KernelFusion::new(&config).expect("operation failed in test");
 
         let mut graph = ComputationGraph::new();
 
@@ -716,7 +716,7 @@ mod tests {
         let result = fusion.create_fused_node(&graph, &group);
         assert!(result.is_ok());
 
-        let fused_node = result.unwrap();
+        let fused_node = result.expect("operation failed in test");
         assert!(fused_node.op_type.contains("Fused"));
         assert!(fused_node.compute_cost < 80.0); // Should be less than sum due to fusion benefit
     }

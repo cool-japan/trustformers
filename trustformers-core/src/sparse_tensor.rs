@@ -1000,20 +1000,20 @@ mod tests {
             vec![1.0, 2.0, 3.0],
         );
         assert!(sparse.is_ok());
-        let sparse = sparse.unwrap();
+        let sparse = sparse.expect("operation failed in test");
         assert_eq!(sparse.nnz(), 3);
         assert_eq!(sparse.shape(), &[3, 3]);
     }
 
     #[test]
     fn test_sparse_to_dense() {
-        let sparse =
-            SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![0, 1], vec![1.0, 2.0]).unwrap();
+        let sparse = SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![0, 1], vec![1.0, 2.0])
+            .expect("tensor operation failed");
 
-        let dense = sparse.to_dense().unwrap();
+        let dense = sparse.to_dense().expect("operation failed in test");
         assert_eq!(dense.shape(), vec![2, 2]);
 
-        let data = dense.data().unwrap();
+        let data = dense.data().expect("operation failed in test");
         assert_eq!(data[0], 1.0); // [0,0]
         assert_eq!(data[1], 0.0); // [0,1]
         assert_eq!(data[2], 0.0); // [1,0]
@@ -1022,10 +1022,10 @@ mod tests {
 
     #[test]
     fn test_dense_to_sparse() {
-        let dense = Tensor::new(vec![1.0, 0.0, 0.0, 2.0]).unwrap();
+        let dense = Tensor::new(vec![1.0, 0.0, 0.0, 2.0]).expect("tensor operation failed");
         let dense_2d = dense.reshape(&[2, 2]).expect("Reshape failed");
 
-        let sparse = SparseTensor::from_dense(&dense_2d, 0.5).unwrap();
+        let sparse = SparseTensor::from_dense(&dense_2d, 0.5).expect("tensor operation failed");
         assert_eq!(sparse.nnz(), 2);
         assert_eq!(sparse.sparsity(), 0.5);
     }
@@ -1038,24 +1038,24 @@ mod tests {
             vec![0, 1, 2],
             vec![1.0, 2.0, 3.0],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
-        let sparse_csr = sparse_coo.to_format(SparseFormat::CSR).unwrap();
+        let sparse_csr = sparse_coo.to_format(SparseFormat::CSR).expect("operation failed in test");
         assert_eq!(sparse_csr.format, SparseFormat::CSR);
         assert_eq!(sparse_csr.nnz(), 3);
 
         // Convert back to dense to verify correctness
-        let dense = sparse_csr.to_dense().unwrap();
+        let dense = sparse_csr.to_dense().expect("operation failed in test");
         assert_eq!(dense.shape(), vec![3, 3]);
     }
 
     #[test]
     fn test_sparse_addition() {
-        let sparse1 =
-            SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![0, 1], vec![1.0, 2.0]).unwrap();
+        let sparse1 = SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![0, 1], vec![1.0, 2.0])
+            .expect("tensor operation failed");
 
-        let sparse2 =
-            SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![1, 0], vec![3.0, 4.0]).unwrap();
+        let sparse2 = SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![1, 0], vec![3.0, 4.0])
+            .expect("tensor operation failed");
 
         let result = sparse1.add(&sparse2).expect("Addition failed");
         assert_eq!(result.nnz(), 4); // Four non-zero elements after addition
@@ -1063,18 +1063,18 @@ mod tests {
 
     #[test]
     fn test_sparse_scalar_multiplication() {
-        let sparse =
-            SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![0, 1], vec![1.0, 2.0]).unwrap();
+        let sparse = SparseTensor::new_coo(vec![2, 2], vec![0, 1], vec![0, 1], vec![1.0, 2.0])
+            .expect("tensor operation failed");
 
-        let result = sparse.mul_scalar(3.0).unwrap();
+        let result = sparse.mul_scalar(3.0).expect("operation failed in test");
         assert_eq!(result.values[0], 3.0);
         assert_eq!(result.values[1], 6.0);
     }
 
     #[test]
     fn test_sparsity_calculation() {
-        let sparse =
-            SparseTensor::new_coo(vec![4, 4], vec![0, 1], vec![0, 1], vec![1.0, 2.0]).unwrap();
+        let sparse = SparseTensor::new_coo(vec![4, 4], vec![0, 1], vec![0, 1], vec![1.0, 2.0])
+            .expect("tensor operation failed");
 
         assert_eq!(sparse.sparsity(), 0.875); // 14/16 elements are zero
         assert_eq!(sparse.density(), 0.125); // 2/16 elements are non-zero
@@ -1082,13 +1082,13 @@ mod tests {
 
     #[test]
     fn test_sparse_dense_matmul() {
-        let sparse =
-            SparseTensor::new_csr(vec![2, 2], vec![0, 1, 2], vec![0, 1], vec![1.0, 2.0]).unwrap();
+        let sparse = SparseTensor::new_csr(vec![2, 2], vec![0, 1, 2], vec![0, 1], vec![1.0, 2.0])
+            .expect("tensor operation failed");
 
-        let dense = Tensor::new(vec![1.0, 0.0, 0.0, 1.0]).unwrap();
+        let dense = Tensor::new(vec![1.0, 0.0, 0.0, 1.0]).expect("tensor operation failed");
         let dense_2d = dense.reshape(&[2, 2]).expect("Reshape failed");
 
-        let result = sparse.dense_matmul(&dense_2d).unwrap();
+        let result = sparse.dense_matmul(&dense_2d).expect("operation failed in test");
         assert_eq!(result.shape(), vec![2, 2]);
     }
 
@@ -1096,7 +1096,7 @@ mod tests {
     fn test_memory_usage() {
         let sparse =
             SparseTensor::new_coo(vec![1000, 1000], vec![0, 1], vec![0, 1], vec![1.0, 2.0])
-                .unwrap();
+                .expect("operation failed in test");
 
         let usage = sparse.memory_usage();
         assert!(usage > 0);

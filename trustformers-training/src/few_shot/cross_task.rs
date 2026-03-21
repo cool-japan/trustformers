@@ -646,7 +646,9 @@ mod tests {
         let mut generalizer = CrossTaskGeneralizer::new(config);
 
         let data = vec![Array1::ones(128); 10];
-        generalizer.register_task("task1".to_string(), &data).unwrap();
+        generalizer
+            .register_task("task1".to_string(), &data)
+            .expect("operation failed in test");
 
         assert!(generalizer.get_task_embedding("task1").is_some());
     }
@@ -686,7 +688,7 @@ mod tests {
         let encoder = SharedEncoder::new(config);
 
         let input = Array1::ones(5);
-        let encoded = encoder.encode(&input).unwrap();
+        let encoded = encoder.encode(&input).expect("encoding failed");
 
         assert_eq!(encoded.len(), 5);
     }
@@ -709,8 +711,12 @@ mod tests {
         let data1 = vec![Array1::ones(10); 5];
         let data2 = vec![Array1::zeros(10); 5];
 
-        generalizer.register_task("task1".to_string(), &data1).unwrap();
-        generalizer.register_task("task2".to_string(), &data2).unwrap();
+        generalizer
+            .register_task("task1".to_string(), &data1)
+            .expect("operation failed in test");
+        generalizer
+            .register_task("task2".to_string(), &data2)
+            .expect("operation failed in test");
 
         let similarity_matrix = generalizer.compute_task_similarity_matrix();
         assert_eq!(similarity_matrix.shape(), &[2, 2]);

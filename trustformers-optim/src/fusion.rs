@@ -705,7 +705,7 @@ mod tests {
     #[test]
     fn test_fused_optimizer_creation() {
         let config = FusionConfig::default();
-        let optimizer = FusedOptimizer::new(config).unwrap();
+        let optimizer = FusedOptimizer::new(config).expect("Failed to create fused optimizer");
 
         let stats = optimizer.get_fusion_stats();
         assert_eq!(stats.fused_operations, 0);
@@ -714,10 +714,10 @@ mod tests {
     #[test]
     fn test_fused_adam_operation() {
         let config = FusionConfig::default();
-        let mut optimizer = FusedOptimizer::new(config).unwrap();
+        let mut optimizer = FusedOptimizer::new(config).expect("Failed to create fused optimizer");
 
-        let param = Tensor::ones(&[10, 10]).unwrap();
-        let grad = Tensor::ones(&[10, 10]).unwrap();
+        let param = Tensor::ones(&[10, 10]).expect("Failed to create tensor");
+        let grad = Tensor::ones(&[10, 10]).expect("Failed to create tensor");
 
         let operation = FusedOperation::FusedAdam {
             lr: 0.001,
@@ -727,9 +727,11 @@ mod tests {
             weight_decay: 0.0,
         };
 
-        optimizer.queue_operation("param1".to_string(), operation, param, grad).unwrap();
+        optimizer
+            .queue_operation("param1".to_string(), operation, param, grad)
+            .expect("Failed to queue operation");
 
-        optimizer.flush().unwrap();
+        optimizer.flush().expect("Flush failed");
 
         let stats = optimizer.get_fusion_stats();
         assert_eq!(stats.fused_operations, 1);
@@ -738,10 +740,10 @@ mod tests {
     #[test]
     fn test_fused_adamw_operation() {
         let config = FusionConfig::default();
-        let mut optimizer = FusedOptimizer::new(config).unwrap();
+        let mut optimizer = FusedOptimizer::new(config).expect("Failed to create fused optimizer");
 
-        let param = Tensor::ones(&[5, 5]).unwrap();
-        let grad = Tensor::ones(&[5, 5]).unwrap();
+        let param = Tensor::ones(&[5, 5]).expect("Failed to create tensor");
+        let grad = Tensor::ones(&[5, 5]).expect("Failed to create tensor");
 
         let operation = FusedOperation::FusedAdamW {
             lr: 0.001,
@@ -751,9 +753,11 @@ mod tests {
             weight_decay: 0.01,
         };
 
-        optimizer.queue_operation("param2".to_string(), operation, param, grad).unwrap();
+        optimizer
+            .queue_operation("param2".to_string(), operation, param, grad)
+            .expect("Failed to queue operation");
 
-        optimizer.flush().unwrap();
+        optimizer.flush().expect("Flush failed");
 
         let stats = optimizer.get_fusion_stats();
         assert_eq!(stats.fused_operations, 1);
@@ -762,10 +766,10 @@ mod tests {
     #[test]
     fn test_fused_sgd_operation() {
         let config = FusionConfig::default();
-        let mut optimizer = FusedOptimizer::new(config).unwrap();
+        let mut optimizer = FusedOptimizer::new(config).expect("Failed to create fused optimizer");
 
-        let param = Tensor::ones(&[3, 3]).unwrap();
-        let grad = Tensor::ones(&[3, 3]).unwrap();
+        let param = Tensor::ones(&[3, 3]).expect("Failed to create tensor");
+        let grad = Tensor::ones(&[3, 3]).expect("Failed to create tensor");
 
         let operation = FusedOperation::FusedSGDMomentum {
             lr: 0.01,
@@ -775,9 +779,11 @@ mod tests {
             nesterov: false,
         };
 
-        optimizer.queue_operation("param3".to_string(), operation, param, grad).unwrap();
+        optimizer
+            .queue_operation("param3".to_string(), operation, param, grad)
+            .expect("Failed to queue operation");
 
-        optimizer.flush().unwrap();
+        optimizer.flush().expect("Flush failed");
 
         let stats = optimizer.get_fusion_stats();
         assert_eq!(stats.fused_operations, 1);
@@ -789,12 +795,12 @@ mod tests {
             batch_size: 2,
             ..FusionConfig::default()
         };
-        let mut optimizer = FusedOptimizer::new(config).unwrap();
+        let mut optimizer = FusedOptimizer::new(config).expect("Failed to create fused optimizer");
 
         // Queue multiple operations
         for i in 0..3 {
-            let param = Tensor::ones(&[2, 2]).unwrap();
-            let grad = Tensor::ones(&[2, 2]).unwrap();
+            let param = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
+            let grad = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
 
             let operation = FusedOperation::FusedAdam {
                 lr: 0.001,
@@ -806,7 +812,7 @@ mod tests {
 
             optimizer
                 .queue_operation(format!("param_{}", i), operation, param, grad)
-                .unwrap();
+                .expect("Operation failed in test");
         }
 
         // Should have executed batch automatically
@@ -817,10 +823,10 @@ mod tests {
     #[test]
     fn test_fusion_stats() {
         let config = FusionConfig::default();
-        let mut optimizer = FusedOptimizer::new(config).unwrap();
+        let mut optimizer = FusedOptimizer::new(config).expect("Failed to create fused optimizer");
 
-        let param = Tensor::ones(&[10, 10]).unwrap();
-        let grad = Tensor::ones(&[10, 10]).unwrap();
+        let param = Tensor::ones(&[10, 10]).expect("Failed to create tensor");
+        let grad = Tensor::ones(&[10, 10]).expect("Failed to create tensor");
 
         let operation = FusedOperation::FusedAdam {
             lr: 0.001,
@@ -830,9 +836,11 @@ mod tests {
             weight_decay: 0.0,
         };
 
-        optimizer.queue_operation("param1".to_string(), operation, param, grad).unwrap();
+        optimizer
+            .queue_operation("param1".to_string(), operation, param, grad)
+            .expect("Failed to queue operation");
 
-        optimizer.flush().unwrap();
+        optimizer.flush().expect("Flush failed");
 
         let stats = optimizer.get_fusion_stats();
         assert_eq!(stats.fused_operations, 1);
@@ -847,13 +855,15 @@ mod tests {
     #[test]
     fn test_global_norm_computation() {
         let config = FusionConfig::default();
-        let optimizer = FusedOptimizer::new(config).unwrap();
+        let optimizer = FusedOptimizer::new(config).expect("Failed to create fused optimizer");
 
-        let grad1 = Tensor::ones(&[3, 3]).unwrap();
-        let grad2 = Tensor::ones(&[2, 2]).unwrap();
+        let grad1 = Tensor::ones(&[3, 3]).expect("Failed to create tensor");
+        let grad2 = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
 
         let gradients = vec![grad1, grad2];
-        let global_norm = optimizer.compute_global_norm(&gradients).unwrap();
+        let global_norm = optimizer
+            .compute_global_norm(&gradients)
+            .expect("Failed to compute global norm");
 
         // Expected: sqrt(9 + 4) = sqrt(13) ≈ 3.606
         assert!((global_norm - 3.606).abs() < 0.01);

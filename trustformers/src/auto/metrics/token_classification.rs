@@ -478,9 +478,9 @@ mod tests {
             (3, 5, "LOCATION".to_string()),
         ]]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "token_classification");
         assert_eq!(result.value, 1.0); // Perfect match
         assert_eq!(result.details.get("precision"), Some(&1.0));
@@ -500,9 +500,9 @@ mod tests {
             vec![(0, 2, "PERSON".to_string()), (3, 6, "LOCATION".to_string())], // Different end
         ]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Only PERSON matches exactly, LOCATION has different boundaries
         assert_eq!(result.details.get("precision"), Some(&0.5)); // 1/2 predicted correct
         assert_eq!(result.details.get("recall"), Some(&0.5)); // 1/2 reference found
@@ -516,9 +516,9 @@ mod tests {
         let predictions = MetricInput::Spans(vec![vec![(0, 2, "PERSON".to_string())]]);
         let references = MetricInput::Spans(vec![vec![(3, 5, "LOCATION".to_string())]]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.details.get("precision"), Some(&0.0));
         assert_eq!(result.details.get("recall"), Some(&0.0));
         assert_eq!(result.details.get("f1"), Some(&0.0));
@@ -531,9 +531,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["B-PER I-PER O B-LOC O".to_string()]);
         let references = MetricInput::Text(vec!["B-PER I-PER O B-LOC O".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, 1.0); // Perfect match
     }
 
@@ -544,9 +544,9 @@ mod tests {
         let predictions = MetricInput::Spans(vec![vec![]]);
         let references = MetricInput::Spans(vec![vec![]]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // No entities to evaluate
         assert_eq!(result.details.get("precision"), Some(&0.0));
         assert_eq!(result.details.get("recall"), Some(&0.0));
@@ -562,11 +562,11 @@ mod tests {
                 &MetricInput::Spans(vec![vec![(0, 2, "PERSON".to_string())]]),
                 &MetricInput::Spans(vec![vec![(0, 2, "PERSON".to_string())]]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         metric.reset();
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Should have no data after reset
         assert_eq!(result.value, 0.0);
     }

@@ -344,7 +344,11 @@ impl GradientConflictAnalyzer {
 
         // Find most problematic layer pairs
         let mut sorted_conflicts = analysis.conflicts.clone();
-        sorted_conflicts.sort_by(|a, b| b.conflict_score.partial_cmp(&a.conflict_score).unwrap());
+        sorted_conflicts.sort_by(|a, b| {
+            b.conflict_score
+                .partial_cmp(&a.conflict_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         most_problematic_pairs = sorted_conflicts.into_iter().take(5).collect();
 
         // Find most problematic layers

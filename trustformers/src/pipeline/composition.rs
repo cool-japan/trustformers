@@ -397,7 +397,7 @@ mod tests {
 
         let composed = ComposedPipeline::new(first, second);
 
-        let result = composed.__call__("input".to_string()).unwrap();
+        let result = composed.__call__("input".to_string()).expect("operation failed in test");
 
         if let PipelineOutput::Generation(gen) = result {
             assert_eq!(gen.generated_text, "second(first(input))");
@@ -413,7 +413,7 @@ mod tests {
             .add_stage(MockPipeline::new("stage2"))
             .add_stage(MockPipeline::new("stage3"));
 
-        let result = chain.__call__("input".to_string()).unwrap();
+        let result = chain.__call__("input".to_string()).expect("operation failed in test");
 
         if let PipelineOutput::Generation(gen) = result {
             assert_eq!(gen.generated_text, "stage3(stage2(stage1(input)))");
@@ -429,9 +429,9 @@ mod tests {
             .then(MockPipeline::new("second"))
             .then(MockPipeline::new("third"))
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
-        let result = composed.__call__("input".to_string()).unwrap();
+        let result = composed.__call__("input".to_string()).expect("operation failed in test");
 
         if let PipelineOutput::Generation(gen) = result {
             // The composition should process through all pipelines
@@ -450,7 +450,7 @@ mod tests {
 
         let composed = compose_pipelines(first, second);
 
-        let result = composed.__call__("test".to_string()).unwrap();
+        let result = composed.__call__("test".to_string()).expect("operation failed in test");
 
         if let PipelineOutput::Generation(gen) = result {
             assert_eq!(gen.generated_text, "second(first(test))");
@@ -466,9 +466,9 @@ mod tests {
             MockPipeline::new("p2"),
             MockPipeline::new("p3")
         )
-        .unwrap();
+        .expect("operation failed in test");
 
-        let output = result.__call__("test".to_string()).unwrap();
+        let output = result.__call__("test".to_string()).expect("operation failed in test");
 
         if let PipelineOutput::Generation(gen) = output {
             assert!(gen.generated_text.contains("test"));

@@ -716,7 +716,7 @@ mod tests {
     #[test]
     fn test_specification_generation() {
         let checker = AbiChecker::new();
-        let spec = checker.generate_current_specification().unwrap();
+        let spec = checker.generate_current_specification().expect("operation failed in test");
 
         assert!(!spec.functions.is_empty());
         assert!(!spec.types.is_empty());

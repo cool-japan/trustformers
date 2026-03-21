@@ -382,12 +382,13 @@ mod tests {
         token_map.insert("world".to_string(), 2);
         token_map.insert("[UNK]".to_string(), 0);
 
-        let tokenizer = CustomVocabTokenizer::from_token_map(token_map).unwrap();
+        let tokenizer =
+            CustomVocabTokenizer::from_token_map(token_map).expect("Operation failed in test");
 
-        let result = tokenizer.encode("hello world").unwrap();
+        let result = tokenizer.encode("hello world").expect("Encoding failed");
         assert_eq!(result.input_ids, vec![1, 2]);
 
-        let decoded = tokenizer.decode(&result.input_ids).unwrap();
+        let decoded = tokenizer.decode(&result.input_ids).expect("Decoding failed");
         assert_eq!(decoded, "hello world");
     }
 
@@ -397,9 +398,10 @@ mod tests {
         token_map.insert("hello".to_string(), 1);
         token_map.insert("[UNK]".to_string(), 0);
 
-        let tokenizer = CustomVocabTokenizer::from_token_map(token_map).unwrap();
+        let tokenizer =
+            CustomVocabTokenizer::from_token_map(token_map).expect("Operation failed in test");
 
-        let result = tokenizer.encode("hello unknown").unwrap();
+        let result = tokenizer.encode("hello unknown").expect("Encoding failed");
         assert_eq!(result.input_ids, vec![1, 0]); // unknown -> [UNK]
     }
 
@@ -410,14 +412,20 @@ mod tests {
         token_map.insert("world".to_string(), 2);
 
         let tokenizer = CustomVocabTokenizer::from_token_map(token_map)
-            .unwrap()
+            .expect("Operation failed in test")
             .with_special_token("[CLS]".to_string(), 100)
             .with_special_token("[SEP]".to_string(), 101);
 
-        assert_eq!(tokenizer.token_to_id("[CLS]").unwrap(), Some(100));
-        assert_eq!(tokenizer.token_to_id("[SEP]").unwrap(), Some(101));
         assert_eq!(
-            tokenizer.id_to_token(100).unwrap(),
+            tokenizer.token_to_id("[CLS]").expect("Operation failed in test"),
+            Some(100)
+        );
+        assert_eq!(
+            tokenizer.token_to_id("[SEP]").expect("Operation failed in test"),
+            Some(101)
+        );
+        assert_eq!(
+            tokenizer.id_to_token(100).expect("Operation failed in test"),
             Some("[CLS]".to_string())
         );
     }
@@ -430,9 +438,12 @@ mod tests {
         token_map.insert("from".to_string(), 3);
         token_map.insert("rust".to_string(), 4);
 
-        let tokenizer = CustomVocabTokenizer::from_token_map(token_map).unwrap();
+        let tokenizer =
+            CustomVocabTokenizer::from_token_map(token_map).expect("Operation failed in test");
 
-        let result = tokenizer.encode_pair("hello world", "from rust").unwrap();
+        let result = tokenizer
+            .encode_pair("hello world", "from rust")
+            .expect("Operation failed in test");
         assert_eq!(result.input_ids, vec![1, 2, 3, 4]);
         assert_eq!(result.token_type_ids, Some(vec![0, 0, 1, 1]));
     }
@@ -445,11 +456,11 @@ mod tests {
         token_map.insert("c".to_string(), 3);
 
         let tokenizer = CustomVocabTokenizer::from_token_map(token_map)
-            .unwrap()
+            .expect("Operation failed in test")
             .with_max_length(2)
             .with_truncation(true);
 
-        let result = tokenizer.encode("a b c").unwrap();
+        let result = tokenizer.encode("a b c").expect("Encoding failed");
         assert_eq!(result.input_ids, vec![1, 2]); // truncated to 2 tokens
     }
 
@@ -460,11 +471,11 @@ mod tests {
         token_map.insert("[PAD]".to_string(), 99);
 
         let tokenizer = CustomVocabTokenizer::from_token_map(token_map)
-            .unwrap()
+            .expect("Operation failed in test")
             .with_max_length(3)
             .with_padding_token("[PAD]".to_string());
 
-        let result = tokenizer.encode("hello").unwrap();
+        let result = tokenizer.encode("hello").expect("Encoding failed");
         assert_eq!(result.input_ids, vec![1, 99, 99]); // padded to length 3
     }
 
@@ -480,10 +491,16 @@ mod tests {
             .max_length(10)
             .truncation(true)
             .build()
-            .unwrap();
+            .expect("Operation failed in test");
 
         assert_eq!(tokenizer.unk_token(), "[UNK]");
-        assert_eq!(tokenizer.token_to_id("test").unwrap(), Some(1));
-        assert_eq!(tokenizer.token_to_id("[CLS]").unwrap(), Some(100));
+        assert_eq!(
+            tokenizer.token_to_id("test").expect("Operation failed in test"),
+            Some(1)
+        );
+        assert_eq!(
+            tokenizer.token_to_id("[CLS]").expect("Operation failed in test"),
+            Some(100)
+        );
     }
 }

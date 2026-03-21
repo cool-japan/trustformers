@@ -1,6 +1,19 @@
 # TrustformeRS Debug
 
+**Version:** 0.1.0 | **Status:** Alpha | **Tests:** 216 | **SLoC:** 61,841 | **Updated:** 2026-03-21
+
 Advanced debugging and analysis tools for TrustformeRS machine learning models.
+
+## Feature Flags
+
+| Feature | Description |
+|---------|-------------|
+| `visual` | Enable graphical plot output via Plotters |
+| `video` | Enable video frame export for training animations |
+| `gif` | Enable animated GIF export for visualization sequences |
+| `wasm` | Enable WebAssembly-compatible debugging (no filesystem I/O) |
+| `atomics` | Enable atomic counters for lock-free profiling in multi-threaded contexts |
+| `headless` | Enable terminal/ASCII visualization for server environments (Ratatui) |
 
 ## Overview
 
@@ -8,41 +21,71 @@ TrustformeRS Debug provides comprehensive debugging capabilities for deep learni
 
 ## Features
 
-### 🔍 Tensor Inspector
+### Tensor Inspector
 - **Real-time Analysis**: Inspect tensor statistics, distributions, and patterns
 - **Anomaly Detection**: Automatically detect NaN, infinite, and extreme values
 - **Memory Tracking**: Monitor memory usage and identify memory leaks
 - **Comparison Tools**: Compare tensors across different training steps or layers
 
-### 📈 Gradient Debugger
+### Gradient Debugger
 - **Flow Analysis**: Track gradient flow through model layers
 - **Problem Detection**: Identify vanishing and exploding gradients
 - **Dead Neuron Detection**: Find layers with inactive neurons
 - **Trend Analysis**: Monitor gradient patterns over training steps
 
-### 🏥 Model Diagnostics
+### Model Diagnostics
 - **Training Dynamics**: Analyze convergence, stability, and learning efficiency
 - **Architecture Analysis**: Evaluate model structure and parameter efficiency
 - **Performance Monitoring**: Track training metrics and detect anomalies
 - **Health Assessment**: Overall model health scoring and recommendations
 
-### 🎣 Debugging Hooks
+### Debugging Hooks
 - **Automated Monitoring**: Set up conditional debugging triggers
 - **Layer-specific Tracking**: Monitor specific layers or operations
 - **Custom Callbacks**: Implement custom debugging logic
 - **Alert System**: Real-time notifications for debugging events
 
-### 📊 Visualization
-- **Interactive Plots**: Generate comprehensive debugging visualizations
-- **Dashboard Creation**: Build debugging dashboards with multiple plots
-- **Terminal Visualization**: ASCII plots for headless environments
-- **Export Capabilities**: Save plots and data in multiple formats
+### Visualization
 
-### ⚡ Performance Profiler
+Multiple backends depending on enabled features:
+
+- **Plotters** (`visual` feature): Static PNG/SVG plots, histograms, scatter charts, line graphs
+- **Ratatui** (`headless` feature): Terminal-based TUI dashboards and ASCII plots for headless server environments
+- **TensorBoard**: Event file export compatible with TensorBoard scalar/histogram/graph viewers
+- **GIF export** (`gif` feature): Animated training progress visualizations
+- **Video export** (`video` feature): MP4-compatible frame sequences for training recordings
+
+### Memory Profiling
+
+Deadlock-safe memory profiling using scoped mutex guards:
+
+- Peak memory tracking with RAII-scoped lock acquisition (no `unwrap`, no lock poisoning)
+- Memory allocation timeline with per-layer attribution
+- Fragmentation analysis and leak detection
+- Thread-safe snapshot API with bounded scope to prevent deadlock across async boundaries
+
+### Performance Profiler
 - **Execution Timing**: Profile layer and operation execution times
-- **Memory Profiling**: Track memory usage patterns
+- **Memory Profiling**: Track memory usage patterns with deadlock-safe mutex scoping
 - **Bottleneck Detection**: Identify performance bottlenecks automatically
 - **Optimization Suggestions**: Get recommendations for performance improvements
+- **Flame Graphs**: Generate Inferno-compatible flamegraph data for call stack visualization
+
+### AI Code Analysis
+
+Automated model code analysis powered by built-in heuristics:
+
+- Pattern matching for common anti-patterns (gradient checkpoint misuse, redundant recomputation)
+- Architecture smell detection (excessive depth without skip connections, degenerate attention heads)
+- Actionable suggestions with line-level annotations compatible with VS Code diagnostics
+
+### VS Code Integration
+
+Language Server Protocol (LSP)-compatible diagnostic output:
+
+- Emit structured JSON diagnostics consumable by the VS Code Rust Analyzer extension
+- Breakpoint-compatible debug session with DAP (Debug Adapter Protocol) event emission
+- In-editor tensor shape annotations via hover provider protocol
 
 ## Quick Start
 
@@ -50,7 +93,6 @@ TrustformeRS Debug provides comprehensive debugging capabilities for deep learni
 
 ```rust
 use trustformers_debug::{debug_session, DebugConfig};
-use ndarray::Array;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -58,8 +100,8 @@ async fn main() -> anyhow::Result<()> {
     let mut debug_session = debug_session();
     debug_session.start().await?;
 
-    // Inspect a tensor
-    let tensor = Array::linspace(0.0, 1.0, 1000);
+    // Inspect a tensor (use plain Vec, not ndarray)
+    let tensor: Vec<f64> = (0..1000).map(|i| i as f64 / 999.0).collect();
     let tensor_id = debug_session.tensor_inspector_mut()
         .inspect_tensor(&tensor, "my_tensor", Some("layer_1"), Some("forward"))?;
 
@@ -149,6 +191,21 @@ let plot_names = visualizer.get_plot_names();
 let dashboard = visualizer.create_dashboard(&plot_names)?;
 ```
 
+### Flame Graph Generation
+
+```rust
+use trustformers_debug::profiler::FlameGraphBuilder;
+
+let mut builder = FlameGraphBuilder::new();
+builder.record_frame("forward", "transformer_block_0", 15_200);
+builder.record_frame("forward/attention", "multi_head_attn", 9_800);
+builder.record_frame("forward/ffn", "feed_forward", 5_400);
+
+// Write Inferno-compatible collapsed stack format
+builder.write_to_file("/tmp/trustformers_flame.txt")?;
+// Run: inferno-flamegraph < /tmp/trustformers_flame.txt > flame.svg
+```
+
 ## Key Components
 
 ### Tensor Inspector
@@ -224,8 +281,9 @@ debug_session.model_diagnostics_mut().record_performance(metrics);
 Identify performance bottlenecks:
 
 - **Execution Timing**: Layer and operation profiling
-- **Memory Analysis**: Memory usage patterns and leaks
+- **Memory Analysis**: Memory usage patterns and leaks (deadlock-safe scoped locks)
 - **Bottleneck Detection**: Automatic performance issue identification
+- **Flame Graph Export**: Inferno-compatible collapsed stack format
 - **Optimization Recommendations**: Actionable performance suggestions
 
 ```rust
@@ -239,7 +297,7 @@ let duration = profiler.end_timer("layer_forward");
 // Record detailed layer metrics
 profiler.record_layer_execution(
     "transformer_block_0",
-    "TransformerBlock", 
+    "TransformerBlock",
     forward_time,
     Some(backward_time),
     memory_usage,
@@ -249,7 +307,7 @@ profiler.record_layer_execution(
 
 ## Terminal Visualization
 
-For headless environments, use ASCII-based visualizations:
+For headless environments (`headless` feature), use Ratatui-based TUI dashboards or ASCII-based visualizations:
 
 ```rust
 use trustformers_debug::TerminalVisualizer;
@@ -260,7 +318,7 @@ let terminal_viz = TerminalVisualizer::new(80, 24);
 let histogram = terminal_viz.ascii_histogram(&values, 10);
 println!("{}", histogram);
 
-// ASCII line plot  
+// ASCII line plot
 let line_plot = terminal_viz.ascii_line_plot(&x_values, &y_values, "Training Loss");
 println!("{}", line_plot);
 ```
@@ -285,7 +343,7 @@ for epoch in 0..num_epochs {
         // Backward pass with gradient tracking
         let loss = criterion(&output, &batch.labels);
         loss.backward();
-        
+
         for (name, param) in model.named_parameters() {
             if let Some(grad) = param.grad() {
                 let grad_values: Vec<f64> = grad.iter().cloned().collect();
@@ -324,6 +382,7 @@ let report = debug_session.stop().await?;
 2. **Selective Monitoring**: Monitor only critical layers during training
 3. **Batch Processing**: Process debug operations in batches when possible
 4. **Memory Management**: Clear debug data periodically for long training runs
+5. **Feature Flags**: Enable only needed features to minimize binary size and overhead
 
 ### Debugging Workflow
 
@@ -336,17 +395,20 @@ let report = debug_session.stop().await?;
 ### Common Use Cases
 
 - **Training Instability**: Use gradient debugger to identify vanishing/exploding gradients
-- **Memory Issues**: Monitor tensor memory usage and detect leaks
-- **Performance Optimization**: Profile layer execution and identify bottlenecks
+- **Memory Issues**: Monitor tensor memory usage with deadlock-safe profiling
+- **Performance Optimization**: Profile layer execution and generate flame graphs
 - **Model Health**: Track training dynamics and convergence patterns
 - **Debugging New Architectures**: Comprehensive monitoring during model development
+- **Headless Servers**: Use `headless` feature with Ratatui for terminal dashboards
 
 ## Examples
 
 See the `examples/` directory for comprehensive demonstrations:
 
 - `debug_session_demo.rs`: Complete debugging workflow examples
-- More examples coming soon...
+- `flame_graph_demo.rs`: Generating and viewing flame graphs
+- `headless_dashboard_demo.rs`: Terminal TUI dashboard with Ratatui
+- `vs_code_integration_demo.rs`: VS Code diagnostic JSON output
 
 ## Contributing
 

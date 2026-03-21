@@ -938,7 +938,7 @@ mod tests {
         let mut detector = AnomalyDetector::new(&config);
 
         let values = vec![1.0, 2.0, f32::NAN, 4.0];
-        detector.check_nan(&values, "test_location").unwrap();
+        detector.check_nan(&values, "test_location").expect("operation failed in test");
 
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
@@ -953,7 +953,7 @@ mod tests {
         let mut detector = AnomalyDetector::new(&config);
 
         let values = vec![1.0, 2.0, f32::INFINITY, 4.0];
-        detector.check_inf(&values, "test_location").unwrap();
+        detector.check_inf(&values, "test_location").expect("operation failed in test");
 
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
@@ -967,7 +967,9 @@ mod tests {
         let config = DebugConfig::default();
         let mut detector = AnomalyDetector::new(&config);
 
-        detector.check_gradient_explosion(1e7, "test_layer").unwrap();
+        detector
+            .check_gradient_explosion(1e7, "test_layer")
+            .expect("operation failed in test");
 
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
@@ -981,7 +983,9 @@ mod tests {
         let config = DebugConfig::default();
         let mut detector = AnomalyDetector::new(&config);
 
-        detector.check_gradient_vanishing(1e-10, "test_layer").unwrap();
+        detector
+            .check_gradient_vanishing(1e-10, "test_layer")
+            .expect("operation failed in test");
 
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
@@ -1000,14 +1004,16 @@ mod tests {
             (0..100).map(|i| if i < 50 { 1e-12 } else { 1.0 }).collect();
         detector
             .check_numerical_instability(&near_zero_values, "test_location")
-            .unwrap();
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 1);
 
         detector.clear_anomalies();
 
         // Test extreme values
         let extreme_values = vec![1.0, 2.0, 1e7, 4.0];
-        detector.check_numerical_instability(&extreme_values, "test_location").unwrap();
+        detector
+            .check_numerical_instability(&extreme_values, "test_location")
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 1);
     }
 
@@ -1020,7 +1026,7 @@ mod tests {
         let relu_saturated: Vec<f32> = vec![0.0; 100];
         detector
             .check_activation_saturation(&relu_saturated, "relu", "test_layer")
-            .unwrap();
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 1);
 
         detector.clear_anomalies();
@@ -1029,7 +1035,7 @@ mod tests {
         let sigmoid_saturated: Vec<f32> = vec![0.999; 100];
         detector
             .check_activation_saturation(&sigmoid_saturated, "sigmoid", "test_layer")
-            .unwrap();
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 1);
     }
 
@@ -1039,7 +1045,9 @@ mod tests {
         let mut detector = AnomalyDetector::new(&config);
 
         // Test memory growth detection (3x growth should trigger)
-        detector.check_memory_leak(3072, Some(1024), "test_location").unwrap();
+        detector
+            .check_memory_leak(3072, Some(1024), "test_location")
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
             detector.get_anomalies()[0].anomaly_type,
@@ -1049,7 +1057,9 @@ mod tests {
         detector.clear_anomalies();
 
         // Test absolute high memory
-        detector.check_memory_leak(10240, None, "test_location").unwrap();
+        detector
+            .check_memory_leak(10240, None, "test_location")
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 1);
     }
 
@@ -1059,7 +1069,9 @@ mod tests {
         let mut detector = AnomalyDetector::new(&config);
 
         let weights = vec![1.0, 2.0, 15.0, 4.0, -20.0]; // Two weights exceed threshold of 10.0
-        detector.check_weight_explosion(&weights, "test_layer").unwrap();
+        detector
+            .check_weight_explosion(&weights, "test_layer")
+            .expect("operation failed in test");
 
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
@@ -1077,7 +1089,9 @@ mod tests {
         layer_gradients.insert("layer1".to_string(), vec![1.0, 0.0, 0.0]);
         layer_gradients.insert("layer2".to_string(), vec![-1.0, 0.0, 0.0]); // Opposing gradients
 
-        detector.check_gradient_conflict(&layer_gradients).unwrap();
+        detector
+            .check_gradient_conflict(&layer_gradients)
+            .expect("operation failed in test");
 
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
@@ -1095,11 +1109,15 @@ mod tests {
         let diverged_weights = vec![10.0, 20.0, 30.0, 40.0]; // Significant divergence
 
         // First call establishes baseline
-        detector.check_weight_divergence("test_layer", &baseline_weights).unwrap();
+        detector
+            .check_weight_divergence("test_layer", &baseline_weights)
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 0);
 
         // Second call detects divergence
-        detector.check_weight_divergence("test_layer", &diverged_weights).unwrap();
+        detector
+            .check_weight_divergence("test_layer", &diverged_weights)
+            .expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
             detector.get_anomalies()[0].anomaly_type,
@@ -1114,13 +1132,17 @@ mod tests {
 
         // Add baseline performance metrics
         for _ in 0..10 {
-            detector.check_performance_degradation(100.0, "training").unwrap(); // Good performance
+            detector
+                .check_performance_degradation(100.0, "training")
+                .expect("operation failed in test"); // Good performance
         }
         assert_eq!(detector.get_anomalies().len(), 0);
 
         // Add degraded performance metrics - just enough to trigger once
         for _ in 0..5 {
-            detector.check_performance_degradation(20.0, "training").unwrap(); // Poor performance
+            detector
+                .check_performance_degradation(20.0, "training")
+                .expect("operation failed in test"); // Poor performance
         }
 
         // Should have at least one degradation anomaly
@@ -1137,12 +1159,14 @@ mod tests {
         let mut detector = AnomalyDetector::new(&config);
 
         // Add normal loss values
-        detector.check_loss_anomaly(1.0, "training").unwrap();
-        detector.check_loss_anomaly(0.9, "training").unwrap();
+        detector.check_loss_anomaly(1.0, "training").expect("operation failed in test");
+        detector.check_loss_anomaly(0.9, "training").expect("operation failed in test");
         assert_eq!(detector.get_anomalies().len(), 0);
 
         // Add loss spike
-        detector.check_loss_anomaly(100.0, "training").unwrap(); // 100x spike
+        detector
+            .check_loss_anomaly(100.0, "training")
+            .expect("operation failed in test"); // 100x spike
         assert_eq!(detector.get_anomalies().len(), 1);
         assert!(matches!(
             detector.get_anomalies()[0].anomaly_type,
@@ -1165,7 +1189,7 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        let action = detector.attempt_recovery(&anomaly).await.unwrap();
+        let action = detector.attempt_recovery(&anomaly).await.expect("temp file creation failed");
         assert!(matches!(action, RecoveryAction::ClipGradients { .. }));
         assert_eq!(detector.get_recovery_attempts().len(), 1);
     }
@@ -1176,8 +1200,8 @@ mod tests {
         let mut detector = AnomalyDetector::new(&config);
 
         // Create some anomalies to generate stats
-        detector.check_nan(&[f32::NAN], "test").unwrap();
-        detector.check_inf(&[f32::INFINITY], "test").unwrap();
+        detector.check_nan(&[f32::NAN], "test").expect("operation failed in test");
+        detector.check_inf(&[f32::INFINITY], "test").expect("operation failed in test");
 
         let stats = detector.get_monitoring_stats();
         assert_eq!(stats.total_anomalies, 2);
@@ -1190,8 +1214,8 @@ mod tests {
         let config = DebugConfig::default();
         let mut detector = AnomalyDetector::new(&config);
 
-        detector.check_nan(&[f32::NAN], "test").unwrap();
-        detector.update_monitoring_window().unwrap();
+        detector.check_nan(&[f32::NAN], "test").expect("operation failed in test");
+        detector.update_monitoring_window().expect("operation failed in test");
 
         let stats = detector.get_monitoring_stats();
         assert_eq!(stats.monitoring_window.len(), 1);

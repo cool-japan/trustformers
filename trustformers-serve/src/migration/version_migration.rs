@@ -881,10 +881,11 @@ mod tests {
     #[tokio::test]
     #[cfg_attr(target_os = "macos", ignore)] // Skip on macOS due to path length limitations
     async fn test_directory_structure_creation() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("test operation should succeed");
         let base_path = temp_dir.path();
 
-        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string()).unwrap();
+        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string())
+            .expect("test operation should succeed");
         if let Ok(()) = migrator.restructure_for_v2(base_path).await {
             assert!(base_path.join("config/server").exists());
             assert!(base_path.join("config/models").exists());
@@ -895,16 +896,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_migration_validation() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("test operation should succeed");
         let base_path = temp_dir.path();
 
         // Create basic structure
-        fs::create_dir_all(base_path.join("config")).await.unwrap();
-        fs::create_dir_all(base_path.join("data")).await.unwrap();
-        fs::write(base_path.join("VERSION"), "2.0.0").await.unwrap();
+        fs::create_dir_all(base_path.join("config"))
+            .await
+            .expect("async operation should succeed in test");
+        fs::create_dir_all(base_path.join("data"))
+            .await
+            .expect("async operation should succeed in test");
+        fs::write(base_path.join("VERSION"), "2.0.0")
+            .await
+            .expect("async operation should succeed in test");
 
-        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string()).unwrap();
-        let results = migrator.validate_migration_step(base_path, "2.0.0").await.unwrap();
+        let migrator = VersionMigrator::new("1.0.0".to_string(), "2.0.0".to_string())
+            .expect("test operation should succeed");
+        let results = migrator
+            .validate_migration_step(base_path, "2.0.0")
+            .await
+            .expect("async operation should succeed in test");
 
         assert!(!results.is_empty());
         assert!(results.iter().any(|r| r.rule_name == "Version File"));

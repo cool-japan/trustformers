@@ -484,15 +484,17 @@ mod tests {
 
     #[test]
     fn test_model_versioning_manager_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let manager = ModelVersioningManager::new(temp_dir.path().to_path_buf()).unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let manager = ModelVersioningManager::new(temp_dir.path().to_path_buf())
+            .expect("temp file creation failed");
         assert_eq!(manager.list_models().len(), 0);
     }
 
     #[test]
     fn test_create_version() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf()).unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf())
+            .expect("temp file creation failed");
 
         let training_config = TrainingConfig {
             learning_rate: 0.001,
@@ -527,7 +529,7 @@ mod tests {
                 performance_metrics,
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(version.model_name, "test_model");
         assert_eq!(version.version_number, 1);
@@ -537,8 +539,9 @@ mod tests {
 
     #[test]
     fn test_get_latest_version() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf()).unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf())
+            .expect("temp file creation failed");
 
         let training_config = TrainingConfig {
             learning_rate: 0.001,
@@ -574,7 +577,7 @@ mod tests {
                 performance_metrics.clone(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Create second version
         let model_data2 = b"fake model data v2";
@@ -589,17 +592,18 @@ mod tests {
                 performance_metrics,
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let latest = manager.get_latest_version("test_model").unwrap();
+        let latest = manager.get_latest_version("test_model").expect("operation failed in test");
         assert_eq!(latest.version_id, version2.version_id);
         assert_eq!(latest.version_number, 2);
     }
 
     #[test]
     fn test_version_lineage() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf()).unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf())
+            .expect("temp file creation failed");
 
         let training_config = TrainingConfig {
             learning_rate: 0.001,
@@ -634,7 +638,7 @@ mod tests {
                 performance_metrics.clone(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         manager
             .create_version(
@@ -647,7 +651,7 @@ mod tests {
                 performance_metrics.clone(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let version3 = manager
             .create_version(
@@ -660,7 +664,7 @@ mod tests {
                 performance_metrics,
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let lineage = manager.get_version_lineage("test_model", &version3.version_id);
         assert_eq!(lineage.len(), 3);
@@ -671,8 +675,9 @@ mod tests {
 
     #[test]
     fn test_find_versions_by_tag() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf()).unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let mut manager = ModelVersioningManager::new(temp_dir.path().to_path_buf())
+            .expect("temp file creation failed");
 
         let training_config = TrainingConfig {
             learning_rate: 0.001,
@@ -707,7 +712,7 @@ mod tests {
                 performance_metrics.clone(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Create version with development tag
         manager
@@ -721,7 +726,7 @@ mod tests {
                 performance_metrics,
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let production_versions = manager.find_versions_by_tag("production");
         assert_eq!(production_versions.len(), 1);

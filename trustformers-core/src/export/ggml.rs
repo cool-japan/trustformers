@@ -476,19 +476,27 @@ mod tests {
         let exporter = GGMLExporter::new();
 
         // Test F32 weights
-        let f32_weights = exporter.generate_dummy_weights(10, GGMLType::F32).unwrap();
+        let f32_weights = exporter
+            .generate_dummy_weights(10, GGMLType::F32)
+            .expect("operation failed in test");
         assert_eq!(f32_weights.len(), 10 * 4); // 4 bytes per f32
 
         // Test F16 weights
-        let f16_weights = exporter.generate_dummy_weights(10, GGMLType::F16).unwrap();
+        let f16_weights = exporter
+            .generate_dummy_weights(10, GGMLType::F16)
+            .expect("operation failed in test");
         assert_eq!(f16_weights.len(), 10 * 2); // 2 bytes per f16
 
         // Test Q8_0 weights (block format: 4 bytes scale + 32 bytes data per block)
-        let q8_weights = exporter.generate_dummy_weights(10, GGMLType::Q8_0).unwrap();
+        let q8_weights = exporter
+            .generate_dummy_weights(10, GGMLType::Q8_0)
+            .expect("operation failed in test");
         assert_eq!(q8_weights.len(), 36); // 1 block: 4 bytes (scale) + 32 bytes (quantized values)
 
         // Test Q4_0 weights
-        let q4_weights = exporter.generate_dummy_weights(10, GGMLType::Q4_0).unwrap();
+        let q4_weights = exporter
+            .generate_dummy_weights(10, GGMLType::Q4_0)
+            .expect("operation failed in test");
         assert_eq!(q4_weights.len(), 5); // 2 elements per byte
     }
 }

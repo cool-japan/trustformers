@@ -838,7 +838,7 @@ mod tests {
     fn test_hangul_decomposition() {
         let result = KoreanTokenizer::decompose_hangul('한');
         assert!(result.is_some());
-        let (initial, medial, final_) = result.unwrap();
+        let (initial, medial, final_) = result.expect("Operation failed in test");
         assert_eq!(initial, 'ㅎ');
         assert_eq!(medial, 'ㅏ');
         assert_eq!(final_, Some('ㄴ'));
@@ -872,9 +872,9 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.tokenize_text("안녕하세요").unwrap();
+        let result = tokenizer.tokenize_text("안녕하세요").expect("Operation failed in test");
         assert_eq!(result.len(), 5);
         assert_eq!(result, vec!["안", "녕", "하", "세", "요"]);
     }
@@ -886,9 +886,9 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.tokenize_text("한").unwrap();
+        let result = tokenizer.tokenize_text("한").expect("Operation failed in test");
         assert_eq!(result.len(), 3);
         assert_eq!(result, vec!["ㅎ", "ㅏ", "ㄴ"]);
     }
@@ -900,9 +900,10 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.tokenize_text("안녕하세요 한국어").unwrap();
+        let result =
+            tokenizer.tokenize_text("안녕하세요 한국어").expect("Operation failed in test");
         assert!(result.len() > 0);
         // Should keep multi-character words together
         assert!(result.contains(&"안녕하세요".to_string()) || result.len() > 1);
@@ -915,13 +916,13 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.encode("한국어").unwrap();
+        let result = tokenizer.encode("한국어").expect("Encoding failed");
         assert!(!result.input_ids.is_empty());
         assert_eq!(result.input_ids.len(), result.attention_mask.len());
 
-        let decoded = tokenizer.decode(&result.input_ids).unwrap();
+        let decoded = tokenizer.decode(&result.input_ids).expect("Decoding failed");
         assert_eq!(decoded, "한국어");
     }
 
@@ -932,13 +933,14 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.encode_pair("안녕하세요", "한국어").unwrap();
+        let result =
+            tokenizer.encode_pair("안녕하세요", "한국어").expect("Operation failed in test");
         assert!(!result.input_ids.is_empty());
         assert!(result.token_type_ids.is_some());
 
-        let token_type_ids = result.token_type_ids.unwrap();
+        let token_type_ids = result.token_type_ids.expect("Operation failed in test");
         assert!(token_type_ids.contains(&0)); // First sequence
         assert!(token_type_ids.contains(&1)); // Second sequence
     }
@@ -947,7 +949,7 @@ mod tests {
     fn test_dictionary_management() {
         let config = KoreanTokenizerConfig::default();
         let vocab = create_test_vocab();
-        let mut tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let mut tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
         let initial_size = tokenizer.dictionary_size();
 
@@ -964,7 +966,7 @@ mod tests {
     fn test_particle_detection() {
         let config = KoreanTokenizerConfig::default();
         let vocab = create_test_vocab();
-        let tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
         assert!(tokenizer.is_particle("이"));
         assert!(tokenizer.is_particle("가"));
@@ -981,9 +983,9 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = KoreanTokenizer::new(config, vocab).unwrap();
+        let tokenizer = KoreanTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.tokenize_text("한").unwrap();
+        let result = tokenizer.tokenize_text("한").expect("Operation failed in test");
         assert_eq!(result.len(), 3);
         assert_eq!(result, vec!["ㅎ", "ㅏ", "ㄴ"]);
     }

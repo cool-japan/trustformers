@@ -144,7 +144,9 @@ mod tests {
             trace_id: None,
             span_id: None,
         };
-        let matches = manager.evaluate_filter(&filter, &event).unwrap();
+        let matches = manager
+            .evaluate_filter(&filter, &event)
+            .expect("evaluation should succeed in test");
         assert!(matches);
     }
     fn create_test_event(test_id: &str) -> PerformanceEvent {

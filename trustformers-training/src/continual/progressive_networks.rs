@@ -442,7 +442,7 @@ mod tests {
         let result = task_module.forward(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.len(), config.hidden_dim);
     }
 
@@ -454,7 +454,7 @@ mod tests {
         let result = adapter.forward(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.len(), 4);
     }
 
@@ -486,8 +486,8 @@ mod tests {
         };
         let mut network = ProgressiveNetwork::new(config);
 
-        network.add_task("task1".to_string()).unwrap();
-        network.set_current_task("task1".to_string()).unwrap();
+        network.add_task("task1".to_string()).expect("add operation failed");
+        network.set_current_task("task1".to_string()).expect("operation failed in test");
 
         let input = Array1::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
         let result = network.forward(&input);

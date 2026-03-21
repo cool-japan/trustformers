@@ -750,7 +750,9 @@ mod tests {
         let shape = &[2, 3, 4];
         let flat_idx = 10; // Should be [0, 2, 2] in multi-index
 
-        let multi_idx = checker.flat_index_to_multi_index(flat_idx, shape).unwrap();
+        let multi_idx = checker
+            .flat_index_to_multi_index(flat_idx, shape)
+            .expect("operation failed in test");
         assert_eq!(multi_idx, vec![0, 2, 2]);
     }
 

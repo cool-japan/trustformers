@@ -1125,14 +1125,14 @@ mod tests {
     #[tokio::test]
     async fn test_dashboard_service_creation() {
         let config = DashboardConfig::default();
-        let service = DashboardService::new(config).unwrap();
+        let service = DashboardService::new(config).expect("test operation should succeed");
         assert!(service.config.enabled);
     }
 
     #[tokio::test]
     async fn test_widget_data_update() {
         let config = DashboardConfig::default();
-        let service = DashboardService::new(config).unwrap();
+        let service = DashboardService::new(config).expect("test operation should succeed");
 
         let data_point = DataPoint {
             timestamp: 1234567890,

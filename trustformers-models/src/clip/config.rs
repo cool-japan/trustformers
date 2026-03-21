@@ -286,3 +286,74 @@ impl CLIPVisionConfig {
         self.hidden_size / self.num_attention_heads
     }
 }
+
+/// Trait for extracting encoder-layer-level configuration from both
+/// [`CLIPTextConfig`] and [`CLIPVisionConfig`].
+///
+/// This allows `CLIPEncoder` to be generic over the config type while
+/// still reading concrete field values instead of relying on hardcoded
+/// placeholder constants.
+pub trait CLIPEncoderConfig: Config {
+    fn hidden_size(&self) -> usize;
+    fn num_attention_heads(&self) -> usize;
+    fn intermediate_size(&self) -> usize;
+    fn num_hidden_layers(&self) -> usize;
+    fn hidden_act(&self) -> &str;
+    fn layer_norm_eps(&self) -> f32;
+    fn attention_dropout(&self) -> f32;
+    fn dropout(&self) -> f32;
+}
+
+impl CLIPEncoderConfig for CLIPTextConfig {
+    fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+    fn num_attention_heads(&self) -> usize {
+        self.num_attention_heads
+    }
+    fn intermediate_size(&self) -> usize {
+        self.intermediate_size
+    }
+    fn num_hidden_layers(&self) -> usize {
+        self.num_hidden_layers
+    }
+    fn hidden_act(&self) -> &str {
+        &self.hidden_act
+    }
+    fn layer_norm_eps(&self) -> f32 {
+        self.layer_norm_eps
+    }
+    fn attention_dropout(&self) -> f32 {
+        self.attention_dropout
+    }
+    fn dropout(&self) -> f32 {
+        self.dropout
+    }
+}
+
+impl CLIPEncoderConfig for CLIPVisionConfig {
+    fn hidden_size(&self) -> usize {
+        self.hidden_size
+    }
+    fn num_attention_heads(&self) -> usize {
+        self.num_attention_heads
+    }
+    fn intermediate_size(&self) -> usize {
+        self.intermediate_size
+    }
+    fn num_hidden_layers(&self) -> usize {
+        self.num_hidden_layers
+    }
+    fn hidden_act(&self) -> &str {
+        &self.hidden_act
+    }
+    fn layer_norm_eps(&self) -> f32 {
+        self.layer_norm_eps
+    }
+    fn attention_dropout(&self) -> f32 {
+        self.attention_dropout
+    }
+    fn dropout(&self) -> f32 {
+        self.dropout
+    }
+}

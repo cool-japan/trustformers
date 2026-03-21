@@ -562,7 +562,7 @@ mod tests {
             create_test_sequence(40),
         ];
 
-        let (packed, stats) = packer.pack_sequences(&sequences).unwrap();
+        let (packed, stats) = packer.pack_sequences(&sequences).expect("Operation failed in test");
 
         assert!(!packed.is_empty());
         assert_eq!(stats.total_sequences, 3);
@@ -581,7 +581,7 @@ mod tests {
 
         let sequences = vec![create_test_sequence(20), create_test_sequence(20)];
 
-        let (packed, _) = packer.pack_sequences(&sequences).unwrap();
+        let (packed, _) = packer.pack_sequences(&sequences).expect("Operation failed in test");
 
         assert!(!packed.is_empty());
         // Should have separator between sequences
@@ -599,8 +599,9 @@ mod tests {
 
         let original_sequences = vec![create_test_sequence(30), create_test_sequence(25)];
 
-        let (packed, _) = packer.pack_sequences(&original_sequences).unwrap();
-        let unpacked = packer.unpack_sequence(&packed[0]).unwrap();
+        let (packed, _) =
+            packer.pack_sequences(&original_sequences).expect("Operation failed in test");
+        let unpacked = packer.unpack_sequence(&packed[0]).expect("Operation failed in test");
 
         assert_eq!(unpacked.len(), packed[0].packing_info.num_sequences);
     }
@@ -621,7 +622,7 @@ mod tests {
             create_test_sequence(20),
         ];
 
-        let (packed, stats) = packer.pack_sequences(&sequences).unwrap();
+        let (packed, stats) = packer.pack_sequences(&sequences).expect("Operation failed in test");
 
         assert!(!packed.is_empty());
         assert!(stats.avg_efficiency > 0.0);
@@ -639,7 +640,9 @@ mod tests {
             create_test_sequence(52),
         ];
 
-        let (packed, stats) = advanced_packer.pack_with_optimization(&sequences).unwrap();
+        let (packed, stats) = advanced_packer
+            .pack_with_optimization(&sequences)
+            .expect("Operation failed in test");
 
         assert!(!packed.is_empty());
         assert_eq!(stats.total_sequences, 4);
@@ -662,7 +665,7 @@ mod tests {
         // Perfect packing scenario
         let sequences = vec![create_test_sequence(50), create_test_sequence(50)];
 
-        let (packed, stats) = packer.pack_sequences(&sequences).unwrap();
+        let (packed, stats) = packer.pack_sequences(&sequences).expect("Operation failed in test");
 
         assert_eq!(packed.len(), 1);
         assert_eq!(packed[0].packing_info.efficiency, 1.0); // Perfect efficiency
@@ -685,7 +688,7 @@ mod tests {
             create_test_sequence(10),
         ];
 
-        let (packed, _) = packer.pack_sequences(&sequences).unwrap();
+        let (packed, _) = packer.pack_sequences(&sequences).expect("Operation failed in test");
 
         // Should create 2 packs with max 2 sequences each
         assert_eq!(packed.len(), 2);

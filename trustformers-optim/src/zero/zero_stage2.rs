@@ -416,7 +416,7 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
 
         let stage2 = ZeROStage2::<Adam>::new(mp_context, zero_config);
@@ -432,14 +432,24 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
-        let mut stage2 = ZeROStage2::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage2 =
+            ZeROStage2::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
-        parameters.insert("weight1".to_string(), Tensor::ones(&[8, 8]).unwrap());
-        parameters.insert("weight2".to_string(), Tensor::ones(&[4, 4]).unwrap());
-        parameters.insert("bias1".to_string(), Tensor::ones(&[8]).unwrap());
+        parameters.insert(
+            "weight1".to_string(),
+            Tensor::ones(&[8, 8]).expect("Failed to create tensor"),
+        );
+        parameters.insert(
+            "weight2".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
+        parameters.insert(
+            "bias1".to_string(),
+            Tensor::ones(&[8]).expect("Failed to create tensor"),
+        );
 
         let result = stage2.register_parameters(parameters);
         assert!(result.is_ok());
@@ -460,21 +470,25 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig {
             bucket_size_mb: 1, // Small bucket size for testing
             ..Default::default()
         };
-        let mut stage2 = ZeROStage2::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage2 =
+            ZeROStage2::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
         parameters.insert(
             "large_weight".to_string(),
-            Tensor::ones(&[1000, 1000]).unwrap(),
+            Tensor::ones(&[1000, 1000]).expect("Failed to create tensor"),
         );
-        parameters.insert("small_weight".to_string(), Tensor::ones(&[10, 10]).unwrap());
+        parameters.insert(
+            "small_weight".to_string(),
+            Tensor::ones(&[10, 10]).expect("Failed to create tensor"),
+        );
 
-        stage2.register_parameters(parameters).unwrap();
+        stage2.register_parameters(parameters).expect("Operation failed in test");
 
         // Check that gradient buckets were created
         assert!(stage2.num_gradient_buckets() > 0);
@@ -493,16 +507,20 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
-        let mut stage2 = ZeROStage2::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage2 =
+            ZeROStage2::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
         for i in 0..8 {
-            parameters.insert(format!("param{}", i), Tensor::ones(&[4, 4]).unwrap());
+            parameters.insert(
+                format!("param{}", i),
+                Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+            );
         }
 
-        stage2.register_parameters(parameters).unwrap();
+        stage2.register_parameters(parameters).expect("Operation failed in test");
 
         let savings = stage2.estimate_memory_savings();
 
@@ -527,24 +545,31 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
-        let mut stage2 = ZeROStage2::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage2 =
+            ZeROStage2::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
-        parameters.insert("weight".to_string(), Tensor::ones(&[4, 4]).unwrap());
+        parameters.insert(
+            "weight".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
 
-        stage2.register_parameters(parameters).unwrap();
+        stage2.register_parameters(parameters).expect("Operation failed in test");
 
         // Test gradient update
         let mut gradients = HashMap::new();
-        gradients.insert("weight".to_string(), Tensor::ones(&[4, 4]).unwrap());
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
 
         let result = stage2.update_gradients(gradients);
         assert!(result.is_ok());
 
         // Check that gradient buffer was updated
-        let buffer = stage2.get_gradient_buffer("weight").unwrap();
+        let buffer = stage2.get_gradient_buffer("weight").expect("Operation failed in test");
         assert!(buffer.accumulation_steps > 0);
     }
 
@@ -557,18 +582,25 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig {
             overlap_comm: true,
             ..Default::default()
         };
-        let mut stage2 = ZeROStage2::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage2 =
+            ZeROStage2::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
-        parameters.insert("weight1".to_string(), Tensor::ones(&[4, 4]).unwrap());
-        parameters.insert("weight2".to_string(), Tensor::ones(&[4, 4]).unwrap());
+        parameters.insert(
+            "weight1".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
+        parameters.insert(
+            "weight2".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
 
-        stage2.register_parameters(parameters).unwrap();
+        stage2.register_parameters(parameters).expect("Operation failed in test");
 
         let result = stage2.enable_communication_overlap();
         assert!(result.is_ok());
@@ -586,12 +618,13 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig {
             prefetch_depth: 2,
             ..Default::default()
         };
-        let mut stage2 = ZeROStage2::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage2 =
+            ZeROStage2::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let param_names = vec![
             "param1".to_string(),

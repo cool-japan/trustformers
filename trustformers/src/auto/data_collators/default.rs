@@ -663,7 +663,8 @@ mod tests {
             "vocab_size": 30522
         });
 
-        let config = DefaultCollatorConfig::from_config(&config_json).unwrap();
+        let config =
+            DefaultCollatorConfig::from_config(&config_json).expect("operation failed in test");
         assert_eq!(config.max_length, Some(512));
         assert_eq!(config.pad_token_id, 1);
         assert!(config.truncation);
@@ -698,12 +699,12 @@ mod tests {
             },
         ];
 
-        let batch = collator.collate(&examples).unwrap();
+        let batch = collator.collate(&examples).expect("operation failed in test");
         assert_eq!(batch.batch_size, 2);
         assert_eq!(batch.input_ids.len(), 2);
         assert!(batch.labels.is_some());
 
-        let labels = batch.labels.as_ref().unwrap();
+        let labels = batch.labels.as_ref().expect("operation failed in test");
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0], vec![1, 0, 1]);
         assert_eq!(labels[1], vec![0]);
@@ -728,7 +729,7 @@ mod tests {
             metadata: HashMap::new(),
         }];
 
-        let batch = collator.collate(&examples).unwrap();
+        let batch = collator.collate(&examples).expect("operation failed in test");
         assert_eq!(batch.batch_size, 1);
         assert!(batch.labels.is_none());
     }
@@ -760,13 +761,16 @@ mod tests {
         }];
 
         let metadata = collator.create_basic_metadata(&examples, 1, 5);
-        assert_eq!(metadata.get("collator_type").unwrap(), "default");
         assert_eq!(
-            metadata.get("has_token_type_ids").unwrap(),
+            metadata.get("collator_type").expect("expected value not found"),
+            "default"
+        );
+        assert_eq!(
+            metadata.get("has_token_type_ids").expect("expected value not found"),
             &serde_json::Value::Bool(true)
         );
         assert_eq!(
-            metadata.get("has_labels").unwrap(),
+            metadata.get("has_labels").expect("expected value not found"),
             &serde_json::Value::Bool(true)
         );
         assert!(metadata.contains_key("original_sequence_stats"));
@@ -833,7 +837,8 @@ mod tests {
             "pad_token_id": 0
         });
 
-        let config = DefaultCollatorConfig::for_inference(&model_config).unwrap();
+        let config =
+            DefaultCollatorConfig::for_inference(&model_config).expect("operation failed in test");
         assert_eq!(config.max_length, Some(512));
         assert!(!config.truncation); // More lenient for inference
     }
@@ -845,7 +850,8 @@ mod tests {
             "pad_token_id": 0
         });
 
-        let config = DefaultCollatorConfig::for_development(&model_config).unwrap();
+        let config = DefaultCollatorConfig::for_development(&model_config)
+            .expect("operation failed in test");
         assert_eq!(config.max_length, Some(128)); // Smaller for development
     }
 
@@ -856,7 +862,8 @@ mod tests {
             "pad_token_id": 0
         });
 
-        let config = DefaultCollatorConfig::with_max_length(&model_config, 256).unwrap();
+        let config = DefaultCollatorConfig::with_max_length(&model_config, 256)
+            .expect("operation failed in test");
         assert_eq!(config.max_length, Some(256));
         assert!(config.truncation);
     }
@@ -886,7 +893,7 @@ mod tests {
             metadata: example_metadata,
         }];
 
-        let batch = collator.collate(&examples).unwrap();
+        let batch = collator.collate(&examples).expect("operation failed in test");
         assert!(batch.metadata.contains_key("original_metadata"));
     }
 }

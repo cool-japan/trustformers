@@ -23,7 +23,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-trustformers-client = "0.1.0-alpha.2"
+trustformers-client = "0.1.0"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
@@ -145,7 +145,7 @@ Enable OAuth2 authentication by adding the `oauth2` feature:
 
 ```toml
 [dependencies]
-trustformers-client = { version = "0.1.0-alpha.2", features = ["oauth2"] }
+trustformers-client = { version = "0.1.0", features = ["oauth2"] }
 ```
 
 Then use authenticated client:

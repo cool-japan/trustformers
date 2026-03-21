@@ -517,7 +517,7 @@ mod tests {
         let arch_info = create_test_architecture();
 
         analyzer.record_architecture(arch_info);
-        let analysis = analyzer.analyze_architecture().unwrap();
+        let analysis = analyzer.analyze_architecture().expect("operation failed in test");
 
         assert!(analysis.parameter_efficiency > 0.0);
         assert!(analysis.memory_efficiency > 0.0);

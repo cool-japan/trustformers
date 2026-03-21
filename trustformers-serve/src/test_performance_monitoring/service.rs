@@ -505,7 +505,9 @@ mod tests {
     #[tokio::test]
     async fn test_service_status() {
         let config = TestPerformanceMonitoringConfig::default();
-        let service = TestPerformanceMonitoringService::new(config).await.unwrap();
+        let service = TestPerformanceMonitoringService::new(config)
+            .await
+            .expect("async operation should succeed in test");
 
         let status = service.get_status().await;
         assert!(!status.is_running);
@@ -514,7 +516,9 @@ mod tests {
     #[tokio::test]
     async fn test_health_check() {
         let config = TestPerformanceMonitoringConfig::default();
-        let service = TestPerformanceMonitoringService::new(config).await.unwrap();
+        let service = TestPerformanceMonitoringService::new(config)
+            .await
+            .expect("async operation should succeed in test");
 
         let health = service.health_check().await;
         assert!(matches!(health.overall_health, HealthStatus::Healthy));

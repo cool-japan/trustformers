@@ -90,7 +90,7 @@ mod tests {
         })
         .await;
         assert!(test_result.is_ok(), "Test timed out");
-        assert!(test_result.unwrap().is_ok());
+        assert!(test_result.expect("test should not time out").is_ok());
     }
     #[tokio::test(flavor = "multi_thread")]
     #[ignore] // TODO: Fix timeout issue in streaming debugger
@@ -101,7 +101,7 @@ mod tests {
         };
         let debugger = StreamingDebugger::new(config);
         let test_result = tokio::time::timeout(Duration::from_secs(3), async {
-            debugger.start().await.unwrap();
+            debugger.start().await.expect("start should succeed");
             let subscription = debugger
                 .subscribe(
                     "test_subscriber".to_string(),
@@ -109,17 +109,20 @@ mod tests {
                     StreamFilter::default(),
                 )
                 .await
-                .unwrap();
+                .expect("subscribe should succeed");
             assert_eq!(debugger.get_subscribers().await.len(), 1);
-            debugger.unsubscribe(subscription.subscriber_id()).await.unwrap();
+            debugger
+                .unsubscribe(subscription.subscriber_id())
+                .await
+                .expect("unsubscribe should succeed");
             assert_eq!(debugger.get_subscribers().await.len(), 0);
-            debugger.stop().await.unwrap();
+            debugger.stop().await.expect("stop should succeed");
             tokio::time::sleep(Duration::from_millis(100)).await;
             Ok::<(), anyhow::Error>(())
         })
         .await;
         assert!(test_result.is_ok(), "Test timed out");
-        assert!(test_result.unwrap().is_ok());
+        assert!(test_result.expect("test should not time out").is_ok());
     }
     #[tokio::test]
     async fn test_tensor_statistics() {
@@ -239,7 +242,7 @@ mod enhanced_tests {
         })
         .await;
         assert!(test_result.is_ok(), "Test timed out");
-        assert!(test_result.unwrap().is_ok());
+        assert!(test_result.expect("test should not time out").is_ok());
     }
     #[tokio::test]
     async fn test_network_condition_monitor() {
@@ -271,7 +274,8 @@ mod enhanced_tests {
             model_params: vec![],
             accuracy: 0.8,
         };
-        let optimal_size = predictor.predict_optimal_size().unwrap();
+        let optimal_size =
+            predictor.predict_optimal_size().expect("predict_optimal_size should succeed");
         assert_eq!(optimal_size, 1000);
     }
     #[tokio::test]
@@ -295,8 +299,14 @@ mod enhanced_tests {
             affected_components: vec!["layer2".to_string()],
             timestamp: SystemTime::now(),
         };
-        let critical_score = scorer.calculate_importance(&critical_event).await.unwrap();
-        let low_score = scorer.calculate_importance(&low_event).await.unwrap();
+        let critical_score = scorer
+            .calculate_importance(&critical_event)
+            .await
+            .expect("calculate_importance should succeed for critical event");
+        let low_score = scorer
+            .calculate_importance(&low_event)
+            .await
+            .expect("calculate_importance should succeed for low event");
         assert!(critical_score > low_score);
     }
 }

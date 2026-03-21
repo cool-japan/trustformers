@@ -714,7 +714,9 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let visualizer = TokenVisualizer::default();
 
-        let result = visualizer.visualize(&tokenizer, "Hello world!").unwrap();
+        let result = visualizer
+            .visualize(&tokenizer, "Hello world!")
+            .expect("Operation failed in test");
 
         assert_eq!(result.original_text, "Hello world!");
         assert!(!result.tokens.is_empty());
@@ -726,7 +728,8 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let visualizer = TokenVisualizer::default();
 
-        let visualization = visualizer.visualize(&tokenizer, "Hello").unwrap();
+        let visualization =
+            visualizer.visualize(&tokenizer, "Hello").expect("Operation failed in test");
         let html = visualizer.to_html(&visualization);
 
         assert!(html.contains("<!DOCTYPE html>"));
@@ -739,7 +742,8 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let visualizer = TokenVisualizer::default();
 
-        let visualization = visualizer.visualize(&tokenizer, "Hello").unwrap();
+        let visualization =
+            visualizer.visualize(&tokenizer, "Hello").expect("Operation failed in test");
         let text = visualizer.to_text(&visualization);
 
         assert!(text.contains("=== Token Visualization ==="));
@@ -752,8 +756,9 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let visualizer = TokenVisualizer::default();
 
-        let visualization = visualizer.visualize(&tokenizer, "Hi").unwrap();
-        let json = visualizer.to_json(&visualization).unwrap();
+        let visualization =
+            visualizer.visualize(&tokenizer, "Hi").expect("Operation failed in test");
+        let json = visualizer.to_json(&visualization).expect("Operation failed in test");
 
         assert!(json.contains("original_text"));
         assert!(json.contains("tokens"));
@@ -770,7 +775,9 @@ mod tests {
         tokenizers.insert("char2".to_string(), &tokenizer2);
 
         let visualizer = TokenVisualizer::default();
-        let comparison = visualizer.compare_tokenizers(tokenizers, "Hello").unwrap();
+        let comparison = visualizer
+            .compare_tokenizers(tokenizers, "Hello")
+            .expect("Operation failed in test");
 
         assert_eq!(comparison.original_text, "Hello");
         assert_eq!(comparison.tokenizations.len(), 2);

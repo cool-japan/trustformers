@@ -991,8 +991,8 @@ mod tests {
 
     #[test]
     fn test_device_enumeration() {
-        let kernel = VulkanKernel::new().unwrap();
-        let devices = kernel.enumerate_devices().unwrap();
+        let kernel = VulkanKernel::new().expect("operation failed in test");
+        let devices = kernel.enumerate_devices().expect("operation failed in test");
         assert!(!devices.is_empty());
 
         // Should have at least one device
@@ -1015,12 +1015,12 @@ mod tests {
 
     #[test]
     fn test_shader_compilation() {
-        let kernel = VulkanKernel::new().unwrap();
+        let kernel = VulkanKernel::new().expect("operation failed in test");
 
         let shader = kernel.compile_matmul_shader(&[128, 256], &[256, 512]);
         assert!(shader.is_ok());
 
-        let compiled = shader.unwrap();
+        let compiled = shader.expect("operation failed in test");
         assert_eq!(compiled.name, "matmul");
         assert!(!compiled.spirv_code.is_empty());
         assert_eq!(compiled.entry_point, "main");
@@ -1043,11 +1043,11 @@ mod tests {
 
     #[test]
     fn test_memory_pool_stats() {
-        let kernel = VulkanKernel::new().unwrap();
+        let kernel = VulkanKernel::new().expect("operation failed in test");
         let stats = kernel.get_memory_stats(0);
         assert!(stats.is_ok());
 
-        let (total, peak, free) = stats.unwrap();
+        let (total, peak, free) = stats.expect("operation failed in test");
         // assert!(total >= 0);
         // assert!(peak >= 0);
         // assert!(free >= 0);

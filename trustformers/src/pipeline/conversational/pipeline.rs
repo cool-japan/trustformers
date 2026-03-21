@@ -1145,8 +1145,9 @@ mod tests {
     #[test]
     fn test_conversation_mode_serialization() {
         let mode = ConversationMode::Educational;
-        let serialized = serde_json::to_string(&mode).unwrap();
-        let deserialized: ConversationMode = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&mode).expect("JSON serialization failed");
+        let deserialized: ConversationMode =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert!(matches!(deserialized, ConversationMode::Educational));
     }
 
@@ -1217,7 +1218,7 @@ mod tests {
         let memory = manager.create_memory(&turn);
         assert!(memory.is_some());
 
-        let memory = memory.unwrap();
+        let memory = memory.expect("operation failed in test");
         assert!(memory.importance > 0.5); // Should be important due to personal info
         assert_eq!(
             memory.memory_type,
@@ -1240,7 +1241,7 @@ mod tests {
             token_count: 15,
         };
 
-        let metadata = analyzer.analyze_turn(&turn).await.unwrap();
+        let metadata = analyzer.analyze_turn(&turn).await.expect("async operation failed");
 
         // Note: Basic analyzer implementation may not extract detailed topics
         // Check that analysis completed successfully
@@ -1249,7 +1250,10 @@ mod tests {
 
         // Intent detection is a placeholder in basic implementation
         // Just verify the result is valid
-        assert!(metadata.intent.is_none() || !metadata.intent.as_ref().unwrap().is_empty());
+        assert!(
+            metadata.intent.is_none()
+                || !metadata.intent.as_ref().expect("operation failed in test").is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1266,7 +1270,7 @@ mod tests {
             token_count: 20,
         };
 
-        let metadata = analyzer.analyze_turn(&turn).await.unwrap();
+        let metadata = analyzer.analyze_turn(&turn).await.expect("async operation failed");
 
         // Note: Entity extraction is handled separately in the enhanced analysis
         // For basic analysis, we check quality and engagement
@@ -1331,9 +1335,12 @@ mod tests {
     #[ignore] // Temporarily ignored - requires actual model loading
     fn test_input_validation() {
         let config = ConversationalConfig::default();
-        let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium").unwrap();
-        let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium").unwrap();
-        let pipeline = ConversationalPipeline::new(model, tokenizer).unwrap();
+        let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
+            .expect("operation failed in test");
+        let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")
+            .expect("operation failed in test");
+        let pipeline =
+            ConversationalPipeline::new(model, tokenizer).expect("operation failed in test");
 
         // Test empty message
         let empty_input = ConversationalInput {
@@ -1367,9 +1374,12 @@ mod tests {
     #[ignore] // Temporarily ignored due to nested runtime issues with from_pretrained
     async fn test_conversation_backup_restore() {
         let config = ConversationalConfig::default();
-        let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium").unwrap();
-        let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium").unwrap();
-        let pipeline = ConversationalPipeline::new(model, tokenizer).unwrap();
+        let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
+            .expect("operation failed in test");
+        let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")
+            .expect("operation failed in test");
+        let pipeline =
+            ConversationalPipeline::new(model, tokenizer).expect("operation failed in test");
 
         // Create a test conversation
         let mut state = ConversationState::new("test-123".to_string());
@@ -1385,14 +1395,14 @@ mod tests {
         pipeline.conversations.write().await.insert("test-123".to_string(), state);
 
         // Test backup
-        let backup = pipeline.backup_all_conversations().await.unwrap();
+        let backup = pipeline.backup_all_conversations().await.expect("async operation failed");
         assert!(!backup.is_empty());
 
         // Test restore
         pipeline.clear_all_conversations().await;
         assert_eq!(pipeline.get_conversation_count().await, 0);
 
-        let count = pipeline.restore_conversations(&backup).await.unwrap();
+        let count = pipeline.restore_conversations(&backup).await.expect("async operation failed");
         assert_eq!(count, 1);
         assert_eq!(pipeline.get_conversation_count().await, 1);
     }
@@ -1401,9 +1411,12 @@ mod tests {
     #[ignore] // Temporarily ignored due to nested runtime issues with from_pretrained
     async fn test_health_status() {
         let config = ConversationalConfig::default();
-        let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium").unwrap();
-        let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium").unwrap();
-        let pipeline = ConversationalPipeline::new(model, tokenizer).unwrap();
+        let model = crate::AutoModel::from_pretrained("microsoft/DialoGPT-medium")
+            .expect("operation failed in test");
+        let tokenizer = crate::AutoTokenizer::from_pretrained("microsoft/DialoGPT-medium")
+            .expect("operation failed in test");
+        let pipeline =
+            ConversationalPipeline::new(model, tokenizer).expect("operation failed in test");
 
         let health = pipeline.get_health_status().await;
         assert_eq!(health.get("overall_health"), Some(&1.0));

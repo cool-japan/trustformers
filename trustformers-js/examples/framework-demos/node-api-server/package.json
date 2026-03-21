@@ -47,8 +47,8 @@
     "sentiment-analysis",
     "text-generation"
   ],
-  "author": "TrustformeRS Team",
-  "license": "MIT",
+  "author": "COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>",
+  "license": "Apache-2.0",
   "engines": {
     "node": ">=16.0.0",
     "npm": ">=8.0.0"

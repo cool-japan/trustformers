@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn test_model_loading() {
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("operation failed in test");
 
         // Test CPU model loading
         let result = engine.load_model("test_model.onnx");

@@ -901,7 +901,7 @@ mod tests {
         let result = analyzer.analyze_performance(&graph);
         assert!(result.is_ok());
 
-        let analysis = result.unwrap();
+        let analysis = result.expect("operation failed in test");
         assert!(analysis.total_execution_time_ms >= 0.0);
     }
 
@@ -933,7 +933,7 @@ mod tests {
 
         let result = analyzer.find_critical_path(&graph);
         assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
+        assert!(!result.expect("operation failed in test").is_empty());
     }
 
     #[test]
@@ -944,6 +944,9 @@ mod tests {
 
         let result = analyzer.topological_sort(&graph);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().len(), graph.nodes.len());
+        assert_eq!(
+            result.expect("operation failed in test").len(),
+            graph.nodes.len()
+        );
     }
 }

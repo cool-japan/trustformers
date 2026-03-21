@@ -1015,7 +1015,7 @@ mod tests {
         };
 
         let builder = DockerImageBuilder::new(config);
-        let dockerfile = builder.generate_dockerfile().unwrap();
+        let dockerfile = builder.generate_dockerfile().expect("generation should succeed in test");
 
         assert!(dockerfile.contains("FROM debian:bullseye-slim"));
         assert!(dockerfile.contains("USER trustformers"));

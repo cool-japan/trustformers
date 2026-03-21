@@ -731,7 +731,7 @@ mod tests {
         let stats = debugger.get_stats("test_tensor");
         assert!(stats.is_some());
 
-        let stats = stats.unwrap();
+        let stats = stats.expect("operation failed in test");
         assert_eq!(stats.shape, vec![2, 3]);
         assert_eq!(stats.total_elements, 6);
 

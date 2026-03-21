@@ -369,7 +369,7 @@ mod tests {
             .build();
 
         assert!(config.is_ok());
-        let config = config.unwrap();
+        let config = config.expect("operation failed in test");
         assert_eq!(config.temperature, 0.8);
         assert_eq!(config.max_response_tokens, 1024);
         assert_eq!(config.conversation_mode, ConversationMode::Chat);

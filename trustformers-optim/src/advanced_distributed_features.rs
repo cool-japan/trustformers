@@ -1305,7 +1305,9 @@ mod tests {
 
         predictor.update_metrics(&metrics);
 
-        let prediction = predictor.predict_workload(Duration::from_secs(600)).unwrap();
+        let prediction = predictor
+            .predict_workload(Duration::from_secs(600))
+            .expect("Operation failed in test");
         assert!((0.0..=1.0).contains(&prediction));
     }
 
@@ -1318,7 +1320,7 @@ mod tests {
             std::fs::remove_dir_all(&temp_dir).ok();
         }
 
-        let manager = SmartCheckpointManager::new(config, temp_dir).unwrap();
+        let manager = SmartCheckpointManager::new(config, temp_dir).expect("Construction failed");
 
         let metrics = PerformanceMetrics {
             throughput: 1000.0,
@@ -1357,7 +1359,8 @@ mod tests {
             analyzer.update(i as f32 * 0.1);
         }
 
-        let prediction = analyzer.predict(Duration::from_secs(60)).unwrap();
+        let prediction =
+            analyzer.predict(Duration::from_secs(60)).expect("Operation failed in test");
         assert!(prediction > 1.0); // Should predict increasing trend
     }
 }

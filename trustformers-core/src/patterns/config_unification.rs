@@ -987,8 +987,8 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = UnifiedConfig::default();
-        let json = config.to_json().unwrap();
-        let deserialized = UnifiedConfig::from_json(&json).unwrap();
+        let json = config.to_json().expect("operation failed in test");
+        let deserialized = UnifiedConfig::from_json(&json).expect("operation failed in test");
 
         assert_eq!(config.metadata.name, deserialized.metadata.name);
         assert_eq!(config.metadata.enabled, deserialized.metadata.enabled);
@@ -999,22 +999,23 @@ mod tests {
         let mut manager = ConfigManager::new();
         let config = UnifiedConfig::default();
 
-        manager.add_config("test".to_string(), config).unwrap();
-        manager.set_active("test".to_string()).unwrap();
+        manager.add_config("test".to_string(), config).expect("add operation failed");
+        manager.set_active("test".to_string()).expect("operation failed in test");
 
-        let active = manager.get_active().unwrap();
+        let active = manager.get_active().expect("operation failed in test");
         assert_eq!(active.metadata.name, "default");
     }
 
     #[test]
     fn test_config_file_operations() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let config_path = temp_dir.path().join("test_config.json");
 
         let config = UnifiedConfig::default();
-        config.save_to_file(&config_path).unwrap();
+        config.save_to_file(&config_path).expect("operation failed in test");
 
-        let loaded_config = UnifiedConfig::load_from_file(&config_path).unwrap();
+        let loaded_config =
+            UnifiedConfig::load_from_file(&config_path).expect("operation failed in test");
         assert_eq!(config.metadata.name, loaded_config.metadata.name);
     }
 

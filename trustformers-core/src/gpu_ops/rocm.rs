@@ -75,7 +75,7 @@ impl RocmBackend {
             ));
         }
 
-        println!("✓ ROCm backend initialized on device {}", device_id);
+        tracing::debug!("ROCm backend initialized on device {}", device_id);
 
         Ok(Self { device_id })
     }
@@ -129,7 +129,7 @@ extern "C" __global__ void matmul_kernel(
 
         // Placeholder: Fallback to CPU implementation
         // TODO: Implement actual HIP kernel execution when HIP bindings are available
-        eprintln!("⚠️  ROCm GPU operations not yet implemented - using CPU fallback");
+        tracing::debug!("ROCm GPU operations not yet implemented - using CPU fallback");
 
         // CPU fallback
         let mut result = vec![0.0f32; m * n];
@@ -148,7 +148,7 @@ extern "C" __global__ void matmul_kernel(
 
     /// Execute GELU activation on GPU (placeholder)
     pub fn gelu_f32(&self, input: &[f32]) -> Result<Vec<f32>> {
-        eprintln!("⚠️  ROCm GPU operations not yet implemented - using CPU fallback");
+        tracing::debug!("ROCm GPU operations not yet implemented - using CPU fallback");
 
         // CPU fallback GELU implementation
         let result: Vec<f32> = input
@@ -180,7 +180,7 @@ extern "C" __global__ void matmul_kernel(
         hidden_size: usize,
         eps: f32,
     ) -> Result<Vec<f32>> {
-        eprintln!("⚠️  ROCm GPU operations not yet implemented - using CPU fallback");
+        tracing::debug!("ROCm GPU operations not yet implemented - using CPU fallback");
 
         let total_size = seq_len * hidden_size;
         let mut result = vec![0.0f32; total_size];
@@ -325,7 +325,7 @@ mod tests {
                 Ok(())
             },
             Err(_) => {
-                eprintln!("Skipping ROCm test: not available");
+                tracing::debug!("Skipping ROCm test: not available");
                 Ok(())
             },
         }
@@ -337,7 +337,7 @@ mod tests {
         let backend = match RocmBackend::new(0) {
             Ok(b) => b,
             Err(_) => {
-                eprintln!("Skipping ROCm test: not available");
+                tracing::debug!("Skipping ROCm test: not available");
                 return Ok(());
             },
         };

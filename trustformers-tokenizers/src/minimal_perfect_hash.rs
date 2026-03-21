@@ -485,7 +485,7 @@ mod tests {
         ];
 
         let config = MinimalPerfectHashConfig::default();
-        let mph = MinimalPerfectHash::new(&keys, config).unwrap();
+        let mph = MinimalPerfectHash::new(&keys, config).expect("Construction failed");
 
         assert_eq!(mph.len(), 5);
         assert!(!mph.is_empty());
@@ -496,7 +496,7 @@ mod tests {
         let keys = vec!["hello".to_string(), "world".to_string(), "test".to_string()];
 
         let config = MinimalPerfectHashConfig::default();
-        let mph = MinimalPerfectHash::new(&keys, config).unwrap();
+        let mph = MinimalPerfectHash::new(&keys, config).expect("Construction failed");
 
         // All keys should be found
         assert!(mph.contains("hello"));
@@ -519,7 +519,7 @@ mod tests {
         ];
 
         let config = MinimalPerfectHashConfig::default();
-        let mph = MinimalPerfectHash::new(&keys, config).unwrap();
+        let mph = MinimalPerfectHash::new(&keys, config).expect("Construction failed");
 
         // Get all hash values
         let mut hash_values = std::collections::HashSet::new();
@@ -549,7 +549,7 @@ mod tests {
             "jumps".to_string(),
         ];
 
-        let vocab = MinimalPerfectHashVocab::new(tokens.clone()).unwrap();
+        let vocab = MinimalPerfectHashVocab::new(tokens.clone()).expect("Construction failed");
 
         assert_eq!(vocab.size(), 5);
         assert!(!vocab.is_empty());
@@ -581,7 +581,7 @@ mod tests {
             "token3".to_string(),
         ];
 
-        let vocab = MinimalPerfectHashVocab::new(tokens).unwrap();
+        let vocab = MinimalPerfectHashVocab::new(tokens).expect("Construction failed");
         let usage = vocab.memory_usage();
 
         assert!(usage.total_bytes > 0);
@@ -601,7 +601,7 @@ mod tests {
             "hash".to_string(),
         ];
 
-        let vocab = MinimalPerfectHashVocab::new(tokens).unwrap();
+        let vocab = MinimalPerfectHashVocab::new(tokens).expect("Construction failed");
         let comparison = vocab.efficiency_comparison();
 
         assert!(comparison.mph_bytes > 0);
@@ -630,7 +630,8 @@ mod tests {
             use_double_hashing: true,
         };
 
-        let vocab = MinimalPerfectHashVocab::with_config(tokens.clone(), config).unwrap();
+        let vocab = MinimalPerfectHashVocab::with_config(tokens.clone(), config)
+            .expect("Operation failed in test");
 
         assert_eq!(vocab.size(), tokens.len());
 
@@ -657,7 +658,8 @@ mod tests {
             use_double_hashing: false,
         };
 
-        let vocab = MinimalPerfectHashVocab::with_config(tokens, config).unwrap();
+        let vocab =
+            MinimalPerfectHashVocab::with_config(tokens, config).expect("Operation failed in test");
         assert_eq!(vocab.size(), 3);
 
         let usage = vocab.memory_usage();

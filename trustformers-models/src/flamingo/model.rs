@@ -705,7 +705,7 @@ impl GatedCrossAttention {
             config.use_bias,
         );
         let o_proj = Linear::new(config.cross_attention_dim, hidden_size, config.use_bias);
-        let gate_proj = Linear::new(hidden_size, config.cross_attention_dim, true);
+        let gate_proj = Linear::new(hidden_size, hidden_size, true);
         let layer_norm = LayerNorm::new(vec![hidden_size], config.layer_norm_eps as f32)?;
 
         Ok(Self {
@@ -807,6 +807,8 @@ impl GatedCrossAttention {
             _ => self.gate_proj.forward(hidden_states.clone())?.tanh()?,
         };
 
+        let output = output.contiguous()?;
+        let gate = gate.contiguous()?;
         let gated_output = (&output * &gate)?;
 
         Ok(GatedCrossAttentionOutput {
@@ -1177,7 +1179,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // Tensor layout incompatibility in cross-attention matmul operations
     fn test_gated_cross_attention() {
         // Use SIMD-friendly dimensions (powers of 2 and multiples of 64)
         let hidden_size = 256;

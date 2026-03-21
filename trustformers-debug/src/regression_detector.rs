@@ -245,7 +245,7 @@ impl AnomalyDetector {
 
     fn detect_iqr_outliers(&self, values: &[f64]) -> Vec<bool> {
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let q1 = Self::percentile(&sorted_values, 25.0);
         let q3 = Self::percentile(&sorted_values, 75.0);
@@ -868,7 +868,9 @@ impl RegressionDetector {
         // 2. Change point detection
         let change_points = self.change_point_detector.detect_change_points(&filtered_values);
         if !change_points.is_empty() {
-            let latest_change_point = change_points.last().unwrap();
+            let latest_change_point = change_points
+                .last()
+                .expect("change_points should not be empty after is_empty check");
             let before = &filtered_values[0..*latest_change_point];
             let after = &filtered_values[*latest_change_point..];
 
@@ -948,7 +950,9 @@ impl RegressionDetector {
 
     /// Update baseline statistics for a metric
     fn update_baseline_statistics(&mut self, metric_type: &MetricType) -> Result<()> {
-        let series = self.metric_series.get_mut(metric_type).unwrap();
+        let series = self.metric_series.get_mut(metric_type).ok_or_else(|| {
+            anyhow::anyhow!("Metric type {:?} not found in metric_series", metric_type)
+        })?;
         let values: Vec<f64> = series.data_points.iter().map(|dp| dp.value).collect();
 
         if values.is_empty() {
@@ -960,7 +964,7 @@ impl RegressionDetector {
         let std_dev = variance.sqrt();
 
         let mut sorted_values = values.clone();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median = AnomalyDetector::percentile(&sorted_values, 50.0);
         let percentile_95 = AnomalyDetector::percentile(&sorted_values, 95.0);
@@ -1229,7 +1233,7 @@ mod tests {
         let components = decomposer.decompose(&values);
         assert!(components.is_some());
 
-        let comp = components.unwrap();
+        let comp = components.expect("operation failed in test");
         assert_eq!(comp.trend.len(), values.len());
         assert_eq!(comp.seasonal.len(), values.len());
         assert_eq!(comp.residual.len(), values.len());

@@ -74,7 +74,7 @@ impl InterpretabilityAnalyzer {
             });
         }
         feature_contributions
-            .sort_by(|a, b| b.shap_value.abs().partial_cmp(&a.shap_value.abs()).unwrap());
+            .sort_by(|a, b| b.shap_value.abs().partial_cmp(&a.shap_value.abs()).unwrap_or(std::cmp::Ordering::Equal));
         for (i, contribution) in feature_contributions.iter_mut().enumerate() {
             contribution.importance_rank = i + 1;
         }

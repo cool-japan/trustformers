@@ -410,7 +410,10 @@ mod tests {
     #[tokio::test]
     async fn test_efficiency_opportunities() {
         let analyzer = EfficiencyAnalyzer::new();
-        let opportunities = analyzer.analyze_efficiency_opportunities().await.unwrap();
+        let opportunities = analyzer
+            .analyze_efficiency_opportunities()
+            .await
+            .expect("async operation failed");
 
         assert!(!opportunities.is_empty());
         assert!(opportunities.iter().all(|o| o.potential_carbon_reduction_kg >= 0.0));
@@ -430,7 +433,10 @@ mod tests {
             efficiency_ratio: 0.6,   // Low efficiency
         };
 
-        let waste = analyzer.detect_energy_waste(&energy_measurement).await.unwrap();
+        let waste = analyzer
+            .detect_energy_waste(&energy_measurement)
+            .await
+            .expect("async operation failed");
         assert!(!waste.is_empty());
 
         // Should detect multiple waste types
@@ -466,7 +472,7 @@ mod tests {
         let analysis = analyzer
             .analyze_session_efficiency(&session_info, &energy_measurement)
             .await
-            .unwrap();
+            .expect("operation failed in test");
         assert!(analysis.efficiency_score > 0.0);
         assert!(analysis.waste_percentage >= 0.0);
         assert!(!analysis.optimization_opportunities.is_empty());
@@ -485,8 +491,10 @@ mod tests {
             efficiency_ratio: 0.6,   // Low efficiency
         };
 
-        let bottlenecks =
-            analyzer.identify_efficiency_bottlenecks(&energy_measurement).await.unwrap();
+        let bottlenecks = analyzer
+            .identify_efficiency_bottlenecks(&energy_measurement)
+            .await
+            .expect("async operation failed");
         assert!(!bottlenecks.is_empty());
         assert!(bottlenecks.len() >= 3); // Should identify multiple bottlenecks
     }
@@ -495,10 +503,14 @@ mod tests {
     async fn test_optimization_potential() {
         let analyzer = EfficiencyAnalyzer::new();
 
-        let low_efficiency_potential =
-            analyzer.calculate_optimization_potential(0.5).await.unwrap();
-        let high_efficiency_potential =
-            analyzer.calculate_optimization_potential(0.9).await.unwrap();
+        let low_efficiency_potential = analyzer
+            .calculate_optimization_potential(0.5)
+            .await
+            .expect("async operation failed");
+        let high_efficiency_potential = analyzer
+            .calculate_optimization_potential(0.9)
+            .await
+            .expect("async operation failed");
 
         assert!(low_efficiency_potential > high_efficiency_potential);
         assert!(low_efficiency_potential <= 0.5); // Capped at 50%
@@ -507,7 +519,10 @@ mod tests {
     #[tokio::test]
     async fn test_model_optimization_recommendations() {
         let analyzer = EfficiencyAnalyzer::new();
-        let recommendations = analyzer.get_model_optimization_recommendations().await.unwrap();
+        let recommendations = analyzer
+            .get_model_optimization_recommendations()
+            .await
+            .expect("async operation failed");
 
         assert!(!recommendations.is_empty());
         assert!(recommendations.iter().all(|r| r.potential_savings.energy_savings_kwh >= 0.0));

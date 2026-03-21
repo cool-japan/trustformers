@@ -898,7 +898,7 @@ mod tests {
         let tokenizer = MusicTokenizer::new();
         let result = tokenizer.encode("CDEFGAB");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
     }
 
@@ -907,7 +907,7 @@ mod tests {
         let tokenizer = MusicTokenizer::new();
         let result = tokenizer.encode("C Am F G");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
     }
 
@@ -916,7 +916,7 @@ mod tests {
         let tokenizer = MusicTokenizer::new();
         let metadata = tokenizer.parse_note_metadata("C");
         assert!(metadata.is_some());
-        let meta = metadata.unwrap();
+        let meta = metadata.expect("Operation failed in test");
         assert_eq!(meta.pitch_class, Some(0)); // C = 0
         assert_eq!(meta.octave, Some(4));
     }
@@ -926,7 +926,7 @@ mod tests {
         let tokenizer = MusicTokenizer::new();
         let metadata = tokenizer.parse_note_metadata("^C");
         assert!(metadata.is_some());
-        let meta = metadata.unwrap();
+        let meta = metadata.expect("Operation failed in test");
         assert_eq!(meta.pitch_class, Some(1)); // C# = 1
     }
 
@@ -935,7 +935,7 @@ mod tests {
         let tokenizer = MusicTokenizer::new();
         let metadata = tokenizer.parse_duration_metadata("4");
         assert!(metadata.is_some());
-        let meta = metadata.unwrap();
+        let meta = metadata.expect("Operation failed in test");
         assert!(meta.duration_ticks.is_some());
     }
 
@@ -944,7 +944,7 @@ mod tests {
         let tokenizer = MusicTokenizer::new();
         let analysis = tokenizer.analyze("CDEFGAB");
         assert!(analysis.is_ok());
-        let result = analysis.unwrap();
+        let result = analysis.expect("Operation failed in test");
         assert!(!result.note_distribution.is_empty());
         assert!(result.complexity_score > 0.0);
     }
@@ -954,7 +954,7 @@ mod tests {
         let tokenizer = MusicTokenizer::new();
         let metadata = tokenizer.create_chord_metadata("Cmaj7");
         assert!(metadata.is_some());
-        let meta = metadata.unwrap();
+        let meta = metadata.expect("Operation failed in test");
         assert_eq!(meta.pitch_class, Some(0)); // C = 0
     }
 
@@ -962,8 +962,8 @@ mod tests {
     fn test_encoding_decoding_consistency() {
         let tokenizer = MusicTokenizer::new();
         let original = "CDEFG";
-        let encoded = tokenizer.encode(original).unwrap();
-        let decoded = tokenizer.decode(&encoded.input_ids).unwrap();
+        let encoded = tokenizer.encode(original).expect("Encoding failed");
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
         assert!(!decoded.is_empty());
     }
 
@@ -975,7 +975,7 @@ mod tests {
 
         let result = tokenizer.encode("CDEFGABCDEFGAB");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(tokenized.input_ids.len() <= 5);
     }
 

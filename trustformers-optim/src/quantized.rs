@@ -408,10 +408,16 @@ mod tests {
         let param_data = vec![1.0, 2.0, 3.0, 4.0];
         let grad_data = vec![0.1, 0.2, 0.3, 0.4];
 
-        parameters.insert("layer1".to_string(), Tensor::new(param_data).unwrap());
-        gradients.insert("layer1".to_string(), Tensor::new(grad_data).unwrap());
+        parameters.insert(
+            "layer1".to_string(),
+            Tensor::new(param_data).expect("Failed to create tensor"),
+        );
+        gradients.insert(
+            "layer1".to_string(),
+            Tensor::new(grad_data).expect("Failed to create tensor"),
+        );
 
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
 
         assert_eq!(optimizer.memory_usage(), 8);
         assert!(optimizer.memory_savings_vs_fp32() > 0.7);

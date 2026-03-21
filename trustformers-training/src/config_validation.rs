@@ -805,7 +805,7 @@ mod tests {
             output_dir: "/tmp/output".to_string(),
         };
 
-        let validated = ValidatedConfig::new(config.clone()).unwrap();
+        let validated = ValidatedConfig::new(config.clone()).expect("operation failed in test");
         assert_eq!(validated.get().learning_rate, 0.001);
 
         let inner = validated.into_inner();

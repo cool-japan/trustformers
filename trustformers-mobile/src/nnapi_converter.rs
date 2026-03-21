@@ -1150,11 +1150,11 @@ mod tests {
         let converter = NNAPIModelConverter::new(config);
 
         assert_eq!(
-            converter.map_operation_type("Conv2d").unwrap(),
+            converter.map_operation_type("Conv2d").expect("operation failed in test"),
             NNAPIOperationType::Conv2D
         );
         assert_eq!(
-            converter.map_operation_type("ReLU").unwrap(),
+            converter.map_operation_type("ReLU").expect("operation failed in test"),
             NNAPIOperationType::Relu
         );
     }

@@ -917,25 +917,45 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 768);
         assert_eq!(output.shape, vec![768]);
 
         // Check metadata preservation
         assert_eq!(
-            output.metadata.get("width").unwrap().as_u64().expect("expected u64 value"),
+            output
+                .metadata
+                .get("width")
+                .expect("expected value not found")
+                .as_u64()
+                .expect("expected u64 value"),
             640
         );
         assert_eq!(
-            output.metadata.get("height").unwrap().as_u64().expect("expected u64 value"),
+            output
+                .metadata
+                .get("height")
+                .expect("expected value not found")
+                .as_u64()
+                .expect("expected u64 value"),
             480
         );
         assert_eq!(
-            output.metadata.get("channels").unwrap().as_u64().expect("expected u64 value"),
+            output
+                .metadata
+                .get("channels")
+                .expect("expected value not found")
+                .as_u64()
+                .expect("expected u64 value"),
             3
         );
         assert_eq!(
-            output.metadata.get("dpi").unwrap().as_u64().expect("expected u64 value"),
+            output
+                .metadata
+                .get("dpi")
+                .expect("expected value not found")
+                .as_u64()
+                .expect("expected u64 value"),
             96
         );
     }
@@ -954,7 +974,8 @@ mod tests {
             "max_batch_size": 32
         });
 
-        let config = VisionFeatureConfig::from_config(&config_json).unwrap();
+        let config =
+            VisionFeatureConfig::from_config(&config_json).expect("operation failed in test");
         assert_eq!(config.image_size, 224);
         assert_eq!(config.feature_size, 768);
         assert!(config.normalize);
@@ -969,7 +990,8 @@ mod tests {
     #[test]
     fn test_vision_config_defaults() {
         let minimal_config = serde_json::json!({});
-        let config = VisionFeatureConfig::from_config(&minimal_config).unwrap();
+        let config =
+            VisionFeatureConfig::from_config(&minimal_config).expect("operation failed in test");
 
         assert_eq!(config.image_size, 224);
         assert_eq!(config.feature_size, 768);
@@ -1050,18 +1072,31 @@ mod tests {
         let caps = extractor.capabilities();
 
         assert_eq!(
-            caps.get("modality").unwrap().as_str().expect("expected str value"),
+            caps.get("modality")
+                .expect("expected value not found")
+                .as_str()
+                .expect("expected str value"),
             "vision"
         );
         assert_eq!(
-            caps.get("feature_size").unwrap().as_u64().expect("expected u64 value"),
+            caps.get("feature_size")
+                .expect("expected value not found")
+                .as_u64()
+                .expect("expected u64 value"),
             768
         );
         assert_eq!(
-            caps.get("image_size").unwrap().as_u64().expect("expected u64 value"),
+            caps.get("image_size")
+                .expect("expected value not found")
+                .as_u64()
+                .expect("expected u64 value"),
             224
         );
-        assert!(caps.get("supports_batching").unwrap().as_bool().unwrap());
+        assert!(caps
+            .get("supports_batching")
+            .expect("expected value not found")
+            .as_bool()
+            .expect("operation failed in test"));
         assert!(caps.contains_key("supported_formats"));
     }
 

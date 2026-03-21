@@ -1180,7 +1180,8 @@ mod tests {
     #[test]
     fn test_power_consumption_estimation() {
         let config = MobileConfig::default();
-        let device_info = crate::device_info::MobileDeviceDetector::detect().unwrap();
+        let device_info =
+            crate::device_info::MobileDeviceDetector::detect().expect("operation failed in test");
 
         let estimated_power = ThermalPowerUtils::estimate_power_consumption(&config, &device_info);
         assert!(estimated_power > 0.0);

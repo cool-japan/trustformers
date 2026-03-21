@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! NCCL-based communicator implementation for high-performance GPU collective operations
@@ -284,7 +284,7 @@ mod tests {
     #[test]
     #[cfg(feature = "nccl")]
     fn test_nccl_communicator_creation() {
-        let comm = NcclCommunicator::new(0, 2, 0).unwrap();
+        let comm = NcclCommunicator::new(0, 2, 0).expect("operation failed in test");
         assert_eq!(comm.rank(), 0);
         assert_eq!(comm.world_size(), 2);
         assert_eq!(comm.device_id(), 0);

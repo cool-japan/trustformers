@@ -428,8 +428,9 @@ mod tests {
             iterations: 100,
         };
 
-        let serialized = serde_json::to_string(&metrics).unwrap();
-        let deserialized: TrainingMetrics = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&metrics).expect("Serialization failed");
+        let deserialized: TrainingMetrics =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
 
         assert_eq!(metrics.vocab_size, deserialized.vocab_size);
         assert_eq!(metrics.total_tokens, deserialized.total_tokens);

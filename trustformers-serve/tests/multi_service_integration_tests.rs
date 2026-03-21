@@ -305,8 +305,11 @@ async fn test_auth_and_batching_integration() {
 
     // Verify batch processing worked
     assert!(batch_response["results"].is_array());
-    assert_eq!(batch_response["results"].as_array().unwrap().len(), 2);
-    assert!(batch_response["batch_size"].as_u64().unwrap() > 0);
+    assert_eq!(
+        batch_response["results"].as_array().expect("operation failed in test").len(),
+        2
+    );
+    assert!(batch_response["batch_size"].as_u64().expect("operation failed in test") > 0);
 }
 
 #[tokio::test]
@@ -422,7 +425,12 @@ async fn test_gpu_scheduler_and_load_balancer_integration() {
 
     assert_eq!(metrics_response.status_code(), StatusCode::OK);
     let metrics: Value = metrics_response.json();
-    assert!(metrics["gpu_scheduler"]["total_requests"].as_u64().unwrap() >= 6);
+    assert!(
+        metrics["gpu_scheduler"]["total_requests"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 6
+    );
 }
 
 #[tokio::test]
@@ -443,7 +451,7 @@ async fn test_message_queue_and_metrics_integration() {
 
     assert_eq!(response.status_code(), StatusCode::ACCEPTED);
     let async_response: Value = response.json();
-    let job_id = async_response["job_id"].as_str().unwrap();
+    let job_id = async_response["job_id"].as_str().expect("operation failed in test");
 
     // Wait for processing
     sleep(Duration::from_millis(500)).await;
@@ -456,9 +464,8 @@ async fn test_message_queue_and_metrics_integration() {
 
     assert_eq!(status_response.status_code(), StatusCode::OK);
     let job_status: Value = status_response.json();
-    assert!(
-        ["pending", "processing", "completed"].contains(&job_status["status"].as_str().unwrap())
-    );
+    assert!(["pending", "processing", "completed"]
+        .contains(&job_status["status"].as_str().expect("operation failed in test")));
 
     // Check that metrics were collected for queue operations
     let metrics_response = server
@@ -468,8 +475,18 @@ async fn test_message_queue_and_metrics_integration() {
 
     assert_eq!(metrics_response.status_code(), StatusCode::OK);
     let metrics: Value = metrics_response.json();
-    assert!(metrics["message_queue"]["total_messages"].as_u64().unwrap() >= 1);
-    assert!(metrics["async_jobs"]["total_submitted"].as_u64().unwrap() >= 1);
+    assert!(
+        metrics["message_queue"]["total_messages"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
+    assert!(
+        metrics["async_jobs"]["total_submitted"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
 }
 
 #[tokio::test]
@@ -481,7 +498,10 @@ async fn test_streaming_and_health_integration() {
     let health_response = server.get("/health").await;
     assert_eq!(health_response.status_code(), StatusCode::OK);
     let health: Value = health_response.json();
-    assert_eq!(health["status"].as_str().unwrap(), "healthy");
+    assert_eq!(
+        health["status"].as_str().expect("operation failed in test"),
+        "healthy"
+    );
 
     // Start streaming inference
     let response = server
@@ -499,7 +519,10 @@ async fn test_streaming_and_health_integration() {
     // Verify streaming response structure
     let stream_response: Value = response.json();
     assert!(stream_response["stream_id"].is_string());
-    assert_eq!(stream_response["status"].as_str().unwrap(), "streaming");
+    assert_eq!(
+        stream_response["status"].as_str().expect("operation failed in test"),
+        "streaming"
+    );
 
     // Check that health endpoint still works during streaming
     let health_during_stream = server.get("/health").await;
@@ -616,11 +639,21 @@ async fn test_end_to_end_multi_service_workflow() {
     let metrics: Value = final_metrics.json();
 
     // Verify metrics from all services
-    assert!(metrics["auth"]["tokens_issued"].as_u64().unwrap() >= 1);
-    assert!(metrics["model_management"]["models_loaded"].as_u64().unwrap() >= 1);
-    assert!(metrics["batching"]["total_batches"].as_u64().unwrap() >= 1);
-    assert!(metrics["caching"]["cache_requests"].as_u64().unwrap() >= 2);
-    assert!(metrics["message_queue"]["total_messages"].as_u64().unwrap() >= 1);
+    assert!(metrics["auth"]["tokens_issued"].as_u64().expect("operation failed in test") >= 1);
+    assert!(
+        metrics["model_management"]["models_loaded"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
+    assert!(metrics["batching"]["total_batches"].as_u64().expect("operation failed in test") >= 1);
+    assert!(metrics["caching"]["cache_requests"].as_u64().expect("operation failed in test") >= 2);
+    assert!(
+        metrics["message_queue"]["total_messages"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
     // active_streams is u64 which is always >= 0, so we just verify it exists
     assert!(metrics["streaming"]["active_streams"].as_u64().is_some());
 
@@ -628,7 +661,10 @@ async fn test_end_to_end_multi_service_workflow() {
     let final_health = server.get("/health").await;
     assert_eq!(final_health.status_code(), StatusCode::OK);
     let health: Value = final_health.json();
-    assert_eq!(health["status"].as_str().unwrap(), "healthy");
+    assert_eq!(
+        health["status"].as_str().expect("operation failed in test"),
+        "healthy"
+    );
 }
 
 #[tokio::test]
@@ -703,9 +739,29 @@ async fn test_service_dependency_chain() {
     let metrics: Value = metrics_response.json();
 
     // Each service in the chain should have recorded activity
-    assert!(metrics["auth"]["requests_authorized"].as_u64().unwrap() >= 1);
-    assert!(metrics["model_management"]["load_requests"].as_u64().unwrap() >= 1);
-    assert!(metrics["gpu_scheduler"]["allocation_requests"].as_u64().unwrap() >= 1);
-    assert!(metrics["batching"]["requests_processed"].as_u64().unwrap() >= 1);
-    assert!(metrics["caching"]["cache_lookups"].as_u64().unwrap() >= 1);
+    assert!(
+        metrics["auth"]["requests_authorized"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
+    assert!(
+        metrics["model_management"]["load_requests"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
+    assert!(
+        metrics["gpu_scheduler"]["allocation_requests"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
+    assert!(
+        metrics["batching"]["requests_processed"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 1
+    );
+    assert!(metrics["caching"]["cache_lookups"].as_u64().expect("operation failed in test") >= 1);
 }

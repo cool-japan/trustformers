@@ -423,7 +423,7 @@ impl SimulationAnalyzer {
         }
 
         let mut sorted_features: Vec<_> = feature_sensitivities.iter().collect();
-        sorted_features.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+        sorted_features.sort_by(|a, b| b.1.partial_cmp(a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let most_sensitive_features: Vec<String> =
             sorted_features.iter().take(5).map(|(name, _)| (*name).clone()).collect();

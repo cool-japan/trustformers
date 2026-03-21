@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn test_debug_session_creation() {
         let temp_dir = env::temp_dir().join("debug_session_test");
-        let session = UnifiedDebugSession::new(&temp_dir).unwrap();
+        let session = UnifiedDebugSession::new(&temp_dir).expect("temp file creation failed");
 
         assert_eq!(session.current_step(), 0);
         assert!(session.session_dir().exists());
@@ -382,10 +382,10 @@ mod tests {
     #[test]
     fn test_log_scalar() {
         let temp_dir = env::temp_dir().join("debug_session_scalar_test");
-        let mut session = UnifiedDebugSession::new(&temp_dir).unwrap();
+        let mut session = UnifiedDebugSession::new(&temp_dir).expect("temp file creation failed");
 
-        session.log_scalar("test/loss", 0.5).unwrap();
-        session.log_scalar("test/accuracy", 0.95).unwrap();
+        session.log_scalar("test/loss", 0.5).expect("operation failed in test");
+        session.log_scalar("test/accuracy", 0.95).expect("operation failed in test");
         session.step();
 
         assert_eq!(session.current_step(), 1);
@@ -394,10 +394,12 @@ mod tests {
     #[test]
     fn test_register_activations() {
         let temp_dir = env::temp_dir().join("debug_session_activations_test");
-        let mut session = UnifiedDebugSession::new(&temp_dir).unwrap();
+        let mut session = UnifiedDebugSession::new(&temp_dir).expect("temp file creation failed");
 
         let activations = vec![0.1, 0.2, 0.3, 0.4, 0.5];
-        session.register_activations("layer1", activations, vec![5]).unwrap();
+        session
+            .register_activations("layer1", activations, vec![5])
+            .expect("operation failed in test");
 
         assert_eq!(session.activation_visualizer().num_layers(), 1);
     }
@@ -405,10 +407,10 @@ mod tests {
     #[test]
     fn test_check_stability() {
         let temp_dir = env::temp_dir().join("debug_session_stability_test");
-        let mut session = UnifiedDebugSession::new(&temp_dir).unwrap();
+        let mut session = UnifiedDebugSession::new(&temp_dir).expect("temp file creation failed");
 
         let values = vec![1.0, f64::NAN, 2.0];
-        let issues = session.check_stability("layer1", &values).unwrap();
+        let issues = session.check_stability("layer1", &values).expect("operation failed in test");
 
         assert!(issues > 0);
         assert!(session.stability_checker().has_issues());
@@ -417,12 +419,14 @@ mod tests {
     #[test]
     fn test_session_save() {
         let temp_dir = env::temp_dir().join("debug_session_save_test");
-        let mut session = UnifiedDebugSession::new(&temp_dir).unwrap();
+        let mut session = UnifiedDebugSession::new(&temp_dir).expect("temp file creation failed");
 
-        session.log_scalar("test/metric", 1.0).unwrap();
-        session.register_activations("layer1", vec![1.0, 2.0, 3.0], vec![3]).unwrap();
+        session.log_scalar("test/metric", 1.0).expect("operation failed in test");
+        session
+            .register_activations("layer1", vec![1.0, 2.0, 3.0], vec![3])
+            .expect("operation failed in test");
 
-        session.save().unwrap();
+        session.save().expect("operation failed in test");
 
         // Check that files were created
         let session_dir = session.session_dir();
@@ -432,9 +436,11 @@ mod tests {
     #[test]
     fn test_session_summary() {
         let temp_dir = env::temp_dir().join("debug_session_summary_test");
-        let mut session = UnifiedDebugSession::new(&temp_dir).unwrap();
+        let mut session = UnifiedDebugSession::new(&temp_dir).expect("temp file creation failed");
 
-        session.register_activations("layer1", vec![1.0], vec![1]).unwrap();
+        session
+            .register_activations("layer1", vec![1.0], vec![1])
+            .expect("operation failed in test");
         session.step();
         session.step();
 
@@ -457,7 +463,8 @@ mod tests {
             session_name: Some("test_session".to_string()),
         };
 
-        let session = UnifiedDebugSession::with_config(&temp_dir, config).unwrap();
+        let session =
+            UnifiedDebugSession::with_config(&temp_dir, config).expect("temp file creation failed");
         assert!(session.tensorboard.is_none());
         assert!(session.session_id.starts_with("test_session"));
     }
@@ -471,9 +478,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mut session = UnifiedDebugSession::with_config(&temp_dir, config).unwrap();
+        let mut session =
+            UnifiedDebugSession::with_config(&temp_dir, config).expect("temp file creation failed");
 
-        session.log_scalar("test/value", 1.0).unwrap();
+        session.log_scalar("test/value", 1.0).expect("operation failed in test");
         session.step(); // step 1
         session.step(); // step 2 - should trigger auto-save
 
@@ -484,7 +492,7 @@ mod tests {
     #[test]
     fn test_print_summary() {
         let temp_dir = env::temp_dir().join("debug_session_print_test");
-        let session = UnifiedDebugSession::new(&temp_dir).unwrap();
+        let session = UnifiedDebugSession::new(&temp_dir).expect("temp file creation failed");
 
         let summary_str = session.print_summary();
         assert!(summary_str.contains("Debug Session Summary"));

@@ -357,11 +357,11 @@ mod tests {
 
         // Test insert and get
         cache.insert(key.clone(), value.clone());
-        let retrieved = cache.get(&key).unwrap();
+        let retrieved = cache.get(&key).expect("expected value not found");
         assert_eq!(retrieved, value);
 
         // Test metrics
-        let metrics = cache.metrics().unwrap();
+        let metrics = cache.metrics().expect("operation failed in test");
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.hits, 1);
         assert_eq!(snapshot.misses, 0);
@@ -383,11 +383,11 @@ mod tests {
         let value = vec![42u8; 1000];
 
         cache.insert(key.clone(), value.clone());
-        let retrieved = cache.get(&key).unwrap();
+        let retrieved = cache.get(&key).expect("expected value not found");
         assert_eq!(retrieved, value);
 
         // Check that the stored value is smaller (compressed)
-        let entry = cache.cache.get(&key).unwrap();
+        let entry = cache.cache.get(&key).expect("expected value not found");
         assert!(entry.is_compressed);
         assert!(entry.value.len() < entry.uncompressed_size);
     }
@@ -415,7 +415,7 @@ mod tests {
         assert!(cache.get(&keys[4]).is_some());
 
         // Check eviction metrics
-        let metrics = cache.metrics().unwrap();
+        let metrics = cache.metrics().expect("operation failed in test");
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.evictions, 2);
     }

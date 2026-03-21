@@ -281,7 +281,7 @@ impl TestEnvironmentManager {
     }
 
     async fn allocate_ports(&self) -> Result<PortAllocation, IsolationError> {
-        let mut resource_locks = self.resource_locks.lock().unwrap();
+        let mut resource_locks = self.resource_locks.lock().expect("lock acquisition failed");
 
         let mut allocated_ports = Vec::new();
         let (start_port, end_port) = self.config.port_range;
@@ -328,7 +328,7 @@ impl TestEnvironmentManager {
     }
 
     async fn release_ports(&self, ports: &PortAllocation) -> Result<(), IsolationError> {
-        let mut resource_locks = self.resource_locks.lock().unwrap();
+        let mut resource_locks = self.resource_locks.lock().expect("lock acquisition failed");
 
         resource_locks.reserved_ports.remove(&ports.server_port);
         resource_locks.reserved_ports.remove(&ports.metrics_port);
@@ -497,7 +497,7 @@ impl Clone for TestEnvironment {
         // approach to sharing test environments or using reference counting
         Self {
             id: self.id.clone(),
-            temp_dir: tempfile::tempdir().unwrap(), // Create new temp dir
+            temp_dir: tempfile::tempdir().expect("temp file creation failed"), // Create new temp dir
             ports: self.ports.clone(),
             env_vars: self.env_vars.clone(),
             storage: StorageIsolation {
@@ -706,9 +706,18 @@ mod tests {
         });
 
         // Create multiple environments
-        let env1 = manager.create_environment("test_concurrent_1").await.unwrap();
-        let env2 = manager.create_environment("test_concurrent_2").await.unwrap();
-        let env3 = manager.create_environment("test_concurrent_3").await.unwrap();
+        let env1 = manager
+            .create_environment("test_concurrent_1")
+            .await
+            .expect("async operation failed");
+        let env2 = manager
+            .create_environment("test_concurrent_2")
+            .await
+            .expect("async operation failed");
+        let env3 = manager
+            .create_environment("test_concurrent_3")
+            .await
+            .expect("async operation failed");
 
         // Fourth should fail
         let env4_result = manager.create_environment("test_concurrent_4").await;
@@ -718,20 +727,26 @@ mod tests {
         ));
 
         // Clean up
-        manager.cleanup_environment(&env1).await.unwrap();
-        manager.cleanup_environment(&env2).await.unwrap();
-        manager.cleanup_environment(&env3).await.unwrap();
+        manager.cleanup_environment(&env1).await.expect("async operation failed");
+        manager.cleanup_environment(&env2).await.expect("async operation failed");
+        manager.cleanup_environment(&env3).await.expect("async operation failed");
     }
 
     #[tokio::test]
     async fn test_port_allocation_isolation() {
         let manager = TestEnvironmentManager::new(EnvironmentConfig::default());
 
-        let env1_id = manager.create_environment("test_ports_1").await.unwrap();
-        let env2_id = manager.create_environment("test_ports_2").await.unwrap();
+        let env1_id = manager
+            .create_environment("test_ports_1")
+            .await
+            .expect("async operation failed");
+        let env2_id = manager
+            .create_environment("test_ports_2")
+            .await
+            .expect("async operation failed");
 
-        let env1 = manager.get_environment(&env1_id).await.unwrap();
-        let env2 = manager.get_environment(&env2_id).await.unwrap();
+        let env1 = manager.get_environment(&env1_id).await.expect("async operation failed");
+        let env2 = manager.get_environment(&env2_id).await.expect("async operation failed");
 
         // Ports should be different
         assert_ne!(env1.ports.server_port, env2.ports.server_port);
@@ -739,19 +754,25 @@ mod tests {
         assert_ne!(env1.ports.health_port, env2.ports.health_port);
 
         // Clean up
-        manager.cleanup_environment(&env1_id).await.unwrap();
-        manager.cleanup_environment(&env2_id).await.unwrap();
+        manager.cleanup_environment(&env1_id).await.expect("async operation failed");
+        manager.cleanup_environment(&env2_id).await.expect("async operation failed");
     }
 
     #[tokio::test]
     async fn test_storage_isolation() {
         let manager = TestEnvironmentManager::new(EnvironmentConfig::default());
 
-        let env1_id = manager.create_environment("test_storage_1").await.unwrap();
-        let env2_id = manager.create_environment("test_storage_2").await.unwrap();
+        let env1_id = manager
+            .create_environment("test_storage_1")
+            .await
+            .expect("async operation failed");
+        let env2_id = manager
+            .create_environment("test_storage_2")
+            .await
+            .expect("async operation failed");
 
-        let env1 = manager.get_environment(&env1_id).await.unwrap();
-        let env2 = manager.get_environment(&env2_id).await.unwrap();
+        let env1 = manager.get_environment(&env1_id).await.expect("async operation failed");
+        let env2 = manager.get_environment(&env2_id).await.expect("async operation failed");
 
         // Storage paths should be different
         assert_ne!(
@@ -765,8 +786,8 @@ mod tests {
         assert!(env2.storage.cache_directory.exists());
 
         // Clean up
-        manager.cleanup_environment(&env1_id).await.unwrap();
-        manager.cleanup_environment(&env2_id).await.unwrap();
+        manager.cleanup_environment(&env1_id).await.expect("async operation failed");
+        manager.cleanup_environment(&env2_id).await.expect("async operation failed");
     }
 
     #[tokio::test]
@@ -776,13 +797,16 @@ mod tests {
             ..Default::default()
         });
 
-        let env_id = manager.create_environment("test_timeout").await.unwrap();
+        let env_id = manager
+            .create_environment("test_timeout")
+            .await
+            .expect("async operation failed");
 
         // Wait for timeout
         sleep(Duration::from_millis(200)).await;
 
         // Clean up expired environments
-        let cleaned_count = manager.cleanup_expired().await.unwrap();
+        let cleaned_count = manager.cleanup_expired().await.expect("async operation failed");
         assert_eq!(cleaned_count, 1);
 
         // Environment should no longer exist
@@ -797,11 +821,11 @@ mod tests {
             .await
             .expect("Failed to create isolated environment");
 
-        let env = manager.get_environment(&env_id).await.unwrap();
+        let env = manager.get_environment(&env_id).await.expect("async operation failed");
 
         // Test with_env_vars helper
         let result = with_env_vars(&env.env_vars, || async {
-            std::env::var("TRUSTFORMERS_TEST_ENV_ID").unwrap()
+            std::env::var("TRUSTFORMERS_TEST_ENV_ID").expect("operation failed in test")
         })
         .await;
 
@@ -817,6 +841,6 @@ mod tests {
         assert!(port_result.is_ok());
 
         // Clean up
-        manager.cleanup_environment(&env_id).await.unwrap();
+        manager.cleanup_environment(&env_id).await.expect("async operation failed");
     }
 }

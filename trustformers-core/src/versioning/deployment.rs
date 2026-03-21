@@ -661,12 +661,21 @@ mod tests {
             vec![],
         );
 
-        let deployment_id = manager.deploy_to_production(model.id(), &model).await.unwrap();
+        let deployment_id = manager
+            .deploy_to_production(model.id(), &model)
+            .await
+            .expect("async operation failed");
         assert!(!deployment_id.is_empty());
 
-        let deployment = manager.get_active_deployment("test_model").await.unwrap();
+        let deployment = manager
+            .get_active_deployment("test_model")
+            .await
+            .expect("async operation failed");
         assert!(deployment.is_some());
-        assert_eq!(deployment.unwrap().status, DeploymentStatus::Active);
+        assert_eq!(
+            deployment.expect("operation failed in test").status,
+            DeploymentStatus::Active
+        );
     }
 
     #[tokio::test]
@@ -697,14 +706,20 @@ mod tests {
             max_duration_hours: None,
         };
 
-        let deployment_id = manager.deploy_with_strategy(model.id(), &model, config).await.unwrap();
+        let deployment_id = manager
+            .deploy_with_strategy(model.id(), &model, config)
+            .await
+            .expect("async operation failed");
         assert!(!deployment_id.is_empty());
 
         // Check initial traffic percentage
-        let deployments = manager.list_deployments().await.unwrap();
+        let deployments = manager.list_deployments().await.expect("async operation failed");
         let canary_deployment = deployments.iter().find(|d| d.deployment_id == deployment_id);
         assert!(canary_deployment.is_some());
-        assert_eq!(canary_deployment.unwrap().traffic_percentage, 10.0);
+        assert_eq!(
+            canary_deployment.expect("operation failed in test").traffic_percentage,
+            10.0
+        );
     }
 
     #[tokio::test]
@@ -726,7 +741,10 @@ mod tests {
         );
 
         // Deploy initial version
-        manager.deploy_to_production(model.id(), &model).await.unwrap();
+        manager
+            .deploy_to_production(model.id(), &model)
+            .await
+            .expect("async operation failed");
 
         // Create new version
         let new_metadata = ModelMetadata::builder()
@@ -743,14 +761,26 @@ mod tests {
         );
 
         // Deploy new version
-        manager.deploy_to_production(new_model.id(), &new_model).await.unwrap();
+        manager
+            .deploy_to_production(new_model.id(), &new_model)
+            .await
+            .expect("async operation failed");
 
         // Rollback to original version
-        manager.rollback("test_model", model.id()).await.unwrap();
+        manager
+            .rollback("test_model", model.id())
+            .await
+            .expect("async operation failed");
 
-        let deployment = manager.get_active_deployment("test_model").await.unwrap();
+        let deployment = manager
+            .get_active_deployment("test_model")
+            .await
+            .expect("async operation failed");
         assert!(deployment.is_some());
-        assert_eq!(deployment.unwrap().version_id, model.id());
+        assert_eq!(
+            deployment.expect("operation failed in test").version_id,
+            model.id()
+        );
     }
 
     #[tokio::test]
@@ -771,14 +801,26 @@ mod tests {
             vec![],
         );
 
-        let deployment_id = manager.deploy_to_production(model.id(), &model).await.unwrap();
+        let deployment_id = manager
+            .deploy_to_production(model.id(), &model)
+            .await
+            .expect("async operation failed");
 
         // Update traffic percentage
-        manager.update_traffic_percentage(&deployment_id, 75.0).await.unwrap();
+        manager
+            .update_traffic_percentage(&deployment_id, 75.0)
+            .await
+            .expect("async operation failed");
 
-        let deployment = manager.get_active_deployment("test_model").await.unwrap();
+        let deployment = manager
+            .get_active_deployment("test_model")
+            .await
+            .expect("async operation failed");
         assert!(deployment.is_some());
-        assert_eq!(deployment.unwrap().traffic_percentage, 75.0);
+        assert_eq!(
+            deployment.expect("operation failed in test").traffic_percentage,
+            75.0
+        );
     }
 
     #[tokio::test]
@@ -799,9 +841,12 @@ mod tests {
             vec![],
         );
 
-        let deployment_id = manager.deploy_to_production(model.id(), &model).await.unwrap();
+        let deployment_id = manager
+            .deploy_to_production(model.id(), &model)
+            .await
+            .expect("async operation failed");
 
-        let health = manager.health_check(&deployment_id).await.unwrap();
+        let health = manager.health_check(&deployment_id).await.expect("async operation failed");
         assert!(health.is_healthy);
         assert_eq!(health.deployment_id, deployment_id);
     }

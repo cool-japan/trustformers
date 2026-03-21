@@ -219,25 +219,26 @@ mod tests {
 
     #[test]
     fn test_linear_layer() {
-        let linear = Linear::new(3, 2, true).unwrap();
-        let input = WasmTensor::new(vec![1.0, 2.0, 3.0], vec![1, 3]).unwrap();
-        let output = linear.forward(&input).unwrap();
+        let linear = Linear::new(3, 2, true).expect("Linear layer creation should succeed");
+        let input = WasmTensor::new(vec![1.0, 2.0, 3.0], vec![1, 3])
+            .expect("tensor creation should succeed");
+        let output = linear.forward(&input).expect("forward pass should succeed");
         assert_eq!(output.shape(), vec![1, 2]);
     }
 
     #[test]
     fn test_layer_norm() {
         let ln = LayerNorm::new(vec![4], 1e-5);
-        let input =
-            WasmTensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 4]).unwrap();
-        let output = ln.forward(&input).unwrap();
+        let input = WasmTensor::new(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], vec![2, 4])
+            .expect("tensor creation should succeed");
+        let output = ln.forward(&input).expect("forward pass should succeed");
         assert_eq!(output.shape(), vec![2, 4]);
     }
 
     #[test]
     fn test_embedding() {
-        let emb = Embedding::new(10, 4).unwrap();
-        let output = emb.forward(&[0, 2, 5]).unwrap();
+        let emb = Embedding::new(10, 4).expect("embedding creation should succeed");
+        let output = emb.forward(&[0, 2, 5]).expect("forward pass should succeed");
         assert_eq!(output.shape(), vec![3, 4]);
     }
 }

@@ -27,12 +27,13 @@
 //! ```no_run
 //! use trustformers_core::layers::{Linear, LayerNorm, MultiHeadAttention};
 //! use trustformers_core::tensor::Tensor;
+//! use trustformers_core::traits::Layer;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Create layers for a transformer block
-//! let attention = MultiHeadAttention::new(768, 12, 0.1)?;
+//! let attention = MultiHeadAttention::new(768, 12, 0.1, true)?;
 //! let norm1 = LayerNorm::new(vec![768], 1e-5)?;
-//! let ffn = Linear::new(768, 3072, true)?;
+//! let ffn = Linear::new(768, 3072, true);
 //! let norm2 = LayerNorm::new(vec![768], 1e-5)?;
 //!
 //! // Use in a forward pass

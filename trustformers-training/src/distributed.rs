@@ -910,10 +910,14 @@ mod tests {
         };
         let pg = Arc::new(SimulatedProcessGroup::new(0, 1));
 
-        let trainer = DataParallelTrainer::new(model, pg, config).unwrap();
+        let trainer =
+            DataParallelTrainer::new(model, pg, config).expect("operation failed in test");
 
         let mut gradients = HashMap::new();
-        gradients.insert("test_param".to_string(), Tensor::ones(&[2, 2]).unwrap());
+        gradients.insert(
+            "test_param".to_string(),
+            Tensor::ones(&[2, 2]).expect("tensor operation failed"),
+        );
 
         let result = trainer.backward(&mut gradients);
         assert!(result.is_ok());
@@ -948,7 +952,7 @@ mod tests {
         let pg = init_distributed_training(config);
         assert!(pg.is_ok());
 
-        let pg = pg.unwrap();
+        let pg = pg.expect("operation failed in test");
         assert_eq!(pg.rank(), 0);
         assert_eq!(pg.world_size(), 2);
     }

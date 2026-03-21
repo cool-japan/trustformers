@@ -543,12 +543,12 @@ mod tests {
                 vec![vec![2, 3], vec![2, 3]],
                 vec![2, 3],
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(tape.len(), 1);
         assert_eq!(entry_id, 0);
 
-        let entry = tape.get_entry(entry_id).unwrap();
+        let entry = tape.get_entry(entry_id).expect("operation failed in test");
         assert_eq!(entry.inputs, vec![0, 1]);
         assert_eq!(entry.output, 2);
     }
@@ -565,7 +565,7 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         tape.record_operation(
             OperationType::Multiply,
@@ -575,7 +575,7 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         let stats = tape.stats();
         assert_eq!(stats.num_entries, 2);
@@ -596,7 +596,7 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         assert_eq!(tape.len(), 1);
 
@@ -632,7 +632,7 @@ mod tests {
                 vec![vec![2, 3], vec![2, 3]],
                 vec![2, 3],
             )
-            .unwrap();
+            .expect("operation failed in test");
         }
 
         // Should only keep the last 2 entries
@@ -651,7 +651,7 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         tape.record_operation(
             OperationType::Multiply,
@@ -661,7 +661,7 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         let dependent = tape.find_dependent_entries(0);
         assert_eq!(dependent.len(), 2);
@@ -682,11 +682,14 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         let producer = tape.find_producer_entry(2);
         assert!(producer.is_some());
-        assert_eq!(producer.unwrap().operation, OperationType::Add);
+        assert_eq!(
+            producer.expect("operation failed in test").operation,
+            OperationType::Add
+        );
 
         let producer = tape.find_producer_entry(0);
         assert!(producer.is_none());
@@ -704,7 +707,7 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         let trace = tape.export_trace();
         assert!(trace.contains("Gradient Tape Trace"));
@@ -725,7 +728,7 @@ mod tests {
             vec![vec![2, 3], vec![2, 3]],
             vec![2, 3],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         let result = tape.validate();
         assert!(result.is_err());

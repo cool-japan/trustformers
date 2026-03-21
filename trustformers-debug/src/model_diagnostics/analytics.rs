@@ -1367,7 +1367,7 @@ mod tests {
 
         let distance = analytics
             .calculate_distance(&point1, &point2, &DistanceMetric::Euclidean)
-            .unwrap();
+            .expect("operation failed in test");
         assert!(distance > 0.0);
     }
 

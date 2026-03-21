@@ -4,8 +4,10 @@
 //! breach detection, and performance analysis for production deployments.
 
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use prometheus::{
-    register_counter_vec, register_gauge_vec, register_histogram_vec, Counter, Gauge, Histogram,
+    register_counter_vec, register_gauge_vec, register_histogram_vec, Counter, CounterVec, Gauge,
+    GaugeVec, Histogram, HistogramVec,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
@@ -14,6 +16,61 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+// Global metric registrations — registered exactly once, shared across all SloTracker instances.
+static SLO_SLI_VALUE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "slo_sli_value",
+        "Current SLI value",
+        &["sli_id", "sli_name"]
+    )
+    .expect("Failed to register slo_sli_value metric")
+});
+
+static SLO_COMPLIANCE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "slo_compliance_percentage",
+        "SLO compliance percentage",
+        &["slo_id", "slo_name"]
+    )
+    .expect("Failed to register slo_compliance_percentage metric")
+});
+
+static SLO_ERROR_BUDGET_REMAINING: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "slo_error_budget_remaining",
+        "Error budget remaining percentage",
+        &["slo_id", "slo_name"]
+    )
+    .expect("Failed to register slo_error_budget_remaining metric")
+});
+
+static SLO_BURN_RATE: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "slo_burn_rate",
+        "Current error budget burn rate",
+        &["slo_id", "slo_name"]
+    )
+    .expect("Failed to register slo_burn_rate metric")
+});
+
+static SLO_BREACHES_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "slo_breaches_total",
+        "Total number of SLO breaches",
+        &["slo_id", "slo_name", "severity"]
+    )
+    .expect("Failed to register slo_breaches_total metric")
+});
+
+static SLO_SLI_EVAL_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "slo_sli_evaluation_duration_seconds",
+        "SLI evaluation duration in seconds",
+        &["sli_id"]
+    )
+    .expect("Failed to register slo_sli_evaluation_duration_seconds metric")
+});
 
 /// SLO configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -876,7 +933,7 @@ impl SloTracker {
                     breach.end_time = Some(SystemTime::now());
                     breach.duration = breach
                         .end_time
-                        .unwrap()
+                        .expect("end_time was just set to Some above")
                         .duration_since(breach.start_time)
                         .unwrap_or(Duration::from_secs(0));
 
@@ -931,48 +988,16 @@ impl SloTracker {
 
 impl SloPrometheusMetrics {
     fn new() -> Result<Self> {
+        // Force initialization of all lazy statics to ensure they are registered.
+        // Each SloTracker instance shares the same underlying metric families;
+        // only the label-value children differ.
         Ok(Self {
-            sli_value: register_gauge_vec!(
-                "slo_sli_value",
-                "Current SLI value",
-                &["sli_id", "sli_name"]
-            )?
-            .with_label_values(&["", ""]),
-
-            slo_compliance: register_gauge_vec!(
-                "slo_compliance_percentage",
-                "SLO compliance percentage",
-                &["slo_id", "slo_name"]
-            )?
-            .with_label_values(&["", ""]),
-
-            error_budget_remaining: register_gauge_vec!(
-                "slo_error_budget_remaining",
-                "Error budget remaining percentage",
-                &["slo_id", "slo_name"]
-            )?
-            .with_label_values(&["", ""]),
-
-            burn_rate: register_gauge_vec!(
-                "slo_burn_rate",
-                "Current error budget burn rate",
-                &["slo_id", "slo_name"]
-            )?
-            .with_label_values(&["", ""]),
-
-            slo_breaches: register_counter_vec!(
-                "slo_breaches_total",
-                "Total number of SLO breaches",
-                &["slo_id", "slo_name", "severity"]
-            )?
-            .with_label_values(&["", "", ""]),
-
-            sli_evaluation_duration: register_histogram_vec!(
-                "slo_sli_evaluation_duration_seconds",
-                "SLI evaluation duration in seconds",
-                &["sli_id"]
-            )?
-            .with_label_values(&[""]),
+            sli_value: SLO_SLI_VALUE.with_label_values(&["", ""]),
+            slo_compliance: SLO_COMPLIANCE.with_label_values(&["", ""]),
+            error_budget_remaining: SLO_ERROR_BUDGET_REMAINING.with_label_values(&["", ""]),
+            burn_rate: SLO_BURN_RATE.with_label_values(&["", ""]),
+            slo_breaches: SLO_BREACHES_TOTAL.with_label_values(&["", "", ""]),
+            sli_evaluation_duration: SLO_SLI_EVAL_DURATION.with_label_values(&[""]),
         })
     }
 }
@@ -1006,14 +1031,14 @@ mod tests {
     #[tokio::test]
     async fn test_slo_tracker_creation() {
         let config = SloConfig::default();
-        let tracker = SloTracker::new(config).unwrap();
+        let tracker = SloTracker::new(config).expect("test operation should succeed");
         assert!(tracker.config.enabled);
     }
 
     #[tokio::test]
     async fn test_sli_registration() {
         let config = SloConfig::default();
-        let tracker = SloTracker::new(config).unwrap();
+        let tracker = SloTracker::new(config).expect("test operation should succeed");
 
         let sli = SliDefinition {
             id: "test_sli".to_string(),
@@ -1039,7 +1064,7 @@ mod tests {
     #[tokio::test]
     async fn test_slo_registration() {
         let config = SloConfig::default();
-        let tracker = SloTracker::new(config).unwrap();
+        let tracker = SloTracker::new(config).expect("test operation should succeed");
 
         // First register SLI
         let sli = SliDefinition {
@@ -1055,7 +1080,7 @@ mod tests {
             },
             labels: HashMap::new(),
         };
-        tracker.register_sli(sli).await.unwrap();
+        tracker.register_sli(sli).await.expect("registration should succeed in test");
 
         // Then register SLO
         let slo = SloDefinition {

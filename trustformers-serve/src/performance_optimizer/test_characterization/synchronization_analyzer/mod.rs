@@ -18,8 +18,9 @@ pub mod synchronizationpatternlibrary_traits;
 pub mod synchronizationpointdetectorconfig_traits;
 pub mod topologicalorderingalgorithm_traits;
 pub mod types;
+pub mod types_patterns;
 pub mod waittimeanalyzerconfig_traits;
 
-// Re-export all types
+// Re-export all types (types_patterns is re-exported via types.rs)
 pub use functions::*;
 pub use types::*;

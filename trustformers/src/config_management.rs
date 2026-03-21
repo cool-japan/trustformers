@@ -1481,7 +1481,9 @@ mod tests {
             "learning_rate": 2e-5
         });
 
-        let migrated = manager.migrate_config("training", &old_config, "1.0.0", "2.0.0").unwrap();
+        let migrated = manager
+            .migrate_config("training", &old_config, "1.0.0", "2.0.0")
+            .expect("operation failed in test");
 
         assert!(migrated.get("gradient_accumulation_steps").is_some());
         assert!(migrated.get("warmup_steps").is_some());
@@ -1490,7 +1492,7 @@ mod tests {
     #[test]
     fn test_template_generation() {
         let manager = ConfigurationManager::new();
-        let template = manager.generate_template("training").unwrap();
+        let template = manager.generate_template("training").expect("temp file creation failed");
 
         assert!(template.get("num_epochs").is_some());
         assert!(template.get("batch_size").is_some());
@@ -1531,14 +1533,14 @@ mod tests {
                     serde_json::Value::Number(serde_json::Number::from(16)),
                 )])),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(
-            config.get("num_epochs").unwrap(),
+            config.get("num_epochs").expect("expected value not found"),
             &serde_json::Value::Number(serde_json::Number::from(3))
         );
         assert_eq!(
-            config.get("batch_size").unwrap(),
+            config.get("batch_size").expect("expected value not found"),
             &serde_json::Value::Number(serde_json::Number::from(16))
         ); // overridden
     }
@@ -1555,7 +1557,9 @@ mod tests {
         let context = RecommendationContext {
             hardware_info: HashMap::from([(
                 "gpu_memory_gb".to_string(),
-                serde_json::Value::Number(serde_json::Number::from_f64(16.0).unwrap()),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(16.0).expect("operation failed in test"),
+                ),
             )]),
             use_case: "production".to_string(),
             performance_requirements: PerformanceRequirements {

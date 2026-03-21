@@ -50,9 +50,12 @@ mod tests {
         let system = ErrorTrackingSystem::new(config);
         let error = ErrorEntry::new("TestError".to_string(), "Test message".to_string());
         let error_id = error.id.clone();
-        system.track_error(error).await.unwrap();
+        system.track_error(error).await.expect("async operation should succeed in test");
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let retrieved_error = system.get_error(&error_id).await.unwrap();
+        let retrieved_error = system
+            .get_error(&error_id)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(retrieved_error.error_type, "TestError");
         assert_eq!(retrieved_error.message, "Test message");
     }
@@ -62,8 +65,14 @@ mod tests {
         let system = ErrorTrackingSystem::new(config);
         let error1 = ErrorEntry::new("Error1".to_string(), "Message 1".to_string());
         let error2 = ErrorEntry::new("Error2".to_string(), "Message 2".to_string());
-        system.track_error(error1).await.unwrap();
-        system.track_error(error2).await.unwrap();
+        system
+            .track_error(error1)
+            .await
+            .expect("async operation should succeed in test");
+        system
+            .track_error(error2)
+            .await
+            .expect("async operation should succeed in test");
         tokio::time::sleep(Duration::from_millis(100)).await;
         let stats = system.get_statistics().await;
         assert_eq!(stats.total_errors, 2);

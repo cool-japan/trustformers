@@ -250,8 +250,8 @@ impl InterpretabilityAnalyzer {
         ];
 
         let (max_score, pattern_type) = scores.into_iter()
-            .max_by(|a, b| a.0.partial_cmp(&b.0).expect("Partial comparison failed"))
-            .unwrap();
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+            .expect("scores vec is non-empty");
 
         if max_score > 0.3 {
             pattern_type
@@ -911,7 +911,7 @@ mod tests {
         let activation_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 0.0, 0.0, 0.0];
         let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
 
-        let stats = analyzer.calculate_activation_statistics(&activation_tensor).unwrap();
+        let stats = analyzer.calculate_activation_statistics(&activation_tensor).expect("tensor operation failed");
         assert!(stats.mean > 0.0);
         assert!(stats.std > 0.0);
         assert!(stats.sparsity > 0.0);
@@ -926,7 +926,7 @@ mod tests {
         let activation_data = vec![1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0, 0.0];
         let activation_tensor = Tensor::from_vec(activation_data, &[2, 4]).expect("Tensor from_vec failed");
 
-        let dead_count = analyzer.count_dead_neurons(&activation_tensor).unwrap();
+        let dead_count = analyzer.count_dead_neurons(&activation_tensor).expect("tensor operation failed");
         assert!(dead_count > 0);
     }
 
@@ -959,7 +959,7 @@ mod tests {
         let result = analyzer.analyze_activations(&activations);
         assert!(result.is_ok());
 
-        let analysis = analyzer.get_activation_analysis().unwrap();
+        let analysis = analyzer.get_activation_analysis().expect("operation failed in test");
         assert!(analysis.layer_activation_statistics.contains_key("layer1"));
         assert!(analysis.dead_neuron_count.contains_key("layer1"));
     }

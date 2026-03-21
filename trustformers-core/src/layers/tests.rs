@@ -39,7 +39,8 @@ fn test_embedding_layer() {
 
 #[test]
 fn test_embedding_with_padding() {
-    let embedding = Embedding::new(100, 64, Some(0)).unwrap();
+    let embedding =
+        Embedding::new(100, 64, Some(0)).expect("Failed to create embedding with padding");
 
     let input_ids = vec![0u32, 1, 5, 0]; // 0 is padding
     let output = embedding.forward(input_ids).expect("Forward pass failed");
@@ -94,13 +95,16 @@ fn test_multihead_attention_with_mask() {
     let input = Tensor::zeros(&[2, 10, 64]).expect("Failed to create tensor");
     let mask = Some(Tensor::ones(&[2, 10, 10]).expect("Failed to create tensor")); // Allow all attention
 
-    let output = attention.forward_self_attention(&input, mask.as_ref(), false).unwrap();
+    let output = attention
+        .forward_self_attention(&input, mask.as_ref(), false)
+        .expect("Forward self-attention with mask failed");
     assert_eq!(output.shape(), vec![2, 10, 64]);
 }
 
 #[test]
 fn test_multihead_attention_causal() {
-    let attention = MultiHeadAttention::new(64, 8, 0.1, true).unwrap(); // causal=true
+    let attention =
+        MultiHeadAttention::new(64, 8, 0.1, true).expect("Failed to create causal attention"); // causal=true
 
     let input = Tensor::zeros(&[1, 5, 64]).expect("Failed to create tensor");
     match attention.forward_self_attention(&input, None, true) {
@@ -125,7 +129,8 @@ fn test_multihead_attention_causal() {
 #[test]
 fn test_attention_head_dimension() {
     // Test that head dimension is correctly computed
-    let attention = MultiHeadAttention::new(64, 8, 0.0, false).unwrap();
+    let attention = MultiHeadAttention::new(64, 8, 0.0, false)
+        .expect("Failed to create attention for head dimension test");
     // head_dim should be 64 / 8 = 8
 
     let input = Tensor::zeros(&[1, 4, 64]).expect("Failed to create tensor");
@@ -239,7 +244,8 @@ fn test_tensor_operations() {
 fn test_embedding_basic_functionality() {
     let vocab_size = 10;
     let embedding_dim = 5;
-    let embedding = Embedding::new(vocab_size, embedding_dim, None).unwrap();
+    let embedding =
+        Embedding::new(vocab_size, embedding_dim, None).expect("Failed to create embedding");
 
     // Test single ID
     let single_id = vec![3u32];

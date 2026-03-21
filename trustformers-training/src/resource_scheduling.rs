@@ -813,8 +813,14 @@ mod tests {
     #[test]
     fn test_resource_scheduler_creation() {
         let scheduler = ResourceScheduler::new();
-        assert_eq!(scheduler.get_pending_requests_count().unwrap(), 0);
-        assert_eq!(scheduler.get_active_allocations_count().unwrap(), 0);
+        assert_eq!(
+            scheduler.get_pending_requests_count().expect("operation failed in test"),
+            0
+        );
+        assert_eq!(
+            scheduler.get_active_allocations_count().expect("operation failed in test"),
+            0
+        );
     }
 
     #[test]
@@ -835,9 +841,9 @@ mod tests {
             tags: HashMap::new(),
         };
 
-        scheduler.register_resource_pool(pool).unwrap();
+        scheduler.register_resource_pool(pool).expect("operation failed in test");
 
-        let utilization = scheduler.get_resource_utilization().unwrap();
+        let utilization = scheduler.get_resource_utilization().expect("operation failed in test");
         assert_eq!(utilization.get("cpu-pool-1"), Some(&0.0));
     }
 
@@ -859,7 +865,7 @@ mod tests {
             cost_per_unit: 0.1,
             tags: HashMap::new(),
         };
-        scheduler.register_resource_pool(pool).unwrap();
+        scheduler.register_resource_pool(pool).expect("operation failed in test");
 
         let request = ResourceRequest {
             request_id: "req-1".to_string(),
@@ -880,13 +886,17 @@ mod tests {
             deadline: None,
         };
 
-        let request_id = scheduler.submit_resource_request(request).unwrap();
+        let request_id =
+            scheduler.submit_resource_request(request).expect("operation failed in test");
         assert_eq!(request_id, "req-1");
 
         // Check that resources were allocated
-        assert_eq!(scheduler.get_active_allocations_count().unwrap(), 1);
+        assert_eq!(
+            scheduler.get_active_allocations_count().expect("operation failed in test"),
+            1
+        );
 
-        let utilization = scheduler.get_resource_utilization().unwrap();
+        let utilization = scheduler.get_resource_utilization().expect("operation failed in test");
         assert_eq!(utilization.get("cpu-pool-1"), Some(&0.25)); // 4/16 = 0.25
     }
 
@@ -908,7 +918,7 @@ mod tests {
             cost_per_unit: 0.1,
             tags: HashMap::new(),
         };
-        scheduler.register_resource_pool(pool).unwrap();
+        scheduler.register_resource_pool(pool).expect("operation failed in test");
 
         // Submit a request
         let request = ResourceRequest {
@@ -930,21 +940,25 @@ mod tests {
             deadline: None,
         };
 
-        scheduler.submit_resource_request(request).unwrap();
+        scheduler.submit_resource_request(request).expect("operation failed in test");
 
         // Get allocation ID (in a real implementation, this would be returned)
         let active_allocations =
             scheduler.active_allocations.read().expect("lock should not be poisoned");
-        let allocation_id = active_allocations.keys().next().unwrap().clone();
+        let allocation_id =
+            active_allocations.keys().next().expect("operation failed in test").clone();
         drop(active_allocations);
 
         // Release the allocation
-        scheduler.release_allocation(&allocation_id).unwrap();
+        scheduler.release_allocation(&allocation_id).expect("operation failed in test");
 
         // Check that resources were freed
-        assert_eq!(scheduler.get_active_allocations_count().unwrap(), 0);
+        assert_eq!(
+            scheduler.get_active_allocations_count().expect("operation failed in test"),
+            0
+        );
 
-        let utilization = scheduler.get_resource_utilization().unwrap();
+        let utilization = scheduler.get_resource_utilization().expect("operation failed in test");
         assert_eq!(utilization.get("cpu-pool-1"), Some(&0.0));
     }
 
@@ -966,7 +980,7 @@ mod tests {
             cost_per_unit: 0.1,
             tags: HashMap::new(),
         };
-        scheduler.register_resource_pool(pool).unwrap();
+        scheduler.register_resource_pool(pool).expect("operation failed in test");
 
         // Submit low priority request first
         let low_priority_request = ResourceRequest {
@@ -988,7 +1002,9 @@ mod tests {
             deadline: None,
         };
 
-        scheduler.submit_resource_request(low_priority_request).unwrap();
+        scheduler
+            .submit_resource_request(low_priority_request)
+            .expect("operation failed in test");
 
         // Submit high priority request that should be prioritized
         let high_priority_request = ResourceRequest {
@@ -1010,10 +1026,12 @@ mod tests {
             deadline: None,
         };
 
-        scheduler.submit_resource_request(high_priority_request).unwrap();
+        scheduler
+            .submit_resource_request(high_priority_request)
+            .expect("operation failed in test");
 
         // In a real scenario, we would verify that the high priority request
         // gets allocated first when resources become available
-        assert!(scheduler.get_pending_requests_count().unwrap() > 0);
+        assert!(scheduler.get_pending_requests_count().expect("operation failed in test") > 0);
     }
 }

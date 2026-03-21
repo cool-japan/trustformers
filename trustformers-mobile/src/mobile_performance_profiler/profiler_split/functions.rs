@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn test_error_handling() {
         let config = fast_test_config();
-        let profiler = MobilePerformanceProfiler::new(config).unwrap();
+        let profiler = MobilePerformanceProfiler::new(config).expect("operation failed in test");
         assert!(profiler.stop_profiling().is_err());
         assert!(profiler.pause_profiling().is_err());
         assert!(profiler.resume_profiling().is_err());
@@ -253,7 +253,7 @@ mod tests {
             })
             .collect();
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("thread join failed");
         }
         let profiling_data = profiler.stop_profiling()?;
         assert!(profiling_data.events.len() > 0);

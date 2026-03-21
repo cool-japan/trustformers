@@ -354,9 +354,9 @@ mod tests {
             "hello world test".to_string(),
         ]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "generation");
         assert!(result.value >= 0.0 && result.value <= 1.0);
         assert!(result.details.contains_key("bleu_like"));
@@ -369,9 +369,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["hello world".to_string()]);
         let references = MetricInput::Text(vec!["hello world".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, 1.0); // Perfect match should give 1.0
     }
 
@@ -382,9 +382,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["foo bar".to_string()]);
         let references = MetricInput::Text(vec!["baz qux".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, 0.0); // No overlap should give 0.0
     }
 
@@ -395,9 +395,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["".to_string()]);
         let references = MetricInput::Text(vec!["hello world".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Empty prediction should not contribute to score
         assert_eq!(result.value, 0.0);
     }
@@ -409,9 +409,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["hello world test".to_string()]);
         let references = MetricInput::Text(vec!["hello universe test".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Should have some overlap but not perfect
         assert!(result.value > 0.0 && result.value < 1.0);
     }
@@ -422,7 +422,7 @@ mod tests {
 
         let predictions = MetricInput::Text(vec!["hello".to_string()]);
         let references = MetricInput::Text(vec!["world".to_string()]);
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
         metric.reset();
 
@@ -451,7 +451,7 @@ mod tests {
                 &MetricInput::Text(vec!["hello world".to_string()]),
                 &MetricInput::Text(vec!["hello world".to_string()]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Second batch
         metric
@@ -459,9 +459,9 @@ mod tests {
                 &MetricInput::Text(vec!["foo bar".to_string()]),
                 &MetricInput::Text(vec!["baz qux".to_string()]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Should average: 1.0 (perfect) + 0.0 (no overlap) = 0.5
         assert_eq!(result.value, 0.5);
     }

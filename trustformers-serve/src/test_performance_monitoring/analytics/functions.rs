@@ -245,7 +245,9 @@ mod tests {
             outlier_detection_config: OutlierDetectionConfig::default(),
         };
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        let summary = analyzer.calculate_descriptive_statistics(&data).unwrap();
+        let summary = analyzer
+            .calculate_descriptive_statistics(&data)
+            .expect("analysis should succeed in test");
         assert_eq!(summary.mean, 3.0);
         assert_eq!(summary.median, 3.0);
         assert_eq!(summary.range, (1.0, 5.0));
@@ -272,7 +274,8 @@ mod tests {
             outlier_detection_config: OutlierDetectionConfig::default(),
         };
         let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 100.0];
-        let outlier_analysis = analyzer.detect_outliers(&data).unwrap();
+        let outlier_analysis =
+            analyzer.detect_outliers(&data).expect("analysis should succeed in test");
         assert_eq!(outlier_analysis.outliers.len(), 1);
         assert_eq!(outlier_analysis.outliers[0].value, 100.0);
         assert!(outlier_analysis.outliers[0].score > 0.0);

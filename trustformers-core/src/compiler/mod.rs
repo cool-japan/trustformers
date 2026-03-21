@@ -19,8 +19,8 @@ This module provides comprehensive compiler optimizations for TrustformeRS inclu
 
 ## Usage
 
-```rust
-use trustformers_core::compiler::{CompilerOptimizer, OptimizationLevel};
+```rust,no_run
+use trustformers_core::compiler::{CompilerOptimizer, OptimizationLevel, ComputationGraph};
 
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 let computation_graph = ComputationGraph::new();

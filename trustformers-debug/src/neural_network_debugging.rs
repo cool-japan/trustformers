@@ -491,7 +491,7 @@ impl AttentionDebugger {
 
         // Compute 90th percentile threshold
         let mut sorted_values = values.to_vec();
-        sorted_values.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        sorted_values.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut cumulative_sum = 0.0;
         let target_sum = sum * 0.9; // 90% of attention mass

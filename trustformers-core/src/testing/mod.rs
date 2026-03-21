@@ -202,7 +202,7 @@ mod tests {
                 detector.record_deallocation(id);
                 Ok(())
             })
-            .unwrap();
+            .expect("passing test should succeed");
 
         // Run a failing test
         runner
@@ -210,7 +210,7 @@ mod tests {
                 detector.record_allocation(2048); // Not deallocated
                 Ok(())
             })
-            .unwrap();
+            .expect("failing test should still return Ok");
 
         let summary = runner.get_summary();
         assert_eq!(summary.total_tests, 2);

@@ -1016,7 +1016,7 @@ mod tests {
         };
 
         let generator = ReportGenerator::new(config);
-        let report = generator.generate().unwrap();
+        let report = generator.generate().expect("operation failed in test");
 
         assert_eq!(report.metadata.title, "Test Report");
         assert!(!report.sections.is_empty());
@@ -1027,7 +1027,7 @@ mod tests {
         let config = ReportConfig::default();
         let generator = ReportGenerator::new(config);
 
-        let summary = generator.generate_summary_section().unwrap();
+        let summary = generator.generate_summary_section().expect("operation failed in test");
         assert!(matches!(summary.section_type, ReportSection::Summary));
         assert_eq!(summary.title, "Executive Summary");
         assert!(!summary.content.is_empty());
@@ -1044,7 +1044,7 @@ mod tests {
         };
 
         let generator = ReportGenerator::new(config);
-        let report = generator.generate().unwrap();
+        let report = generator.generate().expect("operation failed in test");
 
         assert_eq!(report.sections.len(), 2);
         assert!(matches!(
@@ -1061,10 +1061,11 @@ mod tests {
     fn test_report_serialization() {
         let config = ReportConfig::default();
         let generator = ReportGenerator::new(config);
-        let report = generator.generate().unwrap();
+        let report = generator.generate().expect("operation failed in test");
 
-        let json = serde_json::to_string(&report).unwrap();
-        let deserialized: Report = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&report).expect("JSON serialization failed");
+        let deserialized: Report =
+            serde_json::from_str(&json).expect("JSON deserialization failed");
 
         assert_eq!(report.metadata.title, deserialized.metadata.title);
         assert_eq!(report.sections.len(), deserialized.sections.len());

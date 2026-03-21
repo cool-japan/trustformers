@@ -629,7 +629,7 @@ mod tests {
         let tensor =
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0], &[5]).expect("Tensor from_vec failed");
 
-        stats.update(&tensor, 0.01).unwrap();
+        stats.update(&tensor, 0.01).expect("tensor operation failed");
 
         assert_eq!(stats.count, 5);
         assert_eq!(stats.min_val, 1.0);
@@ -643,9 +643,10 @@ mod tests {
         let tensor = Tensor::from_vec(vec![-2.0, -1.0, 0.0, 1.0, 2.0], &[5])
             .expect("Tensor from_vec failed");
 
-        stats.update(&tensor, 0.01).unwrap();
+        stats.update(&tensor, 0.01).expect("tensor operation failed");
 
-        let (scale, zero_point) = stats.get_quantization_params(true, 8, 1.0).unwrap();
+        let (scale, zero_point) =
+            stats.get_quantization_params(true, 8, 1.0).expect("operation failed in test");
         assert!(scale > 0.0);
         assert_eq!(zero_point, 0); // Symmetric quantization
     }
@@ -663,8 +664,12 @@ mod tests {
 
         // Calibration phase
         assert!(quantizer.calibrating);
-        quantizer.quantize_activation(&tensor1, "layer1", false).unwrap();
-        quantizer.quantize_activation(&tensor2, "layer1", false).unwrap();
+        quantizer
+            .quantize_activation(&tensor1, "layer1", false)
+            .expect("tensor operation failed");
+        quantizer
+            .quantize_activation(&tensor2, "layer1", false)
+            .expect("tensor operation failed");
 
         // Should have statistics now
         assert!(quantizer.get_layer_stats("layer1").is_some());
@@ -684,11 +689,15 @@ mod tests {
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Tensor from_vec failed");
 
         // Calibrate
-        quantizer.quantize_activation(&tensor, "test_layer", false).unwrap();
+        quantizer
+            .quantize_activation(&tensor, "test_layer", false)
+            .expect("tensor operation failed");
         quantizer.end_calibration();
 
         // Quantize
-        let result = quantizer.quantize_activation(&tensor, "test_layer", false).unwrap();
+        let result = quantizer
+            .quantize_activation(&tensor, "test_layer", false)
+            .expect("tensor operation failed");
         assert_eq!(result.shape(), tensor.shape());
     }
 
@@ -712,7 +721,9 @@ mod tests {
         let tensor = Tensor::randn(&[8, 8]).expect("Failed to create random tensor");
 
         // Disabled layer should return original tensor
-        let result = quantizer.quantize_activation(&tensor, "disabled_layer", false).unwrap();
+        let result = quantizer
+            .quantize_activation(&tensor, "disabled_layer", false)
+            .expect("tensor operation failed");
         // Should be same reference (no quantization applied)
         assert_eq!(result.shape(), tensor.shape());
     }
@@ -731,11 +742,15 @@ mod tests {
             .expect("Tensor from_vec failed"); // One outlier
 
         // Calibrate
-        quantizer.quantize_activation(&tensor, "adaptive_layer", false).unwrap();
+        quantizer
+            .quantize_activation(&tensor, "adaptive_layer", false)
+            .expect("tensor operation failed");
         quantizer.end_calibration();
 
         // Quantize with adaptive scheme
-        let result = quantizer.quantize_activation(&tensor, "adaptive_layer", false).unwrap();
+        let result = quantizer
+            .quantize_activation(&tensor, "adaptive_layer", false)
+            .expect("tensor operation failed");
         assert_eq!(result.shape(), tensor.shape());
     }
 
@@ -777,9 +792,10 @@ mod tests {
     #[test]
     fn test_percentile_calculation() {
         let mut stats = ActivationStats::new();
-        let tensor = Tensor::from_vec((1..=100).map(|x| x as f32).collect(), &[100]).unwrap();
+        let tensor = Tensor::from_vec((1..=100).map(|x| x as f32).collect(), &[100])
+            .expect("tensor operation failed");
 
-        stats.update(&tensor, 0.01).unwrap();
+        stats.update(&tensor, 0.01).expect("tensor operation failed");
 
         let p95 = stats.percentile(0.95);
         assert!((90.0..=100.0).contains(&p95)); // Should be around 95

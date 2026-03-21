@@ -647,7 +647,7 @@ mod tests {
     #[test]
     fn test_advantage_calculation() {
         let config = PPOConfig::default();
-        let trainer = PPOTrainer::new(config).unwrap();
+        let trainer = PPOTrainer::new(config).expect("operation failed in test");
 
         let rewards = Array1::from_vec(vec![1.0, 2.0, 3.0]);
         let values = Array1::from_vec(vec![0.5, 1.5, 2.5]);
@@ -655,7 +655,7 @@ mod tests {
         let result = trainer.calculate_advantages(&rewards, &values, 0.99f32, 0.95f32);
         assert!(result.is_ok());
 
-        let (advantages, returns) = result.unwrap();
+        let (advantages, returns) = result.expect("operation failed in test");
         assert_eq!(advantages.len(), 3);
         assert_eq!(returns.len(), 3);
     }

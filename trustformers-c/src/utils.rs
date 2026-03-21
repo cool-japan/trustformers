@@ -247,20 +247,20 @@ mod tests {
         let id = interner.intern("test");
         assert!(id > 0);
 
-        let retrieved = interner.get(id).unwrap();
+        let retrieved = interner.get(id).expect("key should exist in test data");
         assert_eq!(retrieved.as_str(), "test");
     }
 
     #[test]
     fn test_backward_compatibility_string_conversion() {
         let rust_str = "Hello, World!";
-        let c_str = CString::new(rust_str).unwrap();
-        let converted = c_str_to_string(c_str.as_ptr()).unwrap();
+        let c_str = CString::new(rust_str).expect("CString creation should succeed for valid test input");
+        let converted = c_str_to_string(c_str.as_ptr()).expect("test operation should succeed");
         assert_eq!(converted, rust_str);
 
         let c_ptr = string_to_c_str(rust_str.to_string());
         assert!(!c_ptr.is_null());
-        let back = c_str_to_string(c_ptr).unwrap();
+        let back = c_str_to_string(c_ptr).expect("test operation should succeed");
         assert_eq!(back, rust_str);
 
         unsafe {
@@ -273,7 +273,7 @@ mod tests {
         let mut timer = PerformanceTimer::new();
         timer.start();
         std::thread::sleep(std::time::Duration::from_millis(1));
-        let elapsed = timer.stop().unwrap();
+        let elapsed = timer.stop().expect("timer stop should succeed");
         assert!(elapsed > 0.0);
 
         let stats = timer.get_statistics();
@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_backward_compatibility_validation() {
-        let valid_str = CString::new("valid_string").unwrap();
+        let valid_str = CString::new("valid_string").expect("CString creation should succeed for valid test input");
         let result = validate_string_comprehensive("valid_string", 1, 100, true);
         assert!(result.is_ok());
 
@@ -292,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_backward_compatibility_system_info() {
-        let info = get_system_info().unwrap();
+        let info = get_system_info().expect("system info retrieval should succeed");
         assert!(info.num_cpu_cores > 0);
     }
 
@@ -331,12 +331,12 @@ mod tests {
         let mut timer = PerformanceTimer::new();
         timer.start();
         std::thread::sleep(std::time::Duration::from_millis(1));
-        let _elapsed = timer.stop().unwrap();
+        let _elapsed = timer.stop().expect("timer stop should succeed");
 
         let result = validate_string_comprehensive("valid", 1, 10, false);
         assert!(result.is_ok());
 
-        let _system_info = get_system_info().unwrap();
+        let _system_info = get_system_info().expect("system info retrieval should succeed");
 
         // Everything should work without conflicts
         assert!(interner.get(id).is_some());

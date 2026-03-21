@@ -319,25 +319,25 @@ mod tests {
     #[test]
     fn test_checker_creation() {
         let args = vec![];
-        let checker = create_checker_from_args(&args).unwrap();
+        let checker = create_checker_from_args(&args).expect("operation failed in test");
         // Basic test that checker is created successfully
         assert!(checker.check_directory(Path::new(".")).is_ok());
     }
 
     #[test]
     fn test_config_file_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let current_dir = env::current_dir().unwrap();
-        env::set_current_dir(temp_dir.path()).unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let current_dir = env::current_dir().expect("operation failed in test");
+        env::set_current_dir(temp_dir.path()).expect("temp file creation failed");
 
-        create_config_file().unwrap();
+        create_config_file().expect("operation failed in test");
         assert!(Path::new("naming_conventions.toml").exists());
 
-        let content = fs::read_to_string("naming_conventions.toml").unwrap();
+        let content = fs::read_to_string("naming_conventions.toml").expect("file operation failed");
         assert!(content.contains("[naming_conventions]"));
         assert!(content.contains("rule = \"SnakeCase\""));
 
-        env::set_current_dir(current_dir).unwrap();
+        env::set_current_dir(current_dir).expect("operation failed in test");
     }
 
     #[test]

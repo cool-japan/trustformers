@@ -645,13 +645,14 @@ mod tests {
 
         // Test parameter allocation
         let param_id = 12345usize;
-        state.allocate_parameter(param_id, 100).unwrap();
+        state.allocate_parameter(param_id, 100).expect("Operation failed in test");
 
         assert!(state.param_metadata.contains_key(&param_id));
         assert!(state.interleaved_buffers.contains_key(&param_id));
 
         // Test buffer access
-        let (momentum, variance) = state.get_buffers_mut(param_id).unwrap();
+        let (momentum, variance) =
+            state.get_buffers_mut(param_id).expect("Operation failed in test");
         assert_eq!(momentum.len(), 100);
         assert_eq!(variance.len(), 100);
     }
@@ -696,8 +697,8 @@ mod tests {
         // Add some parameters
         let param1_id = 11111usize;
         let param2_id = 22222usize;
-        state.allocate_parameter(param1_id, 100).unwrap();
-        state.allocate_parameter(param2_id, 200).unwrap();
+        state.allocate_parameter(param1_id, 100).expect("Operation failed in test");
+        state.allocate_parameter(param2_id, 200).expect("Operation failed in test");
 
         // Simulate time passing
         state.step = 1000;

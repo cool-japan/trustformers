@@ -609,15 +609,15 @@ mod tests {
 
     #[test]
     fn test_string_length() {
-        let test_str = CString::new("Hello, World!").unwrap();
-        let length = get_string_length(test_str.as_ptr()).unwrap();
+        let test_str = CString::new("Hello, World!").expect("CString creation should succeed for valid test input");
+        let length = get_string_length(test_str.as_ptr()).expect("test operation should succeed");
         assert_eq!(length, 13);
     }
 
     #[test]
     fn test_string_copy() {
-        let test_str = CString::new("Test").unwrap();
-        let copied = copy_string(test_str.as_ptr()).unwrap();
+        let test_str = CString::new("Test").expect("CString creation should succeed for valid test input");
+        let copied = copy_string(test_str.as_ptr()).expect("test operation should succeed");
 
         unsafe {
             let copied_str = CStr::from_ptr(copied);
@@ -628,38 +628,38 @@ mod tests {
 
     #[test]
     fn test_string_comparison() {
-        let str1 = CString::new("abc").unwrap();
-        let str2 = CString::new("def").unwrap();
-        let str3 = CString::new("abc").unwrap();
+        let str1 = CString::new("abc").expect("CString creation should succeed for valid test input");
+        let str2 = CString::new("def").expect("CString creation should succeed for valid test input");
+        let str3 = CString::new("abc").expect("CString creation should succeed for valid test input");
 
-        assert_eq!(compare_strings(str1.as_ptr(), str2.as_ptr()).unwrap(), -1);
-        assert_eq!(compare_strings(str1.as_ptr(), str3.as_ptr()).unwrap(), 0);
-        assert_eq!(compare_strings(str2.as_ptr(), str1.as_ptr()).unwrap(), 1);
+        assert_eq!(compare_strings(str1.as_ptr(), str2.as_ptr()).expect("test operation should succeed"), -1);
+        assert_eq!(compare_strings(str1.as_ptr(), str3.as_ptr()).expect("test operation should succeed"), 0);
+        assert_eq!(compare_strings(str2.as_ptr(), str1.as_ptr()).expect("test operation should succeed"), 1);
     }
 
     #[test]
     fn test_string_concatenation() {
-        let str1 = CString::new("Hello, ").unwrap();
-        let str2 = CString::new("World!").unwrap();
-        let result = concatenate_strings(str1.as_ptr(), str2.as_ptr()).unwrap();
+        let str1 = CString::new("Hello, ").expect("CString creation should succeed for valid test input");
+        let str2 = CString::new("World!").expect("CString creation should succeed for valid test input");
+        let result = concatenate_strings(str1.as_ptr(), str2.as_ptr()).expect("test operation should succeed");
 
         unsafe {
             let result_str = CStr::from_ptr(result);
-            assert_eq!(result_str.to_str().unwrap(), "Hello, World!");
+            assert_eq!(result_str.to_str().expect("string conversion should succeed"), "Hello, World!");
             let _ = CString::from_raw(result); // Free the memory
         }
     }
 
     #[test]
     fn test_case_transformations() {
-        let test_str = CString::new("Hello World").unwrap();
+        let test_str = CString::new("Hello World").expect("CString creation should succeed for valid test input");
 
-        let lower = to_lowercase(test_str.as_ptr()).unwrap();
-        let upper = to_uppercase(test_str.as_ptr()).unwrap();
+        let lower = to_lowercase(test_str.as_ptr()).expect("test operation should succeed");
+        let upper = to_uppercase(test_str.as_ptr()).expect("test operation should succeed");
 
         unsafe {
-            assert_eq!(CStr::from_ptr(lower).to_str().unwrap(), "hello world");
-            assert_eq!(CStr::from_ptr(upper).to_str().unwrap(), "HELLO WORLD");
+            assert_eq!(CStr::from_ptr(lower).to_str().expect("string conversion should succeed"), "hello world");
+            assert_eq!(CStr::from_ptr(upper).to_str().expect("string conversion should succeed"), "HELLO WORLD");
 
             let _ = CString::from_raw(lower);
             let _ = CString::from_raw(upper);
@@ -668,12 +668,12 @@ mod tests {
 
     #[test]
     fn test_substring_search() {
-        let haystack = CString::new("The quick brown fox").unwrap();
-        let needle = CString::new("quick").unwrap();
+        let haystack = CString::new("The quick brown fox").expect("CString creation should succeed for valid test input");
+        let needle = CString::new("quick").expect("CString creation should succeed for valid test input");
 
-        assert!(contains_substring(haystack.as_ptr(), needle.as_ptr()).unwrap());
+        assert!(contains_substring(haystack.as_ptr(), needle.as_ptr()).expect("test operation should succeed"));
         assert_eq!(
-            find_substring(haystack.as_ptr(), needle.as_ptr()).unwrap(),
+            find_substring(haystack.as_ptr(), needle.as_ptr()).expect("test operation should succeed"),
             4
         );
     }

@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Hardware device implementations
@@ -925,30 +925,366 @@ impl GPUDevice {
     }
 
     #[allow(dead_code)]
-    fn execute_gpu_conv2d(&self, _inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
-        // GPU-accelerated 2D convolution (placeholder)
-        Err(TrustformersError::hardware_error(
-            "GPU Conv2D not yet implemented",
-            "execute_gpu_conv2d",
-        ))
+    fn execute_gpu_conv2d(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
+        // CPU fallback for 2D convolution using im2col + matmul approach
+        // inputs: [input (N,C_in,H,W), kernel (C_out,C_in,kH,kW)]
+        tracing::debug!("GPU Conv2D not available - using CPU fallback");
+
+        if inputs.len() < 2 {
+            return Err(TrustformersError::hardware_error(
+                "Conv2D requires at least 2 inputs: [input, kernel]",
+                "execute_gpu_conv2d",
+            ));
+        }
+
+        let input = &inputs[0];
+        let kernel = &inputs[1];
+        let input_shape = input.shape();
+        let kernel_shape = kernel.shape();
+
+        if input_shape.len() != 4 || kernel_shape.len() != 4 {
+            return Err(TrustformersError::hardware_error(
+                "Conv2D expects 4D input (N,C_in,H,W) and 4D kernel (C_out,C_in,kH,kW)",
+                "execute_gpu_conv2d",
+            ));
+        }
+
+        let batch_size = input_shape[0];
+        let c_in = input_shape[1];
+        let h_in = input_shape[2];
+        let w_in = input_shape[3];
+        let c_out = kernel_shape[0];
+        let kc_in = kernel_shape[1];
+        let k_h = kernel_shape[2];
+        let k_w = kernel_shape[3];
+
+        if c_in != kc_in {
+            return Err(TrustformersError::hardware_error(
+                &format!(
+                    "Conv2D channel mismatch: input has {} channels, kernel expects {}",
+                    c_in, kc_in
+                ),
+                "execute_gpu_conv2d",
+            ));
+        }
+
+        // Stride=1, padding=0 convolution
+        let h_out = h_in.saturating_sub(k_h) + 1;
+        let w_out = w_in.saturating_sub(k_w) + 1;
+
+        if h_out == 0 || w_out == 0 {
+            return Err(TrustformersError::hardware_error(
+                "Conv2D output dimensions are zero - kernel larger than input",
+                "execute_gpu_conv2d",
+            ));
+        }
+
+        let input_data = input.data().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to extract input data: {}", e),
+                "execute_gpu_conv2d",
+            )
+        })?;
+        let kernel_data = kernel.data().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to extract kernel data: {}", e),
+                "execute_gpu_conv2d",
+            )
+        })?;
+
+        // im2col + matmul approach
+        let col_rows = c_in * k_h * k_w;
+        let col_cols = h_out * w_out;
+        let mut output_data = vec![0.0f32; batch_size * c_out * h_out * w_out];
+
+        for n in 0..batch_size {
+            // Build im2col matrix for this batch element
+            let mut col_matrix = vec![0.0f32; col_rows * col_cols];
+
+            for c in 0..c_in {
+                for kh in 0..k_h {
+                    for kw in 0..k_w {
+                        let col_row = c * k_h * k_w + kh * k_w + kw;
+                        for oh in 0..h_out {
+                            for ow in 0..w_out {
+                                let ih = oh + kh;
+                                let iw = ow + kw;
+                                let col_col = oh * w_out + ow;
+                                col_matrix[col_row * col_cols + col_col] = input_data
+                                    [n * c_in * h_in * w_in + c * h_in * w_in + ih * w_in + iw];
+                            }
+                        }
+                    }
+                }
+            }
+
+            // kernel reshaped to (C_out, C_in*kH*kW) matmul with col_matrix (C_in*kH*kW, H_out*W_out)
+            for co in 0..c_out {
+                for spatial in 0..col_cols {
+                    let mut sum = 0.0f32;
+                    for kr in 0..col_rows {
+                        sum +=
+                            kernel_data[co * col_rows + kr] * col_matrix[kr * col_cols + spatial];
+                    }
+                    output_data[n * c_out * h_out * w_out + co * h_out * w_out + spatial] = sum;
+                }
+            }
+        }
+
+        let result =
+            Tensor::from_vec(output_data, &[batch_size, c_out, h_out, w_out]).map_err(|e| {
+                TrustformersError::hardware_error(
+                    &format!("Failed to create output tensor: {}", e),
+                    "execute_gpu_conv2d",
+                )
+            })?;
+
+        Ok(vec![result])
     }
 
     #[allow(dead_code)]
-    fn execute_gpu_attention(&self, _inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
-        // GPU-accelerated attention mechanism (placeholder)
-        Err(TrustformersError::hardware_error(
-            "GPU Attention not yet implemented",
-            "execute_gpu_attention",
-        ))
+    fn execute_gpu_attention(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
+        // CPU fallback for standard scaled dot-product attention
+        // inputs: [Q, K, V] each of shape (..., seq_len, d_k)
+        // Computes: softmax(Q * K^T / sqrt(d_k)) * V
+        tracing::debug!("GPU Attention not available - using CPU fallback");
+
+        if inputs.len() < 3 {
+            return Err(TrustformersError::hardware_error(
+                "Attention requires 3 inputs: [Q, K, V]",
+                "execute_gpu_attention",
+            ));
+        }
+
+        let q = &inputs[0];
+        let k = &inputs[1];
+        let v = &inputs[2];
+
+        let q_shape = q.shape();
+        if q_shape.len() < 2 {
+            return Err(TrustformersError::hardware_error(
+                "Attention Q must have at least 2 dimensions",
+                "execute_gpu_attention",
+            ));
+        }
+
+        let d_k = q_shape[q_shape.len() - 1];
+        if d_k == 0 {
+            return Err(TrustformersError::hardware_error(
+                "Attention d_k dimension must be > 0",
+                "execute_gpu_attention",
+            ));
+        }
+
+        let scale = 1.0 / (d_k as f32).sqrt();
+
+        // Transpose K: swap last two dimensions
+        let k_shape = k.shape();
+        let k_ndim = k_shape.len();
+        let k_t = k.transpose(k_ndim - 2, k_ndim - 1).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to transpose K: {}", e),
+                "execute_gpu_attention",
+            )
+        })?;
+
+        // Q * K^T
+        let scores = q.matmul(&k_t).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to compute Q*K^T: {}", e),
+                "execute_gpu_attention",
+            )
+        })?;
+
+        // Scale by 1/sqrt(d_k)
+        let scaled_scores = scores.scalar_mul(scale).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to scale scores: {}", e),
+                "execute_gpu_attention",
+            )
+        })?;
+
+        // Softmax along last dimension
+        let attn_weights = scaled_scores.softmax(-1).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to compute softmax: {}", e),
+                "execute_gpu_attention",
+            )
+        })?;
+
+        // Multiply by V
+        let output = attn_weights.matmul(v).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to compute attention * V: {}", e),
+                "execute_gpu_attention",
+            )
+        })?;
+
+        Ok(vec![output])
     }
 
     #[allow(dead_code)]
-    fn execute_gpu_flash_attention(&self, _inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
-        // GPU-accelerated Flash Attention (placeholder)
-        Err(TrustformersError::hardware_error(
-            "GPU Flash Attention not yet implemented",
-            "execute_gpu_flash_attention",
-        ))
+    fn execute_gpu_flash_attention(&self, inputs: &[Tensor]) -> HardwareResult<Vec<Tensor>> {
+        // CPU fallback for flash attention using a tiled/chunked approach
+        // inputs: [Q, K, V] each of shape (seq_len, d_k) or (batch, seq_len, d_k)
+        // Falls back to tiled computation for memory efficiency
+        tracing::debug!("GPU Flash Attention not available - using CPU tiled fallback");
+
+        if inputs.len() < 3 {
+            return Err(TrustformersError::hardware_error(
+                "Flash Attention requires 3 inputs: [Q, K, V]",
+                "execute_gpu_flash_attention",
+            ));
+        }
+
+        let q = &inputs[0];
+        let k = &inputs[1];
+        let v = &inputs[2];
+
+        let q_shape = q.shape();
+        let k_shape = k.shape();
+
+        if q_shape.len() < 2 {
+            return Err(TrustformersError::hardware_error(
+                "Flash Attention Q must have at least 2 dimensions",
+                "execute_gpu_flash_attention",
+            ));
+        }
+
+        let d_k = q_shape[q_shape.len() - 1];
+        if d_k == 0 {
+            return Err(TrustformersError::hardware_error(
+                "Flash Attention d_k dimension must be > 0",
+                "execute_gpu_flash_attention",
+            ));
+        }
+
+        let seq_len_q = q_shape[q_shape.len() - 2];
+        let seq_len_k = k_shape[k_shape.len() - 2];
+        let scale = 1.0 / (d_k as f32).sqrt();
+
+        // Tile size for chunked computation (memory-efficient approach)
+        let tile_size = 64.min(seq_len_k);
+        if tile_size == 0 {
+            return Err(TrustformersError::hardware_error(
+                "Flash Attention sequence length must be > 0",
+                "execute_gpu_flash_attention",
+            ));
+        }
+
+        // For small sequences or when tiling overhead is not worth it,
+        // delegate to standard attention
+        if seq_len_q * seq_len_k <= tile_size * tile_size * 4 {
+            return self.execute_gpu_attention(inputs);
+        }
+
+        // Tiled flash attention: process K/V in chunks to reduce peak memory
+        // This is the CPU emulation of the flash attention algorithm
+        let q_data = q.data().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to extract Q data: {}", e),
+                "execute_gpu_flash_attention",
+            )
+        })?;
+        let k_data = k.data().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to extract K data: {}", e),
+                "execute_gpu_flash_attention",
+            )
+        })?;
+        let v_data = v.data().map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to extract V data: {}", e),
+                "execute_gpu_flash_attention",
+            )
+        })?;
+
+        // Determine batch dimensions (everything before the last 2 dims)
+        let batch_dims: Vec<usize> = q_shape[..q_shape.len() - 2].to_vec();
+        let batch_size: usize = if batch_dims.is_empty() { 1 } else { batch_dims.iter().product() };
+
+        let mut output_data = vec![0.0f32; batch_size * seq_len_q * d_k];
+
+        for b in 0..batch_size {
+            let q_offset = b * seq_len_q * d_k;
+            let k_offset = b * seq_len_k * d_k;
+            let v_offset = b * seq_len_k * d_k;
+            let o_offset = b * seq_len_q * d_k;
+
+            // Per-row running max and sum for numerically stable softmax (online softmax)
+            let mut row_max = vec![f32::NEG_INFINITY; seq_len_q];
+            let mut row_sum = vec![0.0f32; seq_len_q];
+
+            // Process K/V in tiles
+            let num_tiles = seq_len_k.div_ceil(tile_size);
+
+            for tile_idx in 0..num_tiles {
+                let k_start = tile_idx * tile_size;
+                let k_end = (k_start + tile_size).min(seq_len_k);
+                let tile_len = k_end - k_start;
+
+                for qi in 0..seq_len_q {
+                    // Compute scores for this tile: Q[qi] dot K[k_start..k_end]^T * scale
+                    let mut tile_scores = vec![0.0f32; tile_len];
+                    for ki in 0..tile_len {
+                        let mut dot = 0.0f32;
+                        for di in 0..d_k {
+                            dot += q_data[q_offset + qi * d_k + di]
+                                * k_data[k_offset + (k_start + ki) * d_k + di];
+                        }
+                        tile_scores[ki] = dot * scale;
+                    }
+
+                    // Find tile max
+                    let tile_max = tile_scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+                    let prev_max = row_max[qi];
+                    let new_max = prev_max.max(tile_max);
+
+                    // Rescale previous accumulated output and sum
+                    let correction =
+                        if prev_max.is_finite() { (prev_max - new_max).exp() } else { 0.0 };
+
+                    // Rescale existing output
+                    for di in 0..d_k {
+                        output_data[o_offset + qi * d_k + di] *= correction;
+                    }
+                    row_sum[qi] *= correction;
+
+                    // Compute exp(score - new_max) and accumulate
+                    for ki in 0..tile_len {
+                        let w = (tile_scores[ki] - new_max).exp();
+                        row_sum[qi] += w;
+                        for di in 0..d_k {
+                            output_data[o_offset + qi * d_k + di] +=
+                                w * v_data[v_offset + (k_start + ki) * d_k + di];
+                        }
+                    }
+
+                    row_max[qi] = new_max;
+                }
+            }
+
+            // Normalize by row_sum
+            for qi in 0..seq_len_q {
+                let s = if row_sum[qi] > 0.0 { row_sum[qi] } else { 1.0 };
+                for di in 0..d_k {
+                    output_data[o_offset + qi * d_k + di] /= s;
+                }
+            }
+        }
+
+        // Reconstruct output shape matching Q's shape
+        let out_shape = q_shape.clone();
+        // Last two dims are seq_len_q x d_k, which matches Q
+        let result = Tensor::from_vec(output_data, &out_shape).map_err(|e| {
+            TrustformersError::hardware_error(
+                &format!("Failed to create flash attention output tensor: {}", e),
+                "execute_gpu_flash_attention",
+            )
+        })?;
+
+        Ok(vec![result])
     }
 }
 

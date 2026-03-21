@@ -462,10 +462,12 @@ mod tests {
         let mut visualizer = ActivationVisualizer::new();
         let values = vec![0.1, 0.5, 0.3, 0.8, -0.2];
 
-        visualizer.register("layer1", values.clone(), vec![5]).unwrap();
+        visualizer
+            .register("layer1", values.clone(), vec![5])
+            .expect("operation failed in test");
         assert_eq!(visualizer.num_layers(), 1);
 
-        let activation = visualizer.get_activations("layer1").unwrap();
+        let activation = visualizer.get_activations("layer1").expect("operation failed in test");
         assert_eq!(activation.values, values);
         assert_eq!(activation.shape, vec![5]);
     }
@@ -475,7 +477,7 @@ mod tests {
         let visualizer = ActivationVisualizer::new();
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let stats = visualizer.compute_statistics(&values).unwrap();
+        let stats = visualizer.compute_statistics(&values).expect("operation failed in test");
         assert_eq!(stats.mean, 3.0);
         assert!(stats.std_dev > 0.0);
         assert_eq!(stats.min, 1.0);
@@ -489,9 +491,11 @@ mod tests {
         let mut visualizer = ActivationVisualizer::new();
         let values: Vec<f32> = (0..100).map(|x| x as f32).collect();
 
-        visualizer.register("layer1", values, vec![100]).unwrap();
+        visualizer
+            .register("layer1", values, vec![100])
+            .expect("operation failed in test");
 
-        let histogram = visualizer.create_histogram("layer1").unwrap();
+        let histogram = visualizer.create_histogram("layer1").expect("operation failed in test");
         assert_eq!(histogram.bin_edges.len(), visualizer.config.num_bins + 1);
         assert_eq!(histogram.total_count, 100);
     }
@@ -501,9 +505,13 @@ mod tests {
         let mut visualizer = ActivationVisualizer::new();
         let values: Vec<f32> = (0..16).map(|x| x as f32).collect();
 
-        visualizer.register("layer1", values, vec![4, 4]).unwrap();
+        visualizer
+            .register("layer1", values, vec![4, 4])
+            .expect("operation failed in test");
 
-        let heatmap = visualizer.create_heatmap("layer1", Some((4, 4))).unwrap();
+        let heatmap = visualizer
+            .create_heatmap("layer1", Some((4, 4)))
+            .expect("operation failed in test");
         assert_eq!(heatmap.values.len(), 4);
         assert_eq!(heatmap.values[0].len(), 4);
     }
@@ -516,8 +524,12 @@ mod tests {
         let mut visualizer = ActivationVisualizer::new();
         let values = vec![1.0, 2.0, 3.0];
 
-        visualizer.register("layer1", values, vec![3]).unwrap();
-        visualizer.export_statistics("layer1", &output_path).unwrap();
+        visualizer
+            .register("layer1", values, vec![3])
+            .expect("operation failed in test");
+        visualizer
+            .export_statistics("layer1", &output_path)
+            .expect("operation failed in test");
 
         assert!(output_path.exists());
 
@@ -530,9 +542,12 @@ mod tests {
         let mut visualizer = ActivationVisualizer::new();
         let values: Vec<f32> = (0..100).map(|x| x as f32 / 100.0).collect();
 
-        visualizer.register("layer1", values, vec![100]).unwrap();
+        visualizer
+            .register("layer1", values, vec![100])
+            .expect("operation failed in test");
 
-        let ascii_plot = visualizer.plot_distribution_ascii("layer1").unwrap();
+        let ascii_plot =
+            visualizer.plot_distribution_ascii("layer1").expect("operation failed in test");
         assert!(ascii_plot.contains("Activation Distribution"));
         assert!(ascii_plot.contains("layer1"));
     }
@@ -541,10 +556,14 @@ mod tests {
     fn test_print_summary() {
         let mut visualizer = ActivationVisualizer::new();
 
-        visualizer.register("layer1", vec![1.0, 2.0, 3.0], vec![3]).unwrap();
-        visualizer.register("layer2", vec![4.0, 5.0, 6.0], vec![3]).unwrap();
+        visualizer
+            .register("layer1", vec![1.0, 2.0, 3.0], vec![3])
+            .expect("operation failed in test");
+        visualizer
+            .register("layer2", vec![4.0, 5.0, 6.0], vec![3])
+            .expect("operation failed in test");
 
-        let summary = visualizer.print_summary().unwrap();
+        let summary = visualizer.print_summary().expect("operation failed in test");
         assert!(summary.contains("layer1"));
         assert!(summary.contains("layer2"));
         assert!(summary.contains("Mean"));
@@ -556,7 +575,7 @@ mod tests {
         let visualizer = ActivationVisualizer::new();
         let values = vec![0.0, 0.0, 0.0, 1.0, 0.0];
 
-        let stats = visualizer.compute_statistics(&values).unwrap();
+        let stats = visualizer.compute_statistics(&values).expect("operation failed in test");
         assert_eq!(stats.num_zeros, 4);
         assert_eq!(stats.sparsity, 0.8);
     }
@@ -565,8 +584,12 @@ mod tests {
     fn test_clear_activations() {
         let mut visualizer = ActivationVisualizer::new();
 
-        visualizer.register("layer1", vec![1.0], vec![1]).unwrap();
-        visualizer.register("layer2", vec![2.0], vec![1]).unwrap();
+        visualizer
+            .register("layer1", vec![1.0], vec![1])
+            .expect("operation failed in test");
+        visualizer
+            .register("layer2", vec![2.0], vec![1])
+            .expect("operation failed in test");
 
         assert_eq!(visualizer.num_layers(), 2);
 

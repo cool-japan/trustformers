@@ -320,18 +320,18 @@ mod tests {
 
         parameters.insert(
             "param1".to_string(),
-            Tensor::new(param_data.clone()).unwrap(),
+            Tensor::new(param_data.clone()).expect("Failed to create tensor"),
         );
         gradients.insert(
             "param1".to_string(),
-            Tensor::new(grad_data.clone()).unwrap(),
+            Tensor::new(grad_data.clone()).expect("Failed to create tensor"),
         );
 
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
 
         assert_eq!(optimizer.step, 1);
 
-        let updated_data = parameters.get("param1").unwrap().data()?;
+        let updated_data = parameters.get("param1").expect("Key not found").data()?;
         // Parameters should be updated (exact values depend on CG solver)
         for i in 0..updated_data.len() {
             // Should be different from original parameters
@@ -367,19 +367,19 @@ mod tests {
 
         parameters.insert(
             "param1".to_string(),
-            Tensor::new(param_data.clone()).unwrap(),
+            Tensor::new(param_data.clone()).expect("Failed to create tensor"),
         );
         gradients.insert(
             "param1".to_string(),
-            Tensor::new(grad_data.clone()).unwrap(),
+            Tensor::new(grad_data.clone()).expect("Failed to create tensor"),
         );
 
         // First step
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
         assert_eq!(optimizer.step, 1);
 
         // Second step (should use previous state for Hessian approximation)
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
         assert_eq!(optimizer.step, 2);
 
         // Verify that previous parameters and gradients are stored
@@ -407,17 +407,17 @@ mod tests {
 
         parameters.insert(
             "param1".to_string(),
-            Tensor::new(param_data.clone()).unwrap(),
+            Tensor::new(param_data.clone()).expect("Failed to create tensor"),
         );
         gradients.insert(
             "param1".to_string(),
-            Tensor::new(grad_data.clone()).unwrap(),
+            Tensor::new(grad_data.clone()).expect("Failed to create tensor"),
         );
 
-        let original_params = parameters.get("param1").unwrap().data()?;
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        let original_params = parameters.get("param1").expect("Key not found").data()?;
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
 
-        let updated_params = parameters.get("param1").unwrap().data()?;
+        let updated_params = parameters.get("param1").expect("Key not found").data()?;
 
         // With weight decay, parameters should be affected
         for i in 0..updated_params.len() {

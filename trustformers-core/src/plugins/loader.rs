@@ -433,16 +433,27 @@ impl std::error::Error for LoadError {}
 /// ```no_run
 /// use trustformers_core::register_static_plugin;
 /// use trustformers_core::plugins::Plugin;
+/// use trustformers_core::tensor::Tensor;
+/// use trustformers_core::errors::Result;
+/// use std::collections::HashMap;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// struct MyPlugin;
+/// #[derive(Debug, Clone, Default)]
+/// struct MyPlugin {
+///     config: HashMap<String, serde_json::Value>,
+/// }
 /// impl Plugin for MyPlugin {
-///     // ... implementation
+///     fn name(&self) -> &str { "my_plugin" }
+///     fn version(&self) -> &str { "1.0.0" }
+///     fn description(&self) -> &str { "My custom plugin" }
+///     fn configure(&mut self, config: HashMap<String, serde_json::Value>) -> Result<()> {
+///         self.config = config; Ok(())
+///     }
+///     fn get_config(&self) -> &HashMap<String, serde_json::Value> { &self.config }
+///     fn as_any(&self) -> &dyn std::any::Any { self }
+///     fn forward(&self, input: Tensor) -> Result<Tensor> { Ok(input) }
 /// }
 ///
 /// register_static_plugin!(MyPlugin, "my_plugin");
-/// # Ok(())
-/// # }
 /// ```
 #[macro_export]
 macro_rules! register_static_plugin {

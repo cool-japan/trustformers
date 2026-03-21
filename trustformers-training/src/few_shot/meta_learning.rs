@@ -974,8 +974,14 @@ mod tests {
         let tensor = Array2::ones((2, 3));
         params.add_parameter("layer1".to_string(), tensor.clone());
 
-        assert_eq!(params.get_parameter("layer1").unwrap(), &tensor);
-        assert_eq!(params.shapes.get("layer1").unwrap(), &vec![2, 3]);
+        assert_eq!(
+            params.get_parameter("layer1").expect("tensor operation failed"),
+            &tensor
+        );
+        assert_eq!(
+            params.shapes.get("layer1").expect("expected value not found"),
+            &vec![2, 3]
+        );
     }
 
     #[test]
@@ -1015,7 +1021,7 @@ mod tests {
             ),
         ];
 
-        let batch = TaskBatch::new(support, query).unwrap();
+        let batch = TaskBatch::new(support, query).expect("operation failed in test");
         assert_eq!(batch.num_tasks(), 2);
     }
 
@@ -1047,20 +1053,20 @@ mod tests {
         params1.add_parameter("layer1".to_string(), Array2::<f32>::ones((2, 2)));
         params2.add_parameter("layer1".to_string(), Array2::<f32>::ones((2, 2)) * 2.0);
 
-        let diff = params2.subtract(&params1).unwrap();
-        let sum = params1.add(&params2).unwrap();
+        let diff = params2.subtract(&params1).expect("operation failed in test");
+        let sum = params1.add(&params2).expect("add operation failed");
         let scaled = params1.scale(2.0);
 
         assert_eq!(
-            diff.get_parameter("layer1").unwrap(),
+            diff.get_parameter("layer1").expect("operation failed in test"),
             &Array2::<f32>::ones((2, 2))
         );
         assert_eq!(
-            sum.get_parameter("layer1").unwrap(),
+            sum.get_parameter("layer1").expect("operation failed in test"),
             &(Array2::<f32>::ones((2, 2)) * 3.0)
         );
         assert_eq!(
-            scaled.get_parameter("layer1").unwrap(),
+            scaled.get_parameter("layer1").expect("operation failed in test"),
             &(Array2::<f32>::ones((2, 2)) * 2.0)
         );
     }

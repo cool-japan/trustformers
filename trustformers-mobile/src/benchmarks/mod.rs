@@ -329,7 +329,7 @@ mod tests {
         config.export_results = false; // Disable export for test
 
         let mut suite = BenchmarkSuite::new(config);
-        let summary = suite.run_comprehensive_benchmarks().unwrap();
+        let summary = suite.run_comprehensive_benchmarks().expect("operation failed in test");
 
         assert!(summary.overall_score >= 0.0 && summary.overall_score <= 100.0);
         assert!(!summary.target_results.is_empty());
@@ -355,7 +355,7 @@ mod tests {
         config.export_results = false;
 
         let mut suite = BenchmarkSuite::new(config);
-        let is_valid = suite.quick_validation().unwrap();
+        let is_valid = suite.quick_validation().expect("operation failed in test");
 
         // Result should be boolean
         // quick_validation returns a boolean result

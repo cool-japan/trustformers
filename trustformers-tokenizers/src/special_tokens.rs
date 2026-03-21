@@ -939,11 +939,13 @@ mod tests {
         let config = SpecialTokenConfig::default();
         let mut manager = SpecialTokenManager::new(config);
 
-        let token_id = manager.add_dynamic_token("<|test|>".to_string()).unwrap();
+        let token_id = manager
+            .add_dynamic_token("<|test|>".to_string())
+            .expect("Operation failed in test");
         assert_eq!(manager.get_token_id("<|test|>"), Some(token_id));
         assert_eq!(manager.get_token(token_id), Some(&"<|test|>".to_string()));
 
-        manager.remove_dynamic_token("<|test|>").unwrap();
+        manager.remove_dynamic_token("<|test|>").expect("Operation failed in test");
         assert_eq!(manager.get_token_id("<|test|>"), None);
     }
 
@@ -955,7 +957,9 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("content".to_string(), "Hello, world!".to_string());
 
-        let result = manager.render_template("user_message", &params).unwrap();
+        let result = manager
+            .render_template("user_message", &params)
+            .expect("Operation failed in test");
         assert_eq!(result, "<|user|>Hello, world!<|end|>");
     }
 
@@ -970,7 +974,7 @@ mod tests {
             ConversationMessage::assistant("2+2 equals 4.".to_string()),
         ];
 
-        let result = manager.format_conversation(&messages).unwrap();
+        let result = manager.format_conversation(&messages).expect("Operation failed in test");
         let expected = "<|system|>You are a helpful assistant.<|end|><|user|>What is 2+2?<|end|><|assistant|>2+2 equals 4.<|end|>";
         assert_eq!(result, expected);
     }
@@ -980,7 +984,9 @@ mod tests {
         let config = SpecialTokenConfig::default();
         let mut manager = SpecialTokenManager::new(config);
 
-        let tokens = manager.create_control_tokens("classification").unwrap();
+        let tokens = manager
+            .create_control_tokens("classification")
+            .expect("Operation failed in test");
         assert!(tokens.contains(&"<|class_0|>".to_string()));
         assert!(tokens.contains(&"<|class_1|>".to_string()));
         assert!(tokens.contains(&"<|confidence|>".to_string()));
@@ -1006,11 +1012,13 @@ mod tests {
         let mut manager = SpecialTokenManager::new(config);
 
         // Add a dynamic token
-        manager.add_dynamic_token("<|test|>".to_string()).unwrap();
+        manager
+            .add_dynamic_token("<|test|>".to_string())
+            .expect("Operation failed in test");
 
         // Export and reimport
-        let exported = manager.export_config().unwrap();
-        manager.import_config(&exported).unwrap();
+        let exported = manager.export_config().expect("Operation failed in test");
+        manager.import_config(&exported).expect("Operation failed in test");
 
         // Verify the dynamic token is still there
         assert!(manager.is_special_token("<|test|>"));
@@ -1041,7 +1049,9 @@ mod tests {
         let placeholder = PlaceholderToken::new("test".to_string(), PlaceholderType::String)
             .with_transformation("uppercase".to_string());
 
-        let result = processor.process_value(&placeholder, "hello world").unwrap();
+        let result = processor
+            .process_value(&placeholder, "hello world")
+            .expect("Operation failed in test");
         assert_eq!(result.processed_value, "HELLO WORLD");
         assert_eq!(result.raw_value, "hello world");
     }
@@ -1072,7 +1082,9 @@ mod tests {
         params.insert("content".to_string(), "Hello, world!".to_string());
         params.insert("username".to_string(), "alice".to_string());
 
-        let result = manager.render_advanced_template("advanced_user_message", &params).unwrap();
+        let result = manager
+            .render_advanced_template("advanced_user_message", &params)
+            .expect("Operation failed in test");
         assert!(result.contains("alice"));
         assert!(result.contains("Hello, world!"));
     }
@@ -1086,7 +1098,9 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("content".to_string(), "Hello!".to_string());
 
-        let result = manager.render_advanced_template("advanced_user_message", &params).unwrap();
+        let result = manager
+            .render_advanced_template("advanced_user_message", &params)
+            .expect("Operation failed in test");
         assert!(result.contains("user")); // Default username
         assert!(result.contains("Hello!"));
     }
@@ -1099,7 +1113,9 @@ mod tests {
         // Test validation with missing required parameter
         let params = HashMap::new(); // Missing required "content" parameter
 
-        let errors = manager.validate_template_params("advanced_user_message", &params).unwrap();
+        let errors = manager
+            .validate_template_params("advanced_user_message", &params)
+            .expect("Operation failed in test");
         assert!(!errors.is_empty());
         assert!(errors.iter().any(|e| e.contains("content")));
     }
@@ -1109,7 +1125,9 @@ mod tests {
         let config = SpecialTokenConfig::default();
         let manager = SpecialTokenManager::new(config);
 
-        let docs = manager.get_template_documentation("advanced_user_message").unwrap();
+        let docs = manager
+            .get_template_documentation("advanced_user_message")
+            .expect("Operation failed in test");
         assert!(docs.contains_key("content"));
         assert!(docs.contains_key("username"));
         assert!(docs.contains_key("timestamp"));
@@ -1137,7 +1155,9 @@ mod tests {
         );
         params.insert("timeout".to_string(), "60".to_string());
 
-        let result = manager.render_advanced_template("api_call", &params).unwrap();
+        let result = manager
+            .render_advanced_template("api_call", &params)
+            .expect("Operation failed in test");
         assert!(result.contains("POST"));
         assert!(result.contains("https://api.example.com/data"));
         assert!(result.contains("60"));
@@ -1153,7 +1173,9 @@ mod tests {
         params.insert("status".to_string(), "completed".to_string());
         params.insert("completion_percentage".to_string(), "100".to_string());
 
-        let result = manager.render_advanced_template("task_completion", &params).unwrap();
+        let result = manager
+            .render_advanced_template("task_completion", &params)
+            .expect("Operation failed in test");
         assert!(result.contains("Data Processing")); // Should be capitalized
         assert!(result.contains("COMPLETED")); // Should be uppercase
         assert!(result.contains("100%"));
@@ -1187,7 +1209,9 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("text".to_string(), "hello".to_string());
 
-        let result = manager.render_advanced_template("reverse_test", &params).unwrap();
+        let result = manager
+            .render_advanced_template("reverse_test", &params)
+            .expect("Operation failed in test");
         assert!(result.contains("olleh")); // "hello" reversed
     }
 

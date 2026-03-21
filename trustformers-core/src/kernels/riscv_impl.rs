@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! RISC-V Vector Extensions backend implementation for TrustformeRS
@@ -1166,11 +1166,13 @@ mod tests {
     #[test]
     fn test_register_manager() {
         let mut manager = VectorRegisterManager::new(32);
-        let allocation = manager.allocate_registers("test".to_string(), 4, 1.0, 32).unwrap();
+        let allocation = manager
+            .allocate_registers("test".to_string(), 4, 1.0, 32)
+            .expect("operation failed in test");
         assert_eq!(allocation.register_indices.len(), 4);
         assert_eq!(allocation.lmul, 1.0);
 
-        manager.deallocate_registers("test").unwrap();
+        manager.deallocate_registers("test").expect("operation failed in test");
         assert_eq!(manager.allocated_registers.len(), 0);
     }
 }

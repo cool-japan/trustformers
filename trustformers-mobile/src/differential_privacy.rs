@@ -796,7 +796,10 @@ mod tests {
 
         // Test gradient privatization
         let mut gradients: HashMap<String, Tensor> = HashMap::new();
-        gradients.insert("weight".to_string(), Tensor::randn(&[10, 10]).unwrap());
+        gradients.insert(
+            "weight".to_string(),
+            Tensor::randn(&[10, 10]).expect("tensor operation failed"),
+        );
 
         // Note: This would fail in real implementation due to budget checks
         // let report = engine.privatize_gradients(&mut gradients, 32, 1);

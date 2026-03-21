@@ -568,12 +568,12 @@ mod tests {
             "world peace".to_string(),
         ];
 
-        let tokenizer = trainer.train(&texts).unwrap();
+        let tokenizer = trainer.train(&texts).expect("Operation failed in test");
         assert!(tokenizer.vocab_size() > 0);
         assert!(tokenizer.vocab_size() <= 100);
 
         // Test that it can encode the training texts
-        let encoded = tokenizer.encode("hello world").unwrap();
+        let encoded = tokenizer.encode("hello world").expect("Encoding failed");
         assert!(!encoded.input_ids.is_empty());
     }
 
@@ -594,7 +594,7 @@ mod tests {
 
         let texts = vec!["hello world".to_string(), "hello there".to_string()];
 
-        let tokenizer = trainer.train(&texts).unwrap();
+        let tokenizer = trainer.train(&texts).expect("Operation failed in test");
         assert!(tokenizer.vocab_size() > 0);
         assert!(tokenizer.vocab_size() <= 100);
     }
@@ -622,12 +622,12 @@ mod tests {
             "hello hello world".to_string(),
         ];
 
-        let tokenizer = trainer.train(&texts).unwrap();
+        let tokenizer = trainer.train(&texts).expect("Operation failed in test");
         assert!(tokenizer.vocab_size() > 0);
         assert!(tokenizer.vocab_size() <= 50);
 
         // Test that it can encode the training texts
-        let encoded = tokenizer.encode("hello world").unwrap();
+        let encoded = tokenizer.encode("hello world").expect("Encoding failed");
         assert!(!encoded.input_ids.is_empty());
     }
 
@@ -673,11 +673,11 @@ mod tests {
         let trainer = BPETrainer::new(config).with_normalizer(Box::new(LowercaseNormalizer));
 
         let texts = vec!["Hello World".to_string(), "HELLO WORLD".to_string()];
-        let tokenizer = trainer.train(&texts).unwrap();
+        let tokenizer = trainer.train(&texts).expect("Operation failed in test");
 
         // Both inputs should be normalized to lowercase
-        let encoded1 = tokenizer.encode("Hello World").unwrap();
-        let encoded2 = tokenizer.encode("hello world").unwrap();
+        let encoded1 = tokenizer.encode("Hello World").expect("Encoding failed");
+        let encoded2 = tokenizer.encode("hello world").expect("Encoding failed");
 
         // They should have similar tokenization (the normalizer should handle case)
         assert!(!encoded1.input_ids.is_empty());

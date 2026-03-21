@@ -336,7 +336,7 @@ mod tests {
         let layer = QuantumNeuralLayer::new(3, ansatz, &parameters);
         assert!(layer.is_ok());
 
-        let layer = layer.unwrap();
+        let layer = layer.expect("operation failed in test");
         assert_eq!(layer.input_qubits, 3);
         assert_eq!(layer.parameters.len(), 3);
     }
@@ -347,7 +347,7 @@ mod tests {
         let layer = QuantumEmbeddingLayer::new(4, 4, encoding);
         assert!(layer.is_ok());
 
-        let layer = layer.unwrap();
+        let layer = layer.expect("operation failed in test");
         assert_eq!(layer.classical_dim, 4);
         assert_eq!(layer.quantum_dim, 4);
         assert_eq!(layer.weights.len(), 4);
@@ -356,13 +356,13 @@ mod tests {
     #[test]
     fn test_quantum_embedding_forward() {
         let encoding = QuantumEncoding::Angle;
-        let layer = QuantumEmbeddingLayer::new(2, 4, encoding).unwrap();
+        let layer = QuantumEmbeddingLayer::new(2, 4, encoding).expect("operation failed in test");
 
         let input = Tensor::from_vec(vec![0.5, 1.0], &[2]).expect("Tensor from_vec failed");
         let output = layer.forward(&input);
         assert!(output.is_ok());
 
-        let output = output.unwrap();
+        let output = output.expect("operation failed in test");
         assert_eq!(output.shape(), &[4]);
     }
 
@@ -371,7 +371,7 @@ mod tests {
         let attention = QuantumAttention::new(3, 2);
         assert!(attention.is_ok());
 
-        let attention = attention.unwrap();
+        let attention = attention.expect("operation failed in test");
         assert_eq!(attention.num_qubits, 2);
     }
 
@@ -379,7 +379,8 @@ mod tests {
     fn test_quantum_neural_layer_forward() {
         let ansatz = QuantumAnsatz::Hardware;
         let parameters = vec![0.1, 0.2];
-        let layer = QuantumNeuralLayer::new(2, ansatz, &parameters).unwrap();
+        let layer =
+            QuantumNeuralLayer::new(2, ansatz, &parameters).expect("operation failed in test");
 
         let input = Tensor::from_vec(vec![0.5, 1.0], &[2]).expect("Tensor from_vec failed");
         let output = layer.forward(&input);
@@ -390,7 +391,8 @@ mod tests {
     fn test_parameter_updates() {
         let ansatz = QuantumAnsatz::Hardware;
         let parameters = vec![0.1, 0.2, 0.3];
-        let mut layer = QuantumNeuralLayer::new(3, ansatz, &parameters).unwrap();
+        let mut layer =
+            QuantumNeuralLayer::new(3, ansatz, &parameters).expect("operation failed in test");
 
         let gradients = vec![0.01, 0.02, 0.03];
         let learning_rate = 0.1;
@@ -407,7 +409,8 @@ mod tests {
     #[test]
     fn test_embedding_weights_update() {
         let encoding = QuantumEncoding::Angle;
-        let mut layer = QuantumEmbeddingLayer::new(3, 4, encoding).unwrap();
+        let mut layer =
+            QuantumEmbeddingLayer::new(3, 4, encoding).expect("operation failed in test");
 
         let gradients = vec![0.01, 0.02, 0.03];
         let learning_rate = 0.1;

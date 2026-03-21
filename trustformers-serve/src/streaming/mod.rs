@@ -306,13 +306,19 @@ mod tests {
         let config = StreamingConfig::default();
         let service = StreamingService::new(config);
 
-        let handle = service.start_stream(StreamType::TokenStream, Uuid::new_v4()).await.unwrap();
+        let handle = service
+            .start_stream(StreamType::TokenStream, Uuid::new_v4())
+            .await
+            .expect("async operation should succeed in test");
 
         service
             .send_to_stream(handle.id, StreamData::Token("Hello".to_string()))
             .await
-            .unwrap();
-        service.close_stream(handle.id).await.unwrap();
+            .expect("test operation should succeed");
+        service
+            .close_stream(handle.id)
+            .await
+            .expect("async operation should succeed in test");
 
         let stats = service.get_stats().await;
         assert_eq!(stats.active_streams, 0);
@@ -321,8 +327,9 @@ mod tests {
     #[test]
     fn test_stream_data_serialization() {
         let data = StreamData::Token("test".to_string());
-        let json = serde_json::to_string(&data).unwrap();
-        let deserialized: StreamData = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&data).expect("JSON serialization should succeed");
+        let deserialized: StreamData =
+            serde_json::from_str(&json).expect("JSON parsing should succeed for valid test input");
 
         match deserialized {
             StreamData::Token(s) => assert_eq!(s, "test"),

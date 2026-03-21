@@ -454,7 +454,8 @@ mod tests {
 
     #[test]
     fn test_version_parsing() {
-        let version: SemanticVersion = "1.2.3-alpha+build".parse().unwrap();
+        let version: SemanticVersion =
+            "1.2.3-alpha+build".parse().expect("test operation should succeed");
         assert_eq!(version.major, 1);
         assert_eq!(version.minor, 2);
         assert_eq!(version.patch, 3);
@@ -503,7 +504,9 @@ mod tests {
             checksum: "abc123".to_string(),
         };
 
-        manager.register_version("test-model", metadata).unwrap();
+        manager
+            .register_version("test-model", metadata)
+            .expect("registration should succeed in test");
 
         let retrieved = manager.get_version_metadata("test-model", &version);
         assert!(retrieved.is_some());

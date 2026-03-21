@@ -22,7 +22,7 @@ mod benches {
 
     // Helper function to create test tensors
     fn create_test_tensor(shape: &[usize]) -> Tensor {
-        Tensor::randn(shape).unwrap()
+        Tensor::randn(shape).expect("tensor operation failed")
     }
 
     // Test different matrix multiplication sizes common in ML
@@ -47,15 +47,17 @@ mod benches {
         for (batch, m, k) in matrix_sizes {
             let tensor_a = create_test_tensor(&[batch, m]);
             let tensor_b = create_test_tensor(&[m, k]);
-            let mut result = Tensor::zeros(&[batch, k]).unwrap();
+            let mut result = Tensor::zeros(&[batch, k]).expect("tensor operation failed");
 
             group.bench_with_input(
                 BenchmarkId::new("hardware_accelerated", format!("{}x{}x{}", batch, m, k)),
                 &(&tensor_a, &tensor_b),
                 |bench, (a, b)| {
                     bench.iter(|| {
-                        let mut result = Tensor::zeros(&[batch, k]).unwrap();
-                        api::accelerated_matmul(a, b, &mut result).unwrap();
+                        let mut result =
+                            Tensor::zeros(&[batch, k]).expect("tensor operation failed");
+                        api::accelerated_matmul(a, b, &mut result)
+                            .expect("operation failed in test");
                         black_box(result)
                     })
                 },
@@ -65,7 +67,9 @@ mod benches {
             group.bench_with_input(
                 BenchmarkId::new("standard_tensor", format!("{}x{}x{}", batch, m, k)),
                 &(&tensor_a, &tensor_b),
-                |bench, (a, b)| bench.iter(|| black_box(a.matmul(b).unwrap())),
+                |bench, (a, b)| {
+                    bench.iter(|| black_box(a.matmul(b).expect("operation failed in test")))
+                },
             );
         }
 
@@ -93,7 +97,8 @@ mod benches {
             let query = create_test_tensor(&[batch_size, seq_len, head_dim]);
             let key = create_test_tensor(&[batch_size, seq_len, head_dim]);
             let value = create_test_tensor(&[batch_size, seq_len, head_dim]);
-            let mut output = Tensor::zeros(&[batch_size, seq_len, head_dim]).unwrap();
+            let mut output =
+                Tensor::zeros(&[batch_size, seq_len, head_dim]).expect("tensor operation failed");
 
             group.bench_with_input(
                 BenchmarkId::new(
@@ -103,8 +108,10 @@ mod benches {
                 &(&query, &key, &value),
                 |bench, (q, k, v)| {
                     bench.iter(|| {
-                        let mut output = Tensor::zeros(&[batch_size, seq_len, head_dim]).unwrap();
-                        api::accelerated_flash_attention(q, k, v, &mut output).unwrap();
+                        let mut output = Tensor::zeros(&[batch_size, seq_len, head_dim])
+                            .expect("tensor operation failed");
+                        api::accelerated_flash_attention(q, k, v, &mut output)
+                            .expect("operation failed in test");
                         black_box(output)
                     })
                 },
@@ -121,11 +128,13 @@ mod benches {
                     bench.iter(|| {
                         // Manual attention: softmax(QK^T/sqrt(d_k))V
                         let scale = 1.0 / (head_dim as f32).sqrt();
-                        let key_t = k.transpose(1, 2).unwrap();
-                        let scores = q.matmul(&key_t).unwrap();
-                        let scaled_scores = scores.mul_scalar(scale).unwrap();
-                        let attention_weights = scaled_scores.softmax(-1).unwrap();
-                        let result = attention_weights.matmul(v).unwrap();
+                        let key_t = k.transpose(1, 2).expect("operation failed in test");
+                        let scores = q.matmul(&key_t).expect("operation failed in test");
+                        let scaled_scores =
+                            scores.mul_scalar(scale).expect("operation failed in test");
+                        let attention_weights =
+                            scaled_scores.softmax(-1).expect("operation failed in test");
+                        let result = attention_weights.matmul(v).expect("operation failed in test");
                         black_box(result)
                     })
                 },
@@ -189,19 +198,19 @@ mod benches {
 
         // Test device information queries
         group.bench_function("get_active_backend", |b| {
-            b.iter(|| black_box(api::get_active_backend().unwrap()))
+            b.iter(|| black_box(api::get_active_backend().expect("operation failed in test")))
         });
 
         group.bench_function("get_device_info", |b| {
-            b.iter(|| black_box(api::get_device_info().unwrap()))
+            b.iter(|| black_box(api::get_device_info().expect("operation failed in test")))
         });
 
         group.bench_function("get_memory_stats", |b| {
-            b.iter(|| black_box(api::get_memory_stats().unwrap()))
+            b.iter(|| black_box(api::get_memory_stats().expect("operation failed in test")))
         });
 
         group.bench_function("get_performance_stats", |b| {
-            b.iter(|| black_box(api::get_performance_stats().unwrap()))
+            b.iter(|| black_box(api::get_performance_stats().expect("operation failed in test")))
         });
 
         group.finish();
@@ -228,7 +237,7 @@ mod benches {
         for (batch_size, m, k) in batch_configs {
             let tensor_a = create_test_tensor(&[batch_size, m]);
             let tensor_b = create_test_tensor(&[m, k]);
-            let mut result = Tensor::zeros(&[batch_size, k]).unwrap();
+            let mut result = Tensor::zeros(&[batch_size, k]).expect("tensor operation failed");
 
             let flops = 2 * batch_size * m * k;
 
@@ -240,8 +249,10 @@ mod benches {
                 &(&tensor_a, &tensor_b, flops),
                 |bench, (a, b, _flops)| {
                     bench.iter(|| {
-                        let mut result = Tensor::zeros(&[batch_size, k]).unwrap();
-                        api::accelerated_matmul(a, b, &mut result).unwrap();
+                        let mut result =
+                            Tensor::zeros(&[batch_size, k]).expect("tensor operation failed");
+                        api::accelerated_matmul(a, b, &mut result)
+                            .expect("operation failed in test");
                         black_box(result)
                     })
                 },
@@ -276,8 +287,10 @@ mod benches {
                     bench.iter(|| {
                         let a = create_test_tensor(&[*rows, *cols]);
                         let b = create_test_tensor(&[*cols, *rows]);
-                        let mut result = Tensor::zeros(&[*rows, *rows]).unwrap();
-                        api::accelerated_matmul(&a, &b, &mut result).unwrap();
+                        let mut result =
+                            Tensor::zeros(&[*rows, *rows]).expect("tensor operation failed");
+                        api::accelerated_matmul(&a, &b, &mut result)
+                            .expect("operation failed in test");
                         black_box(result)
                     })
                 },

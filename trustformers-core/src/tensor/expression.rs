@@ -20,14 +20,14 @@
 //! let c = Tensor::randn(&[1000, 1000])?;
 //!
 //! // Without lazy evaluation (creates intermediate tensors):
-//! let result1 = (a.add(&b)?.mul(&c)?.relu()?).sum(None)?;
+//! let result1 = (a.add(&b)?.mul(&c)?.relu()?).sum(None, false)?;
 //!
 //! // With lazy evaluation (no intermediate tensors):
-//! let expr = TensorExpr::from(&a)
-//!     .add(TensorExpr::from(&b))
-//!     .mul(TensorExpr::from(&c))
-//!     .relu()
-//!     .sum(None);
+//! let expr = TensorExpr::from(&a)?
+//!     .add(TensorExpr::from(&b)?)?
+//!     .mul(TensorExpr::from(&c)?)?
+//!     .relu()?
+//!     .sum(None)?;
 //! let result2 = expr.eval()?;
 //! # Ok(())
 //! # }

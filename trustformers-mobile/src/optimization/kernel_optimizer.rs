@@ -805,8 +805,9 @@ mod tests {
         let input_shapes = vec![vec![1, 3, 224, 224]];
         let output_shape = vec![1, 64, 112, 112];
 
-        let optimized =
-            optimizer.optimize_kernel(&kernel, &input_shapes, &output_shape[..]).unwrap();
+        let optimized = optimizer
+            .optimize_kernel(&kernel, &input_shapes, &output_shape[..])
+            .expect("operation failed in test");
 
         assert!(optimized.estimated_speedup >= 1.0);
         assert_eq!(optimized.kernel_type, KernelType::Conv2d);

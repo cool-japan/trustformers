@@ -614,7 +614,9 @@ mod tests {
 
         assert_eq!(state.gpu_memory_used, 0);
 
-        state.allocate_parameter("param1".to_string(), 1000).unwrap();
+        state
+            .allocate_parameter("param1".to_string(), 1000)
+            .expect("Operation failed in test");
         assert!(state.gpu_memory_used > 0);
         assert!(state.fused_buffers.contains_key("param1"));
     }
@@ -635,8 +637,12 @@ mod tests {
         let config = KernelFusionConfig::a100();
         let mut state = FusedGPUState::new(config);
 
-        state.allocate_parameter("param1".to_string(), 1000).unwrap();
-        state.allocate_parameter("param2".to_string(), 2000).unwrap();
+        state
+            .allocate_parameter("param1".to_string(), 1000)
+            .expect("Operation failed in test");
+        state
+            .allocate_parameter("param2".to_string(), 2000)
+            .expect("Operation failed in test");
 
         let stats = state.gpu_memory_stats();
         assert_eq!(stats.num_parameter_buffers, 2);

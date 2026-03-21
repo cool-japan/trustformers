@@ -653,7 +653,7 @@ mod tests {
 
     #[test]
     fn test_regression_detector_creation() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
         let storage_path = temp_dir.path().join("baselines.json");
 
         let detector = RegressionDetector::new(storage_path, RegressionConfig::default());
@@ -662,11 +662,11 @@ mod tests {
 
     #[test]
     fn test_baseline_recording() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
         let storage_path = temp_dir.path().join("baselines.json");
 
-        let mut detector =
-            RegressionDetector::new(storage_path, RegressionConfig::default()).unwrap();
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
 
         let measurement = PerformanceMeasurement {
             time_ns: 1_000_000, // 1ms
@@ -680,11 +680,11 @@ mod tests {
 
     #[test]
     fn test_regression_detection() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
         let storage_path = temp_dir.path().join("baselines.json");
 
-        let mut detector =
-            RegressionDetector::new(storage_path, RegressionConfig::default()).unwrap();
+        let mut detector = RegressionDetector::new(storage_path, RegressionConfig::default())
+            .expect("operation failed in test");
 
         // Record baseline
         let baseline_measurement = PerformanceMeasurement {
@@ -692,7 +692,9 @@ mod tests {
             throughput_ops_per_sec: Some(1000.0),
             memory_usage_bytes: Some(1024),
         };
-        detector.record_baseline("test_benchmark", baseline_measurement).unwrap();
+        detector
+            .record_baseline("test_benchmark", baseline_measurement)
+            .expect("operation failed in test");
 
         // Test with faster performance (no regression)
         let faster_measurement = PerformanceMeasurement {
@@ -701,9 +703,11 @@ mod tests {
             memory_usage_bytes: Some(1000),
         };
 
-        let result = detector.check_regression("test_benchmark", faster_measurement).unwrap();
+        let result = detector
+            .check_regression("test_benchmark", faster_measurement)
+            .expect("operation failed in test");
         assert!(result.is_some());
-        assert!(!result.unwrap().is_regression);
+        assert!(!result.expect("operation failed in test").is_regression);
 
         // Test with slower performance (regression)
         let slower_measurement = PerformanceMeasurement {
@@ -712,9 +716,11 @@ mod tests {
             memory_usage_bytes: Some(1200),
         };
 
-        let result = detector.check_regression("test_benchmark", slower_measurement).unwrap();
+        let result = detector
+            .check_regression("test_benchmark", slower_measurement)
+            .expect("operation failed in test");
         assert!(result.is_some());
-        let regression = result.unwrap();
+        let regression = result.expect("operation failed in test");
         assert!(regression.is_regression);
         assert!(regression.severity > 0.0);
     }

@@ -855,7 +855,7 @@ mod tests {
         let mut tuner = RandomSearchTuner::new();
         let space = create_test_space();
 
-        let config = tuner.suggest_configuration(&space, &[]).unwrap();
+        let config = tuner.suggest_configuration(&space, &[]).expect("operation failed in test");
 
         assert!(config.values.contains_key("learning_rate"));
         assert!(config.values.contains_key("batch_size"));
@@ -875,7 +875,7 @@ mod tests {
             iteration: 0,
         };
 
-        tuner.update_with_result(&result).unwrap();
+        tuner.update_with_result(&result).expect("operation failed in test");
         assert!(tuner.get_best_configuration().is_some());
     }
 
@@ -886,7 +886,7 @@ mod tests {
         let space = create_test_space();
 
         // First suggestion should be random (no history)
-        let config = tuner.suggest_configuration(&space, &[]).unwrap();
+        let config = tuner.suggest_configuration(&space, &[]).expect("operation failed in test");
         assert!(config.values.contains_key("learning_rate"));
     }
 
@@ -902,7 +902,7 @@ mod tests {
         );
 
         let config = HyperparameterConfig { values };
-        let vector = config_to_vector(&config, &space).unwrap();
+        let vector = config_to_vector(&config, &space).expect("operation failed in test");
 
         assert_eq!(vector.len(), 3);
         assert!(vector.iter().all(|&x| (0.0..=1.0).contains(&x)));
@@ -938,7 +938,10 @@ mod tests {
             Ok(metrics)
         };
 
-        let result = automated_tuner.optimize(&space, objective_fn).await.unwrap();
+        let result = automated_tuner
+            .optimize(&space, objective_fn)
+            .await
+            .expect("async operation failed");
         assert!(result.primary_metric >= 0.0 && result.primary_metric <= 1.0);
 
         let history = automated_tuner.get_optimization_history();

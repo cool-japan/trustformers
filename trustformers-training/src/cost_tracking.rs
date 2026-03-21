@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn test_cost_tracker_creation() {
         let tracker = CostTracker::new();
-        let stats = tracker.get_statistics().unwrap();
+        let stats = tracker.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_cost, 0.0);
     }
 
@@ -932,11 +932,11 @@ mod tests {
                 "aws".to_string(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(!entry_id.is_empty());
 
-        let stats = tracker.get_statistics().unwrap();
+        let stats = tracker.get_statistics().expect("operation failed in test");
         assert!(stats.total_cost > 0.0);
         assert_eq!(stats.cost_by_job.get("job-1"), Some(&stats.total_cost));
     }
@@ -979,10 +979,11 @@ mod tests {
             status: BudgetStatus::Active,
         };
 
-        let budget_id = tracker.create_budget(budget).unwrap();
+        let budget_id = tracker.create_budget(budget).expect("operation failed in test");
         assert_eq!(budget_id, "budget-1");
 
-        let retrieved_budget = tracker.get_budget_status(&budget_id).unwrap();
+        let retrieved_budget =
+            tracker.get_budget_status(&budget_id).expect("operation failed in test");
         assert_eq!(retrieved_budget.name, "Monthly Budget");
     }
 
@@ -1002,7 +1003,7 @@ mod tests {
                 "aws".to_string(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         tracker
             .record_cost(
@@ -1015,7 +1016,7 @@ mod tests {
                 "aws".to_string(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let time_range = TimeRange {
             start: 0,
@@ -1026,7 +1027,9 @@ mod tests {
                 + 86400,
         };
 
-        let report = tracker.generate_cost_report(ReportType::Daily, time_range).unwrap();
+        let report = tracker
+            .generate_cost_report(ReportType::Daily, time_range)
+            .expect("operation failed in test");
 
         assert!(report.total_cost > 0.0);
         assert!(!report.cost_breakdown.by_resource_type.is_empty());
@@ -1050,11 +1053,15 @@ mod tests {
                 "aws".to_string(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let spot_cost = {
             let entries = tracker.cost_entries.read().expect("lock should not be poisoned");
-            entries.iter().find(|e| e.entry_id == entry_id).unwrap().total_cost
+            entries
+                .iter()
+                .find(|e| e.entry_id == entry_id)
+                .expect("operation failed in test")
+                .total_cost
         };
 
         // Record regular instance for comparison
@@ -1069,11 +1076,15 @@ mod tests {
                 "aws".to_string(),
                 HashMap::new(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let regular_cost = {
             let entries = tracker.cost_entries.read().expect("lock should not be poisoned");
-            entries.iter().find(|e| e.entry_id == regular_entry_id).unwrap().total_cost
+            entries
+                .iter()
+                .find(|e| e.entry_id == regular_entry_id)
+                .expect("operation failed in test")
+                .total_cost
         };
 
         // Spot instance should be significantly cheaper
@@ -1097,10 +1108,10 @@ mod tests {
                     "aws".to_string(),
                     HashMap::new(),
                 )
-                .unwrap();
+                .expect("operation failed in test");
         }
 
-        let forecast = tracker.forecast_costs(7).unwrap();
+        let forecast = tracker.forecast_costs(7).expect("operation failed in test");
         assert_eq!(forecast.len(), 7);
 
         for point in forecast {

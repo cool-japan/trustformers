@@ -13,19 +13,19 @@ use trustformers_core::tensor::Tensor;
 fn create_f32_tensor(shape: &[usize]) -> Tensor {
     let size: usize = shape.iter().product();
     let values: Vec<f32> = (0..size).map(|i| (i as f32) * 0.01).collect();
-    Tensor::from_vec(values, shape).unwrap()
+    Tensor::from_vec(values, shape).expect("tensor operation failed")
 }
 
 // Helper function to create random test tensors
 fn create_random_f32_tensor(shape: &[usize]) -> Tensor {
-    Tensor::randn(shape).unwrap()
+    Tensor::randn(shape).expect("tensor operation failed")
 }
 
 // Helper function to create positive test tensors for operations like sqrt, log
 fn create_positive_f32_tensor(shape: &[usize]) -> Tensor {
     let size: usize = shape.iter().product();
     let values: Vec<f32> = (0..size).map(|i| (i as f32) * 0.01 + 1.0).collect();
-    Tensor::from_vec(values, shape).unwrap()
+    Tensor::from_vec(values, shape).expect("tensor operation failed")
 }
 
 fn benchmark_tensor_creation(c: &mut Criterion) {
@@ -47,19 +47,19 @@ fn benchmark_tensor_creation(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("zeros_f32", format!("{:?}", shape)),
             &shape,
-            |b, shape| b.iter(|| black_box(Tensor::zeros(shape).unwrap())),
+            |b, shape| b.iter(|| black_box(Tensor::zeros(shape).expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("ones_f32", format!("{:?}", shape)),
             &shape,
-            |b, shape| b.iter(|| black_box(Tensor::ones(shape).unwrap())),
+            |b, shape| b.iter(|| black_box(Tensor::ones(shape).expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("randn_f32", format!("{:?}", shape)),
             &shape,
-            |b, shape| b.iter(|| black_box(Tensor::randn(shape).unwrap())),
+            |b, shape| b.iter(|| black_box(Tensor::randn(shape).expect("tensor operation failed"))),
         );
 
         let values: Vec<f32> = (0..size).map(|i| i as f32).collect();
@@ -67,7 +67,11 @@ fn benchmark_tensor_creation(c: &mut Criterion) {
             BenchmarkId::new("from_vec_f32", format!("{:?}", shape)),
             &(values, shape),
             |b, (values, shape)| {
-                b.iter(|| black_box(Tensor::from_vec(values.clone(), shape).unwrap()))
+                b.iter(|| {
+                    black_box(
+                        Tensor::from_vec(values.clone(), shape).expect("tensor operation failed"),
+                    )
+                })
             },
         );
     }
@@ -94,66 +98,70 @@ fn benchmark_element_wise_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("add", format!("{:?}", shape)),
             &(&tensor_a, &tensor_b),
-            |bench, (a, b)| bench.iter(|| black_box(a.add(b).unwrap())),
+            |bench, (a, b)| bench.iter(|| black_box(a.add(b).expect("add operation failed"))),
         );
 
         // Subtraction
         group.bench_with_input(
             BenchmarkId::new("sub", format!("{:?}", shape)),
             &(&tensor_a, &tensor_b),
-            |bench, (a, b)| bench.iter(|| black_box(a.sub(b).unwrap())),
+            |bench, (a, b)| bench.iter(|| black_box(a.sub(b).expect("operation failed in test"))),
         );
 
         // Multiplication
         group.bench_with_input(
             BenchmarkId::new("mul", format!("{:?}", shape)),
             &(&tensor_a, &tensor_b),
-            |bench, (a, b)| bench.iter(|| black_box(a.mul(b).unwrap())),
+            |bench, (a, b)| bench.iter(|| black_box(a.mul(b).expect("operation failed in test"))),
         );
 
         // Division
         group.bench_with_input(
             BenchmarkId::new("div", format!("{:?}", shape)),
             &(&tensor_a, &positive_tensor),
-            |bench, (a, b)| bench.iter(|| black_box(a.div(b).unwrap())),
+            |bench, (a, b)| bench.iter(|| black_box(a.div(b).expect("operation failed in test"))),
         );
 
         // Scalar operations
         group.bench_with_input(
             BenchmarkId::new("add_scalar", format!("{:?}", shape)),
             &tensor_a,
-            |b, tensor| b.iter(|| black_box(tensor.add_scalar(2.5).unwrap())),
+            |b, tensor| {
+                b.iter(|| black_box(tensor.add_scalar(2.5).expect("tensor operation failed")))
+            },
         );
 
         group.bench_with_input(
             BenchmarkId::new("mul_scalar", format!("{:?}", shape)),
             &tensor_a,
-            |b, tensor| b.iter(|| black_box(tensor.mul_scalar(2.5).unwrap())),
+            |b, tensor| {
+                b.iter(|| black_box(tensor.mul_scalar(2.5).expect("tensor operation failed")))
+            },
         );
 
         // Mathematical functions
         group.bench_with_input(
             BenchmarkId::new("sqrt", format!("{:?}", shape)),
             &positive_tensor,
-            |b, tensor| b.iter(|| black_box(tensor.sqrt().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.sqrt().expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("exp", format!("{:?}", shape)),
             &tensor_a,
-            |b, tensor| b.iter(|| black_box(tensor.exp().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.exp().expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("log", format!("{:?}", shape)),
             &positive_tensor,
-            |b, tensor| b.iter(|| black_box(tensor.log().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.log().expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("pow", format!("{:?}", shape)),
             &positive_tensor,
-            |b, tensor| b.iter(|| black_box(tensor.pow(2.0).unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.pow(2.0).expect("tensor operation failed"))),
         );
     }
 
@@ -180,7 +188,9 @@ fn benchmark_matrix_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("matmul", format!("{}x{}x{}", m, k, n)),
             &(&tensor_a, &tensor_b),
-            |bench, (a, b)| bench.iter(|| black_box(a.matmul(b).unwrap())),
+            |bench, (a, b)| {
+                bench.iter(|| black_box(a.matmul(b).expect("operation failed in test")))
+            },
         );
     }
 
@@ -194,7 +204,9 @@ fn benchmark_matrix_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("batch_matmul", format!("{}x{}x{}x{}", batch, m, k, n)),
             &(&tensor_a, &tensor_b),
-            |bench, (a, b)| bench.iter(|| black_box(a.matmul(b).unwrap())),
+            |bench, (a, b)| {
+                bench.iter(|| black_box(a.matmul(b).expect("operation failed in test")))
+            },
         );
     }
 
@@ -218,31 +230,31 @@ fn benchmark_activation_functions(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("relu", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.relu().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.relu().expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("sigmoid", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.sigmoid().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.sigmoid().expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("tanh", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.tanh().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.tanh().expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("gelu", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.gelu().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.gelu().expect("tensor operation failed"))),
         );
 
         group.bench_with_input(
             BenchmarkId::new("softmax", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.softmax(-1).unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.softmax(-1).expect("tensor operation failed"))),
         );
     }
 
@@ -258,33 +270,33 @@ fn benchmark_shape_operations(c: &mut Criterion) {
 
     // Transpose
     group.bench_function("transpose_2d", |b| {
-        b.iter(|| black_box(tensor_2d.transpose(1, 0).unwrap()))
+        b.iter(|| black_box(tensor_2d.transpose(1, 0).expect("tensor operation failed")))
     });
 
     group.bench_function("transpose_3d", |b| {
-        b.iter(|| black_box(tensor_3d.transpose(0, 2).unwrap()))
+        b.iter(|| black_box(tensor_3d.transpose(0, 2).expect("tensor operation failed")))
     });
 
     // Reshape
     group.bench_function("reshape_2d_to_1d", |b| {
-        b.iter(|| black_box(tensor_2d.reshape(&[64 * 128]).unwrap()))
+        b.iter(|| black_box(tensor_2d.reshape(&[64 * 128]).expect("tensor operation failed")))
     });
 
     group.bench_function("reshape_3d_to_2d", |b| {
-        b.iter(|| black_box(tensor_3d.reshape(&[8, 16 * 32]).unwrap()))
+        b.iter(|| black_box(tensor_3d.reshape(&[8, 16 * 32]).expect("tensor operation failed")))
     });
 
     group.bench_function("reshape_4d_to_2d", |b| {
-        b.iter(|| black_box(tensor_4d.reshape(&[4 * 8, 16 * 32]).unwrap()))
+        b.iter(|| black_box(tensor_4d.reshape(&[4 * 8, 16 * 32]).expect("tensor operation failed")))
     });
 
     // Slice operations
     group.bench_function("slice_2d", |b| {
-        b.iter(|| black_box(tensor_2d.slice(0, 0, 32).unwrap()))
+        b.iter(|| black_box(tensor_2d.slice(0, 0, 32).expect("tensor operation failed")))
     });
 
     group.bench_function("slice_3d", |b| {
-        b.iter(|| black_box(tensor_3d.slice(0, 0, 4).unwrap()))
+        b.iter(|| black_box(tensor_3d.slice(0, 0, 4).expect("tensor operation failed")))
     });
 
     // Concatenation
@@ -293,11 +305,11 @@ fn benchmark_shape_operations(c: &mut Criterion) {
     let tensors = vec![tensor_a.clone(), tensor_b.clone()];
 
     group.bench_function("concat_2d_axis0", |b| {
-        b.iter(|| black_box(Tensor::concat(&tensors, 0).unwrap()))
+        b.iter(|| black_box(Tensor::concat(&tensors, 0).expect("tensor operation failed")))
     });
 
     group.bench_function("concat_2d_axis1", |b| {
-        b.iter(|| black_box(Tensor::concat(&tensors, 1).unwrap()))
+        b.iter(|| black_box(Tensor::concat(&tensors, 1).expect("tensor operation failed")))
     });
 
     group.finish();
@@ -321,7 +333,9 @@ fn benchmark_reduction_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("sum_all", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.sum(None, false).unwrap())),
+            |b, tensor| {
+                b.iter(|| black_box(tensor.sum(None, false).expect("tensor operation failed")))
+            },
         );
 
         if shape.len() >= 2 {
@@ -329,14 +343,22 @@ fn benchmark_reduction_operations(c: &mut Criterion) {
                 BenchmarkId::new("sum_axis_last", format!("{:?}", shape)),
                 &tensor,
                 |b, tensor| {
-                    b.iter(|| black_box(tensor.sum_axes(&[tensor.shape().len() - 1]).unwrap()))
+                    b.iter(|| {
+                        black_box(
+                            tensor
+                                .sum_axes(&[tensor.shape().len() - 1])
+                                .expect("tensor operation failed"),
+                        )
+                    })
                 },
             );
 
             group.bench_with_input(
                 BenchmarkId::new("sum_axis_first", format!("{:?}", shape)),
                 &tensor,
-                |b, tensor| b.iter(|| black_box(tensor.sum_axes(&[0]).unwrap())),
+                |b, tensor| {
+                    b.iter(|| black_box(tensor.sum_axes(&[0]).expect("tensor operation failed")))
+                },
             );
         }
 
@@ -344,7 +366,7 @@ fn benchmark_reduction_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("mean_all", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.mean().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.mean().expect("tensor operation failed"))),
         );
 
         if shape.len() >= 2 {
@@ -352,7 +374,13 @@ fn benchmark_reduction_operations(c: &mut Criterion) {
                 BenchmarkId::new("mean_axis_last", format!("{:?}", shape)),
                 &tensor,
                 |b, tensor| {
-                    b.iter(|| black_box(tensor.mean_axes(&[tensor.shape().len() - 1]).unwrap()))
+                    b.iter(|| {
+                        black_box(
+                            tensor
+                                .mean_axes(&[tensor.shape().len() - 1])
+                                .expect("tensor operation failed"),
+                        )
+                    })
                 },
             );
         }
@@ -457,28 +485,33 @@ fn benchmark_sparse_operations(c: &mut Criterion) {
             &dense_tensor,
             |b, tensor| {
                 b.iter(|| {
-                    black_box(tensor.to_sparse(0.1).unwrap()) // 10% sparsity threshold
+                    black_box(tensor.to_sparse(0.1).expect("tensor operation failed"))
+                    // 10% sparsity threshold
                 })
             },
         );
 
         // Create a sparse tensor for other operations
-        let sparse_tensor = dense_tensor.to_sparse(0.1).unwrap();
+        let sparse_tensor = dense_tensor.to_sparse(0.1).expect("tensor operation failed");
 
         group.bench_with_input(
             BenchmarkId::new("sparse_to_dense", format!("{:?}", shape)),
             &sparse_tensor,
-            |b, tensor| b.iter(|| black_box(tensor.to_dense().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.to_dense().expect("tensor operation failed"))),
         );
 
         // Sparse matrix multiplication
         if shape.len() == 2 && shape[0] == shape[1] {
-            let sparse_b = create_random_f32_tensor(&shape).to_sparse(0.1).unwrap();
+            let sparse_b = create_random_f32_tensor(&shape)
+                .to_sparse(0.1)
+                .expect("tensor operation failed");
 
             group.bench_with_input(
                 BenchmarkId::new("sparse_matmul", format!("{:?}", shape)),
                 &(&sparse_tensor, &sparse_b),
-                |bench, (a, b)| bench.iter(|| black_box(a.matmul(b).unwrap())),
+                |bench, (a, b)| {
+                    bench.iter(|| black_box(a.matmul(b).expect("operation failed in test")))
+                },
             );
         }
     }
@@ -526,7 +559,9 @@ fn benchmark_broadcasting_operations(c: &mut Criterion) {
                 format!("{:?}+{:?}", small_shape, large_shape),
             ),
             &(&small_tensor, &large_tensor),
-            |b, (small, large)| b.iter(|| black_box(small.add(large).unwrap())),
+            |b, (small, large)| {
+                b.iter(|| black_box(small.add(large).expect("add operation failed")))
+            },
         );
 
         group.bench_with_input(
@@ -535,7 +570,9 @@ fn benchmark_broadcasting_operations(c: &mut Criterion) {
                 format!("{:?}*{:?}", small_shape, large_shape),
             ),
             &(&small_tensor, &large_tensor),
-            |b, (small, large)| b.iter(|| black_box(small.mul(large).unwrap())),
+            |b, (small, large)| {
+                b.iter(|| black_box(small.mul(large).expect("operation failed in test")))
+            },
         );
     }
 
@@ -560,14 +597,16 @@ fn benchmark_normalization_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("layer_norm", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.layer_norm(-1, 1e-5).unwrap())),
+            |b, tensor| {
+                b.iter(|| black_box(tensor.layer_norm(-1, 1e-5).expect("tensor operation failed")))
+            },
         );
 
         // L2 normalization
         group.bench_with_input(
             BenchmarkId::new("l2_norm", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.norm().unwrap())),
+            |b, tensor| b.iter(|| black_box(tensor.norm().expect("tensor operation failed"))),
         );
 
         // Batch normalization (if implemented)
@@ -578,14 +617,24 @@ fn benchmark_normalization_operations(c: &mut Criterion) {
                 |b, tensor| {
                     b.iter(|| {
                         // Simulate batch norm: (x - mean) / sqrt(var + eps)
-                        let mean = tensor.mean_axis(0).unwrap();
-                        let var =
-                            tensor.sub(&mean).unwrap().pow(2.0).unwrap().mean_axis(0).unwrap();
+                        let mean = tensor.mean_axis(0).expect("tensor operation failed");
+                        let var = tensor
+                            .sub(&mean)
+                            .expect("tensor operation failed")
+                            .pow(2.0)
+                            .expect("operation failed in test")
+                            .mean_axis(0)
+                            .expect("operation failed in test");
                         let normalized = tensor
                             .sub(&mean)
-                            .unwrap()
-                            .div(&var.add_scalar(1e-5).unwrap().sqrt().unwrap())
-                            .unwrap();
+                            .expect("operation failed in test")
+                            .div(
+                                &var.add_scalar(1e-5)
+                                    .expect("add operation failed")
+                                    .sqrt()
+                                    .expect("operation failed in test"),
+                            )
+                            .expect("operation failed in test");
                         black_box(normalized)
                     })
                 },
@@ -605,27 +654,31 @@ fn benchmark_advanced_operations(c: &mut Criterion) {
 
     // Advanced indexing and slicing
     group.bench_function("advanced_slice_2d", |b| {
-        b.iter(|| black_box(tensor_2d.slice_multi(&[(10, 50), (20, 100)]).unwrap()))
+        b.iter(|| {
+            black_box(
+                tensor_2d.slice_multi(&[(10, 50), (20, 100)]).expect("tensor operation failed"),
+            )
+        })
     });
 
     // Tensor splitting
     group.bench_function("split_2d", |b| {
         b.iter(|| {
-            black_box(tensor_2d.split(32, 0).unwrap()) // Split along first dimension
+            black_box(tensor_2d.split(32, 0).expect("tensor operation failed")) // Split along first dimension
         })
     });
 
     // Tensor permutation (complex transpose)
     group.bench_function("permute_3d", |b| {
-        b.iter(|| black_box(tensor_3d.permute(&[2, 0, 1]).unwrap()))
+        b.iter(|| black_box(tensor_3d.permute(&[2, 0, 1]).expect("tensor operation failed")))
     });
 
     // Advanced reduction with keepdims
     group.bench_function("sum_keepdims", |b| {
         b.iter(|| {
             // Simulate keepdims by reshaping after reduction
-            let sum = tensor_2d.sum_axis(1).unwrap();
-            black_box(sum.reshape(&[64, 1]).unwrap())
+            let sum = tensor_2d.sum_axis(1).expect("tensor operation failed");
+            black_box(sum.reshape(&[64, 1]).expect("operation failed in test"))
         })
     });
 
@@ -636,7 +689,13 @@ fn benchmark_advanced_operations(c: &mut Criterion) {
     group.bench_function("tensor_gt", |b| {
         b.iter(|| {
             // Element-wise comparison simulation
-            black_box(tensor_a.sub(&tensor_b).unwrap().relu().unwrap()) // Simulate >
+            black_box(
+                tensor_a
+                    .sub(&tensor_b)
+                    .expect("tensor operation failed")
+                    .relu()
+                    .expect("operation failed in test"),
+            ) // Simulate >
         })
     });
 
@@ -679,13 +738,18 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
 
         // Create target labels (as f32 for compatibility)
         let targets_data: Vec<f32> = (0..batch_size).map(|i| (i % num_classes) as f32).collect();
-        let targets = Tensor::from_vec(targets_data, &[batch_size]).unwrap();
+        let targets =
+            Tensor::from_vec(targets_data, &[batch_size]).expect("tensor operation failed");
 
         group.bench_with_input(
             BenchmarkId::new("cross_entropy_mean", format!("{:?}", shape)),
             &(&predictions, &targets),
             |b, (preds, targets)| {
-                b.iter(|| black_box(preds.cross_entropy(targets, "mean").unwrap()))
+                b.iter(|| {
+                    black_box(
+                        preds.cross_entropy(targets, "mean").expect("operation failed in test"),
+                    )
+                })
             },
         );
 
@@ -693,7 +757,11 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
             BenchmarkId::new("cross_entropy_sum", format!("{:?}", shape)),
             &(&predictions, &targets),
             |b, (preds, targets)| {
-                b.iter(|| black_box(preds.cross_entropy(targets, "sum").unwrap()))
+                b.iter(|| {
+                    black_box(
+                        preds.cross_entropy(targets, "sum").expect("operation failed in test"),
+                    )
+                })
             },
         );
     }
@@ -706,7 +774,11 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("cosine_similarity", format!("{:?}", shape)),
             &(&tensor_a, &tensor_b),
-            |bench, (a, b)| bench.iter(|| black_box(a.cosine_similarity(b, -1, 1e-8).unwrap())),
+            |bench, (a, b)| {
+                bench.iter(|| {
+                    black_box(a.cosine_similarity(b, -1, 1e-8).expect("operation failed in test"))
+                })
+            },
         );
     }
 
@@ -717,7 +789,9 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("log_softmax", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.log_softmax(-1).unwrap())),
+            |b, tensor| {
+                b.iter(|| black_box(tensor.log_softmax(-1).expect("tensor operation failed")))
+            },
         );
     }
 
@@ -729,7 +803,9 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("variance_all", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.variance(None, false).unwrap())),
+            |b, tensor| {
+                b.iter(|| black_box(tensor.variance(None, false).expect("tensor operation failed")))
+            },
         );
 
         // Last axis variance (common for feature statistics)
@@ -739,7 +815,13 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
                 BenchmarkId::new("variance_last_axis", format!("{:?}", shape)),
                 &tensor,
                 |b, tensor| {
-                    b.iter(|| black_box(tensor.variance(Some(&[last_axis]), false).unwrap()))
+                    b.iter(|| {
+                        black_box(
+                            tensor
+                                .variance(Some(&[last_axis]), false)
+                                .expect("tensor operation failed"),
+                        )
+                    })
                 },
             );
         }
@@ -753,7 +835,9 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("std_dev_all", format!("{:?}", shape)),
             &tensor,
-            |b, tensor| b.iter(|| black_box(tensor.std_dev(None, false).unwrap())),
+            |b, tensor| {
+                b.iter(|| black_box(tensor.std_dev(None, false).expect("tensor operation failed")))
+            },
         );
 
         // Last axis standard deviation
@@ -763,7 +847,13 @@ fn benchmark_enhanced_operations(c: &mut Criterion) {
                 BenchmarkId::new("std_dev_last_axis", format!("{:?}", shape)),
                 &tensor,
                 |b, tensor| {
-                    b.iter(|| black_box(tensor.std_dev(Some(&[last_axis]), false).unwrap()))
+                    b.iter(|| {
+                        black_box(
+                            tensor
+                                .std_dev(Some(&[last_axis]), false)
+                                .expect("tensor operation failed"),
+                        )
+                    })
                 },
             );
         }

@@ -4,8 +4,8 @@
   "description": "Cross-platform desktop AI assistant powered by TrustformeRS and Electron",
   "main": "src/main.js",
   "homepage": "./",
-  "author": "TrustformeRS Team",
-  "license": "MIT",
+  "author": "COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>",
+  "license": "Apache-2.0",
   "private": true,
   "scripts": {
     "start": "electron .",

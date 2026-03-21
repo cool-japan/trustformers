@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Custom ASIC (Application-Specific Integrated Circuit) support for TrustformeRS
@@ -956,7 +956,7 @@ mod tests {
         let mut device = AsicDevice::new(config);
 
         let hw_config = HardwareConfig::default();
-        device.initialize(&hw_config).await.unwrap();
+        device.initialize(&hw_config).await.expect("async operation failed");
 
         assert!(device.is_available());
         assert!(device.status().online);
@@ -967,11 +967,11 @@ mod tests {
         let config = AsicDeviceConfig::default();
         let mut device = AsicDevice::new(config);
 
-        let memory = device.allocate_memory(1024).await.unwrap();
+        let memory = device.allocate_memory(1024).await.expect("async operation failed");
         assert_eq!(memory.size, 1024);
         assert_eq!(memory.memory_type, MemoryType::Local);
 
-        device.free_memory(memory).await.unwrap();
+        device.free_memory(memory).await.expect("async operation failed");
     }
 
     #[test]

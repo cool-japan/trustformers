@@ -859,7 +859,9 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let test_texts = vec!["Hello world!".to_string()];
 
-        let results = profiler.profile_tokenizer("char", &tokenizer, &test_texts).unwrap();
+        let results = profiler
+            .profile_tokenizer("char", &tokenizer, &test_texts)
+            .expect("Operation failed in test");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].tokenizer_name, "char");
     }
@@ -893,8 +895,10 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let test_texts = vec!["Hi".to_string()];
 
-        profiler.profile_tokenizer("test", &tokenizer, &test_texts).unwrap();
-        let report = profiler.generate_report().unwrap();
+        profiler
+            .profile_tokenizer("test", &tokenizer, &test_texts)
+            .expect("Operation failed in test");
+        let report = profiler.generate_report().expect("Operation failed in test");
 
         assert_eq!(report.benchmarks.len(), 1);
         assert_eq!(report.summary.total_benchmarks, 1);
@@ -919,16 +923,24 @@ mod tests {
             timestamp: "2023-01-01T00:00:00Z".to_string(),
         };
 
-        let json = profiler.export_report(&report, ExportFormat::Json).unwrap();
+        let json = profiler
+            .export_report(&report, ExportFormat::Json)
+            .expect("Operation failed in test");
         assert!(json.contains("fastest_tokenizer"));
 
-        let csv = profiler.export_report(&report, ExportFormat::Csv).unwrap();
+        let csv = profiler
+            .export_report(&report, ExportFormat::Csv)
+            .expect("Operation failed in test");
         assert!(csv.contains("tokenizer_name"));
 
-        let html = profiler.export_report(&report, ExportFormat::Html).unwrap();
+        let html = profiler
+            .export_report(&report, ExportFormat::Html)
+            .expect("Operation failed in test");
         assert!(html.contains("<html>"));
 
-        let md = profiler.export_report(&report, ExportFormat::Markdown).unwrap();
+        let md = profiler
+            .export_report(&report, ExportFormat::Markdown)
+            .expect("Operation failed in test");
         assert!(md.contains("# Tokenizer Performance Report"));
     }
 }

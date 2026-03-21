@@ -686,7 +686,7 @@ mod tests {
             return;
         }
 
-        let context = context.unwrap();
+        let context = context.expect("operation failed in test");
         assert!(!context.get_device().0.is_null());
         assert!(!context.get_queue().0.is_null());
     }

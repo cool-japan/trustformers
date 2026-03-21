@@ -738,7 +738,7 @@ mod tests {
     fn test_weight_initialization() {
         let weight =
             TensorParallelInit::column_parallel_weight(512, 2048, 4, 0, InitMethod::Xavier)
-                .unwrap();
+                .expect("operation failed in test");
 
         assert_eq!(weight.shape(), &[512, 512]); // 2048 / 4 = 512
     }

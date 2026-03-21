@@ -1387,7 +1387,7 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        let report = result.unwrap();
+        let report = result.expect("operation failed in test");
         assert!(report.safety_analysis.is_some());
         assert!(report.overall_score > 0.0);
     }
@@ -1403,7 +1403,7 @@ mod tests {
         let result = debugger.analyze_batch(&interactions).await;
         assert!(result.is_ok());
 
-        let batch_report = result.unwrap();
+        let batch_report = result.expect("operation failed in test");
         assert_eq!(batch_report.batch_size, 2);
         assert_eq!(batch_report.individual_reports.len(), 2);
     }
@@ -1414,7 +1414,7 @@ mod tests {
         let health_report = debugger.generate_health_report().await;
 
         assert!(health_report.is_ok());
-        let report = health_report.unwrap();
+        let report = health_report.expect("operation failed in test");
         assert!(report.overall_health_score > 0.0);
     }
 

@@ -498,7 +498,7 @@ mod tests {
             return;
         }
 
-        let model = model.unwrap();
+        let model = model.expect("operation failed in test");
         let executor = NNAPIExecutor::new(
             model.get_model_ptr(),
             1, // input count
@@ -512,7 +512,7 @@ mod tests {
             return;
         }
 
-        let executor = executor.unwrap();
+        let executor = executor.expect("operation failed in test");
         assert!(executor.is_ready());
         assert_eq!(executor.get_input_count(), 1);
         assert_eq!(executor.get_output_count(), 1);

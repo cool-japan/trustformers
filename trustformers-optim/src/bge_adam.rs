@@ -684,10 +684,12 @@ mod tests {
         };
 
         // Test that entropy weighting is disabled
-        let gradients = Tensor::new(vec![1.0, 2.0, 1.0, 0.5]).unwrap();
-        let weighted = optimizer.apply_entropy_weighting(&gradients, 1.0).unwrap();
-        let grad_data = gradients.data().unwrap();
-        let weighted_data = weighted.data().unwrap();
+        let gradients = Tensor::new(vec![1.0, 2.0, 1.0, 0.5]).expect("Failed to create tensor");
+        let weighted = optimizer
+            .apply_entropy_weighting(&gradients, 1.0)
+            .expect("Operation failed in test");
+        let grad_data = gradients.data().expect("Operation failed in test");
+        let weighted_data = weighted.data().expect("Operation failed in test");
         assert_eq!(grad_data, weighted_data); // Should be unchanged
 
         // Test that adaptive parameters are disabled

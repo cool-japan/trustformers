@@ -581,7 +581,8 @@ mod tests {
             "vocab_size": 30522
         });
 
-        let config = ClassificationCollatorConfig::from_config(&config_json).unwrap();
+        let config = ClassificationCollatorConfig::from_config(&config_json)
+            .expect("operation failed in test");
         assert_eq!(config.max_length, Some(512));
         assert_eq!(config.pad_token_id, 1);
         assert_eq!(config.num_labels, 5);
@@ -616,12 +617,12 @@ mod tests {
             },
         ];
 
-        let batch = collator.collate(&examples).unwrap();
+        let batch = collator.collate(&examples).expect("operation failed in test");
         assert_eq!(batch.batch_size, 2);
         assert_eq!(batch.input_ids.len(), 2);
         assert!(batch.labels.is_some());
 
-        let labels = batch.labels.as_ref().unwrap();
+        let labels = batch.labels.as_ref().expect("operation failed in test");
         assert_eq!(labels.len(), 2);
         assert_eq!(labels[0], vec![1]);
         assert_eq!(labels[1], vec![0]);
@@ -664,12 +665,12 @@ mod tests {
             "pad_token_id": 0
         });
 
-        let config =
-            ClassificationCollatorConfig::for_sentiment_analysis(&model_config, true).unwrap();
+        let config = ClassificationCollatorConfig::for_sentiment_analysis(&model_config, true)
+            .expect("operation failed in test");
         assert_eq!(config.num_labels, 3); // Negative, Neutral, Positive
 
-        let config =
-            ClassificationCollatorConfig::for_sentiment_analysis(&model_config, false).unwrap();
+        let config = ClassificationCollatorConfig::for_sentiment_analysis(&model_config, false)
+            .expect("operation failed in test");
         assert_eq!(config.num_labels, 2); // Negative, Positive
     }
 

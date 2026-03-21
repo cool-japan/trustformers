@@ -590,7 +590,7 @@ mod tests {
         let config = crate::MobileConfig::default();
         let scheduler = PowerAwareScheduler::new(config);
 
-        let sorted = scheduler.topological_sort(&graph).unwrap();
+        let sorted = scheduler.topological_sort(&graph).expect("operation failed in test");
         assert_eq!(sorted, vec![0, 1]);
     }
 

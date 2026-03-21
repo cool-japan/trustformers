@@ -668,7 +668,7 @@ mod tests {
         let loss = distiller.compute_distillation_loss(&student_logits, &teacher_logits);
         assert!(loss.is_ok(), "Loss computation should succeed");
 
-        let loss_value = loss.unwrap();
+        let loss_value = loss.expect("operation failed in test");
         assert!(loss_value >= 0.0, "Loss should be non-negative");
     }
 
@@ -686,7 +686,7 @@ mod tests {
             distiller.simulate_gradient_computation(&student_logits, &teacher_logits, &config);
         assert!(grad_norm.is_ok(), "Gradient simulation should succeed");
 
-        let grad_value = grad_norm.unwrap();
+        let grad_value = grad_norm.expect("operation failed in test");
         assert!(grad_value >= 0.0, "Gradient norm should be non-negative");
     }
 }

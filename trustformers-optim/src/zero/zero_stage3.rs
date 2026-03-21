@@ -569,7 +569,7 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
 
         let stage3 = ZeROStage3::<Adam>::new(mp_context, zero_config);
@@ -585,14 +585,24 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
-        let mut stage3 = ZeROStage3::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage3 =
+            ZeROStage3::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
-        parameters.insert("weight1".to_string(), Tensor::ones(&[16, 16]).unwrap());
-        parameters.insert("weight2".to_string(), Tensor::ones(&[8, 8]).unwrap());
-        parameters.insert("bias1".to_string(), Tensor::ones(&[16]).unwrap());
+        parameters.insert(
+            "weight1".to_string(),
+            Tensor::ones(&[16, 16]).expect("Failed to create tensor"),
+        );
+        parameters.insert(
+            "weight2".to_string(),
+            Tensor::ones(&[8, 8]).expect("Failed to create tensor"),
+        );
+        parameters.insert(
+            "bias1".to_string(),
+            Tensor::ones(&[16]).expect("Failed to create tensor"),
+        );
 
         let result = stage3.register_parameters(parameters);
         assert!(result.is_ok());
@@ -619,28 +629,35 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig {
             max_memory_usage_mb: 100, // Small memory limit for testing
             ..Default::default()
         };
-        let mut stage3 = ZeROStage3::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage3 =
+            ZeROStage3::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
-        parameters.insert("weight1".to_string(), Tensor::ones(&[4, 4]).unwrap());
-        parameters.insert("weight2".to_string(), Tensor::ones(&[4, 4]).unwrap());
+        parameters.insert(
+            "weight1".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
+        parameters.insert(
+            "weight2".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
 
-        stage3.register_parameters(parameters).unwrap();
+        stage3.register_parameters(parameters).expect("Operation failed in test");
 
         // Test parameter gathering
         let param_names = vec!["weight1".to_string()];
-        let gathered = stage3.gather_parameters(&param_names).unwrap();
+        let gathered = stage3.gather_parameters(&param_names).expect("Operation failed in test");
         assert_eq!(gathered.len(), 1);
         assert!(stage3.is_parameter_gathered("weight1"));
         assert!(!stage3.is_parameter_gathered("weight2"));
 
         // Test parameter release
-        stage3.release_parameters(&param_names).unwrap();
+        stage3.release_parameters(&param_names).expect("Operation failed in test");
         assert!(!stage3.is_parameter_gathered("weight1"));
     }
 
@@ -693,19 +710,23 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig {
             prefetch_depth: 2,
             ..Default::default()
         };
-        let mut stage3 = ZeROStage3::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage3 =
+            ZeROStage3::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
         for i in 0..6 {
-            parameters.insert(format!("param{}", i), Tensor::ones(&[2, 2]).unwrap());
+            parameters.insert(
+                format!("param{}", i),
+                Tensor::ones(&[2, 2]).expect("Failed to create tensor"),
+            );
         }
 
-        stage3.register_parameters(parameters).unwrap();
+        stage3.register_parameters(parameters).expect("Operation failed in test");
 
         // Check that access schedule was created
         assert!(!stage3.access_schedule.is_empty());
@@ -725,16 +746,20 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
-        let mut stage3 = ZeROStage3::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage3 =
+            ZeROStage3::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
         for i in 0..16 {
-            parameters.insert(format!("param{}", i), Tensor::ones(&[4, 4]).unwrap());
+            parameters.insert(
+                format!("param{}", i),
+                Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+            );
         }
 
-        stage3.register_parameters(parameters).unwrap();
+        stage3.register_parameters(parameters).expect("Operation failed in test");
 
         let savings = stage3.estimate_memory_savings();
 
@@ -761,22 +786,26 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
         let zero_config = ZeROConfig::default();
-        let mut stage3 = ZeROStage3::<Adam>::new(mp_context, zero_config).unwrap();
+        let mut stage3 =
+            ZeROStage3::<Adam>::new(mp_context, zero_config).expect("Construction failed");
 
         let mut parameters = HashMap::new();
-        parameters.insert("weight".to_string(), Tensor::ones(&[4, 4]).unwrap());
+        parameters.insert(
+            "weight".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
 
-        stage3.register_parameters(parameters).unwrap();
+        stage3.register_parameters(parameters).expect("Operation failed in test");
 
         // Gather parameter
         let param_names = vec!["weight".to_string()];
-        stage3.gather_parameters(&param_names).unwrap();
+        stage3.gather_parameters(&param_names).expect("Operation failed in test");
         assert!(stage3.is_parameter_gathered("weight"));
 
         // Garbage collect
-        stage3.garbage_collect().unwrap();
+        stage3.garbage_collect().expect("Operation failed in test");
         assert!(!stage3.is_parameter_gathered("weight"));
         assert_eq!(stage3.memory_usage_percent(), 0.0);
     }

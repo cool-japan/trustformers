@@ -505,7 +505,9 @@ impl DistributedProfiler {
         // Find slowest communication
         let slowest_comm = events
             .iter()
-            .max_by(|a, b| a.duration_ms.partial_cmp(&b.duration_ms).unwrap())
+            .max_by(|a, b| {
+                a.duration_ms.partial_cmp(&b.duration_ms).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .cloned();
 
         Ok(CommunicationSummary {

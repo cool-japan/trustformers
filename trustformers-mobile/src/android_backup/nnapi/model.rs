@@ -489,7 +489,7 @@ mod tests {
             return;
         }
 
-        let mut builder = builder.unwrap();
+        let mut builder = builder.expect("operation failed in test");
         assert_eq!(builder.get_operand_count(), 0);
         assert_eq!(builder.get_operation_count(), 0);
         assert!(!builder.is_finalized().into());
@@ -504,7 +504,7 @@ mod tests {
             return;
         }
 
-        let model = model.unwrap();
+        let model = model.expect("operation failed in test");
         assert!(!model.get_model_ptr().is_null());
         assert_eq!(model.get_input_index(), 0);
     }

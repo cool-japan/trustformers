@@ -405,7 +405,7 @@ mod tests {
     fn test_android_specific_features() {
         // These tests only run on actual Android devices
         let config = MobileConfig::android_optimized();
-        let mut engine = AndroidInferenceEngine::new(config).unwrap();
+        let mut engine = AndroidInferenceEngine::new(config).expect("operation failed in test");
 
         // Test model loading (may fail without actual model file)
         let _result = engine.load_model("test_model.onnx");
@@ -423,7 +423,7 @@ mod tests {
         let engine = AndroidInferenceEngine::new(config);
 
         assert!(engine.is_ok());
-        let engine = engine.unwrap();
+        let engine = engine.expect("operation failed in test");
 
         // Check capabilities match expectations
         if device_info.supports_feature(AndroidFeature::NNAPI) {

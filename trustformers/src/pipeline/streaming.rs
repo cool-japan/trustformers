@@ -882,7 +882,7 @@ mod tests {
         let mut count = 0;
 
         while let Some(result) = results.next().await {
-            match result.unwrap() {
+            match result.expect("operation failed in test") {
                 StreamResult::Complete { output, .. } => {
                     assert!(output.starts_with("processed:"));
                     count += 1;
@@ -902,7 +902,7 @@ mod tests {
 
         let result = processor.process_with_priority("test".to_string(), 0).await;
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "processed: test");
+        assert_eq!(result.expect("operation failed in test"), "processed: test");
     }
 
     #[test]

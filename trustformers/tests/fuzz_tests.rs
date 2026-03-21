@@ -294,7 +294,7 @@ mod fuzz_tests {
             config.insert("max_steps".to_string(), max_steps.to_string());
 
             let validator = ConfigValidator::new();
-            let config_value = serde_json::to_value(&config).unwrap();
+            let config_value = serde_json::to_value(&config).expect("operation failed in test");
             let schema = trustformers::config_management::ConfigSchema {
                 name: "test_schema".to_string(),
                 version: "1.0".to_string(),

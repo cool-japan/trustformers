@@ -894,7 +894,7 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let exporter = OnnxTokenizerExporter::from_tokenizer(tokenizer);
 
-        let model = exporter.export().unwrap();
+        let model = exporter.export().expect("Operation failed in test");
         assert_eq!(model.metadata.name, "tokenizer");
         assert!(!model.inputs.is_empty());
         assert!(!model.outputs.is_empty());
@@ -905,7 +905,7 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let exporter = OnnxTokenizerExporter::from_tokenizer(tokenizer);
 
-        let model_bytes = exporter.export_to_bytes().unwrap();
+        let model_bytes = exporter.export_to_bytes().expect("Operation failed in test");
         assert!(!model_bytes.is_empty());
     }
 
@@ -913,7 +913,7 @@ mod tests {
     fn test_onnx_runtime_creation() {
         let runtime = OnnxTokenizerRuntime::from_file("test_model.onnx".to_string());
 
-        let input_specs = runtime.get_input_specs().unwrap();
+        let input_specs = runtime.get_input_specs().expect("Operation failed in test");
         assert!(!input_specs.is_empty());
         assert_eq!(input_specs[0].name, "input_text");
     }

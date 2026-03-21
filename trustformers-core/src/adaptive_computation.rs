@@ -1570,8 +1570,12 @@ mod tests {
         // Create a high-entropy input (uniform distribution after softmax)
         let high_entropy_input = Tensor::ones(&[1, 5]).expect("Failed to create ones tensor");
 
-        let low_complexity = estimator.estimate_complexity(&low_entropy_input).unwrap();
-        let high_complexity = estimator.estimate_complexity(&high_entropy_input).unwrap();
+        let low_complexity = estimator
+            .estimate_complexity(&low_entropy_input)
+            .expect("operation failed in test");
+        let high_complexity = estimator
+            .estimate_complexity(&high_entropy_input)
+            .expect("operation failed in test");
 
         // Uniform distribution should have higher entropy than concentrated distribution
         assert!(high_complexity > low_complexity);

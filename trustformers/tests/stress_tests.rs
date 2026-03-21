@@ -285,8 +285,9 @@ impl StressTestMetrics {
         // Calculate memory statistics
         let memory_samples = self.memory_samples.lock().await;
         let memory_stats = if !memory_samples.is_empty() {
-            let initial_memory = memory_samples.first().unwrap().memory_mb;
-            let final_memory = memory_samples.last().unwrap().memory_mb;
+            let initial_memory =
+                memory_samples.first().expect("operation failed in test").memory_mb;
+            let final_memory = memory_samples.last().expect("operation failed in test").memory_mb;
             let peak_memory = memory_samples.iter().map(|s| s.memory_mb).max().unwrap_or(0);
 
             MemoryStats {
@@ -565,7 +566,7 @@ impl StressTestRunner {
 
         // Wait for all tasks to complete
         for task in tasks {
-            task.await.unwrap();
+            task.await.expect("async operation failed");
         }
 
         Ok(())
@@ -630,7 +631,7 @@ impl StressTestRunner {
 
         // Wait for all tasks to complete
         for task in tasks {
-            task.await.unwrap();
+            task.await.expect("async operation failed");
         }
 
         Ok(())
@@ -687,7 +688,7 @@ impl StressTestRunner {
 
         // Wait for all tasks to complete
         for task in tasks {
-            task.await.unwrap();
+            task.await.expect("async operation failed");
         }
 
         Ok(())
@@ -744,7 +745,7 @@ impl StressTestRunner {
 
         // Wait for all tasks to complete
         for task in tasks {
-            task.await.unwrap();
+            task.await.expect("async operation failed");
         }
 
         Ok(())
@@ -796,7 +797,7 @@ impl StressTestRunner {
 
         // Wait for all tasks to complete
         for task in tasks {
-            task.await.unwrap();
+            task.await.expect("async operation failed");
         }
 
         Ok(())
@@ -844,7 +845,7 @@ impl StressTestRunner {
 
                 // Wait for burst to complete
                 for task in tasks {
-                    task.await.unwrap();
+                    task.await.expect("async operation failed");
                 }
 
                 if last_switch.elapsed() > burst_duration {
@@ -897,7 +898,7 @@ impl StressTestRunner {
 
             // Wait for tasks to complete
             for task in tasks {
-                task.await.unwrap();
+                task.await.expect("async operation failed");
             }
 
             current_concurrency += 1;
@@ -1017,7 +1018,7 @@ mod tests {
         let config = StressTestConfig::light();
         let runner = StressTestRunner::new(config);
 
-        let results = runner.run().await.unwrap();
+        let results = runner.run().await.expect("async operation failed");
 
         assert!(results.error_rate < 10.0); // Less than 10% error rate
         assert!(results.total_requests > 0);
@@ -1030,7 +1031,7 @@ mod tests {
         config.scenario = StressTestScenario::TextClassification;
 
         let runner = StressTestRunner::new(config);
-        let results = runner.run().await.unwrap();
+        let results = runner.run().await.expect("async operation failed");
 
         assert!(results.error_rate < 5.0); // Less than 5% error rate
         assert!(results.throughput > 0.0);
@@ -1043,7 +1044,7 @@ mod tests {
         config.scenario = StressTestScenario::Mixed;
 
         let runner = StressTestRunner::new(config);
-        let results = runner.run().await.unwrap();
+        let results = runner.run().await.expect("async operation failed");
 
         assert!(results.total_requests > 0);
         assert!(results.successful_requests > 0);
@@ -1056,7 +1057,7 @@ mod tests {
         config.memory_limit_mb = Some(512); // Lower limit for testing
 
         let runner = StressTestRunner::new(config);
-        let results = runner.run().await.unwrap();
+        let results = runner.run().await.expect("async operation failed");
 
         assert!(results.total_requests > 0);
         assert!(results.memory_stats.peak_memory_mb > 0);
@@ -1069,7 +1070,7 @@ mod tests {
         config.request_delay = None; // No delay for max throughput
 
         let runner = StressTestRunner::new(config);
-        let results = runner.run().await.unwrap();
+        let results = runner.run().await.expect("async operation failed");
 
         assert!(results.throughput > 0.0);
         assert!(results.total_requests > 0);
@@ -1082,7 +1083,7 @@ mod tests {
         config.duration = Some(Duration::from_secs(5)); // Very short duration for testing
 
         let runner = StressTestRunner::new(config);
-        let results = runner.run().await.unwrap();
+        let results = runner.run().await.expect("async operation failed");
 
         assert!(results.total_requests > 0);
         assert!(results.duration <= Duration::from_secs(10)); // Should complete within time limit

@@ -473,6 +473,8 @@ echo "Deployment completed successfully!"
         config: &ECSConfig,
     ) -> TrustformersResult<String> {
         // Generate CloudFormation template for ECS
+        let network_mode_str = serde_json::to_string(&config.network_mode)?;
+        let launch_type_str = serde_json::to_string(&config.launch_type)?;
         Ok(format!(
             r#"
 AWSTemplateFormatVersion: '2010-09-09'
@@ -497,8 +499,8 @@ Resources:
 "#,
             self.config.app_name,
             config.task_definition_family,
-            serde_json::to_string(&config.network_mode).unwrap().trim_matches('"'),
-            serde_json::to_string(&config.launch_type).unwrap().trim_matches('"'),
+            network_mode_str.trim_matches('"'),
+            launch_type_str.trim_matches('"'),
             config.service_name,
             config.cluster_name,
             config.desired_count
@@ -698,7 +700,7 @@ scrape_configs:
             }
         });
 
-        Ok(serde_json::to_string_pretty(&dashboard).unwrap())
+        Ok(serde_json::to_string_pretty(&dashboard)?)
     }
 
     fn generate_alerting_rules(&self) -> TrustformersResult<String> {

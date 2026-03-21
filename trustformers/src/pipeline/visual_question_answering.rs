@@ -1343,7 +1343,7 @@ mod tests {
     #[test]
     fn test_image_processor() {
         let config = ImageConfig::default();
-        let processor = ImageProcessor::new(config).unwrap();
+        let processor = ImageProcessor::new(config).expect("operation failed in test");
         let image = ImageInput::Tensor(vec![0.5; 224 * 224 * 3]);
         let result = processor.process_image(&image);
         assert!(result.is_ok());
@@ -1351,17 +1351,21 @@ mod tests {
 
     #[test]
     fn test_fusion_strategies() {
-        let fusion = FusionModule::new(FusionStrategy::Concatenation).unwrap();
-        let img_tensor = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).unwrap();
-        let q_tensor = Tensor::from_vec(vec![4.0, 5.0], &[1, 2]).unwrap();
+        let fusion =
+            FusionModule::new(FusionStrategy::Concatenation).expect("operation failed in test");
+        let img_tensor =
+            Tensor::from_vec(vec![1.0, 2.0, 3.0], &[1, 3]).expect("tensor operation failed");
+        let q_tensor = Tensor::from_vec(vec![4.0, 5.0], &[1, 2]).expect("tensor operation failed");
         let result = fusion.fuse(&img_tensor, &q_tensor);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_answer_generator() {
-        let generator = AnswerGenerator::new(AnswerGenerationStrategy::Generative).unwrap();
-        let features = Tensor::from_vec(vec![0.1, 0.2, 0.3], &[1, 3]).unwrap();
+        let generator = AnswerGenerator::new(AnswerGenerationStrategy::Generative)
+            .expect("operation failed in test");
+        let features =
+            Tensor::from_vec(vec![0.1, 0.2, 0.3], &[1, 3]).expect("tensor operation failed");
         let config = VisualQuestionAnsweringConfig::default();
         let result = generator.generate_answer(&features, "What is in the image?", &None, &config);
         assert!(result.is_ok());
@@ -1380,15 +1384,18 @@ mod tests {
         let result =
             engine.generate_reasoning_chain("How many people are there?", "2", &image_features);
         assert!(result.is_ok());
-        assert!(!result.unwrap().is_empty());
+        assert!(!result.expect("operation failed in test").is_empty());
     }
 
     #[test]
     fn test_attention_visualizer() {
         let visualizer = AttentionVisualizer::new();
-        let features = Tensor::from_vec(vec![0.1, 0.2, 0.3], &[1, 3]).unwrap();
-        let image_tensor = Tensor::from_vec(vec![0.5; 100], &[1, 100]).unwrap();
-        let question_tensor = Tensor::from_vec(vec![0.3; 50], &[1, 50]).unwrap();
+        let features =
+            Tensor::from_vec(vec![0.1, 0.2, 0.3], &[1, 3]).expect("tensor operation failed");
+        let image_tensor =
+            Tensor::from_vec(vec![0.5; 100], &[1, 100]).expect("tensor operation failed");
+        let question_tensor =
+            Tensor::from_vec(vec![0.3; 50], &[1, 50]).expect("tensor operation failed");
         let result = visualizer.visualize_attention(&features, &image_tensor, &question_tensor);
         assert!(result.is_ok());
     }
@@ -1398,11 +1405,11 @@ mod tests {
         let model = MockModel::new();
         let tokenizer = MockTokenizer::new();
         let pipeline = VisualQuestionAnsweringPipeline::new(model, tokenizer)
-            .unwrap()
+            .expect("operation failed in test")
             .with_fusion_strategy(FusionStrategy::CrossAttention)
-            .unwrap()
+            .expect("operation failed in test")
             .with_answer_generation(AnswerGenerationStrategy::Classification)
-            .unwrap()
+            .expect("operation failed in test")
             .with_confidence_threshold(0.5)
             .with_top_k_answers(3);
 

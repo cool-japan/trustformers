@@ -942,42 +942,44 @@ mod tests {
 
     #[test]
     fn test_device_info() {
-        let metal_impl = MetalImpl::new().unwrap();
-        let info = metal_impl.device_info().unwrap();
+        let metal_impl = MetalImpl::new().expect("operation failed in test");
+        let info = metal_impl.device_info().expect("operation failed in test");
         assert!(!info.is_empty());
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn test_matrix_multiply() {
-        let metal_impl = MetalImpl::new().unwrap();
+        let metal_impl = MetalImpl::new().expect("operation failed in test");
 
-        let a = Tensor::from_slice(&[1.0, 2.0, 3.0, 4.0], &[2, 2]).unwrap();
-        let b = Tensor::from_slice(&[5.0, 6.0, 7.0, 8.0], &[2, 2]).unwrap();
+        let a =
+            Tensor::from_slice(&[1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("tensor operation failed");
+        let b =
+            Tensor::from_slice(&[5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("tensor operation failed");
 
         let result = metal_impl.matrix_multiply(&a, &b);
         assert!(result.is_ok());
 
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("tensor operation failed");
         assert_eq!(result_tensor.shape(), &[2, 2]);
     }
 
     #[cfg(all(target_os = "macos", feature = "metal"))]
     #[test]
     fn test_add_tensors() {
-        let metal_impl = MetalImpl::new().unwrap();
+        let metal_impl = MetalImpl::new().expect("operation failed in test");
 
-        let a = Tensor::from_slice(&[1.0, 2.0, 3.0, 4.0], &[4]).unwrap();
-        let b = Tensor::from_slice(&[5.0, 6.0, 7.0, 8.0], &[4]).unwrap();
+        let a = Tensor::from_slice(&[1.0, 2.0, 3.0, 4.0], &[4]).expect("tensor operation failed");
+        let b = Tensor::from_slice(&[5.0, 6.0, 7.0, 8.0], &[4]).expect("tensor operation failed");
 
         let result = metal_impl.add_tensors(&a, &b);
         assert!(result.is_ok());
 
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("tensor operation failed");
         assert_eq!(result_tensor.shape(), &[4]);
 
         let expected = [6.0, 8.0, 10.0, 12.0];
-        let actual = result_tensor.data_f32().unwrap();
+        let actual = result_tensor.data_f32().expect("tensor operation failed");
         for (a, e) in actual.iter().zip(expected.iter()) {
             assert!((a - e).abs() < 1e-6);
         }

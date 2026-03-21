@@ -287,7 +287,7 @@ impl PluginManager {
             .map(|e| {
                 format!(
                     "{}: {} ({}ms) - {}",
-                    e.timestamp.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+                    e.timestamp.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
                     e.plugin_name,
                     e.duration_ms,
                     if e.success { "success" } else { "failed" }
@@ -510,7 +510,7 @@ mod tests {
         let data = VisualizationData::Array1D(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let config = PluginConfig::default();
 
-        let result = manager.execute("histogram", data, config).unwrap();
+        let result = manager.execute("histogram", data, config).expect("operation failed in test");
 
         assert!(result.success);
         assert!(result.output_data.is_some());
@@ -540,7 +540,9 @@ mod tests {
         let count_before = manager.list_plugins().len();
 
         // Register histogram again (should replace)
-        manager.register_plugin(Box::new(HistogramPlugin)).unwrap();
+        manager
+            .register_plugin(Box::new(HistogramPlugin))
+            .expect("operation failed in test");
 
         let count_after = manager.list_plugins().len();
 

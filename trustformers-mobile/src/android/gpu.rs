@@ -363,7 +363,8 @@ mod tests {
 
     #[test]
     fn test_gpu_state_default_state() {
-        let state = AndroidGPUComputeState::new(AndroidGPUBackend::OpenGLES).unwrap();
+        let state = AndroidGPUComputeState::new(AndroidGPUBackend::OpenGLES)
+            .expect("operation failed in test");
         assert!(!state.is_initialized());
         assert!(!state.supports_compute());
 
@@ -375,7 +376,8 @@ mod tests {
 
     #[test]
     fn test_vulkan_backend_properties() {
-        let state = AndroidGPUComputeState::new(AndroidGPUBackend::Vulkan).unwrap();
+        let state = AndroidGPUComputeState::new(AndroidGPUBackend::Vulkan)
+            .expect("operation failed in test");
         assert!(!state.is_initialized());
         assert!(!state.supports_compute());
 
@@ -387,7 +389,8 @@ mod tests {
 
     #[test]
     fn test_cleanup_safety() {
-        let mut state = AndroidGPUComputeState::new(AndroidGPUBackend::OpenGLES).unwrap();
+        let mut state = AndroidGPUComputeState::new(AndroidGPUBackend::OpenGLES)
+            .expect("operation failed in test");
         // Should not panic even without initialization
         state.cleanup();
         // Should be safe to call multiple times

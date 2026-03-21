@@ -685,7 +685,7 @@ impl BufferPerformancePredictor {
         let optimal_point = self.performance_history.iter().max_by(|a, b| {
             let score_a = a.throughput / a.latency.max(1.0);
             let score_b = b.throughput / b.latency.max(1.0);
-            score_a.partial_cmp(&score_b).unwrap()
+            score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
         });
         Ok(optimal_point.map(|p| p.buffer_size).unwrap_or(1000))
     }

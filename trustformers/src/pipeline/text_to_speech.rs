@@ -1039,7 +1039,7 @@ mod tests {
     #[test]
     fn test_phoneme_converter() {
         let converter = PhonemeConverter::new();
-        let phonemes = converter.text_to_phonemes("hello world").unwrap();
+        let phonemes = converter.text_to_phonemes("hello world").expect("operation failed in test");
         assert!(!phonemes.is_empty());
     }
 
@@ -1047,7 +1047,8 @@ mod tests {
     fn test_prosody_analyzer() {
         let analyzer = ProsodyAnalyzer::new();
         let audio_data = vec![0.1, 0.2, 0.0, 0.0, 0.3, 0.4];
-        let prosody = analyzer.analyze("test", &audio_data, 22050).unwrap();
+        let prosody =
+            analyzer.analyze("test", &audio_data, 22050).expect("operation failed in test");
         assert!(prosody.avg_pitch > 0.0);
     }
 
@@ -1055,9 +1056,12 @@ mod tests {
     fn test_text_preprocessing() {
         let model = MockModel::new();
         let tokenizer = MockTokenizer::new();
-        let pipeline = TextToSpeechPipeline::new(model, tokenizer).unwrap();
+        let pipeline =
+            TextToSpeechPipeline::new(model, tokenizer).expect("operation failed in test");
 
-        let processed = pipeline.preprocess_text("Dr. Smith said 5 words.").unwrap();
+        let processed = pipeline
+            .preprocess_text("Dr. Smith said 5 words.")
+            .expect("operation failed in test");
         assert!(processed.contains("Doctor"));
         assert!(processed.contains("five"));
     }
@@ -1067,7 +1071,7 @@ mod tests {
         let model = MockModel::new();
         let tokenizer = MockTokenizer::new();
         let pipeline = TextToSpeechPipeline::new(model, tokenizer)
-            .unwrap()
+            .expect("operation failed in test")
             .with_voice("female-neutral".to_string())
             .with_speaking_rate(1.5)
             .with_pitch(1.2)

@@ -1058,12 +1058,12 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let mut analyzer = CoverageAnalyzer::from_tokenizer(tokenizer);
 
-        analyzer.analyze_input("hello").unwrap();
-        analyzer.analyze_input("world").unwrap();
+        analyzer.analyze_input("hello").expect("Operation failed in test");
+        analyzer.analyze_input("world").expect("Operation failed in test");
 
         let report = analyzer.generate_report();
         assert!(report.is_ok());
-        let report = report.unwrap();
+        let report = report.expect("Operation failed in test");
         assert_eq!(report.metadata.sample_count, 2);
         assert!(report.vocabulary_coverage.used_tokens > 0);
     }
@@ -1073,12 +1073,12 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let mut analyzer = CoverageAnalyzer::from_tokenizer(tokenizer);
 
-        analyzer.analyze_input("test").unwrap();
-        let report = analyzer.generate_report().unwrap();
+        analyzer.analyze_input("test").expect("Operation failed in test");
+        let report = analyzer.generate_report().expect("Operation failed in test");
 
         let json_result = CoverageReportExporter::export_to_string(&report, &ReportFormat::Json);
         assert!(json_result.is_ok());
-        let json = json_result.unwrap();
+        let json = json_result.expect("Operation failed in test");
         assert!(json.contains("vocabulary_coverage"));
     }
 
@@ -1087,12 +1087,12 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let mut analyzer = CoverageAnalyzer::from_tokenizer(tokenizer);
 
-        analyzer.analyze_input("test").unwrap();
-        let report = analyzer.generate_report().unwrap();
+        analyzer.analyze_input("test").expect("Operation failed in test");
+        let report = analyzer.generate_report().expect("Operation failed in test");
 
         let md_result = CoverageReportExporter::export_to_string(&report, &ReportFormat::Markdown);
         assert!(md_result.is_ok());
-        let md = md_result.unwrap();
+        let md = md_result.expect("Operation failed in test");
         assert!(md.contains("# Tokenizer Coverage Report"));
     }
 
@@ -1119,8 +1119,8 @@ mod tests {
         let mut analyzer = CoverageAnalyzer::from_tokenizer(tokenizer);
 
         // Analyze some text that might generate warnings
-        analyzer.analyze_input("a b c d e f g").unwrap(); // Many single-char tokens
-        let report = analyzer.generate_report().unwrap();
+        analyzer.analyze_input("a b c d e f g").expect("Operation failed in test"); // Many single-char tokens
+        let report = analyzer.generate_report().expect("Operation failed in test");
 
         // Should have some warnings about token length
         assert!(!report.warnings.is_empty());

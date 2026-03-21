@@ -90,18 +90,18 @@ fn check_memory_leak<F: Fn()>(name: &str, iterations: usize, f: F) {
 #[ignore] // This test requires special setup and may interfere with other tests
 fn test_tensor_operations_memory_leak() {
     check_memory_leak("Tensor creation and drop", 1000, || {
-        let _tensor = Tensor::new(vec![1.0; 1000], vec![10, 100]).unwrap();
+        let _tensor = Tensor::new(vec![1.0; 1000], vec![10, 100]).expect("tensor operation failed");
     });
 
     check_memory_leak("Tensor arithmetic", 1000, || {
-        let a = Tensor::new(vec![1.0; 100], vec![10, 10]).unwrap();
-        let b = Tensor::new(vec![2.0; 100], vec![10, 10]).unwrap();
-        let _c = a.add(&b).unwrap();
+        let a = Tensor::new(vec![1.0; 100], vec![10, 10]).expect("tensor operation failed");
+        let b = Tensor::new(vec![2.0; 100], vec![10, 10]).expect("tensor operation failed");
+        let _c = a.add(&b).expect("add operation failed");
     });
 
     check_memory_leak("Tensor transpose", 1000, || {
-        let tensor = Tensor::new(vec![1.0; 100], vec![10, 10]).unwrap();
-        let _transposed = tensor.transpose(0, 1).unwrap();
+        let tensor = Tensor::new(vec![1.0; 100], vec![10, 10]).expect("tensor operation failed");
+        let _transposed = tensor.transpose(0, 1).expect("tensor operation failed");
     });
 }
 
@@ -110,8 +110,8 @@ fn test_tensor_operations_memory_leak() {
 fn test_layer_memory_leak() {
     check_memory_leak("Linear layer forward pass", 100, || {
         let layer = Linear::new(100, 200, true);
-        let input = Tensor::new(vec![1.0; 1000], vec![10, 100]).unwrap();
-        let _output = layer.forward(&input).unwrap();
+        let input = Tensor::new(vec![1.0; 1000], vec![10, 100]).expect("tensor operation failed");
+        let _output = layer.forward(&input).expect("forward pass failed");
     });
 }
 
@@ -130,7 +130,7 @@ fn test_tensor_memory_usage() {
     for (size, label) in sizes {
         reset_memory_tracking();
 
-        let tensor = Tensor::new(vec![0.0; size], vec![size]).unwrap();
+        let tensor = Tensor::new(vec![0.0; size], vec![size]).expect("tensor operation failed");
         let allocated = ALLOCATED.load(Ordering::Relaxed);
 
         // Expected: size * 4 bytes (f32) + some overhead for Vec and Tensor struct
@@ -160,13 +160,13 @@ fn test_no_retained_references() {
 
     {
         // Create tensors that reference each other through operations
-        let a = Rc::new(RefCell::new(Tensor::new(vec![1.0; 1000], vec![100, 10]).unwrap()));
-        let b = Rc::new(RefCell::new(Tensor::new(vec![2.0; 1000], vec![100, 10]).unwrap()));
+        let a = Rc::new(RefCell::new(Tensor::new(vec![1.0; 1000], vec![100, 10]).expect("tensor operation failed")));
+        let b = Rc::new(RefCell::new(Tensor::new(vec![2.0; 1000], vec![100, 10]).expect("tensor operation failed")));
 
         // Perform operations that might create references
-        let c = a.borrow().add(&*b.borrow()).unwrap();
-        let d = b.borrow().add(&*a.borrow()).unwrap();
-        let _e = c.add(&d).unwrap();
+        let c = a.borrow().add(&*b.borrow()).expect("add operation failed");
+        let d = b.borrow().add(&*a.borrow()).expect("add operation failed");
+        let _e = c.add(&d).expect("add operation failed");
 
         // All references should be dropped when leaving scope
     }

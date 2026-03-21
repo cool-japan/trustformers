@@ -501,7 +501,11 @@ impl TeamDashboard {
         // Calculate last 7 days
         for i in 0..7 {
             let date = now - Duration::days(i);
-            let day_start = date.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+            let day_start = date
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .expect("0:0:0 is always a valid time")
+                .and_utc();
             let day_end = day_start + Duration::days(1);
 
             let day_activities: Vec<_> = self

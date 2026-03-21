@@ -17,7 +17,7 @@ fn test_cache_directory_creation() {
         "Should be able to determine cache directory"
     );
 
-    let cache_path = cache_dir.unwrap();
+    let cache_path = cache_dir.expect("operation failed in test");
     assert!(cache_path.is_absolute(), "Cache path should be absolute");
 }
 
@@ -37,7 +37,10 @@ fn test_model_cache_check() {
     // Test with a model that definitely doesn't exist
     let result = is_cached("nonexistent-model-123456", None);
     assert!(result.is_ok());
-    assert!(!result.unwrap(), "Nonexistent model should not be cached");
+    assert!(
+        !result.expect("operation failed in test"),
+        "Nonexistent model should not be cached"
+    );
 }
 
 #[rstest]
@@ -71,7 +74,7 @@ fn test_error_system_functionality() {
 async fn test_profiler_basic_functionality() {
     // Create a basic profiler instance for testing
     use trustformers::profiler::Profiler;
-    let _profiler = Profiler::new().unwrap();
+    let _profiler = Profiler::new().expect("operation failed in test");
 
     // For testing purposes, just verify the profiler can be created
     assert!(true); // Profiler created successfully
@@ -385,7 +388,10 @@ mod async_tests {
             result.is_ok(),
             "Async operation should complete within timeout"
         );
-        assert!(result.unwrap().is_ok(), "Async operation should succeed");
+        assert!(
+            result.expect("operation failed in test").is_ok(),
+            "Async operation should succeed"
+        );
     }
 
     #[rstest]
@@ -405,7 +411,7 @@ mod async_tests {
 
         let mut results = Vec::new();
         while let Some(res) = set.join_next().await {
-            results.push(res.unwrap());
+            results.push(res.expect("operation failed in test"));
         }
 
         assert_eq!(

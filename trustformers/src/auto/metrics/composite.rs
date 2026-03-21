@@ -556,9 +556,9 @@ mod tests {
         let predictions = MetricInput::Classifications(vec![0, 1, 0, 1]);
         let references = MetricInput::Classifications(vec![0, 0, 1, 1]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "default");
         assert_eq!(result.value, 0.5); // 50% accuracy
         assert!(result.details.contains_key("accuracy"));
@@ -573,7 +573,7 @@ mod tests {
                 &MetricInput::Classifications(vec![0, 1]),
                 &MetricInput::Classifications(vec![0, 1]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         metric.reset();
 
@@ -615,7 +615,7 @@ mod tests {
                 &MetricInput::Classifications(vec![0, 1]),
                 &MetricInput::Classifications(vec![0, 1]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         composite.reset_all();
 
@@ -634,9 +634,9 @@ mod tests {
                 &MetricInput::Classifications(vec![0, 1]),
                 &MetricInput::Classifications(vec![0, 1]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let results = composite.compute_all().unwrap();
+        let results = composite.compute_all().expect("operation failed in test");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "classification");
     }
@@ -687,7 +687,7 @@ mod tests {
         assert!(composite.is_empty());
         assert_eq!(composite.len(), 0);
 
-        let results = composite.compute_all().unwrap();
+        let results = composite.compute_all().expect("operation failed in test");
         assert_eq!(results.len(), 0);
     }
 }

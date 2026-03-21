@@ -807,7 +807,8 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        let tokenizer = CustomFormatTokenizer::from_format(format).unwrap();
+        let tokenizer =
+            CustomFormatTokenizer::from_format(format).expect("Operation failed in test");
         assert_eq!(tokenizer.vocab_size(), 2);
         assert_eq!(tokenizer.token_to_id("hello"), Some(0));
         assert_eq!(tokenizer.id_to_token(1), Some("world".to_string()));
@@ -851,8 +852,9 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        let tokenizer = CustomFormatTokenizer::from_format(format).unwrap();
-        let result = tokenizer.encode("hello world").unwrap();
+        let tokenizer =
+            CustomFormatTokenizer::from_format(format).expect("Operation failed in test");
+        let result = tokenizer.encode("hello world").expect("Encoding failed");
         assert_eq!(result.input_ids, vec![0, 1]);
         assert_eq!(result.attention_mask, vec![1, 1]);
     }
@@ -882,7 +884,8 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        let warnings = CustomFormatConverter::validate_format(&format).unwrap();
+        let warnings =
+            CustomFormatConverter::validate_format(&format).expect("Operation failed in test");
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("Vocabulary size mismatch"));
     }

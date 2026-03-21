@@ -1001,7 +1001,10 @@ mod tests {
         let manager = MemoryManager::with_storage(config, storage_path);
 
         assert!(manager.storage_path.is_some());
-        assert_eq!(manager.storage_path.unwrap(), storage_path);
+        assert_eq!(
+            manager.storage_path.expect("operation failed in test"),
+            storage_path
+        );
     }
 
     #[test]
@@ -1013,7 +1016,7 @@ mod tests {
         let memory = manager.create_memory(&turn);
 
         assert!(memory.is_some());
-        let memory = memory.unwrap();
+        let memory = memory.expect("operation failed in test");
         assert_eq!(memory.content, "I like programming in Rust");
         assert!(memory.importance > 0.5); // Should be high due to preference
         assert_eq!(memory.memory_type, MemoryType::Preference);
@@ -1029,7 +1032,7 @@ mod tests {
             "My name is Alice and I prefer Python",
             ConversationRole::User,
         );
-        let memory = manager.create_memory(&personal_turn).unwrap();
+        let memory = manager.create_memory(&personal_turn).expect("operation failed in test");
         assert!(memory.importance > 0.7);
 
         // Test low importance for generic content
@@ -1264,7 +1267,8 @@ mod tests {
         assert!(result.is_ok());
 
         // Test loading memories
-        let loaded_memories = manager.load_memories(conversation_id).await.unwrap();
+        let loaded_memories =
+            manager.load_memories(conversation_id).await.expect("async operation failed");
         assert_eq!(loaded_memories.len(), 1); // Only important memory should be saved
         assert_eq!(loaded_memories[0].content, "Important memory");
 
@@ -1272,7 +1276,8 @@ mod tests {
         let result = manager.delete_memories(conversation_id).await;
         assert!(result.is_ok());
 
-        let loaded_after_delete = manager.load_memories(conversation_id).await.unwrap();
+        let loaded_after_delete =
+            manager.load_memories(conversation_id).await.expect("async operation failed");
         assert!(loaded_after_delete.is_empty());
 
         // Cleanup
@@ -1290,7 +1295,10 @@ mod tests {
             create_test_memory("Another good memory", 0.7, MemoryType::Experience),
         ];
 
-        let report = manager.maintenance_cleanup(&mut memories).await.unwrap();
+        let report = manager
+            .maintenance_cleanup(&mut memories)
+            .await
+            .expect("async operation failed");
 
         assert!(report.decay_applied);
         assert!(report.compression_applied);
@@ -1309,23 +1317,31 @@ mod tests {
         ];
 
         // Test JSON export
-        let json_export = manager.export_memories(&memories, ExportFormat::Json).await.unwrap();
+        let json_export = manager
+            .export_memories(&memories, ExportFormat::Json)
+            .await
+            .expect("async operation failed");
         assert!(json_export.contains("Test memory 1"));
         assert!(json_export.contains("Test memory 2"));
 
         // Test CSV export
-        let csv_export = manager.export_memories(&memories, ExportFormat::Csv).await.unwrap();
+        let csv_export = manager
+            .export_memories(&memories, ExportFormat::Csv)
+            .await
+            .expect("async operation failed");
         assert!(csv_export.contains("id,content,importance"));
         assert!(csv_export.contains("Test memory 1"));
 
         // Test summary export
-        let summary_export =
-            manager.export_memories(&memories, ExportFormat::Summary).await.unwrap();
+        let summary_export = manager
+            .export_memories(&memories, ExportFormat::Summary)
+            .await
+            .expect("async operation failed");
         assert!(summary_export.contains("Memory Summary"));
         assert!(summary_export.contains("Total memories: 2"));
 
         // Test import
-        let imported = manager.import_memories(&json_export).await.unwrap();
+        let imported = manager.import_memories(&json_export).await.expect("async operation failed");
         assert_eq!(imported.len(), 2);
     }
 
@@ -1353,12 +1369,12 @@ mod tests {
             )],
         );
 
-        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let runtime = tokio::runtime::Runtime::new().expect("operation failed in test");
         let consolidated = runtime
             .block_on(async {
                 ltm_manager.consolidate_cross_conversation_memories(conversation_memories).await
             })
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(!consolidated.is_empty());
         assert!(!ltm_manager.conversation_summaries.is_empty());

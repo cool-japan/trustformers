@@ -266,24 +266,24 @@ mod tests {
             max_duration_hours: 24,
         };
 
-        let mut experiment = Experiment::new(config).unwrap();
+        let mut experiment = Experiment::new(config).expect("operation failed in test");
         assert_eq!(experiment.status(), ExperimentStatus::Draft);
 
         // Start
-        experiment.start().unwrap();
+        experiment.start().expect("operation failed in test");
         assert_eq!(experiment.status(), ExperimentStatus::Running);
         assert!(experiment.start_time.is_some());
 
         // Pause
-        experiment.pause().unwrap();
+        experiment.pause().expect("operation failed in test");
         assert_eq!(experiment.status(), ExperimentStatus::Paused);
 
         // Resume
-        experiment.resume().unwrap();
+        experiment.resume().expect("operation failed in test");
         assert_eq!(experiment.status(), ExperimentStatus::Running);
 
         // Conclude
-        experiment.conclude().unwrap();
+        experiment.conclude().expect("operation failed in test");
         assert_eq!(experiment.status(), ExperimentStatus::Concluded);
         assert!(experiment.end_time.is_some());
     }
@@ -315,8 +315,8 @@ mod tests {
             max_duration_hours: 24,
         };
 
-        let mut experiment = Experiment::new(config).unwrap();
-        experiment.start().unwrap();
+        let mut experiment = Experiment::new(config).expect("operation failed in test");
+        experiment.start().expect("operation failed in test");
 
         // Should not auto-conclude with no samples
         assert!(!experiment.should_auto_conclude());

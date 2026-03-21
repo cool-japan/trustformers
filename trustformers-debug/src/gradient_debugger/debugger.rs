@@ -550,7 +550,9 @@ impl GradientDebugger {
         recommendations.sort_by(|a, b| {
             let priority_cmp = b.priority.cmp(&a.priority);
             if priority_cmp == std::cmp::Ordering::Equal {
-                b.expected_impact.partial_cmp(&a.expected_impact).unwrap()
+                b.expected_impact
+                    .partial_cmp(&a.expected_impact)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             } else {
                 priority_cmp
             }
@@ -626,7 +628,10 @@ impl GradientDebugger {
         for (layer_name, history) in &self.gradient_histories {
             if !history.gradient_norms.is_empty() {
                 active_layers += 1;
-                let latest_norm = history.gradient_norms.back().unwrap();
+                let latest_norm = history
+                    .gradient_norms
+                    .back()
+                    .expect("gradient_norms should not be empty after is_empty check");
                 total_gradients += latest_norm;
 
                 // Check for basic problems

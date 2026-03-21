@@ -484,19 +484,19 @@ mod tests {
     fn test_memory_pool_allocation() {
         let mut pool = GpuMemoryPool::new(GpuBackend::Cpu);
 
-        let ptr1 = pool.allocate(1024).unwrap();
-        let ptr2 = pool.allocate(2048).unwrap();
+        let ptr1 = pool.allocate(1024).expect("operation failed in test");
+        let ptr2 = pool.allocate(2048).expect("operation failed in test");
 
         assert_ne!(ptr1, ptr2);
 
-        pool.deallocate(ptr1).unwrap();
-        pool.deallocate(ptr2).unwrap();
+        pool.deallocate(ptr1).expect("operation failed in test");
+        pool.deallocate(ptr2).expect("operation failed in test");
     }
 
     #[test]
     fn test_gpu_context_creation() {
         let device = GpuDevice::cpu();
-        let context = GpuContext::new(device).unwrap();
+        let context = GpuContext::new(device).expect("operation failed in test");
 
         assert_eq!(context.device.backend, GpuBackend::Cpu);
         assert!(!context.async_enabled);
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn test_gpu_initialization() {
-        let context = init_gpu(None).unwrap();
+        let context = init_gpu(None).expect("operation failed in test");
         assert!(context.device.is_available);
     }
 
@@ -584,15 +584,15 @@ mod tests {
     fn test_context_memory_operations() {
         let context = GpuContext::cpu();
 
-        let ptr = context.allocate(1024).unwrap();
+        let ptr = context.allocate(1024).expect("operation failed in test");
         assert!(ptr > 0);
 
-        let stats = context.memory_stats().unwrap();
+        let stats = context.memory_stats().expect("operation failed in test");
         assert_eq!(stats.0, 1024); // total allocated
 
-        context.deallocate(ptr).unwrap();
+        context.deallocate(ptr).expect("operation failed in test");
 
-        let stats_after = context.memory_stats().unwrap();
+        let stats_after = context.memory_stats().expect("operation failed in test");
         assert_eq!(stats_after.0, 0); // total allocated after free
     }
 
@@ -610,8 +610,8 @@ mod tests {
     fn test_manager_context_management() {
         let mut manager = GpuManager::new();
 
-        let context1 = manager.get_or_create_context(Some(0)).unwrap();
-        let context2 = manager.get_or_create_context(Some(0)).unwrap();
+        let context1 = manager.get_or_create_context(Some(0)).expect("operation failed in test");
+        let context2 = manager.get_or_create_context(Some(0)).expect("operation failed in test");
 
         // Should return the same context for the same device
         assert!(Arc::ptr_eq(&context1, &context2));

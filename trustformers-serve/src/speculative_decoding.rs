@@ -767,7 +767,7 @@ mod tests {
         let generated = decoder.generate(&context, 10, &draft_model, &target_model).await;
 
         assert!(generated.is_ok());
-        let tokens = generated.unwrap();
+        let tokens = generated.expect("generation should succeed in test");
         assert!(!tokens.is_empty());
         assert!(tokens.len() <= 10);
     }
@@ -783,7 +783,7 @@ mod tests {
         let generated = decoder.generate(&context, 4, &draft_model, &target_model).await;
 
         assert!(generated.is_ok());
-        let tokens = generated.unwrap();
+        let tokens = generated.expect("generation should succeed in test");
         assert_eq!(tokens.len(), 4);
         assert_eq!(tokens, vec![1, 2, 3, 4]);
 
@@ -803,7 +803,7 @@ mod tests {
         let generated = decoder.generate(&context, 4, &draft_model, &target_model).await;
 
         assert!(generated.is_ok());
-        let tokens = generated.unwrap();
+        let tokens = generated.expect("generation should succeed in test");
         assert_eq!(tokens.len(), 4);
         // All tokens should be the correction token (9999)
         for token in tokens {
@@ -845,8 +845,9 @@ mod tests {
             ..Default::default()
         };
 
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: SpeculativeDecodingConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("JSON serialization should succeed");
+        let deserialized: SpeculativeDecodingConfig =
+            serde_json::from_str(&json).expect("JSON parsing should succeed for valid test input");
 
         assert_eq!(
             config.max_speculation_length,
@@ -872,8 +873,9 @@ mod tests {
             ..Default::default()
         };
 
-        let json = serde_json::to_string(&stats).unwrap();
-        let deserialized: SpeculativeStats = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&stats).expect("JSON serialization should succeed");
+        let deserialized: SpeculativeStats =
+            serde_json::from_str(&json).expect("JSON parsing should succeed for valid test input");
 
         assert_eq!(stats.total_sequences, deserialized.total_sequences);
         assert_eq!(stats.total_draft_tokens, deserialized.total_draft_tokens);

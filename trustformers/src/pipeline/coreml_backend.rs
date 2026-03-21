@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn test_device_capabilities() {
         let config = CoreMLBackendConfig::for_ios();
-        let backend = CoreMLBackend::new(config).unwrap();
+        let backend = CoreMLBackend::new(config).expect("operation failed in test");
         let capabilities = backend.device_capabilities();
 
         assert!(capabilities.has_neural_engine);

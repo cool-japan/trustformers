@@ -1,9 +1,9 @@
 [package]
 name = "trustformers-py"
-version = "0.1.0-rc.1"
+version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-authors = ["TrustformeRS cool-japan Team (Team KitaSan)"]
+authors = ["COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>"]
 license = "Apache-2.0"
 repository = "https://github.com/cool-japan/trustformers"
 homepage = "https://github.com/cool-japan/trustformers"
@@ -13,7 +13,7 @@ categories = ["api-bindings", "science"]
 keywords = ["transformers", "python", "machine-learning", "nlp", "pyo3"]
 readme = "README.md"
 
-# Standalone crate (not part of main workspace for v0.1.0-rc.1)
+# Standalone crate (not part of main workspace for v0.1.0)
 [workspace]
 
 [lib]

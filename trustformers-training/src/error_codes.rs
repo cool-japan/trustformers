@@ -559,7 +559,7 @@ mod tests {
         let info = registry.get_code_info("TRAIN_NAN_LOSS");
         assert!(info.is_some());
 
-        let info = info.unwrap();
+        let info = info.expect("operation failed in test");
         assert_eq!(info.code, "TRAIN_NAN_LOSS");
         assert_eq!(info.severity, "CRITICAL");
         assert!(!info.causes.is_empty());

@@ -485,7 +485,7 @@ mod tests {
     #[test]
     fn test_parameter_group() {
         let mut group = ParameterGroup::new("test_group".to_string(), vec!["param1".to_string()]);
-        let tensor = Tensor::ones(&[2, 2]).unwrap();
+        let tensor = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
         group.add_parameter("param1".to_string(), tensor);
 
         assert_eq!(group.parameter_names.len(), 1);
@@ -495,12 +495,12 @@ mod tests {
 
     #[test]
     fn test_gradient_buffer() {
-        let tensor = Tensor::ones(&[2, 2]).unwrap();
+        let tensor = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
         let partition_info = PartitionInfo::default();
         let mut buffer = GradientBuffer::new("test_grad".to_string(), tensor, partition_info);
 
-        let grad = Tensor::ones(&[2, 2]).unwrap();
-        buffer.accumulate(&grad).unwrap();
+        let grad = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
+        buffer.accumulate(&grad).expect("Operation failed in test");
 
         assert_eq!(buffer.accumulation_steps, 1);
         assert!(buffer.get_accumulated().is_some());
@@ -509,10 +509,16 @@ mod tests {
     #[test]
     fn test_partition_parameters() {
         let mut params = HashMap::new();
-        params.insert("param1".to_string(), Tensor::ones(&[4, 4]).unwrap());
-        params.insert("param2".to_string(), Tensor::ones(&[2, 2]).unwrap());
+        params.insert(
+            "param1".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
+        params.insert(
+            "param2".to_string(),
+            Tensor::ones(&[2, 2]).expect("Failed to create tensor"),
+        );
 
-        let partitions = partition_parameters(&params, 2, 0).unwrap();
+        let partitions = partition_parameters(&params, 2, 0).expect("Operation failed in test");
         assert_eq!(partitions.len(), 2);
 
         for partition in partitions.values() {

@@ -309,7 +309,8 @@ mod tests {
         token_map.insert("world".to_string(), 1);
         token_map.insert("test".to_string(), 2);
 
-        let compressed_vocab = CompressedVocab::from_token_map(token_map).unwrap();
+        let compressed_vocab =
+            CompressedVocab::from_token_map(token_map).expect("Operation failed in test");
 
         assert_eq!(compressed_vocab.get_id("hello"), Some(0));
         assert_eq!(compressed_vocab.get_id("world"), Some(1));
@@ -333,7 +334,8 @@ mod tests {
             token_map.insert(format!("token_{}", i), i);
         }
 
-        let compressed_vocab = CompressedVocab::from_token_map(token_map).unwrap();
+        let compressed_vocab =
+            CompressedVocab::from_token_map(token_map).expect("Operation failed in test");
         let stats = compressed_vocab.memory_stats();
 
         assert_eq!(stats.vocab_size, 100);
@@ -350,7 +352,8 @@ mod tests {
             token_map.insert(format!("token_{}", i), i);
         }
 
-        let compressed_vocab = CompressedVocab::from_token_map(token_map).unwrap();
+        let compressed_vocab =
+            CompressedVocab::from_token_map(token_map).expect("Operation failed in test");
 
         // Should have frequent tokens (first 150, all are frequent since < 1000)
         assert_eq!(compressed_vocab.frequent_tokens.len(), 150);
@@ -367,7 +370,8 @@ mod tests {
             token_map.insert(format!("token_{}", i), i);
         }
 
-        let mut compressed_vocab = CompressedVocab::from_token_map(token_map).unwrap();
+        let mut compressed_vocab =
+            CompressedVocab::from_token_map(token_map).expect("Operation failed in test");
         compressed_vocab.optimize();
 
         assert!(compressed_vocab.frequent_tokens.len() <= 1000);
@@ -399,7 +403,8 @@ mod tests {
         token_map.insert("prefix_2".to_string(), 2);
         token_map.insert("other".to_string(), 3);
 
-        let compressed_vocab = CompressedVocab::from_token_map(token_map).unwrap();
+        let compressed_vocab =
+            CompressedVocab::from_token_map(token_map).expect("Operation failed in test");
         let results = compressed_vocab.find_tokens_with_prefix("prefix_");
 
         assert_eq!(results.len(), 2);
@@ -414,7 +419,8 @@ mod tests {
         token_map.insert("testing".to_string(), 2);
         token_map.insert("other".to_string(), 3);
 
-        let compressed_vocab = CompressedVocab::from_token_map(token_map).unwrap();
+        let compressed_vocab =
+            CompressedVocab::from_token_map(token_map).expect("Operation failed in test");
         let trie = compressed_vocab.build_prefix_trie();
 
         let results = trie.find_with_prefix("test");

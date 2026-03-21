@@ -875,7 +875,8 @@ mod tests {
         file.write_u64::<LittleEndian>(0)?; // tensor count
         file.write_u64::<LittleEndian>(0)?; // kv count
 
-        let report = GGUFConverter::validate_file(temp_file.to_str().unwrap())?;
+        let report =
+            GGUFConverter::validate_file(temp_file.to_str().expect("temp file creation failed"))?;
         assert!(report.is_valid);
         assert_eq!(report.version, GGUF_VERSION);
         assert_eq!(report.tensor_count, 0);

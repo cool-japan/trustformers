@@ -1665,7 +1665,7 @@ mod tests {
         let manager = TensorRTPipelineManager::new(config);
 
         assert_eq!(manager.list_models().len(), 0);
-        assert_eq!(manager.cache_size().unwrap(), 0);
+        assert_eq!(manager.cache_size().expect("operation failed in test"), 0);
     }
 
     #[test]

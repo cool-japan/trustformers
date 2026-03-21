@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Real CUDA implementation for TrustformeRS hardware acceleration
@@ -923,7 +923,7 @@ mod tests {
             cuda.matmul(&a, &b, &mut c).expect("Matrix multiplication failed");
 
             // Result should be all 4s (4x4 matrix of ones * 4x4 matrix of ones)
-            let data = c.data_f32().unwrap();
+            let data = c.data_f32().expect("operation failed in test");
             assert!(data.iter().all(|&x| (x - 4.0).abs() < 1e-6));
         }
     }

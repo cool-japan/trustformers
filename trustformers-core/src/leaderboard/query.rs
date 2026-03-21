@@ -392,7 +392,7 @@ impl QueryBuilder {
     pub fn category(self, category: LeaderboardCategory) -> Self {
         self.filter(
             FilterType::Category,
-            serde_json::to_value(category).unwrap(),
+            serde_json::to_value(category).expect("LeaderboardCategory should always serialize"),
         )
     }
 

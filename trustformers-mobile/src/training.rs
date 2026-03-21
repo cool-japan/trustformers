@@ -615,12 +615,13 @@ mod tests {
     fn test_training_initialization() {
         let training_config = OnDeviceTrainingConfig::default();
         let mobile_config = crate::MobileConfig::default();
-        let mut trainer = OnDeviceTrainer::new(training_config, mobile_config).unwrap();
+        let mut trainer =
+            OnDeviceTrainer::new(training_config, mobile_config).expect("operation failed in test");
 
         let mut base_params = HashMap::new();
         base_params.insert(
             "attention.linear".to_string(),
-            Tensor::randn(&[128, 128]).unwrap(),
+            Tensor::randn(&[128, 128]).expect("tensor operation failed"),
         );
 
         let result = trainer.initialize_training(base_params);

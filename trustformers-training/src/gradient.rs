@@ -129,8 +129,8 @@ mod tests {
     #[test]
     fn test_clip_grad_norm() {
         let mut gradients = vec![
-            Tensor::zeros(&[2, 2]).unwrap(),
-            Tensor::zeros(&[3, 3]).unwrap(),
+            Tensor::zeros(&[2, 2]).expect("tensor operation failed"),
+            Tensor::zeros(&[3, 3]).expect("tensor operation failed"),
         ];
 
         // Set some values
@@ -145,7 +145,8 @@ mod tests {
         }
 
         // Total norm should be sqrt(5^2 + 10^2) = sqrt(125) ≈ 11.18
-        let norm = GradientUtils::clip_grad_norm(&mut gradients, 5.0).unwrap();
+        let norm =
+            GradientUtils::clip_grad_norm(&mut gradients, 5.0).expect("operation failed in test");
         assert!(norm > 11.0 && norm < 12.0);
 
         // After clipping, gradients should be scaled down
@@ -157,7 +158,7 @@ mod tests {
 
     #[test]
     fn test_clip_grad_value() {
-        let mut gradients = vec![Tensor::zeros(&[2, 2]).unwrap()];
+        let mut gradients = vec![Tensor::zeros(&[2, 2]).expect("tensor operation failed")];
 
         // Set some values that exceed clip_value
         if let Tensor::F32(ref mut arr) = gradients[0] {
@@ -167,7 +168,7 @@ mod tests {
             arr[[1, 1]] = -3.0;
         }
 
-        GradientUtils::clip_grad_value(&mut gradients, 5.0).unwrap();
+        GradientUtils::clip_grad_value(&mut gradients, 5.0).expect("operation failed in test");
 
         // Check that values are clipped
         if let Tensor::F32(ref arr) = gradients[0] {

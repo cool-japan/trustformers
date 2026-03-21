@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn test_error_manager_creation() {
         let manager = ErrorManager::new();
-        let stats = manager.get_statistics().unwrap();
+        let stats = manager.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_errors, 0);
     }
 
@@ -876,9 +876,15 @@ mod tests {
         assert_eq!(error.severity, ErrorSeverity::Critical);
         assert!(!error.recovery_suggestions.is_empty());
 
-        let stats = manager.get_statistics().unwrap();
+        let stats = manager.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_errors, 1);
-        assert_eq!(*stats.errors_by_type.get(&ErrorType::Training).unwrap(), 1);
+        assert_eq!(
+            *stats
+                .errors_by_type
+                .get(&ErrorType::Training)
+                .expect("expected value not found"),
+            1
+        );
     }
 
     #[test]
@@ -898,7 +904,7 @@ mod tests {
             }],
         };
 
-        manager.add_error_pattern(pattern).unwrap();
+        manager.add_error_pattern(pattern).expect("add operation failed");
 
         // Simulate multiple OOM errors
         let context = create_context!("trainer", "forward_pass");
@@ -913,7 +919,7 @@ mod tests {
         }
 
         // Pattern should be detected after 3 occurrences
-        let stats = manager.get_statistics().unwrap();
+        let stats = manager.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_errors, 3);
     }
 
@@ -960,23 +966,41 @@ mod tests {
             context,
         );
 
-        let stats = manager.get_statistics().unwrap();
+        let stats = manager.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_errors, 3);
-        assert_eq!(*stats.errors_by_type.get(&ErrorType::Training).unwrap(), 2);
         assert_eq!(
-            *stats.errors_by_type.get(&ErrorType::DataLoading).unwrap(),
+            *stats
+                .errors_by_type
+                .get(&ErrorType::Training)
+                .expect("expected value not found"),
+            2
+        );
+        assert_eq!(
+            *stats
+                .errors_by_type
+                .get(&ErrorType::DataLoading)
+                .expect("expected value not found"),
             1
         );
         assert_eq!(
-            *stats.errors_by_severity.get(&ErrorSeverity::Critical).unwrap(),
+            *stats
+                .errors_by_severity
+                .get(&ErrorSeverity::Critical)
+                .expect("expected value not found"),
             1
         );
         assert_eq!(
-            *stats.errors_by_severity.get(&ErrorSeverity::Medium).unwrap(),
+            *stats
+                .errors_by_severity
+                .get(&ErrorSeverity::Medium)
+                .expect("expected value not found"),
             1
         );
         assert_eq!(
-            *stats.errors_by_severity.get(&ErrorSeverity::High).unwrap(),
+            *stats
+                .errors_by_severity
+                .get(&ErrorSeverity::High)
+                .expect("expected value not found"),
             1
         );
     }
@@ -998,7 +1022,7 @@ mod tests {
             );
         }
 
-        let recent_errors = manager.get_recent_errors(3).unwrap();
+        let recent_errors = manager.get_recent_errors(3).expect("operation failed in test");
         assert_eq!(recent_errors.len(), 3);
 
         // Should be in reverse chronological order (most recent first)
@@ -1020,7 +1044,7 @@ mod tests {
             context,
         );
 
-        let json_export = manager.export_errors().unwrap();
+        let json_export = manager.export_errors().expect("operation failed in test");
         assert!(!json_export.is_empty());
         assert!(json_export.contains("TEST_001"));
         assert!(json_export.contains("Test error"));

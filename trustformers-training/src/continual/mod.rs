@@ -139,10 +139,10 @@ mod tests {
             created_at: chrono::Utc::now(),
         };
 
-        manager.add_task(task1).unwrap();
+        manager.add_task(task1).expect("add operation failed");
         assert_eq!(manager.get_task_count(), 1);
 
-        manager.set_current_task("task1".to_string()).unwrap();
+        manager.set_current_task("task1".to_string()).expect("operation failed in test");
         assert!(manager.get_current_task().is_some());
     }
 

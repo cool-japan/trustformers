@@ -347,7 +347,7 @@ mod tests {
         let streaming = StreamingTokenizer::new(tokenizer);
 
         let text = "Hello world! This is a test of streaming tokenization.";
-        let chunks = streaming.process_text(text).unwrap();
+        let chunks = streaming.process_text(text).expect("Operation failed in test");
 
         assert!(!chunks.is_empty());
         // Each chunk should have tokenized content
@@ -366,7 +366,7 @@ mod tests {
             .with_max_chunk_length(20);
 
         let text = "This is a longer text that should be split into multiple chunks based on the buffer size.";
-        let chunks = streaming.process_text(text).unwrap();
+        let chunks = streaming.process_text(text).expect("Operation failed in test");
 
         assert!(chunks.len() > 1);
 
@@ -383,7 +383,7 @@ mod tests {
 
         let text = "Line 1\nLine 2\nLine 3\n";
         let cursor = Cursor::new(text.as_bytes());
-        let chunks = streaming.process_stream(cursor).unwrap();
+        let chunks = streaming.process_stream(cursor).expect("Operation failed in test");
 
         assert!(!chunks.is_empty());
         for chunk in chunks {
@@ -402,7 +402,7 @@ mod tests {
             "Third line".to_string(),
         ];
 
-        let chunks = streaming.process_lines(lines.into_iter()).unwrap();
+        let chunks = streaming.process_lines(lines.into_iter()).expect("Operation failed in test");
         assert!(!chunks.is_empty());
     }
 
@@ -417,7 +417,7 @@ mod tests {
             "Third text to tokenize".to_string(),
         ];
 
-        let results = batched.process_text_batch(&texts).unwrap();
+        let results = batched.process_text_batch(&texts).expect("Operation failed in test");
         assert_eq!(results.len(), 3);
 
         for result in results {
@@ -437,7 +437,7 @@ mod tests {
         let iterator = TextFileIterator::new(buf_reader, 10, 2);
 
         let chunks: std::result::Result<Vec<_>, _> = iterator.collect();
-        let chunks = chunks.unwrap();
+        let chunks = chunks.expect("Operation failed in test");
 
         assert!(!chunks.is_empty());
         for chunk in chunks {
@@ -450,7 +450,7 @@ mod tests {
         let tokenizer = create_test_tokenizer();
         let streaming = StreamingTokenizer::new(tokenizer);
 
-        let chunks = streaming.process_text("").unwrap();
+        let chunks = streaming.process_text("").expect("Operation failed in test");
         assert_eq!(chunks.len(), 1); // Should have one empty chunk
         assert!(chunks[0].input_ids.is_empty() || chunks[0].input_ids.len() == 1);
         // Might have just padding

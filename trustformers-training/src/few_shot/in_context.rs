@@ -367,8 +367,8 @@ mod tests {
         let ex1 = ICLExample::new("What is 2+2?".to_string(), "4".to_string());
         let ex2 = ICLExample::new("What is 3+3?".to_string(), "6".to_string());
 
-        context.add_example(ex1).unwrap();
-        context.add_example(ex2).unwrap();
+        context.add_example(ex1).expect("add operation failed");
+        context.add_example(ex2).expect("add operation failed");
 
         let formatted = context.format_context("What is 4+4?", true);
         assert!(formatted.contains("Example 1:"));
@@ -389,10 +389,14 @@ mod tests {
 
         learner.add_task_examples("math".to_string(), examples);
 
-        let selected = learner.select_examples("math", "What is 5+5?", 2).unwrap();
+        let selected = learner
+            .select_examples("math", "What is 5+5?", 2)
+            .expect("operation failed in test");
         assert_eq!(selected.len(), 2);
 
-        let context = learner.create_context("math", "What is 5+5?").unwrap();
+        let context = learner
+            .create_context("math", "What is 5+5?")
+            .expect("operation failed in test");
         assert!(context.contains("Input: What is 5+5?"));
     }
 }

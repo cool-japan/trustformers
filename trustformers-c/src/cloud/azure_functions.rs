@@ -783,7 +783,7 @@ mod tests {
             app_insights: None,
         };
 
-        let function_json = AzureFunctionDeployment::generate_function_json(&config).unwrap();
+        let function_json = AzureFunctionDeployment::generate_function_json(&config).expect("generation should succeed in test");
         assert!(function_json.contains("httpTrigger"));
         assert!(function_json.contains("anonymous"));
     }

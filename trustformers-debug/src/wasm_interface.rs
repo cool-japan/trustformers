@@ -618,7 +618,7 @@ impl WasmUtils {
     /// Get library version
     #[wasm_bindgen]
     pub fn get_version() -> String {
-        "0.1.0-rc.1".to_string()
+        "0.1.0".to_string()
     }
 
     /// Check WebAssembly capabilities

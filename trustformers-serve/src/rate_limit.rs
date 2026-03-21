@@ -397,7 +397,7 @@ mod tests {
             global_limit: false,
         };
 
-        let service = RateLimitService::new(config).unwrap();
+        let service = RateLimitService::new(config).expect("test operation should succeed");
 
         // Should allow up to max_burst requests
         for _ in 0..5 {
@@ -421,7 +421,7 @@ mod tests {
             global_limit: false,
         };
 
-        let service = RateLimitService::new(config).unwrap();
+        let service = RateLimitService::new(config).expect("test operation should succeed");
 
         // Should allow max_requests
         for _ in 0..3 {
@@ -443,7 +443,7 @@ mod tests {
             per_ip_limits: true,
             ..Default::default()
         };
-        let service = RateLimitService::new(config).unwrap();
+        let service = RateLimitService::new(config).expect("test operation should succeed");
 
         assert_eq!(
             service.generate_key(Some("user123"), Some("192.168.1.1")),

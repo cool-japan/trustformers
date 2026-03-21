@@ -892,7 +892,7 @@ mod tests {
         );
 
         assert!(manager.get_experiment(&experiment_id).is_some());
-        let experiment = manager.get_experiment(&experiment_id).unwrap();
+        let experiment = manager.get_experiment(&experiment_id).expect("operation failed in test");
         assert_eq!(experiment.name, "Test Experiment");
         assert_eq!(experiment.version, 1);
         assert_eq!(experiment.status, ExperimentStatus::Planning);
@@ -914,7 +914,8 @@ mod tests {
         );
 
         assert!(manager.get_hyperparameter_config(&config_id).is_some());
-        let config = manager.get_hyperparameter_config(&config_id).unwrap();
+        let config =
+            manager.get_hyperparameter_config(&config_id).expect("operation failed in test");
         assert_eq!(config.name, "Test Config");
         assert_eq!(config.version, 1);
     }
@@ -938,7 +939,9 @@ mod tests {
         let config_id2 =
             manager.create_hyperparameter_config("Config 2".to_string(), parameters2, None, None);
 
-        let comparison = manager.compare_hyperparameter_configs(&config_id1, &config_id2).unwrap();
+        let comparison = manager
+            .compare_hyperparameter_configs(&config_id1, &config_id2)
+            .expect("operation failed in test");
 
         assert_eq!(comparison.added.len(), 1);
         assert!(comparison.added.contains(&"weight_decay".to_string()));
@@ -969,7 +972,7 @@ mod tests {
         );
 
         assert!(manager.get_ab_test(&test_id).is_some());
-        let test = manager.get_ab_test(&test_id).unwrap();
+        let test = manager.get_ab_test(&test_id).expect("operation failed in test");
         assert_eq!(test.test_name, "Test A/B Test");
         assert_eq!(test.status, ABTestStatus::Planning);
     }
@@ -1015,7 +1018,9 @@ mod tests {
             environment,
         );
 
-        manager.update_experiment_status(&exp_id1, ExperimentStatus::Completed).unwrap();
+        manager
+            .update_experiment_status(&exp_id1, ExperimentStatus::Completed)
+            .expect("operation failed in test");
 
         let filters = ExperimentFilters {
             status: Some(ExperimentStatus::Completed),

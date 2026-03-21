@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn test_bert_model_creation() {
         let config = BertConfig::tiny();
-        let model = BertModelWasm::new(config).unwrap();
+        let model = BertModelWasm::new(config).expect("test operation should succeed");
         assert_eq!(model.layers.len(), 2);
     }
 }

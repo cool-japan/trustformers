@@ -611,9 +611,9 @@ mod tests {
 
     #[test]
     fn test_plugin_registration() {
-        let name = CString::new("test-plugin").unwrap();
-        let version = CString::new("1.0.0").unwrap();
-        let path = CString::new("/path/to/plugin.so").unwrap();
+        let name = CString::new("test-plugin").expect("CString creation should succeed for valid test input");
+        let version = CString::new("1.0.0").expect("CString creation should succeed for valid test input");
+        let path = CString::new("/path/to/plugin.so").expect("CString creation should succeed for valid test input");
         let mut handle: TrustformersPluginHandle = 0;
 
         let caps = PluginCapabilities {
@@ -641,9 +641,9 @@ mod tests {
 
     #[test]
     fn test_plugin_find_by_name() {
-        let name = CString::new("findme-plugin").unwrap();
-        let version = CString::new("1.0.0").unwrap();
-        let path = CString::new("/path/to/plugin.so").unwrap();
+        let name = CString::new("findme-plugin").expect("CString creation should succeed for valid test input");
+        let version = CString::new("1.0.0").expect("CString creation should succeed for valid test input");
+        let path = CString::new("/path/to/plugin.so").expect("CString creation should succeed for valid test input");
         let mut handle: TrustformersPluginHandle = 0;
 
         let caps = PluginCapabilities::default();
@@ -670,9 +670,9 @@ mod tests {
 
     #[test]
     fn test_plugin_metadata() {
-        let name = CString::new("metadata-plugin").unwrap();
-        let version = CString::new("2.5.0").unwrap();
-        let path = CString::new("/path/to/plugin.so").unwrap();
+        let name = CString::new("metadata-plugin").expect("CString creation should succeed for valid test input");
+        let version = CString::new("2.5.0").expect("CString creation should succeed for valid test input");
+        let path = CString::new("/path/to/plugin.so").expect("CString creation should succeed for valid test input");
         let mut handle: TrustformersPluginHandle = 0;
 
         trustformers_plugin_register(

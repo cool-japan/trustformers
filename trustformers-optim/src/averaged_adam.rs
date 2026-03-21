@@ -587,14 +587,14 @@ mod tests {
     #[test]
     fn test_parameter_update() {
         let mut optimizer = AveragedAdam::new(0.1, (0.9, 0.999), 1e-8, 0.0, 0.999);
-        let mut param = Tensor::new(vec![1.0, 2.0, 3.0]).unwrap();
-        let grad = Tensor::new(vec![0.1, 0.2, 0.3]).unwrap();
+        let mut param = Tensor::new(vec![1.0, 2.0, 3.0]).expect("Failed to create tensor");
+        let grad = Tensor::new(vec![0.1, 0.2, 0.3]).expect("Failed to create tensor");
 
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
 
         // Check that parameters were updated
-        let updated_data = param.data().unwrap();
+        let updated_data = param.data().expect("Operation failed in test");
         assert!(updated_data[0] < 1.0);
         assert!(updated_data[1] < 2.0);
         assert!(updated_data[2] < 3.0);
@@ -603,12 +603,12 @@ mod tests {
     #[test]
     fn test_averaged_parameters() {
         let mut optimizer = AveragedAdam::new(0.1, (0.9, 0.999), 1e-8, 0.0, 0.9);
-        let mut param = Tensor::new(vec![1.0, 2.0]).unwrap();
-        let grad = Tensor::new(vec![0.1, 0.2]).unwrap();
+        let mut param = Tensor::new(vec![1.0, 2.0]).expect("Failed to create tensor");
+        let grad = Tensor::new(vec![0.1, 0.2]).expect("Failed to create tensor");
 
         // Perform several updates
         for _ in 0..10 {
-            optimizer.update(&mut param, &grad).unwrap();
+            optimizer.update(&mut param, &grad).expect("Optimizer update failed");
             optimizer.step();
         }
 
@@ -618,7 +618,7 @@ mod tests {
         let first_param_key = &param_keys[0];
         let averaged = optimizer.get_averaged_parameters(first_param_key);
         assert!(averaged.is_some());
-        assert_eq!(averaged.unwrap().len(), 2);
+        assert_eq!(averaged.expect("Operation failed in test").len(), 2);
     }
 
     #[test]
@@ -626,22 +626,22 @@ mod tests {
         let mut optimizer = AveragedAdam::new(0.1, (0.9, 0.999), 1e-8, 0.0, 0.9);
         optimizer.config.averaging_warmup = 0; // Disable warmup for test
 
-        let mut param = Tensor::new(vec![1.0]).unwrap();
-        let grad = Tensor::new(vec![0.1]).unwrap();
+        let mut param = Tensor::new(vec![1.0]).expect("Failed to create tensor");
+        let grad = Tensor::new(vec![0.1]).expect("Failed to create tensor");
 
         // Initial update without averaging
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
-        let standard_value = param.data().unwrap()[0];
+        let standard_value = param.data().expect("Operation failed in test")[0];
 
         // Reset and use averaged parameters
-        param = Tensor::new(vec![1.0]).unwrap();
+        param = Tensor::new(vec![1.0]).expect("Failed to create tensor");
         optimizer.reset_state();
         optimizer.use_averaged_parameters(true);
 
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
-        let averaged_value = param.data().unwrap()[0];
+        let averaged_value = param.data().expect("Operation failed in test")[0];
 
         // Values should be different when using averaging
         assert_ne!(standard_value, averaged_value);
@@ -650,15 +650,15 @@ mod tests {
     #[test]
     fn test_state_dict_operations() {
         let mut optimizer = AveragedAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.01, 0.999);
-        let mut param = Tensor::new(vec![1.0, 2.0]).unwrap();
-        let grad = Tensor::new(vec![0.1, 0.2]).unwrap();
+        let mut param = Tensor::new(vec![1.0, 2.0]).expect("Failed to create tensor");
+        let grad = Tensor::new(vec![0.1, 0.2]).expect("Failed to create tensor");
 
         // Perform update to create state
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
 
         // Save state
-        let state_dict = optimizer.state_dict().unwrap();
+        let state_dict = optimizer.state_dict().expect("Failed to get state dict");
         assert!(state_dict.contains_key("lr"));
         assert!(state_dict.contains_key("step"));
 
@@ -672,7 +672,7 @@ mod tests {
 
         // Create new optimizer and load state
         let mut new_optimizer = AveragedAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.01, 0.999);
-        new_optimizer.load_state_dict(state_dict).unwrap();
+        new_optimizer.load_state_dict(state_dict).expect("Failed to load state dict");
 
         // Check state was loaded correctly
         assert_eq!(new_optimizer.state().step, optimizer.state().step);
@@ -682,10 +682,10 @@ mod tests {
     #[test]
     fn test_memory_usage() {
         let mut optimizer = AveragedAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.01, 0.999);
-        let mut param = Tensor::new(vec![1.0; 100]).unwrap();
-        let grad = Tensor::new(vec![0.1; 100]).unwrap();
+        let mut param = Tensor::new(vec![1.0; 100]).expect("Failed to create tensor");
+        let grad = Tensor::new(vec![0.1; 100]).expect("Failed to create tensor");
 
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
 
         let memory_stats = optimizer.memory_usage();
         assert!(memory_stats.momentum_elements > 0);
@@ -722,14 +722,14 @@ mod tests {
         let mut optimizer = AveragedAdam::new(1e-3, (0.9, 0.999), 1e-8, 0.01, 0.999);
         assert_eq!(optimizer.num_parameters(), 0);
 
-        let mut param1 = Tensor::new(vec![1.0; 10]).unwrap();
-        let grad1 = Tensor::new(vec![0.1; 10]).unwrap();
-        optimizer.update(&mut param1, &grad1).unwrap();
+        let mut param1 = Tensor::new(vec![1.0; 10]).expect("Failed to create tensor");
+        let grad1 = Tensor::new(vec![0.1; 10]).expect("Failed to create tensor");
+        optimizer.update(&mut param1, &grad1).expect("Optimizer update failed");
         assert_eq!(optimizer.num_parameters(), 10);
 
-        let mut param2 = Tensor::new(vec![2.0; 20]).unwrap();
-        let grad2 = Tensor::new(vec![0.2; 20]).unwrap();
-        optimizer.update(&mut param2, &grad2).unwrap();
+        let mut param2 = Tensor::new(vec![2.0; 20]).expect("Failed to create tensor");
+        let grad2 = Tensor::new(vec![0.2; 20]).expect("Failed to create tensor");
+        optimizer.update(&mut param2, &grad2).expect("Optimizer update failed");
         assert_eq!(optimizer.num_parameters(), 30);
     }
 }

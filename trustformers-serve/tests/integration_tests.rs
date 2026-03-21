@@ -162,7 +162,10 @@ async fn test_inference_endpoints() {
     assert!(body["batch_id"].is_string());
     // API returns "results" not "responses"
     assert!(body["results"].is_array());
-    assert_eq!(body["results"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        body["results"].as_array().expect("operation failed in test").len(),
+        3
+    );
 }
 
 #[tokio::test]
@@ -296,7 +299,7 @@ async fn test_authentication_flow() {
     if response.status_code().is_success() {
         let body: Value = response.json();
         // API returns "access_token" not "token"
-        let token = body["access_token"].as_str().unwrap();
+        let token = body["access_token"].as_str().expect("operation failed in test");
 
         // Test accessing protected endpoint with valid token
         let response = server
@@ -323,9 +326,9 @@ async fn test_streaming_endpoints() {
             assert!(response
                 .headers()
                 .get("content-type")
-                .unwrap()
+                .expect("operation failed in test")
                 .to_str()
-                .unwrap()
+                .expect("operation failed in test")
                 .contains("text/event-stream"));
 
             // Response is created but will be dropped when task ends,
@@ -546,7 +549,7 @@ async fn test_end_to_end_workflow() {
 
     response.assert_status_ok();
     let inference_result: Value = response.json();
-    let request_id = inference_result["request_id"].as_str().unwrap();
+    let request_id = inference_result["request_id"].as_str().expect("operation failed in test");
 
     // 3. Check metrics were updated
     let response = server.get("/metrics").await;
@@ -559,7 +562,12 @@ async fn test_end_to_end_workflow() {
     let response = server.get("/admin/stats").await;
     response.assert_status_ok();
     let stats: Value = response.json();
-    assert!(stats["server_stats"]["total_requests"].as_u64().unwrap() > 0);
+    assert!(
+        stats["server_stats"]["total_requests"]
+            .as_u64()
+            .expect("operation failed in test")
+            > 0
+    );
 
     // 5. Test batch inference
     let batch_request = json!({
@@ -574,13 +582,16 @@ async fn test_end_to_end_workflow() {
     response.assert_status_ok();
     let batch_result: Value = response.json();
     // API returns "results" not "responses"
-    assert_eq!(batch_result["results"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        batch_result["results"].as_array().expect("operation failed in test").len(),
+        2
+    );
 
     println!("✅ End-to-end workflow test completed successfully");
     println!("   - Request ID: {}", request_id);
     println!(
         "   - Batch results: {}",
-        batch_result["results"].as_array().unwrap().len()
+        batch_result["results"].as_array().expect("operation failed in test").len()
     );
 }
 
@@ -630,7 +641,10 @@ async fn test_caching_batching_interaction() {
     let batch_result: Value = batch_response.json();
 
     // API returns "results" not "responses"
-    assert_eq!(batch_result["results"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        batch_result["results"].as_array().expect("operation failed in test").len(),
+        2
+    );
     println!("✅ Caching-Batching interaction test completed");
 }
 
@@ -666,7 +680,7 @@ async fn test_auth_metrics_interaction() {
     auth_response.assert_status_ok();
     let auth_result: Value = auth_response.json();
     // API returns "access_token" not "token"
-    let token = auth_result["access_token"].as_str().unwrap();
+    let token = auth_result["access_token"].as_str().expect("operation failed in test");
 
     // Test authenticated request
     let response = server
@@ -834,7 +848,12 @@ async fn test_load_balancing_health_interaction() {
     admin_response.assert_status_ok();
     let stats: Value = admin_response.json();
 
-    assert!(stats["server_stats"]["total_requests"].as_u64().unwrap() >= 10);
+    assert!(
+        stats["server_stats"]["total_requests"]
+            .as_u64()
+            .expect("operation failed in test")
+            >= 10
+    );
     println!("✅ Load Balancing-Health interaction test completed");
 }
 
@@ -908,7 +927,10 @@ async fn test_comprehensive_multi_service_workflow() {
     let batch_result: Value = batch_response.json();
 
     // API returns "results" not "responses"
-    assert_eq!(batch_result["results"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        batch_result["results"].as_array().expect("operation failed in test").len(),
+        3
+    );
 
     // 3. Test streaming with monitoring
     let stream_request = json!({
@@ -962,14 +984,19 @@ async fn test_comprehensive_multi_service_workflow() {
     admin_stats.assert_status_ok();
     let stats: Value = admin_stats.json();
 
-    assert!(stats["server_stats"]["total_requests"].as_u64().unwrap() > 0);
+    assert!(
+        stats["server_stats"]["total_requests"]
+            .as_u64()
+            .expect("operation failed in test")
+            > 0
+    );
     assert!(stats["batching_stats"].is_object());
     assert!(stats["caching_stats"].is_object());
 
     println!("✅ Comprehensive multi-service workflow test completed");
     println!(
         "   - Batch results: {}",
-        batch_result["results"].as_array().unwrap().len()
+        batch_result["results"].as_array().expect("operation failed in test").len()
     );
     // GraphQL health may not be fully implemented
     if graphql_result["data"]["health"]["status"].is_string() {

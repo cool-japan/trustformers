@@ -1023,17 +1023,20 @@ mod tests {
     #[tokio::test]
     async fn test_kernel_fusion_service_creation() {
         let config = KernelFusionConfig::default();
-        let service = KernelFusionService::new(config).unwrap();
+        let service = KernelFusionService::new(config).expect("test operation should succeed");
         assert!(service.config.enabled);
     }
 
     #[tokio::test]
     async fn test_kernel_registration() {
         let config = KernelFusionConfig::default();
-        let service = KernelFusionService::new(config).unwrap();
+        let service = KernelFusionService::new(config).expect("test operation should succeed");
 
         let kernel = create_test_kernel("test_kernel");
-        service.register_kernel(kernel).await.unwrap();
+        service
+            .register_kernel(kernel)
+            .await
+            .expect("registration should succeed in test");
 
         let stats = service.get_stats().await;
         assert_eq!(stats.kernels_registered, 1);
@@ -1043,15 +1046,21 @@ mod tests {
     async fn test_fusion_opportunity_analysis() {
         let mut config = KernelFusionConfig::default();
         config.fusion_threshold = 0.3; // Lower threshold to allow test kernels to pass
-        let service = KernelFusionService::new(config).unwrap();
+        let service = KernelFusionService::new(config).expect("test operation should succeed");
 
         // Register multiple kernels
         for i in 0..5 {
             let kernel = create_test_kernel(&format!("kernel_{}", i));
-            service.register_kernel(kernel).await.unwrap();
+            service
+                .register_kernel(kernel)
+                .await
+                .expect("registration should succeed in test");
         }
 
-        let opportunities = service.analyze_fusion_opportunities().await.unwrap();
+        let opportunities = service
+            .analyze_fusion_opportunities()
+            .await
+            .expect("async operation should succeed in test");
         assert!(!opportunities.is_empty());
     }
 

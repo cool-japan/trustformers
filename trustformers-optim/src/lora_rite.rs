@@ -678,15 +678,15 @@ mod tests {
         gradients.insert("layer1_b".to_string(), Tensor::ones(&[2, 4])? * 0.1);
 
         // Store original values
-        let orig_a = parameters.get("layer1_a").unwrap().clone();
-        let orig_b = parameters.get("layer1_b").unwrap().clone();
+        let orig_a = parameters.get("layer1_a").expect("Key not found").clone();
+        let orig_b = parameters.get("layer1_b").expect("Key not found").clone();
 
         // Perform optimization step
         optimizer.step(&mut parameters, &gradients)?;
 
         // Check that parameters were updated
-        let updated_a = parameters.get("layer1_a").unwrap();
-        let updated_b = parameters.get("layer1_b").unwrap();
+        let updated_a = parameters.get("layer1_a").expect("Key not found");
+        let updated_b = parameters.get("layer1_b").expect("Key not found");
 
         assert_ne!(updated_a.mean()?.to_scalar::<f32>()?, orig_a.mean()?.to_scalar::<f32>()?);
         assert_ne!(updated_b.mean()?.to_scalar::<f32>()?, orig_b.mean()?.to_scalar::<f32>()?);
@@ -774,11 +774,11 @@ mod tests {
         let mut gradients = HashMap::new();
         gradients.insert("layer1_a".to_string(), Tensor::zeros(&[2, 2])?);
 
-        let initial_param_value = parameters.get("layer1_a").unwrap().mean()?.to_scalar::<f32>()?;
+        let initial_param_value = parameters.get("layer1_a").expect("Key not found").mean()?.to_scalar::<f32>()?;
 
         optimizer.step(&mut parameters, &gradients)?;
 
-        let final_param_value = parameters.get("layer1_a").unwrap().mean()?.to_scalar::<f32>()?;
+        let final_param_value = parameters.get("layer1_a").expect("Key not found").mean()?.to_scalar::<f32>()?;
 
         // With weight decay, parameter should decrease even with zero gradient
         assert!(final_param_value < initial_param_value);

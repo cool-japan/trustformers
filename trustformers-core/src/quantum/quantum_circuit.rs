@@ -446,7 +446,7 @@ mod tests {
         circuit.add_rotation(0, RotationAxis::X, std::f64::consts::PI);
 
         let initial_state = QuantumState::zero_state(1);
-        let result = circuit.execute(&initial_state).unwrap();
+        let result = circuit.execute(&initial_state).expect("operation failed in test");
 
         assert!(result.amplitudes[0].magnitude() < 1e-10);
         assert!((result.amplitudes[1].magnitude() - 1.0).abs() < 1e-10);
@@ -458,7 +458,7 @@ mod tests {
         let qubits = vec![0, 1, 2];
         let parameters = vec![0.1, 0.2, 0.3];
 
-        let circuit = ansatz.build_circuit(&qubits, &parameters).unwrap();
+        let circuit = ansatz.build_circuit(&qubits, &parameters).expect("operation failed in test");
         assert_eq!(circuit.num_qubits, 3);
         assert!(!circuit.gates.is_empty());
     }
@@ -469,7 +469,7 @@ mod tests {
         let qubits = vec![0, 1];
         let parameters = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
 
-        let circuit = ansatz.build_circuit(&qubits, &parameters).unwrap();
+        let circuit = ansatz.build_circuit(&qubits, &parameters).expect("operation failed in test");
         assert_eq!(circuit.num_qubits, 2);
 
         let num_params = ansatz.num_parameters(2);

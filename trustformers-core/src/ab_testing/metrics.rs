@@ -353,7 +353,7 @@ mod tests {
                 MetricType::Latency,
                 MetricValue::Duration(100),
             )
-            .unwrap();
+            .expect("operation failed in test");
         collector
             .record(
                 "exp1",
@@ -361,7 +361,7 @@ mod tests {
                 MetricType::Latency,
                 MetricValue::Duration(150),
             )
-            .unwrap();
+            .expect("operation failed in test");
         collector
             .record(
                 "exp1",
@@ -369,12 +369,12 @@ mod tests {
                 MetricType::Latency,
                 MetricValue::Duration(120),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Get aggregated metrics
         let aggregated = collector
             .get_aggregated_metrics("exp1", &variant, &MetricType::Latency)
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(aggregated.count, 3);
         assert_eq!(aggregated.mean, 123.33333333333333);
@@ -395,7 +395,7 @@ mod tests {
                 MetricType::Accuracy,
                 MetricValue::Numeric(0.95),
             )
-            .unwrap();
+            .expect("operation failed in test");
         collector
             .record(
                 "exp1",
@@ -403,7 +403,7 @@ mod tests {
                 MetricType::ErrorRate,
                 MetricValue::Numeric(0.02),
             )
-            .unwrap();
+            .expect("operation failed in test");
         collector
             .record(
                 "exp1",
@@ -411,10 +411,10 @@ mod tests {
                 MetricType::ConversionRate,
                 MetricValue::Boolean(true),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Verify metrics were recorded
-        let metrics = collector.get_metrics("exp1").unwrap();
+        let metrics = collector.get_metrics("exp1").expect("operation failed in test");
         assert!(metrics.len() >= 3);
     }
 
@@ -432,13 +432,14 @@ mod tests {
                     MetricType::Throughput,
                     MetricValue::Numeric(100.0 + i as f64),
                 )
-                .unwrap();
+                .expect("operation failed in test");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         // Get time series
-        let time_series =
-            collector.get_time_series("exp1", &variant, &MetricType::Throughput).unwrap();
+        let time_series = collector
+            .get_time_series("exp1", &variant, &MetricType::Throughput)
+            .expect("operation failed in test");
 
         assert_eq!(time_series.len(), 10);
 

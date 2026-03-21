@@ -679,7 +679,7 @@ mod tests {
 
         analyzer.analyze_layer_gradients("test_layer", &gradients)?;
 
-        let stats = analyzer.get_layer_stats("test_layer").unwrap();
+        let stats = analyzer.get_layer_stats("test_layer").expect("operation failed in test");
         assert_eq!(stats.layer_name, "test_layer");
         assert_eq!(stats.update_count, 1);
 
@@ -701,7 +701,7 @@ mod tests {
 
         analyzer.analyze_layer_gradients("vanishing_layer", &gradients)?;
 
-        let stats = analyzer.get_layer_stats("vanishing_layer").unwrap();
+        let stats = analyzer.get_layer_stats("vanishing_layer").expect("operation failed in test");
         assert!(stats.flow_health.is_vanishing);
         assert!(!stats.flow_health.recommendations.is_empty());
 
@@ -723,7 +723,7 @@ mod tests {
 
         analyzer.analyze_layer_gradients("exploding_layer", &gradients)?;
 
-        let stats = analyzer.get_layer_stats("exploding_layer").unwrap();
+        let stats = analyzer.get_layer_stats("exploding_layer").expect("operation failed in test");
         assert!(stats.flow_health.is_exploding);
         assert!(!stats.flow_health.recommendations.is_empty());
 

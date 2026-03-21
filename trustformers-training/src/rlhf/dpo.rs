@@ -75,11 +75,9 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
 
         match self.config.loss_type {
             DPOLossType::Sigmoid => {
-                // DPO loss: -log(sigmoid(beta * (log pi(y_w|x) - log pi(y_l|x) - log ref(y_w|x) + log ref(y_l|x))))
-                let neg_logits = logits.mul_scalar(-1.0)?;
-                // Simplified DPO loss using softmax (log operations not yet implemented)
-                let probs = neg_logits.softmax(-1)?;
-                let loss = probs.neg()?;
+                // DPO loss: -log(sigmoid(beta * (log_ratio_chosen - log_ratio_rejected)))
+                // = -log(sigmoid(logits))
+                let loss = logits.sigmoid()?.log()?.neg()?;
                 Ok(loss.mean()?)
             },
             DPOLossType::Hinge => {
@@ -96,12 +94,32 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
                 Ok(loss.mean()?)
             },
             DPOLossType::Kto => {
-                // KTO loss: simplified version
-                // Simplified loss using sigmoid (log operations not yet implemented)
-                let loss = logits.sigmoid()?.neg()?;
+                // KTO loss: -log(sigmoid(logits))
+                let loss = logits.sigmoid()?.log()?.neg()?;
                 Ok(loss.mean()?)
             },
         }
+    }
+
+    /// Compute preference accuracy: fraction of examples where the model
+    /// prefers the chosen response over the rejected one.
+    /// accuracy = (logits > 0).float().mean()
+    /// where logits = beta * (log_ratio_chosen - log_ratio_rejected)
+    pub fn compute_preference_accuracy(
+        &self,
+        policy_chosen_logps: &Tensor,
+        policy_rejected_logps: &Tensor,
+        reference_chosen_logps: &Tensor,
+        reference_rejected_logps: &Tensor,
+    ) -> Result<Tensor> {
+        let pi_logratios = policy_chosen_logps.sub(policy_rejected_logps)?;
+        let ref_logratios = reference_chosen_logps.sub(reference_rejected_logps)?;
+        let logits = pi_logratios.sub(&ref_logratios)?.mul_scalar(self.config.beta)?;
+
+        // (logits > 0).float().mean()
+        let zeros = Tensor::zeros(&logits.shape())?;
+        let preferred = logits.greater(&zeros)?;
+        Ok(preferred.mean()?)
     }
 
     pub fn get_batch_logps(
@@ -110,9 +128,8 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
         labels: &Tensor,
         _average_log_prob: bool,
     ) -> Result<Tensor> {
-        // Convert logits to log probabilities
-        // Use softmax instead of log_softmax for now
-        let log_probs = logits.softmax(-1)?;
+        // Convert logits to log probabilities using log_softmax
+        let log_probs = logits.log_softmax(-1)?;
 
         // Gather log probabilities for the target tokens
         let batch_size = labels.shape()[0];
@@ -187,8 +204,13 @@ impl<M: Model<Input = Tensor, Output = Tensor>> DPOTrainer<M> {
             .mul_scalar(self.config.beta)?;
         let reward_margins = chosen_rewards.sub(&rejected_rewards)?;
 
-        // Compute accuracy (how often chosen is preferred) - simplified implementation
-        let accuracy = reward_margins.mean()?; // Simplified for now
+        // Compute preference accuracy: fraction of examples where chosen is preferred
+        let accuracy = self.compute_preference_accuracy(
+            &policy_chosen_logps,
+            &policy_rejected_logps,
+            &reference_chosen_logps,
+            &reference_rejected_logps,
+        )?;
 
         Ok(DPOLoss {
             loss,
@@ -343,6 +365,216 @@ mod tests {
     }
 
     #[test]
+    fn test_sigmoid_dpo_loss_known_values() {
+        // When logits = 0, sigmoid(0) = 0.5, -log(0.5) = ln(2) ≈ 0.6931
+        let config = DPOConfig {
+            beta: 1.0,
+            loss_type: DPOLossType::Sigmoid,
+            ..DPOConfig::default()
+        };
+
+        // policy_chosen = [1.0], policy_rejected = [1.0] => pi_logratios = 0
+        // ref_chosen = [0.0], ref_rejected = [0.0] => ref_logratios = 0
+        // logits = beta * (0 - 0) = 0
+        // loss = -log(sigmoid(0)) = -log(0.5) = ln(2) ≈ 0.6931
+        let chosen = Tensor::new(vec![1.0f32]).expect("tensor creation failed");
+        let rejected = Tensor::new(vec![1.0f32]).expect("tensor creation failed");
+        let ref_chosen = Tensor::new(vec![0.0f32]).expect("tensor creation failed");
+        let ref_rejected = Tensor::new(vec![0.0f32]).expect("tensor creation failed");
+
+        // Create a dummy model - we only need compute_loss, so use a minimal struct
+        // Instead, call compute_loss directly by constructing the trainer struct fields
+        // We need a Model impl. Let's test the math directly instead.
+        // sigmoid(0) = 0.5, log(0.5) = -0.6931, neg => 0.6931
+        let pi_logratios = chosen.sub(&rejected).expect("sub failed");
+        let ref_logratios = ref_chosen.sub(&ref_rejected).expect("sub failed");
+        let logits = pi_logratios
+            .sub(&ref_logratios)
+            .expect("sub failed")
+            .mul_scalar(config.beta)
+            .expect("mul failed");
+        let loss = logits
+            .sigmoid()
+            .expect("sigmoid failed")
+            .log()
+            .expect("log failed")
+            .neg()
+            .expect("neg failed");
+        let loss_val: f32 = loss.item().expect("item failed");
+        let expected = 2.0f32.ln(); // ln(2) ≈ 0.6931
+        assert!(
+            (loss_val - expected).abs() < 1e-4,
+            "Expected {expected}, got {loss_val}"
+        );
+    }
+
+    #[test]
+    fn test_sigmoid_dpo_loss_positive_logits() {
+        // When chosen is clearly preferred: logits = 2.0
+        // sigmoid(2.0) ≈ 0.8808, -log(0.8808) ≈ 0.1269
+        let logits = Tensor::new(vec![2.0f32]).expect("tensor creation failed");
+        let loss = logits
+            .sigmoid()
+            .expect("sigmoid failed")
+            .log()
+            .expect("log failed")
+            .neg()
+            .expect("neg failed");
+        let loss_val: f32 = loss.item().expect("item failed");
+        let expected = -(1.0f32 / (1.0 + (-2.0f32).exp())).ln();
+        assert!(
+            (loss_val - expected).abs() < 1e-4,
+            "Expected {expected}, got {loss_val}"
+        );
+    }
+
+    #[test]
+    fn test_sigmoid_dpo_loss_negative_logits() {
+        // When rejected is preferred: logits = -2.0
+        // sigmoid(-2.0) ≈ 0.1192, -log(0.1192) ≈ 2.1269
+        let logits = Tensor::new(vec![-2.0f32]).expect("tensor creation failed");
+        let loss = logits
+            .sigmoid()
+            .expect("sigmoid failed")
+            .log()
+            .expect("log failed")
+            .neg()
+            .expect("neg failed");
+        let loss_val: f32 = loss.item().expect("item failed");
+        let expected = -(1.0f32 / (1.0 + 2.0f32.exp())).ln();
+        assert!(
+            (loss_val - expected).abs() < 1e-4,
+            "Expected {expected}, got {loss_val}"
+        );
+    }
+
+    #[test]
+    fn test_preference_accuracy_all_correct() {
+        // When all logits > 0, accuracy should be 1.0
+        let chosen = Tensor::new(vec![2.0f32, 3.0, 4.0]).expect("tensor creation failed");
+        let rejected = Tensor::new(vec![1.0f32, 1.0, 1.0]).expect("tensor creation failed");
+        let ref_logps = Tensor::new(vec![0.0f32, 0.0, 0.0]).expect("tensor creation failed");
+
+        let pi_logratios = chosen.sub(&rejected).expect("sub failed");
+        let ref_logratios = ref_logps.sub(&ref_logps).expect("sub failed");
+        let logits = pi_logratios
+            .sub(&ref_logratios)
+            .expect("sub failed")
+            .mul_scalar(1.0)
+            .expect("mul failed");
+
+        let zeros = Tensor::zeros(&logits.shape()).expect("zeros failed");
+        let preferred = logits.greater(&zeros).expect("greater failed");
+        let accuracy: f32 = preferred.mean().expect("mean failed").item().expect("item failed");
+        assert!(
+            (accuracy - 1.0).abs() < 1e-6,
+            "Expected 1.0, got {accuracy}"
+        );
+    }
+
+    #[test]
+    fn test_preference_accuracy_half_correct() {
+        // When half logits > 0, accuracy should be 0.5
+        let chosen = Tensor::new(vec![2.0f32, 0.5, -1.0, -2.0]).expect("tensor creation failed");
+        let rejected = Tensor::new(vec![0.0f32, 0.0, 0.0, 0.0]).expect("tensor creation failed");
+        let ref_logps = Tensor::new(vec![0.0f32, 0.0, 0.0, 0.0]).expect("tensor creation failed");
+
+        let pi_logratios = chosen.sub(&rejected).expect("sub failed");
+        let ref_logratios = ref_logps.sub(&ref_logps).expect("sub failed");
+        let logits = pi_logratios
+            .sub(&ref_logratios)
+            .expect("sub failed")
+            .mul_scalar(1.0)
+            .expect("mul failed");
+
+        let zeros = Tensor::zeros(&logits.shape()).expect("zeros failed");
+        let preferred = logits.greater(&zeros).expect("greater failed");
+        let accuracy: f32 = preferred.mean().expect("mean failed").item().expect("item failed");
+        assert!(
+            (accuracy - 0.5).abs() < 1e-6,
+            "Expected 0.5, got {accuracy}"
+        );
+    }
+
+    #[test]
+    fn test_log_softmax_produces_log_probabilities() {
+        // log_softmax output should sum to < 0 (all values negative) and
+        // exp(log_softmax) should sum to 1.0
+        let logits =
+            Tensor::from_vec(vec![1.0f32, 2.0, 3.0], &[1, 3]).expect("tensor creation failed");
+        let log_probs = logits.log_softmax(-1).expect("log_softmax failed");
+
+        // All log probs should be <= 0
+        let max_val = log_probs.get_scalar(&[0, 2]).expect("get_scalar failed");
+        assert!(max_val <= 0.0, "Log prob should be <= 0, got {max_val}");
+
+        // exp(log_softmax) should sum to ~1.0
+        // log_softmax([1,2,3]) = [x - log(e^1 + e^2 + e^3)] for each x
+        let denom = 1.0f32.exp() + 2.0f32.exp() + 3.0f32.exp();
+        let expected_0 = 1.0 - denom.ln();
+        let expected_1 = 2.0 - denom.ln();
+        let expected_2 = 3.0 - denom.ln();
+
+        let v0 = log_probs.get_scalar(&[0, 0]).expect("get_scalar failed");
+        let v1 = log_probs.get_scalar(&[0, 1]).expect("get_scalar failed");
+        let v2 = log_probs.get_scalar(&[0, 2]).expect("get_scalar failed");
+
+        assert!(
+            (v0 - expected_0).abs() < 1e-4,
+            "Expected {expected_0}, got {v0}"
+        );
+        assert!(
+            (v1 - expected_1).abs() < 1e-4,
+            "Expected {expected_1}, got {v1}"
+        );
+        assert!(
+            (v2 - expected_2).abs() < 1e-4,
+            "Expected {expected_2}, got {v2}"
+        );
+
+        // exp values should sum to 1.0
+        let sum = v0.exp() + v1.exp() + v2.exp();
+        assert!(
+            (sum - 1.0).abs() < 1e-4,
+            "exp(log_softmax) should sum to 1.0, got {sum}"
+        );
+    }
+
+    #[test]
+    fn test_hinge_loss_known_values() {
+        // Hinge loss: max(0, 1 - logits)
+        // logits = 2.0 => max(0, 1-2) = 0
+        // logits = 0.5 => max(0, 1-0.5) = 0.5
+        // logits = -1.0 => max(0, 1-(-1)) = 2.0
+        let logits = Tensor::new(vec![2.0f32, 0.5, -1.0]).expect("tensor creation failed");
+        let ones = Tensor::ones(&logits.shape()).expect("ones failed");
+        let hinge = ones.sub(&logits).expect("sub failed").relu().expect("relu failed");
+        let loss: f32 = hinge.mean().expect("mean failed").item().expect("item failed");
+        let expected = (0.0 + 0.5 + 2.0) / 3.0;
+        assert!(
+            (loss - expected).abs() < 1e-4,
+            "Expected {expected}, got {loss}"
+        );
+    }
+
+    #[test]
+    fn test_ipo_loss_known_values() {
+        // IPO loss: (logits - 0.5)^2
+        // logits = 0.5 => (0.5 - 0.5)^2 = 0
+        // logits = 1.5 => (1.5 - 0.5)^2 = 1.0
+        // logits = -0.5 => (-0.5 - 0.5)^2 = 1.0
+        let logits = Tensor::new(vec![0.5f32, 1.5, -0.5]).expect("tensor creation failed");
+        let half = logits.sub_scalar(0.5).expect("sub_scalar failed");
+        let loss_tensor = half.pow(2.0).expect("pow failed");
+        let loss: f32 = loss_tensor.mean().expect("mean failed").item().expect("item failed");
+        let expected = (0.0 + 1.0 + 1.0) / 3.0;
+        assert!(
+            (loss - expected).abs() < 1e-4,
+            "Expected {expected}, got {loss}"
+        );
+    }
+
+    #[test]
     fn test_dpo_data_collator() {
         let config = DPOConfig {
             max_length: Some(3), // Set to match test expectations
@@ -365,7 +597,7 @@ mod tests {
             },
         ];
 
-        let batch = collator.collate_batch(examples).unwrap();
+        let batch = collator.collate_batch(examples).expect("operation failed in test");
         assert_eq!(batch.chosen_input_ids.shape(), &[2, 3]);
         assert_eq!(batch.rejected_input_ids.shape(), &[2, 3]);
     }

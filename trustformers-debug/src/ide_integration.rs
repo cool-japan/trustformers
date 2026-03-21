@@ -834,9 +834,9 @@ augroup END"#,
         let manifest = format!(
             r#";;; trustformers-debug.el --- Advanced debugging tools for TrustformeRS models  -*- lexical-binding: t; -*-
 
-;; Copyright (C) 2024 TrustformeRS Team
+;; Copyright (C) 2025-2026 COOLJAPAN OU (Team KitaSan)
 
-;; Author: TrustformeRS Team
+;; Author: COOLJAPAN OU (Team KitaSan)
 ;; Version: {}
 ;; Package-Requires: ((emacs "26.1"))
 ;; Keywords: debugging, machine-learning, rust

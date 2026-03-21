@@ -61,7 +61,7 @@ async fn test_isolated_auth_flow() -> Result<()> {
     auth_response.assert_status_ok();
 
     let auth_result: Value = auth_response.json();
-    let token = auth_result["access_token"].as_str().unwrap();
+    let token = auth_result["access_token"].as_str().expect("operation failed in test");
 
     // Test authenticated request (should succeed)
     let response = env
@@ -99,7 +99,7 @@ async fn test_isolated_batch_with_limits() -> Result<()> {
 
     response.assert_status_ok();
     let result: Value = response.json();
-    let responses = result["results"].as_array().unwrap();
+    let responses = result["results"].as_array().expect("operation failed in test");
     assert_eq!(responses.len(), 3);
 
     // Test that resource limits are being enforced
@@ -220,7 +220,7 @@ async fn test_isolated_full_multi_service() -> Result<()> {
     auth_response.assert_status_ok();
 
     let auth_result: Value = auth_response.json();
-    let token = auth_result["access_token"].as_str().unwrap();
+    let token = auth_result["access_token"].as_str().expect("operation failed in test");
 
     // Test multi-service workflow with authentication
     let test_cases = [
@@ -293,7 +293,12 @@ async fn test_isolated_full_multi_service() -> Result<()> {
     final_stats.assert_status_ok();
 
     let stats: Value = final_stats.json();
-    assert!(stats["server_stats"]["total_requests"].as_u64().unwrap() > 0);
+    assert!(
+        stats["server_stats"]["total_requests"]
+            .as_u64()
+            .expect("operation failed in test")
+            > 0
+    );
 
     println!("✅ Isolated full multi-service test completed");
     Ok(())

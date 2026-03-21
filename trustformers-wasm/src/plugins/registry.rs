@@ -593,7 +593,7 @@ mod tests {
             PluginType::ModelLoader,
         );
 
-        registry.register(metadata).unwrap();
+        registry.register(metadata).expect("registration should succeed in test");
 
         let plugins = registry.find_plugins_by_type(PluginType::ModelLoader);
         assert_eq!(plugins.len(), 1);
@@ -611,7 +611,7 @@ mod tests {
             "1.0.0".to_string(),
             PluginType::Extension,
         );
-        registry.register(dep_metadata).unwrap();
+        registry.register(dep_metadata).expect("registration should succeed in test");
 
         // Register plugin with dependency
         let metadata = PluginMetadata::new(
@@ -621,12 +621,12 @@ mod tests {
             PluginType::Extension,
         ).with_dependency("dep-plugin".to_string());
 
-        registry.register(metadata).unwrap();
+        registry.register(metadata).expect("registration should succeed in test");
 
         let deps = registry.get_dependencies("main-plugin");
         assert_eq!(deps, vec!["dep-plugin".to_string()]);
 
-        let resolved = registry.resolve_dependencies("main-plugin").unwrap();
+        let resolved = registry.resolve_dependencies("main-plugin").expect("resolution should succeed in test");
         assert_eq!(resolved, vec!["dep-plugin".to_string(), "main-plugin".to_string()]);
     }
 }

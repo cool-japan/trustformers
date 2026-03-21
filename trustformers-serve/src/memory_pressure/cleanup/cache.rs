@@ -665,7 +665,9 @@ mod tests {
         manager.record_access("entry1");
 
         // Evict some cache
-        let freed = manager.evict_cache(MemoryPressureLevel::Medium).unwrap();
+        let freed = manager
+            .evict_cache(MemoryPressureLevel::Medium)
+            .expect("test operation should succeed");
         assert!(freed > 0);
     }
 
@@ -679,7 +681,9 @@ mod tests {
 
         assert_eq!(manager.get_entry_count(), 2);
 
-        let freed = manager.evict_cache(MemoryPressureLevel::High).unwrap();
+        let freed = manager
+            .evict_cache(MemoryPressureLevel::High)
+            .expect("test operation should succeed");
         assert!(freed > 0);
     }
 
@@ -710,7 +714,9 @@ mod tests {
             let manager = DefaultCacheManager::with_strategy(strategy.clone());
             manager.add_entry("test".to_string(), 1024);
 
-            let _freed = manager.evict_cache(MemoryPressureLevel::High).unwrap();
+            let _freed = manager
+                .evict_cache(MemoryPressureLevel::High)
+                .expect("test operation should succeed");
             // Eviction should succeed without errors
         }
     }

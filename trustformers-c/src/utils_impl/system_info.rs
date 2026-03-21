@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn test_system_info_gathering() {
-        let info = get_system_info().unwrap();
+        let info = get_system_info().expect("system info retrieval should succeed");
         assert!(info.num_cpu_cores > 0);
         assert!(info.total_memory_bytes > 0);
         assert!(!info.cpu_architecture.is_empty());

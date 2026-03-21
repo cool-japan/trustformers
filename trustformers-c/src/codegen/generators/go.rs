@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn test_type_mapping() {
         let config = CodeGenConfig::default();
-        let generator = GoGenerator::new(&config).unwrap();
+        let generator = GoGenerator::new(&config).expect("test operation should succeed");
 
         assert_eq!(generator.map_base_type("c_int"), "int32");
         assert_eq!(generator.map_base_type("c_uint"), "uint32");
@@ -699,7 +699,7 @@ mod tests {
     #[test]
     fn test_pascal_case_conversion() {
         let config = CodeGenConfig::default();
-        let generator = GoGenerator::new(&config).unwrap();
+        let generator = GoGenerator::new(&config).expect("test operation should succeed");
 
         assert_eq!(generator.to_pascal_case("load_model"), "LoadModel");
         assert_eq!(generator.to_pascal_case("get_config"), "GetConfig");

@@ -297,9 +297,10 @@ mod tests {
     #[test]
     fn test_mmap_vocab_creation() {
         let vocab = create_test_vocab();
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
-        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path()).unwrap();
+        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         assert_eq!(mmap_vocab.size(), vocab.len());
 
@@ -317,9 +318,10 @@ mod tests {
     #[test]
     fn test_mmap_vocab_contains() {
         let vocab = create_test_vocab();
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
-        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path()).unwrap();
+        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         assert!(mmap_vocab.contains("hello"));
         assert!(mmap_vocab.contains("[PAD]"));
@@ -329,9 +331,10 @@ mod tests {
     #[test]
     fn test_mmap_vocab_iterator() {
         let vocab = create_test_vocab();
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
-        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path()).unwrap();
+        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         let tokens: Vec<_> = mmap_vocab.tokens().collect();
         assert_eq!(tokens.len(), vocab.len());
@@ -347,9 +350,10 @@ mod tests {
     #[test]
     fn test_mmap_vocab_memory_stats() {
         let vocab = create_test_vocab();
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
-        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path()).unwrap();
+        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         let stats = mmap_vocab.memory_stats();
         assert!(stats.mmap_size > 0);
@@ -361,9 +365,10 @@ mod tests {
     #[test]
     fn test_mmap_vocab_prefix_search() {
         let vocab = create_test_vocab();
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
-        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path()).unwrap();
+        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         let cls_tokens = mmap_vocab.find_tokens_with_prefix("[");
         assert!(cls_tokens.len() >= 3); // [PAD], [UNK], [CLS], [SEP]
@@ -376,9 +381,10 @@ mod tests {
     #[test]
     fn test_mmap_vocab_most_frequent() {
         let vocab = create_test_vocab();
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
-        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path()).unwrap();
+        let mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         let top_3 = mmap_vocab.get_most_frequent(3);
         assert_eq!(top_3.len(), 3);
@@ -392,9 +398,10 @@ mod tests {
     #[test]
     fn test_mmap_vocab_compact() {
         let vocab = create_test_vocab();
-        let temp_file = NamedTempFile::new().unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
 
-        let mut mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path()).unwrap();
+        let mut mmap_vocab = MmapVocab::create_from_vocab(&vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         // Test compaction
         assert!(mmap_vocab.compact().is_ok());
@@ -412,8 +419,9 @@ mod tests {
             large_vocab.insert(format!("token_{}", i), i as u32);
         }
 
-        let temp_file = NamedTempFile::new().unwrap();
-        let mmap_vocab = MmapVocab::create_from_vocab(&large_vocab, temp_file.path()).unwrap();
+        let temp_file = NamedTempFile::new().expect("Failed to create temp file");
+        let mmap_vocab = MmapVocab::create_from_vocab(&large_vocab, temp_file.path())
+            .expect("Operation failed in test");
 
         assert_eq!(mmap_vocab.size(), 10000);
         assert_eq!(mmap_vocab.get_id("token_5000"), Some(5000));

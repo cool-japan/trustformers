@@ -209,7 +209,7 @@ mod tests {
         let result = TokenizerBenchmark::quick_benchmark(&tokenizer, "Hello world!", 10);
         assert!(result.is_ok());
 
-        let result = result.unwrap();
+        let result = result.expect("Operation failed in test");
         assert!(result.tokens_per_second > 0.0);
         assert!(result.characters_per_second > 0.0);
         assert!(result.total_texts > 0);
@@ -233,7 +233,7 @@ mod tests {
         let result = TokenizerBenchmark::benchmark(&tokenizer, &texts, config);
         assert!(result.is_ok());
 
-        let result = result.unwrap();
+        let result = result.expect("Operation failed in test");
         assert!(result.tokens_per_second > 0.0);
         assert_eq!(result.total_texts, 15); // 3 texts * 5 iterations
     }
@@ -244,7 +244,7 @@ mod tests {
         let results = TokenizerBenchmark::multi_length_benchmark(&tokenizer);
         assert!(results.is_ok());
 
-        let results = results.unwrap();
+        let results = results.expect("Operation failed in test");
         assert_eq!(results.len(), 3); // Short, medium, long
 
         for (name, result) in results {

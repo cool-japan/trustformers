@@ -166,7 +166,10 @@ mod compatibility_tests {
         let test_value = "test_value_123";
 
         env::set_var(test_var, test_value);
-        assert_eq!(env::var(test_var).unwrap(), test_value);
+        assert_eq!(
+            env::var(test_var).expect("operation failed in test"),
+            test_value
+        );
 
         env::remove_var(test_var);
         assert!(env::var(test_var).is_err());
@@ -375,7 +378,7 @@ mod compatibility_tests {
 
         // Test configuration with platform-specific paths
         let config = serde_json::json!({
-            "cache_dir": get_cache_dir().unwrap(),
+            "cache_dir": get_cache_dir().expect("operation failed in test"),
             "model_type": "bert",
             "hidden_size": 768
         });

@@ -49,7 +49,7 @@ async fn test_server_router_creation() {
         "Router creation should complete within timeout"
     );
 
-    let _router = result.unwrap();
+    let _router = result.expect("operation failed in test");
     // Router created successfully
 }
 
@@ -62,11 +62,11 @@ async fn test_config_serialization() {
     assert!(json_str.is_ok(), "Config should be serializable");
 
     // Test that config can be deserialized
-    let json_str = json_str.unwrap();
+    let json_str = json_str.expect("operation failed in test");
     let deserialized: Result<ServerConfig, _> = serde_json::from_str(&json_str);
     assert!(deserialized.is_ok(), "Config should be deserializable");
 
-    let deserialized_config = deserialized.unwrap();
+    let deserialized_config = deserialized.expect("operation failed in test");
     assert_eq!(config.host, deserialized_config.host);
     assert_eq!(config.port, deserialized_config.port);
 }
@@ -176,7 +176,10 @@ async fn test_concurrent_server_creation() {
     // All should succeed
     for result in results {
         assert!(result.is_ok(), "Server creation task should succeed");
-        assert!(result.unwrap().is_ok(), "Router creation should succeed");
+        assert!(
+            result.expect("operation failed in test").is_ok(),
+            "Router creation should succeed"
+        );
     }
 }
 
@@ -231,10 +234,11 @@ async fn test_json_serialization_roundtrip() {
     let config = create_minimal_test_config();
 
     // Serialize to JSON
-    let json_value = serde_json::to_value(&config).unwrap();
+    let json_value = serde_json::to_value(&config).expect("operation failed in test");
 
     // Deserialize back
-    let config2: ServerConfig = serde_json::from_value(json_value).unwrap();
+    let config2: ServerConfig =
+        serde_json::from_value(json_value).expect("operation failed in test");
 
     // Compare key fields
     assert_eq!(config.host, config2.host);
@@ -263,7 +267,7 @@ async fn test_complete_server_setup_flow() {
     println!("✅ Created router successfully");
 
     // 4. Verify router is usable (basic checks)
-    let _router = router_result.unwrap();
+    let _router = router_result.expect("operation failed in test");
     println!("✅ Router is ready for use");
 
     println!("🎉 Complete server setup flow test passed!");

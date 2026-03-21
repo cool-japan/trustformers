@@ -858,7 +858,9 @@ mod tests {
         let input1 = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
         let input2 = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input1, &input2]).unwrap();
+        let gradients = grad_fn
+            .backward(&grad_output, &[&input1, &input2])
+            .expect("operation failed in test");
 
         assert_eq!(gradients.len(), 2);
         assert_eq!(gradients[0].shape(), vec![2, 2]);
@@ -869,16 +871,30 @@ mod tests {
     fn test_multiply_gradient() {
         let grad_fn = grad_fn::MultiplyGradFn;
         let grad_output = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
-        let input1 = Tensor::scalar(2.0).unwrap().broadcast_to(&[2, 2]).unwrap();
-        let input2 = Tensor::scalar(3.0).unwrap().broadcast_to(&[2, 2]).unwrap();
+        let input1 = Tensor::scalar(2.0)
+            .expect("tensor operation failed")
+            .broadcast_to(&[2, 2])
+            .expect("operation failed in test");
+        let input2 = Tensor::scalar(3.0)
+            .expect("tensor operation failed")
+            .broadcast_to(&[2, 2])
+            .expect("operation failed in test");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input1, &input2]).unwrap();
+        let gradients = grad_fn
+            .backward(&grad_output, &[&input1, &input2])
+            .expect("operation failed in test");
 
         assert_eq!(gradients.len(), 2);
         // Gradient w.r.t. input1 should be input2 (3.0)
-        assert_eq!(gradients[0].to_vec_f32().unwrap()[0], 3.0);
+        assert_eq!(
+            gradients[0].to_vec_f32().expect("operation failed in test")[0],
+            3.0
+        );
         // Gradient w.r.t. input2 should be input1 (2.0)
-        assert_eq!(gradients[1].to_vec_f32().unwrap()[0], 2.0);
+        assert_eq!(
+            gradients[1].to_vec_f32().expect("operation failed in test")[0],
+            2.0
+        );
     }
 
     #[test]
@@ -887,11 +903,14 @@ mod tests {
         let grad_output = Tensor::ones(&[2, 2]).expect("Failed to create ones tensor");
         let input = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
+        let gradients =
+            grad_fn.backward(&grad_output, &[&input]).expect("operation failed in test");
 
         assert_eq!(gradients.len(), 1);
         // Gradient of sigmoid(0) = 0.5 * (1 - 0.5) = 0.25
-        assert!((gradients[0].to_vec_f32().unwrap()[0] - 0.25).abs() < 1e-6);
+        assert!(
+            (gradients[0].to_vec_f32().expect("operation failed in test")[0] - 0.25).abs() < 1e-6
+        );
     }
 
     #[test]
@@ -900,10 +919,11 @@ mod tests {
         let grad_output = Tensor::ones(&[2]).expect("Failed to create ones tensor");
         let input = Tensor::from_vec(vec![1.0, -1.0], &[2]).expect("Tensor from_vec failed");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
+        let gradients =
+            grad_fn.backward(&grad_output, &[&input]).expect("operation failed in test");
 
         assert_eq!(gradients.len(), 1);
-        let grad_values = gradients[0].to_vec_f32().unwrap();
+        let grad_values = gradients[0].to_vec_f32().expect("operation failed in test");
         assert_eq!(grad_values[0], 1.0); // Positive input
         assert_eq!(grad_values[1], 0.0); // Negative input
     }
@@ -912,10 +932,11 @@ mod tests {
     fn test_sum_gradient() {
         let original_shape = vec![2, 3];
         let grad_fn = grad_fn::SumGradFn::new(None, original_shape.clone());
-        let grad_output = Tensor::scalar(1.0).unwrap();
-        let input = Tensor::ones(&original_shape).unwrap();
+        let grad_output = Tensor::scalar(1.0).expect("tensor operation failed");
+        let input = Tensor::ones(&original_shape).expect("tensor operation failed");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
+        let gradients =
+            grad_fn.backward(&grad_output, &[&input]).expect("operation failed in test");
 
         assert_eq!(gradients.len(), 1);
         assert_eq!(gradients[0].shape(), original_shape);
@@ -925,16 +946,20 @@ mod tests {
     fn test_mean_gradient() {
         let original_shape = vec![2, 3];
         let grad_fn = grad_fn::MeanGradFn::new(None, original_shape.clone());
-        let grad_output = Tensor::scalar(1.0).unwrap();
-        let input = Tensor::ones(&original_shape).unwrap();
+        let grad_output = Tensor::scalar(1.0).expect("tensor operation failed");
+        let input = Tensor::ones(&original_shape).expect("tensor operation failed");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
+        let gradients =
+            grad_fn.backward(&grad_output, &[&input]).expect("operation failed in test");
 
         assert_eq!(gradients.len(), 1);
         assert_eq!(gradients[0].shape(), original_shape);
         // Gradient should be 1/N where N is the number of elements
         let expected_grad = 1.0 / (2.0 * 3.0);
-        assert!((gradients[0].to_vec_f32().unwrap()[0] - expected_grad).abs() < 1e-6);
+        assert!(
+            (gradients[0].to_vec_f32().expect("operation failed in test")[0] - expected_grad).abs()
+                < 1e-6
+        );
     }
 
     #[test]
@@ -942,9 +967,10 @@ mod tests {
         let original_shape = vec![2, 3];
         let grad_fn = grad_fn::ReshapeGradFn::new(original_shape.clone());
         let grad_output = Tensor::ones(&[6]).expect("Failed to create ones tensor");
-        let input = Tensor::ones(&original_shape).unwrap();
+        let input = Tensor::ones(&original_shape).expect("tensor operation failed");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
+        let gradients =
+            grad_fn.backward(&grad_output, &[&input]).expect("operation failed in test");
 
         assert_eq!(gradients.len(), 1);
         assert_eq!(gradients[0].shape(), original_shape);
@@ -957,7 +983,8 @@ mod tests {
         let grad_output = Tensor::ones(&[3, 2]).expect("Failed to create ones tensor");
         let input = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
 
-        let gradients = grad_fn.backward(&grad_output, &[&input]).unwrap();
+        let gradients =
+            grad_fn.backward(&grad_output, &[&input]).expect("operation failed in test");
 
         assert_eq!(gradients.len(), 1);
         assert_eq!(gradients[0].shape(), vec![2, 3]);

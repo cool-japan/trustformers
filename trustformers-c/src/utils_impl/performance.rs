@@ -439,7 +439,7 @@ mod tests {
 
         timer.start();
         thread::sleep(Duration::from_millis(10));
-        let elapsed = timer.stop().unwrap();
+        let elapsed = timer.stop().expect("timer stop should succeed");
 
         assert!(elapsed >= 10.0);
         assert!(elapsed < 50.0); // Should be close to 10ms, allowing for some variance
@@ -455,7 +455,7 @@ mod tests {
 
         timer.start();
         thread::sleep(Duration::from_millis(1));
-        let elapsed_micros = timer.stop_micros().unwrap();
+        let elapsed_micros = timer.stop_micros().expect("test operation should succeed");
 
         assert!(elapsed_micros >= 1000); // At least 1ms in microseconds
     }

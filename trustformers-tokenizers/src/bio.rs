@@ -1313,7 +1313,7 @@ mod tests {
         let tokenizer = BioTokenizer::new();
         let result = tokenizer.encode("ATGCGATCG");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
     }
 
@@ -1322,7 +1322,7 @@ mod tests {
         let tokenizer = BioTokenizer::new();
         let result = tokenizer.encode("MTKQVFTPG");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
     }
 
@@ -1332,14 +1332,14 @@ mod tests {
         config.kmer_size = Some(3);
         let tokenizer = BioTokenizer::with_config(config);
 
-        let tokens = tokenizer.tokenize_bio("ATGCGATCG").unwrap();
+        let tokens = tokenizer.tokenize_bio("ATGCGATCG").expect("Operation failed in test");
         assert!(tokens.iter().any(|t| t.text.len() == 3));
     }
 
     #[test]
     fn test_translation() {
         let tokenizer = BioTokenizer::new();
-        let protein = tokenizer.translate_dna("ATGAAATAG").unwrap();
+        let protein = tokenizer.translate_dna("ATGAAATAG").expect("Operation failed in test");
         assert_eq!(protein, "MK"); // ATG=M, AAA=K, TAG=stop
     }
 
@@ -1355,7 +1355,7 @@ mod tests {
         let tokenizer = BioTokenizer::new();
         let metadata = tokenizer.create_amino_acid_metadata('A');
         assert!(metadata.is_some());
-        let meta = metadata.unwrap();
+        let meta = metadata.expect("Operation failed in test");
         assert!(meta.molecular_weight.is_some());
         assert!(meta.hydrophobicity.is_some());
     }
@@ -1365,7 +1365,7 @@ mod tests {
         let tokenizer = BioTokenizer::new();
         let metadata = tokenizer.create_nucleotide_metadata('G');
         assert!(metadata.is_some());
-        let meta = metadata.unwrap();
+        let meta = metadata.expect("Operation failed in test");
         assert_eq!(meta.gc_content, Some(1.0));
     }
 
@@ -1374,7 +1374,7 @@ mod tests {
         let tokenizer = BioTokenizer::new();
         let analysis = tokenizer.analyze("ATGCGATCG");
         assert!(analysis.is_ok());
-        let result = analysis.unwrap();
+        let result = analysis.expect("Operation failed in test");
         assert!(result.gc_content.is_some());
         assert!(!result.nucleotide_composition.is_empty());
     }
@@ -1384,7 +1384,7 @@ mod tests {
         let tokenizer = BioTokenizer::new();
         let analysis = tokenizer.analyze("MTKQVFTPG");
         assert!(analysis.is_ok());
-        let result = analysis.unwrap();
+        let result = analysis.expect("Operation failed in test");
         assert!(result.molecular_weight.is_some());
         assert!(result.avg_hydrophobicity.is_some());
         assert!(!result.amino_acid_composition.is_empty());
@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn test_stop_codon_detection() {
         let tokenizer = BioTokenizer::new();
-        let tokens = tokenizer.tokenize_bio("ATGTAG").unwrap();
+        let tokens = tokenizer.tokenize_bio("ATGTAG").expect("Operation failed in test");
         assert!(tokens.iter().any(|t| t.token_type == BioTokenType::StartCodon));
         assert!(tokens.iter().any(|t| t.token_type == BioTokenType::StopCodon));
     }
@@ -1406,7 +1406,7 @@ mod tests {
 
         let result = tokenizer.encode("ATGCGATCGATCGATCG");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(tokenized.input_ids.len() <= 5);
     }
 }

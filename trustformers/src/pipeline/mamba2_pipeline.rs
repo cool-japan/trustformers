@@ -524,13 +524,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_mamba2_basic_functionality() {
-        let pipeline = create_memory_efficient_mamba2_pipeline().unwrap();
+        let pipeline = create_memory_efficient_mamba2_pipeline().expect("operation failed in test");
         let input = PipelineInput::Text("Hello, Mamba-2!".to_string());
 
         let result = pipeline.process_async(input).await;
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert!(!output.text.is_empty());
         assert!(!output.logits.is_empty());
         assert!(output.performance.tokens_per_second > 0.0);
@@ -542,7 +542,7 @@ mod tests {
             chunking_strategy: ChunkingStrategy::Fixed(128),
             ..Default::default()
         };
-        let pipeline = Mamba2Pipeline::new(config).unwrap();
+        let pipeline = Mamba2Pipeline::new(config).expect("operation failed in test");
 
         let long_text = "A".repeat(1000);
         let input = PipelineInput::Text(long_text);
@@ -553,10 +553,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_mamba2_performance_tracking() {
-        let pipeline = create_high_performance_mamba2_pipeline().unwrap();
+        let pipeline = create_high_performance_mamba2_pipeline().expect("operation failed in test");
         let input = PipelineInput::Text("Performance test".to_string());
 
-        let result = pipeline.process_async(input).await.unwrap();
+        let result = pipeline.process_async(input).await.expect("async operation failed");
 
         // Verify performance metrics are populated
         assert!(result.performance.inference_time_ms > 0.0);

@@ -838,7 +838,7 @@ mod tests {
         token_to_id.insert("ครับ".to_string(), 6);
 
         let vocab = Vocab::from_map(token_to_id);
-        let tokenizer = ThaiTokenizer::new(config, vocab).unwrap();
+        let tokenizer = ThaiTokenizer::new(config, vocab).expect("Construction failed");
 
         assert_eq!(tokenizer.vocab_size(), 7);
     }
@@ -856,9 +856,9 @@ mod tests {
         token_to_id.insert("ครับ".to_string(), 6);
 
         let vocab = Vocab::from_map(token_to_id);
-        let tokenizer = ThaiTokenizer::new(config, vocab).unwrap();
+        let tokenizer = ThaiTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.encode("สวัสดีครับ").unwrap();
+        let result = tokenizer.encode("สวัสดีครับ").expect("Encoding failed");
         assert_eq!(result.input_ids.len(), 4); // CLS + 2 tokens + SEP
         assert_eq!(result.input_ids[1], 5); // สวัสดี
         assert_eq!(result.input_ids[2], 6); // ครับ
@@ -877,9 +877,9 @@ mod tests {
         token_to_id.insert("ค".to_string(), 4);
 
         let vocab = Vocab::from_map(token_to_id);
-        let tokenizer = ThaiTokenizer::new(config, vocab).unwrap();
+        let tokenizer = ThaiTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.encode("กขค").unwrap();
+        let result = tokenizer.encode("กขค").expect("Encoding failed");
         assert_eq!(result.input_ids.len(), 5); // CLS + 3 tokens + SEP
         assert_eq!(result.input_ids[1], 2); // ก
         assert_eq!(result.input_ids[2], 3); // ข
@@ -897,9 +897,11 @@ mod tests {
         token_to_id.insert("3".to_string(), 4);
 
         let vocab = Vocab::from_map(token_to_id);
-        let tokenizer = ThaiTokenizer::new(config, vocab).unwrap().with_normalization();
+        let tokenizer = ThaiTokenizer::new(config, vocab)
+            .expect("Construction failed")
+            .with_normalization();
 
-        let result = tokenizer.encode("๑๒๓").unwrap();
+        let result = tokenizer.encode("๑๒๓").expect("Encoding failed");
         assert_eq!(result.input_ids.len(), 5); // CLS + 3 tokens + SEP
         assert_eq!(result.input_ids[1], 2); // 1
         assert_eq!(result.input_ids[2], 3); // 2
@@ -918,9 +920,9 @@ mod tests {
         token_to_id.insert("ครับ".to_string(), 5);
 
         let vocab = Vocab::from_map(token_to_id);
-        let tokenizer = ThaiTokenizer::new(config, vocab).unwrap();
+        let tokenizer = ThaiTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.encode_pair("สวัสดี", "ครับ").unwrap();
+        let result = tokenizer.encode_pair("สวัสดี", "ครับ").expect("Operation failed in test");
         assert!(result.input_ids.len() >= 4); // CLS + text_a + SEP + text_b + SEP
         assert_eq!(result.input_ids[0], 2); // CLS
         assert_eq!(result.input_ids[1], 4); // สวัสดี
@@ -929,7 +931,7 @@ mod tests {
         assert_eq!(result.input_ids[4], 3); // SEP
 
         // Check token type IDs
-        let token_type_ids = result.token_type_ids.unwrap();
+        let token_type_ids = result.token_type_ids.expect("Operation failed in test");
         assert_eq!(token_type_ids[0], 0); // CLS
         assert_eq!(token_type_ids[1], 0); // First text
         assert_eq!(token_type_ids[3], 1); // Second text
@@ -947,10 +949,10 @@ mod tests {
         token_to_id.insert("ครับ".to_string(), 5);
 
         let vocab = Vocab::from_map(token_to_id);
-        let tokenizer = ThaiTokenizer::new(config, vocab).unwrap();
+        let tokenizer = ThaiTokenizer::new(config, vocab).expect("Construction failed");
 
         let token_ids = vec![4, 5];
-        let result = tokenizer.decode(&token_ids).unwrap();
+        let result = tokenizer.decode(&token_ids).expect("Decoding failed");
         assert_eq!(result, "สวัสดีครับ");
     }
 }

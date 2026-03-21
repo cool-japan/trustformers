@@ -1102,20 +1102,20 @@ mod tests {
     #[test]
     fn test_basic_allocation_deallocation() {
         let config = MemoryPoolConfig::default();
-        let pool = MemoryPool::new(config).unwrap();
+        let pool = MemoryPool::new(config).expect("operation failed in test");
 
-        let ptr = pool.allocate(1024).unwrap();
+        let ptr = pool.allocate(1024).expect("operation failed in test");
         assert!(pool.deallocate(ptr).is_ok());
     }
 
     #[test]
     fn test_multiple_allocations() {
         let config = MemoryPoolConfig::default();
-        let pool = MemoryPool::new(config).unwrap();
+        let pool = MemoryPool::new(config).expect("operation failed in test");
 
         let mut ptrs = Vec::new();
         for _ in 0..10 {
-            let ptr = pool.allocate(512).unwrap();
+            let ptr = pool.allocate(512).expect("operation failed in test");
             ptrs.push(ptr);
         }
 
@@ -1155,7 +1155,7 @@ mod tests {
             alignment: 64,
             ..Default::default()
         };
-        let pool = MemoryPool::new(config).unwrap();
+        let pool = MemoryPool::new(config).expect("operation failed in test");
 
         assert_eq!(pool.align_size(1), 64);
         assert_eq!(pool.align_size(64), 64);
@@ -1169,17 +1169,17 @@ mod tests {
             enable_tracking: true,
             ..Default::default()
         };
-        let pool = MemoryPool::new(config).unwrap();
+        let pool = MemoryPool::new(config).expect("operation failed in test");
 
         let initial_stats = pool.get_stats();
         assert_eq!(initial_stats.total_requests, 0);
 
-        let ptr = pool.allocate(1024).unwrap();
+        let ptr = pool.allocate(1024).expect("operation failed in test");
         let stats_after_alloc = pool.get_stats();
         assert_eq!(stats_after_alloc.total_requests, 1);
         assert!(stats_after_alloc.current_usage > 0);
 
-        pool.deallocate(ptr).unwrap();
+        pool.deallocate(ptr).expect("operation failed in test");
         let stats_after_dealloc = pool.get_stats();
         assert!(stats_after_dealloc.total_freed > 0);
     }
@@ -1187,16 +1187,16 @@ mod tests {
     #[test]
     fn test_memory_usage_calculation() {
         let config = MemoryPoolConfig::default();
-        let pool = MemoryPool::new(config).unwrap();
+        let pool = MemoryPool::new(config).expect("operation failed in test");
 
         let usage_before = pool.memory_usage();
 
-        let ptr = pool.allocate(2048).unwrap();
+        let ptr = pool.allocate(2048).expect("operation failed in test");
         let usage_after = pool.memory_usage();
 
         assert!(usage_after.allocated_memory > usage_before.allocated_memory);
         assert!(usage_after.utilization_ratio > usage_before.utilization_ratio);
 
-        pool.deallocate(ptr).unwrap();
+        pool.deallocate(ptr).expect("operation failed in test");
     }
 }

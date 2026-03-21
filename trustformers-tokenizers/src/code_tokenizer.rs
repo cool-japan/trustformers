@@ -1166,15 +1166,15 @@ mod tests {
     fn test_rust_tokenization() {
         let tokenizer = CodeTokenizer::for_language(Language::Rust);
         let code = "fn main() { let x = 42; }";
-        let tokens = tokenizer.tokenize_code(code).unwrap();
+        let tokens = tokenizer.tokenize_code(code).expect("Operation failed in test");
 
         assert!(!tokens.is_empty());
 
         // Check for keywords
-        let fn_token = tokens.iter().find(|t| t.text == "fn").unwrap();
+        let fn_token = tokens.iter().find(|t| t.text == "fn").expect("Operation failed in test");
         assert_eq!(fn_token.token_type, CodeTokenType::Keyword);
 
-        let let_token = tokens.iter().find(|t| t.text == "let").unwrap();
+        let let_token = tokens.iter().find(|t| t.text == "let").expect("Operation failed in test");
         assert_eq!(let_token.token_type, CodeTokenType::Keyword);
     }
 
@@ -1182,9 +1182,12 @@ mod tests {
     fn test_string_literal_parsing() {
         let tokenizer = CodeTokenizer::for_language(Language::JavaScript);
         let code = r#"let name = "Hello \"World\"";"#;
-        let tokens = tokenizer.tokenize_code(code).unwrap();
+        let tokens = tokenizer.tokenize_code(code).expect("Operation failed in test");
 
-        let string_token = tokens.iter().find(|t| t.token_type == CodeTokenType::String).unwrap();
+        let string_token = tokens
+            .iter()
+            .find(|t| t.token_type == CodeTokenType::String)
+            .expect("Operation failed in test");
         assert!(string_token.text.starts_with('"'));
         assert!(string_token.text.ends_with('"'));
     }
@@ -1198,9 +1201,12 @@ mod tests {
         };
         let tokenizer = CodeTokenizer::new(config);
         let code = "// This is a comment\nfn main() {}";
-        let tokens = tokenizer.tokenize_code(code).unwrap();
+        let tokens = tokenizer.tokenize_code(code).expect("Operation failed in test");
 
-        let comment_token = tokens.iter().find(|t| t.token_type == CodeTokenType::Comment).unwrap();
+        let comment_token = tokens
+            .iter()
+            .find(|t| t.token_type == CodeTokenType::Comment)
+            .expect("Operation failed in test");
         assert!(comment_token.text.starts_with("//"));
     }
 
@@ -1208,7 +1214,7 @@ mod tests {
     fn test_numeric_literals() {
         let tokenizer = CodeTokenizer::for_language(Language::Python);
         let code = "x = 42; y = 3.14; z = 0xFF;";
-        let tokens = tokenizer.tokenize_code(code).unwrap();
+        let tokens = tokenizer.tokenize_code(code).expect("Operation failed in test");
 
         let numeric_tokens: Vec<_> =
             tokens.iter().filter(|t| t.token_type == CodeTokenType::Number).collect();
@@ -1220,7 +1226,7 @@ mod tests {
     fn test_code_tokenizer_encode() {
         let tokenizer = CodeTokenizer::for_language(Language::Python);
         let code = "def hello(): return 42";
-        let result = tokenizer.encode(code).unwrap();
+        let result = tokenizer.encode(code).expect("Encoding failed");
 
         assert!(!result.input_ids.is_empty());
         assert_eq!(result.input_ids.len(), result.attention_mask.len());

@@ -610,37 +610,41 @@ mod tests {
     #[test]
     fn test_onnx_adam_export() {
         let exporter = ONNXOptimizerExporter::new();
-        let model = exporter.export_adam(0.001, 0.9, 0.999, 1e-8, 0.01).unwrap();
+        let model = exporter
+            .export_adam(0.001, 0.9, 0.999, 1e-8, 0.01)
+            .expect("Operation failed in test");
 
         assert_eq!(model.graph.name, "adam_optimizer_graph");
         assert_eq!(model.graph.nodes.len(), 1);
         assert_eq!(model.graph.nodes[0].op_type, "Adam");
 
-        utils::validate_model(&model).unwrap();
+        utils::validate_model(&model).expect("Operation failed in test");
     }
 
     #[test]
     fn test_onnx_sgd_export() {
         let exporter = ONNXOptimizerExporter::new();
-        let model = exporter.export_sgd(0.01, 0.9, 1e-4, true).unwrap();
+        let model = exporter.export_sgd(0.01, 0.9, 1e-4, true).expect("Operation failed in test");
 
         assert_eq!(model.graph.name, "sgd_optimizer_graph");
         assert_eq!(model.graph.nodes.len(), 1);
         assert_eq!(model.graph.nodes[0].op_type, "SGD");
 
-        utils::validate_model(&model).unwrap();
+        utils::validate_model(&model).expect("Operation failed in test");
     }
 
     #[test]
     fn test_onnx_adamw_export() {
         let exporter = ONNXOptimizerExporter::new();
-        let model = exporter.export_adamw(0.001, 0.9, 0.999, 1e-8, 0.01).unwrap();
+        let model = exporter
+            .export_adamw(0.001, 0.9, 0.999, 1e-8, 0.01)
+            .expect("Operation failed in test");
 
         assert_eq!(model.graph.name, "adamw_optimizer_graph");
         assert_eq!(model.graph.nodes.len(), 1);
         assert_eq!(model.graph.nodes[0].op_type, "AdamW");
 
-        utils::validate_model(&model).unwrap();
+        utils::validate_model(&model).expect("Operation failed in test");
     }
 
     #[test]
@@ -661,7 +665,7 @@ mod tests {
         let exporter = ONNXOptimizerExporter::new();
         let config = exporter.create_adam_config(0.001, 0.9, 0.999, 1e-8, 0.01);
 
-        let json = exporter.export_config(&config).unwrap();
+        let json = exporter.export_config(&config).expect("Operation failed in test");
         assert!(json.contains("Adam"));
         assert!(json.contains("0.001"));
     }
@@ -669,10 +673,12 @@ mod tests {
     #[test]
     fn test_model_validation() {
         let exporter = ONNXOptimizerExporter::new();
-        let model = exporter.export_adam(0.001, 0.9, 0.999, 1e-8, 0.01).unwrap();
+        let model = exporter
+            .export_adam(0.001, 0.9, 0.999, 1e-8, 0.01)
+            .expect("Operation failed in test");
 
         // Should pass validation
-        utils::validate_model(&model).unwrap();
+        utils::validate_model(&model).expect("Operation failed in test");
 
         // Test invalid model
         let mut invalid_model = model.clone();
@@ -683,13 +689,16 @@ mod tests {
     #[test]
     fn test_scheduler_integration() {
         let exporter = ONNXOptimizerExporter::new();
-        let base_model = exporter.export_adam(0.001, 0.9, 0.999, 1e-8, 0.01).unwrap();
+        let base_model = exporter
+            .export_adam(0.001, 0.9, 0.999, 1e-8, 0.01)
+            .expect("Operation failed in test");
 
         let mut schedule_params = HashMap::new();
         schedule_params.insert("decay_rate".to_string(), 0.95);
 
         let model_with_scheduler =
-            utils::create_with_scheduler(base_model, "ExponentialDecay", schedule_params).unwrap();
+            utils::create_with_scheduler(base_model, "ExponentialDecay", schedule_params)
+                .expect("Operation failed in test");
 
         assert_eq!(model_with_scheduler.graph.nodes.len(), 2);
         assert_eq!(
@@ -697,6 +706,6 @@ mod tests {
             "ExponentialDecay"
         );
 
-        utils::validate_model(&model_with_scheduler).unwrap();
+        utils::validate_model(&model_with_scheduler).expect("Operation failed in test");
     }
 }

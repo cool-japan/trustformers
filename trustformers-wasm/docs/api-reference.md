@@ -27,7 +27,7 @@ class TrustformersWasm {
 **Example:**
 ```javascript
 const tf = new TrustformersWasm();
-console.log(tf.version); // "0.1.0-rc.1"
+console.log(tf.version); // "0.1.0"
 ```
 
 ### InferenceSession

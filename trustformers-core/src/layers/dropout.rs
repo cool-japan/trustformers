@@ -21,6 +21,7 @@ use scirs2_core::random::*;
 /// use trustformers_core::layers::Dropout;
 /// use trustformers_core::tensor::Tensor;
 /// use trustformers_core::device::Device;
+/// use trustformers_core::traits::Layer;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let dropout = Dropout::new_with_device(0.1, Device::CPU); // 10% dropout rate
@@ -161,9 +162,9 @@ mod tests {
 
         let input =
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
-        let input_data = input.data().unwrap();
+        let input_data = input.data().expect("operation failed in test");
         let output = dropout.forward(input).expect("Forward pass failed");
-        let output_data = output.data().unwrap();
+        let output_data = output.data().expect("operation failed in test");
 
         // In inference mode, output should equal input
         assert_eq!(input_data, output_data);
@@ -175,10 +176,10 @@ mod tests {
 
         let input =
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
-        let input_data = input.data().unwrap();
+        let input_data = input.data().expect("operation failed in test");
         let input_shape = input.shape().to_vec();
         let output = dropout.forward(input).expect("Forward pass failed");
-        let output_data = output.data().unwrap();
+        let output_data = output.data().expect("operation failed in test");
         let output_shape = output.shape().to_vec();
 
         // With 0.0 dropout, output should equal input
@@ -194,7 +195,7 @@ mod tests {
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let input_shape = input.shape().to_vec();
         let output = dropout.forward(input).expect("Forward pass failed");
-        let output_data = output.data().unwrap();
+        let output_data = output.data().expect("operation failed in test");
         let output_shape = output.shape().to_vec();
 
         // With 1.0 dropout, all elements should be zero
@@ -214,7 +215,7 @@ mod tests {
         for _ in 0..20 {
             let input = Tensor::from_vec(vec![1.0; size], &[size]).expect("Tensor from_vec failed");
             let output = dropout.forward(input).expect("Forward pass failed");
-            let output_data = output.data().unwrap();
+            let output_data = output.data().expect("operation failed in test");
             let zero_count = output_data.iter().filter(|&&x| x == 0.0).count();
             let sum: f32 = output_data.iter().sum();
 

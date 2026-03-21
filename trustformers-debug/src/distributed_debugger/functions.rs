@@ -50,7 +50,7 @@ mod tests {
         let node_id = NodeId::new(1, "worker-1".to_string());
         let debugger = DistributedDebugger::new(DistributedDebugConfig::default(), node_id);
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
-        let node_info = debugger.create_node_info(addr).await.unwrap();
+        let node_info = debugger.create_node_info(addr).await.expect("async operation failed");
         assert_eq!(node_info.node_id.rank, 1);
         assert_eq!(node_info.status, NodeStatus::Healthy);
         assert_eq!(node_info.address, addr);
@@ -75,21 +75,24 @@ mod tests {
     async fn test_cluster_analysis() {
         let node_id = NodeId::new(0, "test-node".to_string());
         let debugger = DistributedDebugger::new(DistributedDebugConfig::default(), node_id);
-        let _report = debugger.analyze_cluster_performance().await.unwrap();
+        let _report = debugger.analyze_cluster_performance().await.expect("async operation failed");
         // Successfully generated cluster analysis report
     }
     #[tokio::test]
     async fn test_fault_detection() {
         let node_id = NodeId::new(0, "test-node".to_string());
         let debugger = DistributedDebugger::new(DistributedDebugConfig::default(), node_id);
-        let _faults = debugger.detect_faults().await.unwrap();
+        let _faults = debugger.detect_faults().await.expect("async operation failed");
         // Successfully detected faults
     }
     #[tokio::test]
     async fn test_distributed_debug_report() {
         let node_id = NodeId::new(0, "test-node".to_string());
         let debugger = DistributedDebugger::new(DistributedDebugConfig::default(), node_id);
-        let report = debugger.generate_distributed_debug_report().await.unwrap();
+        let report = debugger
+            .generate_distributed_debug_report()
+            .await
+            .expect("async operation failed");
         assert!(!report.recommendations.is_empty());
     }
     #[test]

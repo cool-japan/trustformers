@@ -370,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn test_module_integration() {
         // Test that all modules work together seamlessly
-        let manager = create_default_resource_manager().await.unwrap();
+        let manager = create_default_resource_manager().await.expect("async operation should succeed in test");
 
         let status = manager.get_status().await;
         assert!(status.background_tasks.is_empty() || !status.background_tasks.is_empty());
@@ -391,14 +391,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_optimization_functionality() {
-        let manager = create_default_resource_manager().await.unwrap();
+        let manager = create_default_resource_manager().await.expect("async operation should succeed in test");
         let result = optimize_for_current_load(&manager).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_performance_reporting() {
-        let manager = create_default_resource_manager().await.unwrap();
+        let manager = create_default_resource_manager().await.expect("async operation should succeed in test");
         let report = get_performance_report(&manager).await;
         assert!(report.is_ok());
     }

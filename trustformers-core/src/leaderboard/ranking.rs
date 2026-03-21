@@ -477,7 +477,7 @@ mod tests {
             create_test_entry(30.0, 33.3),
         ];
 
-        let ranked = algo.rank(entries, &criteria).unwrap();
+        let ranked = algo.rank(entries, &criteria).expect("operation failed in test");
 
         // Should be sorted by latency (ascending)
         assert_eq!(ranked[0].metrics.latency_ms, 10.0);
@@ -498,7 +498,9 @@ mod tests {
             create_test_entry(30.0, 150.0), // High latency, moderate throughput
         ];
 
-        let ranked = algo.rank(entries, &RankingCriteria::default()).unwrap();
+        let ranked = algo
+            .rank(entries, &RankingCriteria::default())
+            .expect("operation failed in test");
 
         // The weighted score should balance both metrics
         assert!(ranked.len() == 3);

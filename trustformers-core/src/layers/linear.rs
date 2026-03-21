@@ -99,7 +99,7 @@ fn blas_dgemm(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize)
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// // Create a linear layer: 768 → 3072
-/// let linear = Linear::new(768, 3072, true)?;
+/// let linear = Linear::new(768, 3072, true);
 ///
 /// // Apply to 2D input: [seq_len, in_features]
 /// let input_2d = Tensor::randn(&[128, 768])?;

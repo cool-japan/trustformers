@@ -805,7 +805,8 @@ mod tests {
     fn test_cloud_scheduler() {
         let config = create_test_config();
         let mut scheduler = CloudScheduler::new();
-        let allocation = scheduler.schedule_resources(4, &config).unwrap();
+        let allocation =
+            scheduler.schedule_resources(4, &config).expect("operation failed in test");
         assert!(allocation.values().sum::<usize>() == 4);
     }
 

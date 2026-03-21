@@ -507,7 +507,7 @@ mod tests {
             ..Default::default()
         };
 
-        let graph = exporter.build_nnef_graph(&model, &config).unwrap();
+        let graph = exporter.build_nnef_graph(&model, &config).expect("operation failed in test");
 
         assert!(graph.contains("version 1.0"));
         assert!(graph.contains("graph network"));
@@ -529,7 +529,7 @@ mod tests {
             ..Default::default()
         };
 
-        let metadata = exporter.build_metadata(&model, &config).unwrap();
+        let metadata = exporter.build_metadata(&model, &config).expect("operation failed in test");
 
         assert_eq!(metadata["format"], "NNEF");
         assert_eq!(metadata["version"], "1.0");

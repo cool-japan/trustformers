@@ -383,7 +383,7 @@ mod tests {
         let mut optimizer = MemoryOptimizer::new(config);
 
         // Create mock tensor
-        let tensor = Tensor::zeros(&[2, 3]).unwrap();
+        let tensor = Tensor::zeros(&[2, 3]).expect("tensor operation failed");
         let result = optimizer.create_checkpoint(0, vec![tensor]);
 
         assert!(result.is_ok());
@@ -403,7 +403,7 @@ mod tests {
         optimizer.update_memory_usage(2000);
         assert!(optimizer.should_cleanup());
 
-        let freed = optimizer.cleanup().unwrap();
+        let freed = optimizer.cleanup().expect("operation failed in test");
         assert!(freed == 0); // No actual tensors to free in this test
     }
 
@@ -416,7 +416,7 @@ mod tests {
         };
         let mut optimizer = MemoryOptimizer::new(config);
 
-        let tensor = Tensor::zeros(&[1000, 1000]).unwrap(); // Large tensor
+        let tensor = Tensor::zeros(&[1000, 1000]).expect("tensor operation failed"); // Large tensor
         let result = optimizer.offload_to_cpu("test_tensor".to_string(), tensor);
 
         assert!(result.is_ok());
@@ -436,7 +436,7 @@ mod tests {
         let optimizer = MemoryOptimizer::new(config);
         let mut wrapper = GradientCheckpointWrapper::new(optimizer, 0);
 
-        let tensor = Tensor::zeros(&[2, 3]).unwrap();
+        let tensor = Tensor::zeros(&[2, 3]).expect("tensor operation failed");
         let result = wrapper.forward_with_checkpoint(vec![tensor]);
 
         assert!(result.is_ok());

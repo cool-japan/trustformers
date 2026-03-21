@@ -49,7 +49,10 @@ mod tests {
             create_test_context("test1", TestCategory::Unit),
             create_test_context("test2", TestCategory::Integration),
         ];
-        let analysis = analyzer.analyze_test_independence(&tests).await.unwrap();
+        let analysis = analyzer
+            .analyze_test_independence(&tests)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(analysis.tests.len(), 2);
         assert!(!analysis.groups.is_empty());
         assert!(analysis.analysis_metadata.analysis_quality >= 0.0);
@@ -69,7 +72,10 @@ mod tests {
     async fn test_quality_assessment() {
         let analyzer = TestIndependenceAnalyzer::new();
         let tests = vec![create_test_context("test1", TestCategory::Unit)];
-        let analysis = analyzer.analyze_test_independence(&tests).await.unwrap();
+        let analysis = analyzer
+            .analyze_test_independence(&tests)
+            .await
+            .expect("async operation should succeed in test");
         assert!(analysis.quality_assessment.overall_score >= 0.0);
         assert!(analysis.quality_assessment.overall_score <= 1.0);
     }

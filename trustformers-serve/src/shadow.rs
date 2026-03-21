@@ -788,7 +788,10 @@ mod tests {
             headers: HashMap::new(),
         });
 
-        service.process_request(payload, client_info, HashMap::new()).await.unwrap();
+        service
+            .process_request(payload, client_info, HashMap::new())
+            .await
+            .expect("async operation should succeed in test");
 
         // Wait a bit for processing
         tokio::time::sleep(Duration::from_millis(200)).await;

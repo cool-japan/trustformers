@@ -491,7 +491,7 @@ mod tests {
         let result = monitor.record_session(session_info).await;
         assert!(result.is_ok());
 
-        let report = result.unwrap();
+        let report = result.expect("operation failed in test");
         assert!(report.carbon_measurement.co2_emissions_kg > 0.0);
         assert!(report.energy_measurement.energy_kwh > 0.0);
     }
@@ -509,12 +509,12 @@ mod tests {
                 DeviceType::GPU,
                 PowerMeasurementMethod::Estimated,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Record a measurement to have some power consumption
         let _ = monitor.energy_monitor.record_measurement("gpu-0", 250.0, 0.8, Some(70.0));
 
-        let metrics = monitor.get_real_time_metrics().await.unwrap();
+        let metrics = monitor.get_real_time_metrics().await.expect("async operation failed");
         assert!(metrics.current_power_watts >= 0.0); // Changed to >= to allow 0.0 on fresh monitor
         assert!(metrics.efficiency_ratio > 0.0);
     }
@@ -532,7 +532,7 @@ mod tests {
             estimated_energy_kwh: 5.0,
         };
 
-        let schedule = monitor.optimize_scheduling(workload).await.unwrap();
+        let schedule = monitor.optimize_scheduling(workload).await.expect("async operation failed");
         assert!(schedule.projected_savings.carbon_reduction_kg >= 0.0);
     }
 
@@ -540,7 +540,10 @@ mod tests {
     async fn test_environmental_report_generation() {
         let monitor = EnvironmentalMonitor::new(EnvironmentalConfig::default());
 
-        let report = monitor.generate_environmental_report(ReportType::Summary).await.unwrap();
+        let report = monitor
+            .generate_environmental_report(ReportType::Summary)
+            .await
+            .expect("async operation failed");
         assert!(!report.report_id.is_empty());
         assert!(!report.recommendations.is_empty());
     }

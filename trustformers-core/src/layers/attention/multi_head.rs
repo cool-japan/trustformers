@@ -598,7 +598,8 @@ mod tests {
 
     #[test]
     fn test_multi_head_attention_creation() {
-        let attention = MultiHeadAttention::new(512, 8, 0.1, true).unwrap();
+        let attention =
+            MultiHeadAttention::new(512, 8, 0.1, true).expect("operation failed in test");
         assert_eq!(attention.config.hidden_size, 512);
         assert_eq!(attention.config.num_heads, 8);
         assert_eq!(attention.config.head_dim, 64);
@@ -612,7 +613,8 @@ mod tests {
 
     #[test]
     fn test_self_attention_forward() {
-        let attention = MultiHeadAttention::new(512, 8, 0.1, true).unwrap();
+        let attention =
+            MultiHeadAttention::new(512, 8, 0.1, true).expect("operation failed in test");
         let input = Tensor::randn(&[2, 10, 512]).expect("Failed to create random tensor");
         let output = attention.forward(input).expect("Forward pass failed");
         assert_eq!(output.shape(), vec![2, 10, 512]);
@@ -620,14 +622,16 @@ mod tests {
 
     #[test]
     fn test_memory_estimation() {
-        let attention = MultiHeadAttention::new(512, 8, 0.1, true).unwrap();
+        let attention =
+            MultiHeadAttention::new(512, 8, 0.1, true).expect("operation failed in test");
         let memory_usage = attention.estimate_memory_usage(2, 100);
         assert!(memory_usage > 0);
     }
 
     #[test]
     fn test_optimization_hints_update() {
-        let mut attention = MultiHeadAttention::new(512, 8, 0.1, true).unwrap();
+        let mut attention =
+            MultiHeadAttention::new(512, 8, 0.1, true).expect("operation failed in test");
         attention.update_optimization_hints(2, 2048, Some(1024));
         assert!(attention.optimization_hints.use_flash_attention);
     }

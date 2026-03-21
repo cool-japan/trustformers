@@ -1487,7 +1487,8 @@ mod tests {
     fn test_ring_attention_manager_creation() {
         let config = RingAttentionConfig::default();
         let sequence_length = 32768;
-        let manager = RingAttentionManager::new(config, sequence_length).unwrap();
+        let manager =
+            RingAttentionManager::new(config, sequence_length).expect("operation failed in test");
 
         assert_eq!(manager.devices.len(), 8);
         assert_eq!(manager.global_sequence_length, sequence_length);

@@ -279,7 +279,7 @@ mod tests {
         let parallel_tokenizer = ParallelTokenizer::new(tokenizer);
 
         let texts = vec!["hello world", "goodbye world", "test text"];
-        let results = parallel_tokenizer.encode_batch(&texts).unwrap();
+        let results = parallel_tokenizer.encode_batch(&texts).expect("Operation failed in test");
 
         assert_eq!(results.len(), 3);
         for result in results {
@@ -294,7 +294,8 @@ mod tests {
         let parallel_tokenizer = ParallelTokenizer::new(tokenizer);
 
         let pairs = vec![("hello", "world"), ("good", "bye"), ("test", "text")];
-        let results = parallel_tokenizer.encode_pair_batch(&pairs).unwrap();
+        let results =
+            parallel_tokenizer.encode_pair_batch(&pairs).expect("Operation failed in test");
 
         assert_eq!(results.len(), 3);
         for result in results {
@@ -312,7 +313,7 @@ mod tests {
             .with_truncation();
 
         let texts = vec!["short", "this is a longer text", "medium"];
-        let result = batch_tokenizer.encode_batch_padded(&texts).unwrap();
+        let result = batch_tokenizer.encode_batch_padded(&texts).expect("Operation failed in test");
 
         assert_eq!(result.batch_size(), 3);
 
@@ -363,7 +364,8 @@ mod tests {
         let ids2 = vec![3, 0]; // space, a
         let ids_batch = vec![ids1.as_slice(), ids2.as_slice()];
 
-        let results = parallel_tokenizer.decode_batch(&ids_batch).unwrap();
+        let results =
+            parallel_tokenizer.decode_batch(&ids_batch).expect("Operation failed in test");
         assert_eq!(results.len(), 2);
         assert!(!results[0].is_empty());
         assert!(!results[1].is_empty());

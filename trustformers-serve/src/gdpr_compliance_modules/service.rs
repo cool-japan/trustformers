@@ -7,8 +7,10 @@
 //! all GDPR compliance functionality and provides the main API.
 
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use prometheus::{
-    register_counter_vec, register_gauge_vec, register_histogram_vec, Counter, Gauge, Histogram,
+    register_counter_vec, register_gauge_vec, register_histogram_vec, Counter, CounterVec, Gauge,
+    GaugeVec, Histogram, HistogramVec,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,6 +18,34 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+// Global metric registrations — registered exactly once, shared across all GdprComplianceService instances.
+static GDPR_SUBJECT_REQUESTS_TOTAL: Lazy<CounterVec> = Lazy::new(|| {
+    register_counter_vec!(
+        "gdpr_subject_requests_total",
+        "Total number of data subject requests",
+        &["type"]
+    )
+    .expect("Failed to register gdpr_subject_requests_total metric")
+});
+
+static GDPR_ACTIVE_CONSENTS: Lazy<GaugeVec> = Lazy::new(|| {
+    register_gauge_vec!(
+        "gdpr_active_consents",
+        "Number of active consents",
+        &["purpose"]
+    )
+    .expect("Failed to register gdpr_active_consents metric")
+});
+
+static GDPR_REQUEST_PROCESSING_DURATION: Lazy<HistogramVec> = Lazy::new(|| {
+    register_histogram_vec!(
+        "gdpr_request_processing_duration_seconds",
+        "Duration of request processing",
+        &["type"]
+    )
+    .expect("Failed to register gdpr_request_processing_duration_seconds metric")
+});
 
 use super::consent_management::{ConsentEvidence, ConsentMechanism, ConsentRecord};
 use super::data_subject_rights::{DataSubjectRequest, RequestDetails};
@@ -72,33 +102,17 @@ pub struct GdprPrometheusMetrics {
 }
 
 impl GdprPrometheusMetrics {
-    /// Create new Prometheus metrics
+    /// Create new Prometheus metrics.
+    ///
+    /// Uses globally lazy-initialized metric families so that multiple
+    /// `GdprComplianceService` instances (e.g. in tests) share the same
+    /// Prometheus registration without triggering duplicate-registration errors.
     pub fn new() -> Result<Self> {
-        let subject_requests_total = register_counter_vec!(
-            "gdpr_subject_requests_total",
-            "Total number of data subject requests",
-            &["type"]
-        )?
-        .with_label_values(&["all"]);
-
-        let active_consents = register_gauge_vec!(
-            "gdpr_active_consents",
-            "Number of active consents",
-            &["purpose"]
-        )?
-        .with_label_values(&["all"]);
-
-        let request_processing_duration = register_histogram_vec!(
-            "gdpr_request_processing_duration_seconds",
-            "Duration of request processing",
-            &["type"]
-        )?
-        .with_label_values(&["all"]);
-
         Ok(Self {
-            subject_requests_total,
-            active_consents,
-            request_processing_duration,
+            subject_requests_total: GDPR_SUBJECT_REQUESTS_TOTAL.with_label_values(&["all"]),
+            active_consents: GDPR_ACTIVE_CONSENTS.with_label_values(&["all"]),
+            request_processing_duration: GDPR_REQUEST_PROCESSING_DURATION
+                .with_label_values(&["all"]),
         })
     }
 }

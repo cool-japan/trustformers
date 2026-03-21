@@ -489,7 +489,7 @@ mod tests {
     #[test]
     fn test_device_capabilities() {
         let config = MetalBackendConfig::for_apple_silicon();
-        let backend = MetalBackend::new(config).unwrap();
+        let backend = MetalBackend::new(config).expect("operation failed in test");
         let capabilities = backend.get_device_capabilities();
 
         assert!(capabilities.supports_neural_engine);

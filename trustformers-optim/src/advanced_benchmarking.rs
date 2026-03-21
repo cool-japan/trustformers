@@ -1274,7 +1274,7 @@ mod tests {
     #[test]
     fn test_hardware_profiler() {
         let profiler = HardwareProfiler::new();
-        let cpu_results = profiler.benchmark_cpu_performance().unwrap();
+        let cpu_results = profiler.benchmark_cpu_performance().expect("Operation failed in test");
 
         assert!(cpu_results.single_threaded_performance > 0.0);
         assert!(cpu_results.multi_threaded_performance > cpu_results.single_threaded_performance);
@@ -1284,7 +1284,7 @@ mod tests {
     fn test_memory_profiler() {
         let profiler = MemoryProfiler::new();
         let config = BenchmarkSuiteConfig::default();
-        let profiles = profiler.profile_memory_usage(&config).unwrap();
+        let profiles = profiler.profile_memory_usage(&config).expect("Operation failed in test");
 
         assert!(!profiles.is_empty());
         for (name, profile) in &profiles {
@@ -1298,7 +1298,7 @@ mod tests {
         let monitor = PerformanceMonitor::new();
         let config = BenchmarkSuiteConfig::default();
 
-        let profile = monitor.profile_optimizer("Adam", OptimizerType::Adam, &config).unwrap();
+        let profile = monitor.profile_optimizer("Adam", OptimizerType::Adam, &config).expect("Operation failed in test");
 
         assert!(profile.detailed_timing.total_time > Duration::from_secs(0));
         assert!(profile.memory_usage.total_memory > 0.0);

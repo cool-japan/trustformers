@@ -938,14 +938,14 @@ mod tests {
 
     #[test]
     fn test_tensorflow_adam_creation() {
-        let optimizer = TensorFlowAdam::with_defaults().unwrap();
+        let optimizer = TensorFlowAdam::with_defaults().expect("Operation failed in test");
         assert_eq!(optimizer.get_learning_rate(), 0.001);
         assert_eq!(optimizer.get_name(), "Adam");
     }
 
     #[test]
     fn test_tensorflow_adamw_creation() {
-        let optimizer = TensorFlowAdamW::with_defaults().unwrap();
+        let optimizer = TensorFlowAdamW::with_defaults().expect("Operation failed in test");
         assert_eq!(optimizer.get_learning_rate(), 0.001);
         assert_eq!(optimizer.get_name(), "AdamW");
     }
@@ -981,7 +981,7 @@ mod tests {
             true,
             Some("TestAdam".to_string()),
         )
-        .unwrap();
+        .expect("Operation failed in test");
         assert_eq!(adam.get_name(), "TestAdam");
 
         let adamw = TensorFlowOptimizerFactory::adamw(
@@ -998,7 +998,7 @@ mod tests {
             true,
             Some("TestAdamW".to_string()),
         )
-        .unwrap();
+        .expect("Operation failed in test");
         assert_eq!(adamw.get_name(), "TestAdamW");
     }
 
@@ -1019,20 +1019,24 @@ mod tests {
             true,
             Some("ScheduledAdam".to_string()),
         )
-        .unwrap();
+        .expect("Operation failed in test");
 
         assert_eq!(optimizer.get_learning_rate(), 0.1);
     }
 
     #[test]
     fn test_variable_management() {
-        let mut optimizer = TensorFlowAdam::with_defaults().unwrap();
+        let mut optimizer = TensorFlowAdam::with_defaults().expect("Operation failed in test");
 
-        let var1 = Tensor::zeros(&[10, 10]).unwrap();
-        let var2 = Tensor::zeros(&[5, 5]).unwrap();
+        let var1 = Tensor::zeros(&[10, 10]).expect("Failed to create tensor");
+        let var2 = Tensor::zeros(&[5, 5]).expect("Failed to create tensor");
 
-        optimizer.add_variable("var1".to_string(), var1).unwrap();
-        optimizer.add_variable("var2".to_string(), var2).unwrap();
+        optimizer
+            .add_variable("var1".to_string(), var1)
+            .expect("Operation failed in test");
+        optimizer
+            .add_variable("var2".to_string(), var2)
+            .expect("Operation failed in test");
 
         let variables = optimizer.variables();
         assert_eq!(variables.len(), 2);
@@ -1042,16 +1046,16 @@ mod tests {
 
     #[test]
     fn test_learning_rate_updates() {
-        let mut optimizer = TensorFlowAdam::with_defaults().unwrap();
+        let mut optimizer = TensorFlowAdam::with_defaults().expect("Operation failed in test");
         assert_eq!(optimizer.get_learning_rate(), 0.001);
 
-        optimizer.set_learning_rate(0.01).unwrap();
+        optimizer.set_learning_rate(0.01).expect("Operation failed in test");
         assert_eq!(optimizer.get_learning_rate(), 0.01);
     }
 
     #[test]
     fn test_config_serialization() {
-        let optimizer = TensorFlowAdam::with_defaults().unwrap();
+        let optimizer = TensorFlowAdam::with_defaults().expect("Operation failed in test");
         let config = optimizer.get_config();
 
         assert_eq!(config.learning_rate, 0.001);

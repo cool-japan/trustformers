@@ -680,16 +680,16 @@ mod tests {
                 true,
                 Some("c".to_string()),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        graph.compute_topological_order().unwrap();
+        graph.compute_topological_order().expect("operation failed in test");
         let order = graph.get_topological_order();
         assert_eq!(order.len(), 3);
 
         // Verify that parents come before children
-        let a_pos = order.iter().position(|&id| id == node_a).unwrap();
-        let b_pos = order.iter().position(|&id| id == node_b).unwrap();
-        let c_pos = order.iter().position(|&id| id == node_c).unwrap();
+        let a_pos = order.iter().position(|&id| id == node_a).expect("operation failed in test");
+        let b_pos = order.iter().position(|&id| id == node_b).expect("operation failed in test");
+        let c_pos = order.iter().position(|&id| id == node_c).expect("operation failed in test");
 
         assert!(a_pos < c_pos);
         assert!(b_pos < c_pos);
@@ -700,8 +700,8 @@ mod tests {
         let mut graph = ComputationGraph::new();
 
         // Create computation: c = a * b
-        let a = Tensor::scalar(2.0).unwrap();
-        let b = Tensor::scalar(3.0).unwrap();
+        let a = Tensor::scalar(2.0).expect("tensor operation failed");
+        let b = Tensor::scalar(3.0).expect("tensor operation failed");
         let c = a.mul(&b).expect("Multiplication failed");
 
         let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
@@ -714,19 +714,25 @@ mod tests {
                 true,
                 Some("c".to_string()),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Backward pass
-        graph.backward(node_c, None).unwrap();
+        graph.backward(node_c, None).expect("operation failed in test");
 
         // Check gradients
-        let grad_a = graph.get_gradient(node_a).unwrap();
-        let grad_b = graph.get_gradient(node_b).unwrap();
+        let grad_a = graph.get_gradient(node_a).expect("operation failed in test");
+        let grad_b = graph.get_gradient(node_b).expect("operation failed in test");
 
         // Gradient of a should be b (3.0)
         // Gradient of b should be a (2.0)
-        assert_eq!(grad_a.to_vec_f32().unwrap()[0], 3.0);
-        assert_eq!(grad_b.to_vec_f32().unwrap()[0], 2.0);
+        assert_eq!(
+            grad_a.to_vec_f32().expect("operation failed in test")[0],
+            3.0
+        );
+        assert_eq!(
+            grad_b.to_vec_f32().expect("operation failed in test")[0],
+            2.0
+        );
     }
 
     #[test]
@@ -734,7 +740,7 @@ mod tests {
         let mut graph = ComputationGraph::new();
 
         // Create computation: d = a + a (gradient should accumulate)
-        let a = Tensor::scalar(2.0).unwrap();
+        let a = Tensor::scalar(2.0).expect("tensor operation failed");
         let d = a.add(&a).expect("Addition failed");
 
         let node_a = graph.add_node(a.clone(), true, Some("a".to_string()));
@@ -746,15 +752,18 @@ mod tests {
                 true,
                 Some("d".to_string()),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Backward pass
-        graph.backward(node_d, None).unwrap();
+        graph.backward(node_d, None).expect("operation failed in test");
 
         // Check gradient accumulation
-        let grad_a = graph.get_gradient(node_a).unwrap();
+        let grad_a = graph.get_gradient(node_a).expect("operation failed in test");
 
         // Gradient should be 2.0 (1.0 + 1.0 from both uses)
-        assert_eq!(grad_a.to_vec_f32().unwrap()[0], 2.0);
+        assert_eq!(
+            grad_a.to_vec_f32().expect("operation failed in test")[0],
+            2.0
+        );
     }
 }

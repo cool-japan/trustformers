@@ -1059,7 +1059,7 @@ mod tests {
     #[test]
     fn test_pass_building() {
         let config = CompilerConfig::default();
-        let backend = MlirBackend::new(&config).unwrap();
+        let backend = MlirBackend::new(&config).expect("operation failed in test");
         let passes = backend.build_optimization_passes();
         assert!(!passes.is_empty());
         assert!(passes.contains(&"canonicalize".to_string()));
@@ -1068,11 +1068,11 @@ mod tests {
     #[test]
     fn test_cache_key_generation() {
         let config = CompilerConfig::default();
-        let backend = MlirBackend::new(&config).unwrap();
+        let backend = MlirBackend::new(&config).expect("operation failed in test");
         let ir = IntermediateRepresentation::new();
         let key = backend.generate_cache_key(&ir);
         assert!(key.is_ok());
-        assert!(key.unwrap().starts_with("mlir_"));
+        assert!(key.expect("operation failed in test").starts_with("mlir_"));
     }
 
     #[test]
@@ -1157,7 +1157,7 @@ mod tests {
         assert!(registry.is_dialect_supported("ml"));
         assert!(!registry.is_dialect_supported("unknown"));
 
-        let ml_ops = registry.get_dialect_operations("ml").unwrap();
+        let ml_ops = registry.get_dialect_operations("ml").expect("operation failed in test");
         assert!(ml_ops.contains(&"ml.attention".to_string()));
         assert!(ml_ops.contains(&"ml.flash_attention".to_string()));
         assert!(ml_ops.contains(&"ml.quantized_matmul".to_string()));
@@ -1234,7 +1234,11 @@ mod tests {
         let pipeline = MlirPassPipeline::transformer_optimized();
 
         // Find ml-attention-fusion pass
-        let fusion_pass = pipeline.passes.iter().find(|p| p.name == "ml-attention-fusion").unwrap();
+        let fusion_pass = pipeline
+            .passes
+            .iter()
+            .find(|p| p.name == "ml-attention-fusion")
+            .expect("operation failed in test");
 
         assert!(fusion_pass.dependencies.contains(&"cse".to_string()));
 

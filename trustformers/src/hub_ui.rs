@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Model versioning UI for TrustformeRS Hub integration
@@ -1663,12 +1663,20 @@ mod tests {
         repo.versions.insert("v2.0.0".to_string(), v2);
         repo.version_history = vec!["v1.0.0".to_string(), "v2.0.0".to_string()];
 
-        let comparison = repo.compare_versions("v1.0.0", "v2.0.0").unwrap();
+        let comparison =
+            repo.compare_versions("v1.0.0", "v2.0.0").expect("operation failed in test");
 
         assert_eq!(comparison.from_version, "v1.0.0");
         assert_eq!(comparison.to_version, "v2.0.0");
         assert_eq!(comparison.size_diff, 200000);
-        assert!((comparison.performance_diff.accuracy_diff.unwrap() - 0.05).abs() < 1e-10);
-        assert!((comparison.performance_diff.loss_diff.unwrap() + 0.05).abs() < 1e-10);
+        assert!(
+            (comparison.performance_diff.accuracy_diff.expect("operation failed in test") - 0.05)
+                .abs()
+                < 1e-10
+        );
+        assert!(
+            (comparison.performance_diff.loss_diff.expect("operation failed in test") + 0.05).abs()
+                < 1e-10
+        );
     }
 }

@@ -52,7 +52,10 @@ mod tests {
             resource_usage: ResourceUsage::default(),
             metadata: HashMap::new(),
         };
-        server.register_model(model_info).await.unwrap();
+        server
+            .register_model(model_info)
+            .await
+            .expect("registration should succeed in test");
         let request = InferenceRequest {
             input_text: "Hello world".to_string(),
             path: "/v1/inference".to_string(),
@@ -62,7 +65,7 @@ mod tests {
         };
         let result = server.route_request(&request).await;
         assert!(result.is_ok());
-        match result.unwrap() {
+        match result.expect("test operation should succeed") {
             RoutingResult::SingleModel { model_id } => {
                 assert_eq!(model_id, "test-model");
             },

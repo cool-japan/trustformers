@@ -840,7 +840,7 @@ mod tests {
 
     #[test]
     fn test_intel_device_detection() {
-        let devices = IntelUtils::detect_devices().unwrap();
+        let devices = IntelUtils::detect_devices().expect("operation failed in test");
         assert!(!devices.is_empty());
         assert_eq!(devices[0].device_type, IntelDeviceType::Arc);
     }
@@ -848,7 +848,7 @@ mod tests {
     #[test]
     fn test_intel_kernel_creation() {
         let config = IntelKernelConfig::default();
-        let kernel = IntelKernel::new(config).unwrap();
+        let kernel = IntelKernel::new(config).expect("operation failed in test");
         assert_eq!(kernel.device.device_type, IntelDeviceType::Arc);
     }
 

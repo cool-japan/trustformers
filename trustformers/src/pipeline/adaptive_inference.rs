@@ -958,7 +958,7 @@ mod tests {
     fn test_input_analysis() {
         let analyzer = InputAnalyzer::new();
         let input = "test input";
-        let analysis = analyzer.analyze_input(&input).unwrap();
+        let analysis = analyzer.analyze_input(&input).expect("operation failed in test");
 
         assert_eq!(analysis.sequence_length, 256);
         assert!(analysis.complexity_score > 0.0);

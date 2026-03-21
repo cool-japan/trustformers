@@ -394,13 +394,13 @@ mod tests {
     #[test]
     fn test_reward_prediction() {
         let config = RewardModelConfig::default();
-        let mut model = RewardModel::new(config).unwrap();
-        model.initialize_parameters(768).unwrap();
+        let mut model = RewardModel::new(config).expect("operation failed in test");
+        model.initialize_parameters(768).expect("operation failed in test");
 
         let prediction = model.predict_reward("This is a test response");
         assert!(prediction.is_ok());
 
-        let pred = prediction.unwrap();
+        let pred = prediction.expect("operation failed in test");
         assert!(!pred.text.is_empty());
         assert!(pred.confidence >= 0.0 && pred.confidence <= 1.0);
     }
@@ -431,7 +431,7 @@ mod tests {
         ];
 
         let config = RewardModelConfig::default();
-        let mut model = RewardModel::new(config).unwrap();
+        let mut model = RewardModel::new(config).expect("operation failed in test");
         let result = model.load_from_human_feedback(feedback);
         assert!(result.is_ok());
         assert_eq!(model.training_data.len(), 1);
@@ -440,8 +440,8 @@ mod tests {
     #[test]
     fn test_response_comparison() {
         let config = RewardModelConfig::default();
-        let mut model = RewardModel::new(config).unwrap();
-        model.initialize_parameters(768).unwrap();
+        let mut model = RewardModel::new(config).expect("operation failed in test");
+        model.initialize_parameters(768).expect("operation failed in test");
 
         let preference = model.compare_responses(
             "What is the capital of France?",
@@ -450,7 +450,7 @@ mod tests {
         );
 
         assert!(preference.is_ok());
-        let prob = preference.unwrap();
+        let prob = preference.expect("operation failed in test");
         assert!((0.0..=1.0).contains(&prob));
     }
 }

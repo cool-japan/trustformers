@@ -453,7 +453,7 @@ mod tests {
         );
         params.insert("weight_decay".to_string(), ParameterValue::Float(1e-3));
 
-        let result = language_modeling_objective(params).unwrap();
+        let result = language_modeling_objective(params).expect("operation failed in test");
         assert!(result.metrics.objective_value > 0.0);
         assert!(result.metrics.objective_value <= 1.0);
         assert!(result.metrics.metrics.contains_key("eval_accuracy"));
@@ -466,7 +466,7 @@ mod tests {
         params.insert("batch_size".to_string(), ParameterValue::Int(32));
         params.insert("dropout_rate".to_string(), ParameterValue::Float(0.1));
 
-        let result = computer_vision_objective(params).unwrap();
+        let result = computer_vision_objective(params).expect("operation failed in test");
         assert!(result.metrics.objective_value > 0.0);
         assert!(result.metrics.objective_value <= 1.0);
         assert!(result.metrics.metrics.contains_key("eval_top1_accuracy"));

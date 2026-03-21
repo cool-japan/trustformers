@@ -928,7 +928,7 @@ mod tests {
         let result = manager.execute_task(task);
         assert!(result.is_ok());
 
-        let compute_result = result.unwrap();
+        let compute_result = result.expect("operation failed in test");
         assert!(compute_result.execution_time_us > 0);
         assert!(!compute_result.device_id.is_empty());
     }
@@ -965,7 +965,7 @@ mod tests {
 
         let score = manager.calculate_device_score(&device, &task);
         assert!(score.is_ok());
-        assert!(score.unwrap() >= 0.0);
+        assert!(score.expect("operation failed in test") >= 0.0);
     }
 
     #[test]

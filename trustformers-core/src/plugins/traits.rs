@@ -23,7 +23,7 @@ use std::collections::HashMap;
 /// ```no_run
 /// use trustformers_core::plugins::Plugin;
 /// use trustformers_core::tensor::Tensor;
-/// use trustformers_core::error::Result;
+/// use trustformers_core::errors::Result;
 /// use std::collections::HashMap;
 ///
 /// #[derive(Debug, Clone)]

@@ -39,6 +39,8 @@ pub mod monitoring;
 pub mod profiling;
 pub mod topology;
 pub mod traits;
+pub mod traits_analysis;
+pub mod traits_profiling;
 pub mod utility;
 
 // Re-export all public types from submodules
@@ -51,4 +53,5 @@ pub use monitoring::*;
 pub use profiling::*;
 pub use topology::*;
 pub use traits::*;
+// traits_analysis and traits_profiling are re-exported via traits.rs
 pub use utility::*;

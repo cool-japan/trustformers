@@ -208,7 +208,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 768);
         assert_eq!(output.shape, vec![768]);
     }
@@ -268,7 +268,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 512 * 768);
         assert_eq!(output.shape, vec![512, 768]);
         assert!(output.attention_mask.is_some());
@@ -287,7 +287,7 @@ mod tests {
         let extractor = AutoFeatureExtractor::for_task("image-classification", &config);
         assert!(extractor.is_ok());
 
-        let fe = extractor.unwrap();
+        let fe = extractor.expect("operation failed in test");
         assert_eq!(fe.config().feature_size(), 768);
         assert!(fe.config().supports_batching());
     }

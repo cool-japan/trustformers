@@ -246,7 +246,7 @@ impl NamingChecker {
         // Function definitions
         let fn_regex =
             Regex::new(r"(?m)^\s*(?:pub\s+)?(?:async\s+)?fn\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(")
-                .unwrap();
+                .expect("function regex pattern is valid");
         for (line_num, line) in content.lines().enumerate() {
             for cap in fn_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -267,7 +267,8 @@ impl NamingChecker {
 
         // Struct definitions
         let struct_regex =
-            Regex::new(r"(?m)^\s*(?:pub\s+)?struct\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<{]").unwrap();
+            Regex::new(r"(?m)^\s*(?:pub\s+)?struct\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<{]")
+                .expect("struct regex pattern is valid");
         for (line_num, line) in content.lines().enumerate() {
             for cap in struct_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -287,8 +288,8 @@ impl NamingChecker {
         }
 
         // Enum definitions
-        let enum_regex =
-            Regex::new(r"(?m)^\s*(?:pub\s+)?enum\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<{]").unwrap();
+        let enum_regex = Regex::new(r"(?m)^\s*(?:pub\s+)?enum\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<{]")
+            .expect("enum regex pattern is valid");
         for (line_num, line) in content.lines().enumerate() {
             for cap in enum_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -309,7 +310,8 @@ impl NamingChecker {
 
         // Trait definitions
         let trait_regex =
-            Regex::new(r"(?m)^\s*(?:pub\s+)?trait\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<:{]").unwrap();
+            Regex::new(r"(?m)^\s*(?:pub\s+)?trait\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<:{]")
+                .expect("trait regex pattern is valid");
         for (line_num, line) in content.lines().enumerate() {
             for cap in trait_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -329,8 +331,8 @@ impl NamingChecker {
         }
 
         // Constants
-        let const_regex =
-            Regex::new(r"(?m)^\s*(?:pub\s+)?const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:").unwrap();
+        let const_regex = Regex::new(r"(?m)^\s*(?:pub\s+)?const\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*:")
+            .expect("const regex pattern is valid");
         for (line_num, line) in content.lines().enumerate() {
             for cap in const_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -350,8 +352,8 @@ impl NamingChecker {
         }
 
         // Type aliases
-        let type_regex =
-            Regex::new(r"(?m)^\s*(?:pub\s+)?type\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<=>]").unwrap();
+        let type_regex = Regex::new(r"(?m)^\s*(?:pub\s+)?type\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[<=>]")
+            .expect("type alias regex pattern is valid");
         for (line_num, line) in content.lines().enumerate() {
             for cap in type_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -371,8 +373,8 @@ impl NamingChecker {
         }
 
         // Macros
-        let macro_regex =
-            Regex::new(r"(?m)^\s*macro_rules!\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\{").unwrap();
+        let macro_regex = Regex::new(r"(?m)^\s*macro_rules!\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\{")
+            .expect("macro regex pattern is valid");
         for (line_num, line) in content.lines().enumerate() {
             for cap in macro_regex.captures_iter(line) {
                 let name = &cap[1];
@@ -404,7 +406,8 @@ impl NamingChecker {
 
         // Check package name in Cargo.toml
         if file_path.file_name() == Some(std::ffi::OsStr::new("Cargo.toml")) {
-            let name_regex = Regex::new(r#"name\s*=\s*"([^"]+)""#).unwrap();
+            let name_regex =
+                Regex::new(r#"name\s*=\s*"([^"]+)""#).expect("TOML name regex pattern is valid");
             for (line_num, line) in content.lines().enumerate() {
                 for cap in name_regex.captures_iter(line) {
                     let name = &cap[1];
@@ -1057,7 +1060,7 @@ mod tests {
         );
 
         assert!(violation.is_some());
-        let v = violation.unwrap();
+        let v = violation.expect("operation failed in test");
         assert_eq!(v.element_name, "InvalidFunctionName");
         assert_eq!(v.element_type, ElementType::Function);
         assert!(v.suggested_name.is_some());
@@ -1066,7 +1069,7 @@ mod tests {
     #[test]
     fn test_exclusion_patterns() {
         let mut checker = NamingChecker::default();
-        checker.exclude_pattern(r"^_internal_.*").unwrap();
+        checker.exclude_pattern(r"^_internal_.*").expect("operation failed in test");
 
         assert!(checker.is_excluded("_internal_function"));
         assert!(!checker.is_excluded("public_function"));

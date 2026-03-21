@@ -331,7 +331,7 @@ mod tests {
         let tokenizer = CanineTokenizer::new();
         let text = "Hello";
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         // Should have CLS + characters + SEP
         assert_eq!(encoded.input_ids.len(), 7); // 1 + 5 + 1
@@ -344,7 +344,7 @@ mod tests {
         let tokenizer = CanineTokenizer::new();
         let text = "A";
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         // 'A' is ASCII 65, so token ID should be 4 + 65 = 69
         assert_eq!(encoded.input_ids[1], 69); // CLS(0) + A(69)
@@ -355,7 +355,7 @@ mod tests {
         let tokenizer = CanineTokenizer::new().with_downsample_rate(2);
         let text = "Hello World";
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         // With downsampling rate 2, should take every 2nd character (indices 0, 2, 4, ...)
         // Original: "Hello World" (11 chars: H e l l o   W o r l d)
@@ -371,7 +371,7 @@ mod tests {
         let tokenizer = CanineTokenizer::new().with_max_length(5);
         let text = "Hello World";
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         assert_eq!(encoded.input_ids.len(), 5);
         assert_eq!(encoded.attention_mask.len(), 5);
@@ -385,7 +385,7 @@ mod tests {
         let text1 = "Hello";
         let text2 = "World";
 
-        let encoded = tokenizer.encode_pair(text1, text2).unwrap();
+        let encoded = tokenizer.encode_pair(text1, text2).expect("Operation failed in test");
 
         // Should have CLS + text1 + SEP + text2 + SEP
         let expected_len = 1 + text1.len() + 1 + text2.len() + 1;
@@ -393,7 +393,7 @@ mod tests {
 
         // Check token type IDs
         assert!(encoded.token_type_ids.is_some());
-        let token_types = encoded.token_type_ids.unwrap();
+        let token_types = encoded.token_type_ids.expect("Operation failed in test");
         assert_eq!(token_types.len(), expected_len);
 
         // First sequence should be type 0
@@ -410,7 +410,7 @@ mod tests {
         let tokenizer = CanineTokenizer::new();
         let text = "Hello 世界"; // Mix of ASCII and Unicode
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         // Should handle both ASCII and Unicode characters
         assert!(encoded.input_ids.len() > 2); // At least CLS + some chars + SEP
@@ -425,8 +425,8 @@ mod tests {
         let tokenizer = CanineTokenizer::new();
         let text = "Hello";
 
-        let encoded = tokenizer.encode(text).unwrap();
-        let decoded = tokenizer.decode(&encoded.input_ids).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
 
         // Should decode ASCII characters correctly
         assert!(decoded.contains("Hello"));
@@ -437,7 +437,7 @@ mod tests {
         let tokenizer = CanineTokenizer::new().with_add_special_tokens(false);
         let text = "Hi";
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         // Should only have the character tokens, no CLS/SEP
         assert_eq!(encoded.input_ids.len(), text.len());

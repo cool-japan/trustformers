@@ -862,7 +862,9 @@ mod tests {
         let input = "Hello world";
         let output = "This is a test response.";
 
-        let result = validator.validate(&input.to_string(), &output.to_string()).unwrap();
+        let result = validator
+            .validate(&input.to_string(), &output.to_string())
+            .expect("operation failed in test");
         assert!(result.is_valid);
         assert!(result.score > 0.0);
     }
@@ -877,13 +879,17 @@ mod tests {
         let validator = TextOutputValidator::new(config);
 
         // Test too short
-        let result = validator.validate(&"input".to_string(), &"short".to_string()).unwrap();
+        let result = validator
+            .validate(&"input".to_string(), &"short".to_string())
+            .expect("operation failed in test");
         assert!(!result.is_valid);
         assert!(result.has_errors());
 
         // Test too long
         let long_text = "a".repeat(100);
-        let result = validator.validate(&"input".to_string(), &long_text).unwrap();
+        let result = validator
+            .validate(&"input".to_string(), &long_text)
+            .expect("operation failed in test");
         assert!(!result.is_valid);
         assert!(result.has_errors());
 
@@ -893,7 +899,7 @@ mod tests {
                 &"input".to_string(),
                 &"This is a valid length text.".to_string(),
             )
-            .unwrap();
+            .expect("operation failed in test");
         assert!(result.is_valid);
     }
 
@@ -917,7 +923,9 @@ mod tests {
             }),
         };
 
-        let result = validator.validate(&"test input".to_string(), &output).unwrap();
+        let result = validator
+            .validate(&"test input".to_string(), &output)
+            .expect("operation failed in test");
         assert!(result.is_valid);
     }
 
@@ -926,7 +934,9 @@ mod tests {
         let config = ValidationManagerConfig::default();
         let manager = ValidationManager::new(config);
 
-        let result = manager.validate_text_output("input", "This is a test output.").unwrap();
+        let result = manager
+            .validate_text_output("input", "This is a test output.")
+            .expect("operation failed in test");
         assert!(result.is_valid);
     }
 

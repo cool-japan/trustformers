@@ -307,15 +307,19 @@ impl MemoryProfiler {
 
     /// Stop memory profiling and generate report
     pub async fn stop(&mut self) -> Result<MemoryProfilingReport> {
-        let mut running = self.running.lock().expect("lock should not be poisoned");
-        if !*running {
-            return Err(anyhow::anyhow!("Memory profiler is not running"));
+        {
+            let mut running = self.running.lock().expect("lock should not be poisoned");
+            if !*running {
+                return Err(anyhow::anyhow!("Memory profiler is not running"));
+            }
+            *running = false;
         }
+        // Guard is dropped here so background sampling task can check the flag and exit
 
-        *running = false;
         let end_time = SystemTime::now();
-        let start_time =
-            self.start_time.expect("start_time should be set when profiler is running");
+        let start_time = self
+            .start_time
+            .ok_or_else(|| anyhow::anyhow!("start_time should be set when profiler is running"))?;
         let duration =
             end_time.duration_since(UNIX_EPOCH)?.as_secs_f64() - start_time.elapsed().as_secs_f64();
 
@@ -631,42 +635,70 @@ impl MemoryProfiler {
         duration_secs: f64,
         profiling_overhead_ms: f64,
     ) -> Result<MemoryProfilingReport> {
-        let allocations = self.allocations.lock().expect("lock should not be poisoned");
-        let timeline = self.memory_timeline.lock().expect("lock should not be poisoned");
-        let type_stats = self.type_stats.lock().expect("lock should not be poisoned");
+        // Extract data from locked mutexes first, then drop guards before calling
+        // analysis methods that also need to acquire these locks.
+        let (
+            total_allocations,
+            total_deallocations,
+            net_allocations,
+            peak_memory_mb,
+            average_memory_mb,
+            allocations_by_size_bucket,
+            timeline_snapshot,
+            type_stats_snapshot,
+        ) = {
+            let allocations = self.allocations.lock().expect("lock should not be poisoned");
+            let timeline = self.memory_timeline.lock().expect("lock should not be poisoned");
+            let type_stats = self.type_stats.lock().expect("lock should not be poisoned");
 
-        let total_allocations = allocations.len();
-        let total_deallocations = allocations.values().filter(|r| r.freed).count();
-        let net_allocations = total_allocations as i64 - total_deallocations as i64;
+            let total_allocs = allocations.len();
+            let total_deallocs = allocations.values().filter(|r| r.freed).count();
+            let net_allocs = total_allocs as i64 - total_deallocs as i64;
+
+            // Calculate summary statistics
+            let peak_mem = timeline
+                .iter()
+                .map(|s| s.peak_heap_bytes as f64 / 1024.0 / 1024.0)
+                .fold(0.0, f64::max);
+
+            let avg_mem = if !timeline.is_empty() {
+                timeline.iter().map(|s| s.used_heap_bytes as f64 / 1024.0 / 1024.0).sum::<f64>()
+                    / timeline.len() as f64
+            } else {
+                0.0
+            };
+
+            // Create size buckets
+            let mut size_buckets = HashMap::new();
+            for record in allocations.values() {
+                let bucket = self.get_size_bucket(record.size);
+                *size_buckets.entry(bucket).or_insert(0) += 1;
+            }
+
+            let timeline_snap: Vec<_> = timeline.iter().cloned().collect();
+            let type_stats_snap = type_stats.clone();
+
+            (
+                total_allocs,
+                total_deallocs,
+                net_allocs,
+                peak_mem,
+                avg_mem,
+                size_buckets,
+                timeline_snap,
+                type_stats_snap,
+            )
+        };
+        // Guards are dropped here -- analysis methods can now safely acquire locks
 
         let potential_leaks = self.detect_leaks()?;
         let detected_patterns = self.analyze_patterns()?;
         let fragmentation_analysis = self.analyze_fragmentation()?;
         let gc_pressure_analysis = self.analyze_gc_pressure()?;
 
-        // Calculate summary statistics
-        let peak_memory_mb = timeline
-            .iter()
-            .map(|s| s.peak_heap_bytes as f64 / 1024.0 / 1024.0)
-            .fold(0.0, f64::max);
-
-        let average_memory_mb = if !timeline.is_empty() {
-            timeline.iter().map(|s| s.used_heap_bytes as f64 / 1024.0 / 1024.0).sum::<f64>()
-                / timeline.len() as f64
-        } else {
-            0.0
-        };
-
         let mut leak_summary = HashMap::new();
         for leak in &potential_leaks {
             *leak_summary.entry(leak.allocation_type.clone()).or_insert(0) += 1;
-        }
-
-        // Create size buckets
-        let mut allocations_by_size_bucket = HashMap::new();
-        for record in allocations.values() {
-            let bucket = self.get_size_bucket(record.size);
-            *allocations_by_size_bucket.entry(bucket).or_insert(0) += 1;
         }
 
         Ok(MemoryProfilingReport {
@@ -683,13 +715,13 @@ impl MemoryProfiler {
             total_allocations,
             total_deallocations,
             net_allocations,
-            memory_timeline: timeline.iter().cloned().collect(),
+            memory_timeline: timeline_snapshot,
             potential_leaks,
             leak_summary,
             detected_patterns,
             fragmentation_analysis,
             gc_pressure_analysis,
-            allocations_by_type: type_stats.clone(),
+            allocations_by_type: type_stats_snapshot,
             allocations_by_size_bucket,
             profiling_overhead_ms,
             sampling_accuracy: 0.95, // Placeholder

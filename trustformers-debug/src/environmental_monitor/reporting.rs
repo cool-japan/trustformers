@@ -612,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn test_daily_report_generation() {
         let engine = EnvironmentalReportingEngine::new();
-        let report = engine.generate_daily_report().await.unwrap();
+        let report = engine.generate_daily_report().await.expect("async operation failed");
 
         assert!(!report.report_id.is_empty());
         assert!(!report.summary.is_empty());
@@ -624,16 +624,26 @@ mod tests {
     async fn test_all_report_types() {
         let engine = EnvironmentalReportingEngine::new();
 
-        let summary_report =
-            engine.generate_environmental_report(ReportType::Summary).await.unwrap();
-        let detailed_report =
-            engine.generate_environmental_report(ReportType::Detailed).await.unwrap();
-        let technical_report =
-            engine.generate_environmental_report(ReportType::Technical).await.unwrap();
-        let executive_report =
-            engine.generate_environmental_report(ReportType::Executive).await.unwrap();
-        let compliance_report =
-            engine.generate_environmental_report(ReportType::Compliance).await.unwrap();
+        let summary_report = engine
+            .generate_environmental_report(ReportType::Summary)
+            .await
+            .expect("async operation failed");
+        let detailed_report = engine
+            .generate_environmental_report(ReportType::Detailed)
+            .await
+            .expect("async operation failed");
+        let technical_report = engine
+            .generate_environmental_report(ReportType::Technical)
+            .await
+            .expect("async operation failed");
+        let executive_report = engine
+            .generate_environmental_report(ReportType::Executive)
+            .await
+            .expect("async operation failed");
+        let compliance_report = engine
+            .generate_environmental_report(ReportType::Compliance)
+            .await
+            .expect("async operation failed");
 
         assert_eq!(summary_report.report_type, ReportType::Summary);
         assert_eq!(detailed_report.report_type, ReportType::Detailed);
@@ -647,7 +657,10 @@ mod tests {
         let engine = EnvironmentalReportingEngine::new();
         let custom_period = Duration::from_secs(7 * 24 * 3600); // 7 days
 
-        let report = engine.generate_custom_report(custom_period).await.unwrap();
+        let report = engine
+            .generate_custom_report(custom_period)
+            .await
+            .expect("async operation failed");
 
         assert!(report.summary.contains("7.0 days"));
         assert!(!report.charts.is_empty());
@@ -677,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn test_report_content_quality() {
         let engine = EnvironmentalReportingEngine::new();
-        let report = engine.generate_monthly_report().await.unwrap();
+        let report = engine.generate_monthly_report().await.expect("async operation failed");
 
         // Verify report has substantive content
         assert!(report.summary.len() > 50);

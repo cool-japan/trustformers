@@ -197,7 +197,7 @@ impl OAuth2Auth {
         let client = oauth2::basic::BasicClient::new(
             oauth2::ClientId::new(client_id.into()),
             Some(oauth2::ClientSecret::new(client_secret.into())),
-            oauth2::AuthUrl::new("https://example.com/auth".to_string()).unwrap(), // Not used for client credentials
+            oauth2::AuthUrl::new("https://example.com/auth".to_string()).expect("static auth URL is always valid"), // Not used for client credentials
             Some(oauth2::TokenUrl::new(token_url.as_ref().to_string()).map_err(|e| ClientError::Configuration(e.to_string()))?),
         );
 
@@ -325,10 +325,9 @@ impl InferenceRequest {
 
     /// Add a parameter
     pub fn parameter(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
-        if self.parameters.is_none() {
-            self.parameters = Some(HashMap::new());
-        }
-        self.parameters.as_mut().unwrap().insert(key.into(), value);
+        self.parameters
+            .get_or_insert_with(HashMap::new)
+            .insert(key.into(), value);
         self
     }
 }
@@ -661,10 +660,9 @@ impl TrustformersClient {
         mut request: InferenceRequest,
     ) -> Result<impl Stream<Item = Result<StreamingChunk>>> {
         // Enable streaming
-        if request.options.is_none() {
-            request.options = Some(InferenceOptions::new());
-        }
-        request.options.as_mut().unwrap().stream = Some(true);
+        request.options
+            .get_or_insert_with(InferenceOptions::new)
+            .stream = Some(true);
 
         let response = self
             .make_request_streaming(Method::POST, "/v1/inference/stream", Some(&request))

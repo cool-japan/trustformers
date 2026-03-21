@@ -1052,7 +1052,7 @@ mod tests {
     fn test_vocabulary_analysis() {
         let vocab = create_test_vocab();
         let analyzer = VocabAnalyzer::default();
-        let result = analyzer.analyze_vocabulary(&vocab).unwrap();
+        let result = analyzer.analyze_vocabulary(&vocab).expect("Operation failed in test");
 
         assert_eq!(result.basic_stats.total_tokens, 10);
         assert!(!result.character_patterns.is_empty());
@@ -1069,7 +1069,7 @@ mod tests {
         };
 
         let analyzer = VocabAnalyzer::new(config);
-        let issues = analyzer.detect_long_tokens(&vocab).unwrap();
+        let issues = analyzer.detect_long_tokens(&vocab).expect("Operation failed in test");
 
         assert!(!issues.is_empty());
         assert_eq!(issues[0].issue_type, VocabIssueType::LongTokens);
@@ -1088,7 +1088,8 @@ mod tests {
     fn test_character_pattern_analysis() {
         let vocab = create_test_vocab();
         let analyzer = VocabAnalyzer::default();
-        let patterns = analyzer.analyze_character_patterns(&vocab).unwrap();
+        let patterns =
+            analyzer.analyze_character_patterns(&vocab).expect("Operation failed in test");
 
         assert!(!patterns.is_empty());
         assert!(patterns.iter().any(|p| p.pattern == "alphabetic"));
@@ -1108,7 +1109,7 @@ mod tests {
     fn test_subword_pattern_analysis() {
         let vocab = create_test_vocab();
         let analyzer = VocabAnalyzer::default();
-        let patterns = analyzer.analyze_subword_patterns(&vocab).unwrap();
+        let patterns = analyzer.analyze_subword_patterns(&vocab).expect("Operation failed in test");
 
         // Should find patterns like "test" appearing in multiple tokens
         assert!(!patterns.is_empty());
@@ -1154,7 +1155,7 @@ mod tests {
         }
 
         let analyzer = VocabAnalyzer::default();
-        let result = analyzer.analyze_vocabulary(&vocab).unwrap();
+        let result = analyzer.analyze_vocabulary(&vocab).expect("Operation failed in test");
 
         // Should generate some recommendations
         assert!(!result.recommendations.is_empty());
@@ -1167,7 +1168,7 @@ mod tests {
     fn test_summary_report() {
         let vocab = create_test_vocab();
         let analyzer = VocabAnalyzer::default();
-        let result = analyzer.analyze_vocabulary(&vocab).unwrap();
+        let result = analyzer.analyze_vocabulary(&vocab).expect("Operation failed in test");
 
         let report = VocabDebugUtils::generate_summary_report(&result);
         assert!(report.contains("VOCABULARY ANALYSIS SUMMARY"));

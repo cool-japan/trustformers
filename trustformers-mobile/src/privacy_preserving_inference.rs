@@ -792,7 +792,7 @@ mod tests {
         let config = InferencePrivacyConfig::default();
         let mut engine = PrivacyPreservingInferenceEngine::new(config);
 
-        let input = Tensor::randn(&[1, 10]).unwrap();
+        let input = Tensor::randn(&[1, 10]).expect("tensor operation failed");
         let model_fn = |x: &Tensor| -> Result<Tensor> {
             // Simple linear model
             x.scalar_mul(0.5)
@@ -801,7 +801,7 @@ mod tests {
         let result = engine.private_inference(&input, model_fn);
         assert!(result.is_ok());
 
-        let private_result = result.unwrap();
+        let private_result = result.expect("operation failed in test");
         assert!(private_result.privacy_guarantees.epsilon_spent > 0.0);
     }
 

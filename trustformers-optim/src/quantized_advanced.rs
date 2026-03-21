@@ -612,9 +612,10 @@ mod tests {
     #[test]
     fn test_nf4_quantization() {
         let data = vec![1.0, -0.5, 0.0, 0.8, -1.2];
-        let tensor = Tensor::new(data.clone()).unwrap();
+        let tensor = Tensor::new(data.clone()).expect("Failed to create tensor");
 
-        let quantized = QuantizationUtils::quantize_nf4(&tensor, 64).unwrap();
+        let quantized =
+            QuantizationUtils::quantize_nf4(&tensor, 64).expect("Operation failed in test");
         assert_eq!(quantized.method, QuantizationMethod::NF4);
         assert!(quantized.compression_ratio() >= 1.0);
     }

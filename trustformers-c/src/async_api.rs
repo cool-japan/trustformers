@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_async_operation_lifecycle() {
-        let model_path = CString::new("/path/to/model").unwrap();
+        let model_path = CString::new("/path/to/model").expect("CString creation should succeed for valid test input");
         let mut handle: TrustformersAsyncHandle = 0;
 
         let err = trustformers_async_load_model(
@@ -432,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_async_cancel() {
-        let model_path = CString::new("/path/to/model").unwrap();
+        let model_path = CString::new("/path/to/model").expect("CString creation should succeed for valid test input");
         let mut handle: TrustformersAsyncHandle = 0;
 
         trustformers_async_load_model(

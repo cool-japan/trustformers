@@ -16,22 +16,21 @@
 //! # Example
 //!
 //! ```no_run
-//! use trustformers_core::plugins::{Plugin, PluginRegistry, PluginInfo};
-//! use trustformers_core::tensor::Tensor;
+//! use trustformers_core::plugins::{PluginRegistry, PluginInfo, PluginManager};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! // Register a custom plugin
-//! let mut registry = PluginRegistry::new();
+//! let registry = PluginRegistry::new();
 //! registry.register("custom_attention", PluginInfo::new(
+//!     "custom_attention",
 //!     "1.0.0",
 //!     "Custom attention mechanism",
 //!     &["trustformers-core >= 0.1.0"]
 //! ))?;
 //!
-//! // Load and use the plugin
-//! let plugin = registry.load("custom_attention")?;
-//! let input = Tensor::randn(&[2, 128, 768])?;
-//! let output = plugin.forward(input)?;
+//! // List available plugins
+//! let plugins = registry.list_plugins();
+//! assert!(plugins.contains(&"custom_attention".to_string()));
 //! # Ok(())
 //! # }
 //! ```

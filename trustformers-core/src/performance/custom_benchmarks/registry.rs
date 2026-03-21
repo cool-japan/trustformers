@@ -354,7 +354,7 @@ mod tests {
             .register(metadata, || {
                 Box::new(ExampleBenchmark::new("test".to_string(), 32, 128))
             })
-            .unwrap();
+            .expect("operation failed in test");
 
         // List benchmarks
         let all = registry.list();
@@ -362,7 +362,7 @@ mod tests {
         assert_eq!(all[0].name, "test_bench");
 
         // Create instance
-        let benchmark = registry.create("test_bench").unwrap();
+        let benchmark = registry.create("test_bench").expect("operation failed in test");
         assert_eq!(benchmark.name(), "example_benchmark");
 
         // Search by tags
@@ -383,9 +383,9 @@ mod tests {
             .author("Test Author")
             .version("1.0.0")
             .register(|| Box::new(ExampleBenchmark::new("test".to_string(), 16, 64)))
-            .unwrap();
+            .expect("operation failed in test");
 
-        let metadata = registry.get_metadata("builder_test").unwrap();
+        let metadata = registry.get_metadata("builder_test").expect("operation failed in test");
         assert_eq!(metadata.author, Some("Test Author".to_string()));
         assert_eq!(metadata.version, Some("1.0.0".to_string()));
     }
@@ -402,7 +402,7 @@ mod tests {
                 .name(name.clone())
                 .category(BenchmarkCategory::Inference)
                 .register(move || Box::new(ExampleBenchmark::new(format!("model_{}", i), 32, 128)))
-                .unwrap();
+                .expect("operation failed in test");
         }
 
         // Create suite

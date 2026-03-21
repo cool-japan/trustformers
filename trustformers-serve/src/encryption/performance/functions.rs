@@ -53,7 +53,7 @@ mod tests {
     async fn test_cache_manager() {
         let config = PerformanceCachingConfig::default();
         let cache_manager = CacheManager::new(config);
-        cache_manager.start().await.unwrap();
+        cache_manager.start().await.expect("async operation should succeed in test");
         let result = cache_manager
             .get_cached_result(OperationType::Encryption, b"test_data")
             .await;

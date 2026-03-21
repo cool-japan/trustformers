@@ -492,9 +492,9 @@ mod tests {
             rollback_conditions: vec![],
         };
 
-        controller.start_rollout(config).unwrap();
+        controller.start_rollout(config).expect("operation failed in test");
 
-        match controller.get_status("exp1").unwrap() {
+        match controller.get_status("exp1").expect("operation failed in test") {
             RolloutStatus::InProgress {
                 current_percentage, ..
             } => {
@@ -519,10 +519,10 @@ mod tests {
             rollback_conditions: vec![],
         };
 
-        controller.start_rollout(config).unwrap();
+        controller.start_rollout(config).expect("operation failed in test");
 
         // Initial percentage
-        match controller.get_status("exp2").unwrap() {
+        match controller.get_status("exp2").expect("operation failed in test") {
             RolloutStatus::InProgress {
                 current_percentage, ..
             } => {
@@ -533,10 +533,10 @@ mod tests {
 
         // Wait and update
         std::thread::sleep(std::time::Duration::from_secs(2));
-        controller.update_rollout("exp2").unwrap();
+        controller.update_rollout("exp2").expect("operation failed in test");
 
         // Should have increased
-        match controller.get_status("exp2").unwrap() {
+        match controller.get_status("exp2").expect("operation failed in test") {
             RolloutStatus::InProgress {
                 current_percentage, ..
             } => {
@@ -565,14 +565,14 @@ mod tests {
             rollback_conditions: vec![],
         };
 
-        controller.start_rollout(config).unwrap();
+        controller.start_rollout(config).expect("operation failed in test");
 
         // Simulate high error rate
         controller.health_monitor.update_metric("error_rate", 0.1);
-        controller.update_rollout("exp3").unwrap();
+        controller.update_rollout("exp3").expect("operation failed in test");
 
         // Should be rolled back
-        match controller.get_status("exp3").unwrap() {
+        match controller.get_status("exp3").expect("operation failed in test") {
             RolloutStatus::RolledBack { reason, .. } => {
                 assert!(reason.contains("Health check"));
             },

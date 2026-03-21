@@ -785,8 +785,16 @@ mod tests {
         assert!(optimizer.should_factorize(param_id, 1000, 20, 50));
 
         // High confidence should not factorize
-        optimizer.confidence_states.get_mut(param_id).unwrap().magnitude_confidence = 0.9;
-        optimizer.confidence_states.get_mut(param_id).unwrap().direction_confidence = 0.9;
+        optimizer
+            .confidence_states
+            .get_mut(param_id)
+            .expect("Operation failed in test")
+            .magnitude_confidence = 0.9;
+        optimizer
+            .confidence_states
+            .get_mut(param_id)
+            .expect("Operation failed in test")
+            .direction_confidence = 0.9;
 
         assert!(!optimizer.should_factorize(param_id, 1000, 20, 50));
 
@@ -883,9 +891,9 @@ mod tests {
         );
 
         // Save and load state
-        let state_dict = optimizer.state_dict().unwrap();
+        let state_dict = optimizer.state_dict().expect("Failed to get state dict");
         let mut new_optimizer = CAME::new();
-        new_optimizer.load_state_dict(state_dict).unwrap();
+        new_optimizer.load_state_dict(state_dict).expect("Failed to load state dict");
 
         assert_eq!(new_optimizer.state.step, 10);
         assert_eq!(new_optimizer.momentum["param_0"], vec![0.1, 0.2]);
@@ -934,8 +942,9 @@ mod tests {
             ..Default::default()
         };
 
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: CAMEConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("Serialization failed");
+        let deserialized: CAMEConfig =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
 
         assert_relative_eq!(deserialized.learning_rate, config.learning_rate);
         assert_relative_eq!(

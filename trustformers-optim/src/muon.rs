@@ -696,7 +696,7 @@ mod tests {
         optimizer.momentum_1d.insert("param_1".to_string(), vec![0.7, 0.8]);
 
         // Save state
-        let state_dict = optimizer.state_dict().unwrap();
+        let state_dict = optimizer.state_dict().expect("Failed to get state dict");
         assert!(state_dict.contains_key("step"));
         assert!(state_dict.contains_key("momentum_2d_param_0"));
         assert!(state_dict.contains_key("momentum_1d_param_1"));
@@ -704,7 +704,7 @@ mod tests {
 
         // Create new optimizer and load state
         let mut new_optimizer = Muon::new();
-        new_optimizer.load_state_dict(state_dict).unwrap();
+        new_optimizer.load_state_dict(state_dict).expect("Failed to load state dict");
 
         assert_eq!(new_optimizer.state.step, 5);
         assert_eq!(new_optimizer.param_shapes["param_0"], (2, 3));
@@ -750,8 +750,9 @@ mod tests {
             use_orthogonal: false,
         };
 
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: MuonConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("Serialization failed");
+        let deserialized: MuonConfig =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
 
         assert_relative_eq!(deserialized.learning_rate, config.learning_rate);
         assert_eq!(deserialized.ns_steps, config.ns_steps);

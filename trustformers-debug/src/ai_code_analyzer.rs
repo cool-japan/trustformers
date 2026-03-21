@@ -1531,7 +1531,10 @@ mod tests {
             training_stage: TrainingStage::Training,
         };
 
-        let result = analyzer.analyze_model_code(code, context).await.unwrap();
+        let result = analyzer
+            .analyze_model_code(code, context)
+            .await
+            .expect("async operation failed");
         assert!(!result.detected_patterns.is_empty());
     }
 
@@ -1556,7 +1559,10 @@ mod tests {
             training_stage: TrainingStage::Inference,
         };
 
-        let result = analyzer.analyze_model_code(code, context).await.unwrap();
+        let result = analyzer
+            .analyze_model_code(code, context)
+            .await
+            .expect("async operation failed");
         assert!(!result.security_issues.is_empty());
         assert_eq!(
             result.security_issues[0].vulnerability_type,
@@ -1589,7 +1595,10 @@ mod tests {
             },
         ];
 
-        let report = analyzer.analyze_tensor_operations(&operations).await.unwrap();
+        let report = analyzer
+            .analyze_tensor_operations(&operations)
+            .await
+            .expect("tensor operation failed");
         assert!(!report.fusion_opportunities.is_empty());
         assert_eq!(report.fusion_opportunities[0].fusion_type, FusionType::GEMM);
     }
@@ -1608,8 +1617,14 @@ mod tests {
             training_stage: TrainingStage::Development,
         };
 
-        analyzer.analyze_model_code(code, context.clone()).await.unwrap();
-        analyzer.analyze_model_code(code, context).await.unwrap(); // Should hit cache
+        analyzer
+            .analyze_model_code(code, context.clone())
+            .await
+            .expect("async operation failed");
+        analyzer
+            .analyze_model_code(code, context)
+            .await
+            .expect("async operation failed"); // Should hit cache
 
         let metrics = analyzer.get_performance_metrics();
         assert_eq!(metrics.total_analyses, 2);
@@ -1634,7 +1649,10 @@ mod tests {
             model_info: None,
         };
 
-        let assistance = analyzer.automated_debugging_assistance(&error_context).await.unwrap();
+        let assistance = analyzer
+            .automated_debugging_assistance(&error_context)
+            .await
+            .expect("async operation failed");
         assert!(!assistance.probable_causes.is_empty());
         assert!(!assistance.suggested_fixes.is_empty());
         assert!(assistance.confidence_score > 0.0);

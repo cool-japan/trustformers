@@ -289,10 +289,7 @@ See `python/example.py` for comprehensive usage examples.
 
 This project is licensed under either of
 
-- Apache License, Version 2.0
-- MIT License
-
-at your option.
+- Apache License, Version 2.0 (Apache-2.0 License)
 
 ## Performance Comparison
 

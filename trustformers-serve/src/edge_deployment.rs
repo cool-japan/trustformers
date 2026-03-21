@@ -707,7 +707,10 @@ mod tests {
             metrics: EdgeMetrics::default(),
         };
 
-        orchestrator.register_node(node).await.unwrap();
+        orchestrator
+            .register_node(node)
+            .await
+            .expect("registration should succeed in test");
 
         let stats = orchestrator.get_statistics().await;
         assert_eq!(stats.total_nodes, 1);
@@ -738,7 +741,10 @@ mod tests {
             metrics: EdgeMetrics::default(),
         };
 
-        orchestrator.register_node(node).await.unwrap();
+        orchestrator
+            .register_node(node)
+            .await
+            .expect("registration should succeed in test");
 
         // Deploy a model
         let model = EdgeModel {
@@ -753,7 +759,10 @@ mod tests {
             priority: ModelPriority::High,
         };
 
-        let result = orchestrator.deploy_model(model, vec!["test-node".to_string()]).await.unwrap();
+        let result = orchestrator
+            .deploy_model(model, vec!["test-node".to_string()])
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(result.total_deployments, 1);
         assert_eq!(result.successful_deployments, 1);
     }
@@ -794,7 +803,10 @@ mod tests {
             metrics: EdgeMetrics::default(),
         };
 
-        orchestrator.register_node(node).await.unwrap();
+        orchestrator
+            .register_node(node)
+            .await
+            .expect("registration should succeed in test");
 
         // Make an offline inference request
         let request = InferenceRequest {
@@ -804,7 +816,10 @@ mod tests {
             parameters: HashMap::new(),
         };
 
-        let response = orchestrator.handle_offline_request("test-node", request).await.unwrap();
+        let response = orchestrator
+            .handle_offline_request("test-node", request)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(response.model_id, "test-model");
         assert!(response.result.contains("test input"));
     }

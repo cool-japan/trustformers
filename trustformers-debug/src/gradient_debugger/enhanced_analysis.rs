@@ -433,7 +433,7 @@ impl EnhancedGradientAnalyzer {
         let std = variance.sqrt();
 
         let mut sorted_values = values.clone();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median_idx = values.len() / 2;
         let median = if values.len() % 2 == 0 {
@@ -741,7 +741,7 @@ impl EnhancedGradientAnalyzer {
             };
         }
 
-        other_means.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        other_means.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         let rank = other_means
             .iter()
             .position(|&x| x <= current_stats.mean)
@@ -1288,7 +1288,11 @@ impl EnhancedGradientAnalyzer {
         }
 
         // Sort by priority score
-        priorities.sort_by(|a, b| b.priority_score.partial_cmp(&a.priority_score).unwrap());
+        priorities.sort_by(|a, b| {
+            b.priority_score
+                .partial_cmp(&a.priority_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         priorities
     }

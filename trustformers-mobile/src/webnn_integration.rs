@@ -554,7 +554,8 @@ mod tests {
 
     #[test]
     fn test_webnn_mobile_optimization() {
-        let mut backend = WebNNBackend::new(WebNNGraphConfig::default()).unwrap();
+        let mut backend =
+            WebNNBackend::new(WebNNGraphConfig::default()).expect("operation failed in test");
         backend.optimize_for_mobile();
 
         assert_eq!(backend.config.max_batch_size, 1);

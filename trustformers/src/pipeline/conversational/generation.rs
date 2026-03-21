@@ -1777,7 +1777,7 @@ mod tests {
     fn test_response_cleaner() {
         let cleaner = ResponseCleaner::new();
         let dirty_response = "Hello world<|endoftext|>\n\n\nThis is a test";
-        let cleaned = cleaner.clean_response(dirty_response).unwrap();
+        let cleaned = cleaner.clean_response(dirty_response).expect("operation failed in test");
 
         assert!(!cleaned.contains("<|endoftext|>"));
         assert!(!cleaned.contains("\n\n\n"));
@@ -1811,7 +1811,7 @@ mod tests {
         };
 
         let text = "This is a test of the chunking system";
-        let chunks = processor.create_chunks(text, &config).unwrap();
+        let chunks = processor.create_chunks(text, &config).expect("operation failed in test");
 
         assert!(!chunks.is_empty());
         // Each chunk should have roughly the specified number of words
@@ -1842,7 +1842,9 @@ mod tests {
         let state = ConversationState::new("test".to_string());
         let metrics = PerformanceMetrics::default();
 
-        let optimized = optimizer.optimize_strategy(strategy.clone(), &config, &state).unwrap();
+        let optimized = optimizer
+            .optimize_strategy(strategy.clone(), &config, &state)
+            .expect("operation failed in test");
 
         // Verify parameters are within valid ranges
         assert!(optimized.temperature >= 0.1 && optimized.temperature <= 2.0);
@@ -1858,8 +1860,12 @@ mod tests {
         let relevant_response = "Machine learning is a subset of artificial intelligence";
         let irrelevant_response = "The weather is nice today";
 
-        let relevant_score = scorer.score_relevance(relevant_response, input).unwrap();
-        let irrelevant_score = scorer.score_relevance(irrelevant_response, input).unwrap();
+        let relevant_score = scorer
+            .score_relevance(relevant_response, input)
+            .expect("operation failed in test");
+        let irrelevant_score = scorer
+            .score_relevance(irrelevant_response, input)
+            .expect("operation failed in test");
 
         assert!(relevant_score > irrelevant_score);
     }
@@ -1872,8 +1878,8 @@ mod tests {
             "This is a well-formed sentence with proper capitalization and punctuation.";
         let poor_text = "this is bad text  with no punctuation and double spaces";
 
-        let good_score = analyzer.analyze_fluency(good_text).unwrap();
-        let poor_score = analyzer.analyze_fluency(poor_text).unwrap();
+        let good_score = analyzer.analyze_fluency(good_text).expect("operation failed in test");
+        let poor_score = analyzer.analyze_fluency(poor_text).expect("operation failed in test");
 
         assert!(good_score > poor_score);
     }
@@ -1886,8 +1892,10 @@ mod tests {
         let safe_text = "This is a helpful and appropriate response.";
         let unsafe_text = "This contains violence and harmful content.";
 
-        let safe_result = filter.filter_response(safe_text, &config).unwrap();
-        let unsafe_result = filter.filter_response(unsafe_text, &config).unwrap();
+        let safe_result =
+            filter.filter_response(safe_text, &config).expect("operation failed in test");
+        let unsafe_result =
+            filter.filter_response(unsafe_text, &config).expect("operation failed in test");
 
         assert_eq!(safe_result, safe_text);
         assert_ne!(unsafe_result, unsafe_text); // Should be filtered
@@ -1922,7 +1930,7 @@ mod tests {
         let model_error = crate::error::TrustformersError::Core(
             trustformers_core::errors::TrustformersError::runtime_error("Test error".to_string()),
         );
-        let error_type = analyzer.analyze_error(&model_error).unwrap();
+        let error_type = analyzer.analyze_error(&model_error).expect("operation failed in test");
 
         assert!(matches!(error_type, GenerationErrorType::ModelFailure));
     }

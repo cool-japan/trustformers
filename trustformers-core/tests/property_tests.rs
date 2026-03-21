@@ -24,12 +24,12 @@ proptest! {
         let size: usize = shape.iter().product();
         let data = vec![0.0; size];
 
-        let tensor = Tensor::from_vec(data.clone(), &shape).unwrap();
+        let tensor = Tensor::from_vec(data.clone(), &shape).expect("tensor operation failed");
 
         // Properties that should hold
         let shape_clone = shape.clone();
         prop_assert_eq!(tensor.shape(), shape);
-        prop_assert_eq!(tensor.data().unwrap().len(), size);
+        prop_assert_eq!(tensor.data().expect("tensor operation failed").len(), size);
         prop_assert_eq!(tensor.shape().len(), shape_clone.len());
     }
 }
@@ -39,10 +39,10 @@ proptest! {
     #[test]
     fn test_tensor_data_consistency(shape in tensor_shape_strategy()) {
         let size: usize = shape.iter().product();
-        let data = tensor_data_strategy(size).new_tree(&mut proptest::test_runner::TestRunner::default()).unwrap().current();
+        let data = tensor_data_strategy(size).new_tree(&mut proptest::test_runner::TestRunner::default()).expect("tensor operation failed").current();
 
-        let tensor = Tensor::from_vec(data.clone(), &shape).unwrap();
-        let retrieved_data = tensor.data().unwrap();
+        let tensor = Tensor::from_vec(data.clone(), &shape).expect("tensor operation failed");
+        let retrieved_data = tensor.data().expect("tensor operation failed");
 
         // Data should be preserved
         prop_assert_eq!(retrieved_data.len(), data.len());
@@ -62,15 +62,15 @@ proptest! {
         let data = vec![value; total_size];
 
         // Create as 1D
-        let tensor_1d = Tensor::from_vec(data.clone(), &[total_size]).unwrap();
+        let tensor_1d = Tensor::from_vec(data.clone(), &[total_size]).expect("tensor operation failed");
 
         // Create as 2D
-        let tensor_2d = Tensor::from_vec(data.clone(), &[rows, cols]).unwrap();
+        let tensor_2d = Tensor::from_vec(data.clone(), &[rows, cols]).expect("tensor operation failed");
 
         // Both should have the same data
-        prop_assert_eq!(tensor_1d.data().unwrap(), tensor_2d.data().unwrap());
-        prop_assert_eq!(tensor_1d.data().unwrap().len(), total_size);
-        prop_assert_eq!(tensor_2d.data().unwrap().len(), total_size);
+        prop_assert_eq!(tensor_1d.data().expect("tensor operation failed"), tensor_2d.data().expect("operation failed in test"));
+        prop_assert_eq!(tensor_1d.data().expect("tensor operation failed").len(), total_size);
+        prop_assert_eq!(tensor_2d.data().expect("tensor operation failed").len(), total_size);
     }
 }
 
@@ -83,7 +83,7 @@ proptest! {
         let total_size: usize = dims.iter().product();
         let data = vec![1.0; total_size];
 
-        let tensor = Tensor::from_vec(data, &dims).unwrap();
+        let tensor = Tensor::from_vec(data, &dims).expect("tensor operation failed");
 
         // Shape should match what we provided
         prop_assert_eq!(tensor.shape(), dims);
@@ -119,11 +119,11 @@ proptest! {
         let size: usize = shape.iter().product();
         let data = vec![scale; size];
 
-        let tensor = Tensor::from_vec(data.clone(), &shape).unwrap();
+        let tensor = Tensor::from_vec(data.clone(), &shape).expect("tensor operation failed");
         let cloned_tensor = tensor.clone();
 
         // Cloned tensor should be identical
         prop_assert_eq!(tensor.shape(), cloned_tensor.shape());
-        prop_assert_eq!(tensor.data().unwrap(), cloned_tensor.data().unwrap());
+        prop_assert_eq!(tensor.data().expect("tensor operation failed"), cloned_tensor.data().expect("operation failed in test"));
     }
 }

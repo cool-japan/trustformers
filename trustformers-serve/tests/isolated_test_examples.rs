@@ -25,7 +25,7 @@ async fn test_isolated_auth_flow() {
         .await
         .expect("Failed to create isolated environment");
 
-    let env = manager.get_environment(&env_id).await.unwrap();
+    let env = manager.get_environment(&env_id).await.expect("async operation failed");
 
     // Set environment variables for this test
     with_env_vars(&env.env_vars, || async {
@@ -63,7 +63,7 @@ async fn test_isolated_auth_flow() {
         assert!(token_response["access_token"].is_string());
 
         // Test that this token works for protected endpoints
-        let token = token_response["access_token"].as_str().unwrap();
+        let token = token_response["access_token"].as_str().expect("operation failed in test");
         let metrics_response = test_server
             .get("/metrics")
             .add_header("Authorization", &format!("Bearer {}", token))
@@ -74,7 +74,7 @@ async fn test_isolated_auth_flow() {
     .await;
 
     // Clean up
-    manager.cleanup_environment(&env_id).await.unwrap();
+    manager.cleanup_environment(&env_id).await.expect("async operation failed");
 }
 
 /// Example showing parallel isolated tests that don't interfere
@@ -83,24 +83,39 @@ async fn test_parallel_isolated_inference() {
     let manager = Arc::new(TestEnvironmentManager::new(EnvironmentConfig::default()));
 
     // Create multiple isolated environments for parallel testing
-    let env1_id = manager.create_environment("parallel_test_1").await.unwrap();
-    let env2_id = manager.create_environment("parallel_test_2").await.unwrap();
-    let env3_id = manager.create_environment("parallel_test_3").await.unwrap();
+    let env1_id = manager
+        .create_environment("parallel_test_1")
+        .await
+        .expect("async operation failed");
+    let env2_id = manager
+        .create_environment("parallel_test_2")
+        .await
+        .expect("async operation failed");
+    let env3_id = manager
+        .create_environment("parallel_test_3")
+        .await
+        .expect("async operation failed");
 
-    let env1 = manager.get_environment(&env1_id).await.unwrap();
-    let env2 = manager.get_environment(&env2_id).await.unwrap();
-    let env3 = manager.get_environment(&env3_id).await.unwrap();
+    let env1 = manager.get_environment(&env1_id).await.expect("async operation failed");
+    let env2 = manager.get_environment(&env2_id).await.expect("async operation failed");
+    let env3 = manager.get_environment(&env3_id).await.expect("async operation failed");
 
     // Run tests sequentially to avoid Send issues with TestServer
     // Each test is still isolated due to different environments
-    run_isolated_inference_test(env1, "model-1".to_string()).await.unwrap();
-    run_isolated_inference_test(env2, "model-2".to_string()).await.unwrap();
-    run_isolated_inference_test(env3, "model-3".to_string()).await.unwrap();
+    run_isolated_inference_test(env1, "model-1".to_string())
+        .await
+        .expect("async operation failed");
+    run_isolated_inference_test(env2, "model-2".to_string())
+        .await
+        .expect("async operation failed");
+    run_isolated_inference_test(env3, "model-3".to_string())
+        .await
+        .expect("async operation failed");
 
     // Clean up all environments
-    manager.cleanup_environment(&env1_id).await.unwrap();
-    manager.cleanup_environment(&env2_id).await.unwrap();
-    manager.cleanup_environment(&env3_id).await.unwrap();
+    manager.cleanup_environment(&env1_id).await.expect("async operation failed");
+    manager.cleanup_environment(&env2_id).await.expect("async operation failed");
+    manager.cleanup_environment(&env3_id).await.expect("async operation failed");
 }
 
 async fn run_isolated_inference_test(
@@ -151,12 +166,12 @@ async fn test_isolated_model_management() {
         .await
         .expect("Failed to create isolated environment");
 
-    let env = manager.get_environment(&env_id).await.unwrap();
+    let env = manager.get_environment(&env_id).await.expect("async operation failed");
 
     with_env_vars(&env.env_vars, || async {
         // Create test model files in isolated storage
         let model_path = env.storage.model_storage_path.join("test_model.bin");
-        std::fs::write(&model_path, b"fake model data").unwrap();
+        std::fs::write(&model_path, b"fake model data").expect("file operation failed");
 
         let config_content = format!(
             r#"
@@ -184,7 +199,7 @@ async fn test_isolated_model_management() {
             "test_config.toml",
             &config_content,
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         // Verify isolated file system
         assert!(config_path.exists());
@@ -196,12 +211,12 @@ async fn test_isolated_model_management() {
         assert!(config_path.to_string_lossy().contains(&env.id));
 
         // Test that the configuration works
-        let config_contents = std::fs::read_to_string(&config_path).unwrap();
+        let config_contents = std::fs::read_to_string(&config_path).expect("file operation failed");
         assert!(config_contents.contains(&env.ports.server_port.to_string()));
     })
     .await;
 
-    manager.cleanup_environment(&env_id).await.unwrap();
+    manager.cleanup_environment(&env_id).await.expect("async operation failed");
 }
 
 /// Example showing database isolation
@@ -211,11 +226,11 @@ async fn test_isolated_database_operations() {
         .await
         .expect("Failed to create isolated environment");
 
-    let env = manager.get_environment(&env_id).await.unwrap();
+    let env = manager.get_environment(&env_id).await.expect("async operation failed");
 
     with_env_vars(&env.env_vars, || async {
         // Each test gets its own database URL
-        let db_url = std::env::var("DATABASE_URL").unwrap();
+        let db_url = std::env::var("DATABASE_URL").expect("operation failed in test");
         assert!(db_url.contains(&env.id)); // Database name includes environment ID
 
         let _config = ServerConfig {
@@ -237,7 +252,7 @@ async fn test_isolated_database_operations() {
     })
     .await;
 
-    manager.cleanup_environment(&env_id).await.unwrap();
+    manager.cleanup_environment(&env_id).await.expect("async operation failed");
 }
 
 /// Example showing network isolation and port management
@@ -247,7 +262,7 @@ async fn test_isolated_network_services() {
         .await
         .expect("Failed to create isolated environment");
 
-    let env = manager.get_environment(&env_id).await.unwrap();
+    let env = manager.get_environment(&env_id).await.expect("async operation failed");
 
     with_env_vars(&env.env_vars, || async {
         // Each test environment gets isolated ports for all services
@@ -263,20 +278,26 @@ async fn test_isolated_network_services() {
         assert_ne!(metrics_port, health_port);
 
         // Test that we can bind to these ports (they should be available)
-        let server_listener = std::net::TcpListener::bind(("127.0.0.1", server_port)).unwrap();
-        let metrics_listener = std::net::TcpListener::bind(("127.0.0.1", metrics_port)).unwrap();
+        let server_listener = std::net::TcpListener::bind(("127.0.0.1", server_port))
+            .expect("operation failed in test");
+        let metrics_listener = std::net::TcpListener::bind(("127.0.0.1", metrics_port))
+            .expect("operation failed in test");
 
         // Clean up listeners
         drop(server_listener);
         drop(metrics_listener);
 
         // Wait for ports to be released
-        wait_for_port(server_port, Duration::from_millis(500)).await.unwrap();
-        wait_for_port(metrics_port, Duration::from_millis(500)).await.unwrap();
+        wait_for_port(server_port, Duration::from_millis(500))
+            .await
+            .expect("async operation failed");
+        wait_for_port(metrics_port, Duration::from_millis(500))
+            .await
+            .expect("async operation failed");
     })
     .await;
 
-    manager.cleanup_environment(&env_id).await.unwrap();
+    manager.cleanup_environment(&env_id).await.expect("async operation failed");
 }
 
 /// Example showing caching isolation
@@ -285,11 +306,17 @@ async fn test_isolated_caching() {
     let manager = Arc::new(TestEnvironmentManager::new(EnvironmentConfig::default()));
 
     // Create two environments to test cache isolation
-    let env1_id = manager.create_environment("cache_test_1").await.unwrap();
-    let env2_id = manager.create_environment("cache_test_2").await.unwrap();
+    let env1_id = manager
+        .create_environment("cache_test_1")
+        .await
+        .expect("async operation failed");
+    let env2_id = manager
+        .create_environment("cache_test_2")
+        .await
+        .expect("async operation failed");
 
-    let env1 = manager.get_environment(&env1_id).await.unwrap();
-    let env2 = manager.get_environment(&env2_id).await.unwrap();
+    let env1 = manager.get_environment(&env1_id).await.expect("async operation failed");
+    let env2 = manager.get_environment(&env2_id).await.expect("async operation failed");
 
     // Test that caches are isolated between environments
     let result1 = with_env_vars(&env1.env_vars, || async {
@@ -306,8 +333,8 @@ async fn test_isolated_caching() {
     assert_eq!(result1, "cache-value-1");
     assert_eq!(result2, "cache-value-2");
 
-    manager.cleanup_environment(&env1_id).await.unwrap();
-    manager.cleanup_environment(&env2_id).await.unwrap();
+    manager.cleanup_environment(&env1_id).await.expect("async operation failed");
+    manager.cleanup_environment(&env2_id).await.expect("async operation failed");
 }
 
 async fn test_cache_operations(
@@ -326,10 +353,10 @@ async fn test_cache_operations(
 
     // Simulate cache operation
     let cache_file = env.storage.cache_directory.join(format!("{}.cache", key));
-    std::fs::write(&cache_file, value).unwrap();
+    std::fs::write(&cache_file, value).expect("file operation failed");
 
     // Read back the cached value
-    std::fs::read_to_string(&cache_file).unwrap()
+    std::fs::read_to_string(&cache_file).expect("file operation failed")
 }
 
 /// Stress test with many concurrent isolated environments
@@ -345,28 +372,33 @@ async fn test_concurrent_environment_stress() {
 
     // Create many concurrent isolated environments
     for i in 0..15 {
-        let env_id = manager.create_environment(&format!("stress_test_{}", i)).await.unwrap();
+        let env_id = manager
+            .create_environment(&format!("stress_test_{}", i))
+            .await
+            .expect("async operation failed");
         env_ids.push(env_id.clone());
 
         let manager_clone = Arc::clone(&manager);
         let handle = tokio::spawn(async move {
-            let env = manager_clone.get_environment(&env_id).await.unwrap();
+            let env = manager_clone.get_environment(&env_id).await.expect("async operation failed");
 
             // Simulate some work in the isolated environment
             with_env_vars(&env.env_vars, || async {
                 // Verify environment isolation
-                let test_env_id = std::env::var("TRUSTFORMERS_TEST_ENV_ID").unwrap();
+                let test_env_id =
+                    std::env::var("TRUSTFORMERS_TEST_ENV_ID").expect("operation failed in test");
                 assert_eq!(test_env_id, env_id);
 
                 // Create some files in isolated storage
                 let test_file = env.storage.cache_directory.join("stress_test.txt");
-                std::fs::write(&test_file, format!("stress test data for {}", env_id)).unwrap();
+                std::fs::write(&test_file, format!("stress test data for {}", env_id))
+                    .expect("file operation failed");
 
                 // Simulate work
                 sleep(Duration::from_millis(100)).await;
 
                 // Verify file still exists and has correct content
-                let content = std::fs::read_to_string(&test_file).unwrap();
+                let content = std::fs::read_to_string(&test_file).expect("file operation failed");
                 assert!(content.contains(&env_id));
             })
             .await;
@@ -377,12 +409,12 @@ async fn test_concurrent_environment_stress() {
 
     // Wait for all concurrent tests to complete
     for handle in handles {
-        handle.await.unwrap();
+        handle.await.expect("async operation failed");
     }
 
     // Clean up all environments
     for env_id in env_ids {
-        manager.cleanup_environment(&env_id).await.unwrap();
+        manager.cleanup_environment(&env_id).await.expect("async operation failed");
     }
 }
 

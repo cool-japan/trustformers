@@ -497,7 +497,10 @@ mod tests {
             .tag(ModelTag::new("test"))
             .build();
 
-        manager.register_version(name, version, metadata, vec![]).await.unwrap()
+        manager
+            .register_version(name, version, metadata, vec![])
+            .await
+            .expect("async operation failed")
     }
 
     #[tokio::test]
@@ -520,11 +523,14 @@ mod tests {
             max_duration_hours: 24,
         };
 
-        let experiment_id = ab_manager.create_version_experiment(config).await.unwrap();
+        let experiment_id = ab_manager
+            .create_version_experiment(config)
+            .await
+            .expect("async operation failed");
         assert!(!experiment_id.is_empty());
 
         // Check that experiment is tracked
-        let experiments = ab_manager.list_experiments().await.unwrap();
+        let experiments = ab_manager.list_experiments().await.expect("async operation failed");
         assert_eq!(experiments.len(), 1);
         assert_eq!(experiments[0].experiment_id, experiment_id);
     }
@@ -547,10 +553,16 @@ mod tests {
             max_duration_hours: 1,
         };
 
-        let experiment_id = ab_manager.create_version_experiment(config).await.unwrap();
+        let experiment_id = ab_manager
+            .create_version_experiment(config)
+            .await
+            .expect("async operation failed");
 
         // Route a request
-        let routing_result = ab_manager.route_request(&experiment_id, "test_user").await.unwrap();
+        let routing_result = ab_manager
+            .route_request(&experiment_id, "test_user")
+            .await
+            .expect("async operation failed");
         assert_eq!(routing_result.experiment_id, experiment_id);
         assert_eq!(routing_result.user_id, "test_user");
         assert!(
@@ -576,7 +588,10 @@ mod tests {
             max_duration_hours: 1,
         };
 
-        let experiment_id = ab_manager.create_version_experiment(config).await.unwrap();
+        let experiment_id = ab_manager
+            .create_version_experiment(config)
+            .await
+            .expect("async operation failed");
 
         // Record a metric
         ab_manager
@@ -588,10 +603,10 @@ mod tests {
                 None,
             )
             .await
-            .unwrap();
+            .expect("operation failed in test");
 
         // Check that metric was recorded
-        let experiments = ab_manager.list_experiments().await.unwrap();
+        let experiments = ab_manager.list_experiments().await.expect("async operation failed");
         let experiment = &experiments[0];
         assert!(!experiment.metrics_collected.is_empty());
     }

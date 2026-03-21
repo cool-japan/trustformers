@@ -774,12 +774,16 @@ mod tests {
             rows: vec![
                 vec![
                     serde_json::Value::Number(serde_json::Number::from(1)),
-                    serde_json::Value::Number(serde_json::Number::from_f64(3.14).unwrap()),
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(3.14).expect("operation failed in test"),
+                    ),
                     serde_json::Value::String("2023-01-01T12:00:00Z".to_string()),
                 ],
                 vec![
                     serde_json::Value::Number(serde_json::Number::from(2)),
-                    serde_json::Value::Number(serde_json::Number::from_f64(2.71).unwrap()),
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(2.71).expect("operation failed in test"),
+                    ),
                     serde_json::Value::String("2023-01-01T12:01:00Z".to_string()),
                 ],
             ],
@@ -812,7 +816,7 @@ mod tests {
         let mut manager = DataExportManager::new(config);
         let test_data = create_test_data();
 
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let output_path = temp_dir.path().join("test.csv").to_string_lossy().to_string();
 
         let job_id = manager
@@ -823,7 +827,7 @@ mod tests {
                 output_path.clone(),
                 ExportOptions::default(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Check job was created
         assert!(manager.active_jobs.contains_key(&job_id));
@@ -838,7 +842,7 @@ mod tests {
         let mut manager = DataExportManager::new(config);
         let test_data = create_test_data();
 
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let output_path = temp_dir.path().join("test.json").to_string_lossy().to_string();
 
         let job_id = manager
@@ -849,7 +853,7 @@ mod tests {
                 output_path.clone(),
                 ExportOptions::default(),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(manager.active_jobs.contains_key(&job_id));
         assert!(std::path::Path::new(&output_path).exists());
@@ -869,7 +873,8 @@ mod tests {
             vec!["csv".to_string(), "standard".to_string()],
         );
 
-        let (format, options, _filters) = manager.apply_template(&template_id).unwrap();
+        let (format, options, _filters) =
+            manager.apply_template(&template_id).expect("temp file creation failed");
         assert_eq!(*format, ExportFormat::Csv);
         assert!(options.include_headers);
     }

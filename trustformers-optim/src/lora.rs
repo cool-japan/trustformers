@@ -489,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_lora_adapter_creation() {
-        let adapter = LoRAAdapter::new(512, 256, 8, 16.0).unwrap();
+        let adapter = LoRAAdapter::new(512, 256, 8, 16.0).expect("Construction failed");
 
         assert_eq!(adapter.lora_a.shape(), &[512, 8]);
         assert_eq!(adapter.lora_b.shape(), &[8, 256]);
@@ -499,7 +499,7 @@ mod tests {
 
     #[test]
     fn test_lora_adapter_parameters() {
-        let adapter = LoRAAdapter::new(512, 256, 8, 16.0).unwrap();
+        let adapter = LoRAAdapter::new(512, 256, 8, 16.0).expect("Construction failed");
         let expected_params = 512 * 8 + 8 * 256; // A + B parameters
         assert_eq!(adapter.num_parameters(), expected_params);
     }
@@ -519,7 +519,7 @@ mod tests {
         let mut optimizer = create_lora_adam(1e-3, config, 0.9, 0.999, 1e-8, 0.01);
 
         // Add adapter
-        optimizer.add_adapter("query", 512, 512).unwrap();
+        optimizer.add_adapter("query", 512, 512).expect("Operation failed in test");
         assert_eq!(optimizer.num_trainable_parameters(), 512 * 8 + 8 * 512);
 
         // Check adapter exists
@@ -536,17 +536,17 @@ mod tests {
         let config = LoRAConfig::default();
         let mut optimizer = create_lora_adam(1e-3, config, 0.9, 0.999, 1e-8, 0.01);
 
-        optimizer.add_adapter("query", 512, 512).unwrap();
+        optimizer.add_adapter("query", 512, 512).expect("Operation failed in test");
 
         // Initially active
-        assert!(optimizer.get_adapter("query").unwrap().active);
+        assert!(optimizer.get_adapter("query").expect("Operation failed in test").active);
 
         // Deactivate
-        optimizer.set_adapter_active("query", false).unwrap();
-        assert!(!optimizer.get_adapter("query").unwrap().active);
+        optimizer.set_adapter_active("query", false).expect("Operation failed in test");
+        assert!(!optimizer.get_adapter("query").expect("Operation failed in test").active);
 
         // Activate all
         optimizer.set_all_adapters_active(true);
-        assert!(optimizer.get_adapter("query").unwrap().active);
+        assert!(optimizer.get_adapter("query").expect("Operation failed in test").active);
     }
 }

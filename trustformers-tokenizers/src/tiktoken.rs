@@ -554,7 +554,7 @@ mod tests {
         let tokens = tokenizer.encode_text(text);
         assert!(!tokens.is_empty());
 
-        let decoded = tokenizer.decode_tokens(&tokens).unwrap();
+        let decoded = tokenizer.decode_tokens(&tokens).expect("Operation failed in test");
         // Due to tokenization differences, we check that it's roughly the same
         assert!(decoded.contains("Hello") || decoded.contains("world"));
     }
@@ -574,11 +574,11 @@ mod tests {
     fn test_tokenizer_trait() {
         let tokenizer = TiktokenTokenizer::cl100k_base();
 
-        let result = tokenizer.encode("Hello, world!").unwrap();
+        let result = tokenizer.encode("Hello, world!").expect("Encoding failed");
         assert!(!result.input_ids.is_empty());
         assert_eq!(result.input_ids.len(), result.attention_mask.len());
 
-        let decoded = tokenizer.decode(&result.input_ids).unwrap();
+        let decoded = tokenizer.decode(&result.input_ids).expect("Decoding failed");
         assert!(!decoded.is_empty());
     }
 

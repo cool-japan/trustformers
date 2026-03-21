@@ -467,20 +467,24 @@ mod tests {
 
         parameters.insert(
             "layer1".to_string(),
-            Tensor::new(param_data.clone()).unwrap(),
+            Tensor::new(param_data.clone()).expect("Failed to create tensor"),
         );
         gradients.insert(
             "layer1".to_string(),
-            Tensor::new(grad_data.clone()).unwrap(),
+            Tensor::new(grad_data.clone()).expect("Failed to create tensor"),
         );
 
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
 
         assert_eq!(optimizer.step, 1);
         assert!(optimizer.momentum_states.contains_key("layer1"));
         assert!(optimizer.variance_states.contains_key("layer1"));
 
-        let updated_data = parameters.get("layer1").unwrap().data().unwrap();
+        let updated_data = parameters
+            .get("layer1")
+            .expect("Key not found")
+            .data()
+            .expect("Operation failed in test");
         // Parameters should have changed
         for i in 0..updated_data.len() {
             assert_ne!(updated_data[i], param_data[i]);
@@ -507,21 +511,25 @@ mod tests {
 
         parameters.insert(
             "layer1".to_string(),
-            Tensor::new(param_data.clone()).unwrap(),
+            Tensor::new(param_data.clone()).expect("Failed to create tensor"),
         );
         gradients.insert(
             "layer1".to_string(),
-            Tensor::new(grad_data.clone()).unwrap(),
+            Tensor::new(grad_data.clone()).expect("Failed to create tensor"),
         );
 
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
 
         assert_eq!(optimizer.step, 1);
         assert!(optimizer.momentum_states.contains_key("layer1"));
         assert!(optimizer.variance_states.contains_key("layer1"));
         assert!(optimizer.max_variance_states.contains_key("layer1"));
 
-        let updated_data = parameters.get("layer1").unwrap().data().unwrap();
+        let updated_data = parameters
+            .get("layer1")
+            .expect("Key not found")
+            .data()
+            .expect("Operation failed in test");
         // Parameters should have changed
         for i in 0..updated_data.len() {
             assert_ne!(updated_data[i], param_data[i]);

@@ -20,8 +20,9 @@ pub mod threadpoolconfig_traits;
 pub mod thresholdanomalydetector_traits;
 pub mod trendanalysisconfig_traits;
 pub mod types;
+pub mod types_baseline;
 pub mod variabilitybounds_traits;
 
-// Re-export all types
+// Re-export all types (types_baseline is re-exported via types.rs)
 pub use functions::*;
 pub use types::*;

@@ -270,7 +270,7 @@ impl MLflowClient {
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("SystemTime should be after UNIX_EPOCH")
             .as_millis() as i64;
 
         let metric = MetricPoint {
@@ -578,8 +578,14 @@ mod tests {
         client.log_metric("accuracy", 0.8, 0)?;
 
         let metrics = client.get_metrics();
-        assert_eq!(metrics.get("loss").unwrap().len(), 2);
-        assert_eq!(metrics.get("accuracy").unwrap().len(), 1);
+        assert_eq!(
+            metrics.get("loss").expect("expected value not found").len(),
+            2
+        );
+        assert_eq!(
+            metrics.get("accuracy").expect("expected value not found").len(),
+            1
+        );
 
         Ok(())
     }

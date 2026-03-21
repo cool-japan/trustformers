@@ -1356,10 +1356,10 @@ mod tests {
         // Create test data
         let gradients =
             ArrayD::from_shape_vec(vec![10, 10], (0..100).map(|x| x as f32 * 0.01).collect())
-                .unwrap();
+                .expect("operation failed in test");
         let weights =
             ArrayD::from_shape_vec(vec![10, 10], (0..100).map(|x| x as f32 * 0.1).collect())
-                .unwrap();
+                .expect("operation failed in test");
 
         layer_gradients.insert("layer_0".to_string(), gradients);
         layer_weights.insert("layer_0".to_string(), weights);
@@ -1376,7 +1376,7 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        let analysis = result.unwrap();
+        let analysis = result.expect("operation failed in test");
         assert_eq!(analysis.layer_lr_recommendations.len(), 1);
         assert!(analysis.layer_lr_recommendations.contains_key("layer_0"));
     }

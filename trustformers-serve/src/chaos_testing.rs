@@ -1077,8 +1077,14 @@ mod tests {
         let framework = ChaosTestingFramework::new();
         let experiment = create_test_experiment();
 
-        let experiment_id = framework.create_experiment(experiment).await.unwrap();
-        let retrieved = framework.get_experiment(experiment_id).await.unwrap();
+        let experiment_id = framework
+            .create_experiment(experiment)
+            .await
+            .expect("async operation should succeed in test");
+        let retrieved = framework
+            .get_experiment(experiment_id)
+            .await
+            .expect("async operation should succeed in test");
 
         assert_eq!(retrieved.name, "Test Network Latency");
     }

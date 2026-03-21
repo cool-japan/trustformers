@@ -1093,7 +1093,10 @@ mod tests {
             priority: Priority::High,
         };
 
-        scheduler.add_batch(batch).await.unwrap();
+        scheduler
+            .add_batch(batch)
+            .await
+            .expect("async operation should succeed in test");
 
         let retrieved = scheduler.get_next_batch().await;
         assert!(retrieved.is_some());

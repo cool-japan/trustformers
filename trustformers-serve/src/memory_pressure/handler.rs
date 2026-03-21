@@ -799,10 +799,16 @@ mod tests {
         let config = MemoryPressureConfig::default();
         let handler = MemoryPressureHandler::new(config);
 
-        let allocation_id = handler.request_allocation(1024, "test".to_string()).await.unwrap();
+        let allocation_id = handler
+            .request_allocation(1024, "test".to_string())
+            .await
+            .expect("async operation should succeed in test");
         assert!(!allocation_id.is_empty());
 
-        handler.release_allocation(&allocation_id).await.unwrap();
+        handler
+            .release_allocation(&allocation_id)
+            .await
+            .expect("async operation should succeed in test");
     }
 
     #[tokio::test]
@@ -843,12 +849,12 @@ mod tests {
         let handler = MemoryPressureHandler::new(config);
 
         // Start should succeed
-        handler.start().await.unwrap();
+        handler.start().await.expect("async operation should succeed in test");
 
         // Brief operation
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // Stop should succeed
-        handler.stop().await.unwrap();
+        handler.stop().await.expect("timer stop should succeed");
     }
 }

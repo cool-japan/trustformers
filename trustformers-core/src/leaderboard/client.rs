@@ -426,7 +426,7 @@ mod tests {
             .default_limit(50)
             .build_with_file_storage()
             .await
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(client.config.default_limit, 50);
     }
@@ -441,7 +441,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(params.model_names.unwrap()[0], "bert");
-        assert_eq!(params.min_accuracy.unwrap(), 0.9);
+        assert_eq!(
+            params.model_names.expect("operation failed in test")[0],
+            "bert"
+        );
+        assert_eq!(params.min_accuracy.expect("operation failed in test"), 0.9);
     }
 }

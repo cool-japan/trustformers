@@ -676,7 +676,8 @@ mod tests {
             },
         ];
 
-        let comparison = ModelComparison::from_entries(&entries, "model1", "model2").unwrap();
+        let comparison = ModelComparison::from_entries(&entries, "model1", "model2")
+            .expect("operation failed in test");
 
         assert_eq!(comparison.model1.name, "model1");
         assert_eq!(comparison.model2.name, "model2");

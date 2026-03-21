@@ -231,8 +231,8 @@ mod tests {
         assert_eq!(spikes.len(), 3); // One spike per input
 
         // Higher values should spike earlier
-        let spike_0 = spikes.iter().find(|s| s.neuron_id == 0).unwrap();
-        let spike_2 = spikes.iter().find(|s| s.neuron_id == 2).unwrap();
+        let spike_0 = spikes.iter().find(|s| s.neuron_id == 0).expect("operation failed in test");
+        let spike_2 = spikes.iter().find(|s| s.neuron_id == 2).expect("operation failed in test");
         assert!(spike_0.timestamp < spike_2.timestamp);
     }
 
@@ -261,7 +261,7 @@ mod tests {
         ];
 
         let result = decoder.decode(&spikes, 3, 100.0).expect("Decoding failed");
-        let data = result.data().unwrap();
+        let data = result.data().expect("operation failed in test");
 
         assert_eq!(data.len(), 3);
         assert!(data[0] > data[1]); // Neuron 0 had more spikes
@@ -278,7 +278,7 @@ mod tests {
         ];
 
         let result = decoder.decode(&spikes, 3, 100.0).expect("Decoding failed");
-        let data = result.data().unwrap();
+        let data = result.data().expect("operation failed in test");
 
         assert_eq!(data.len(), 3);
         assert!(data[1] > data[0]); // Neuron 1 spiked earlier, higher activation
@@ -302,7 +302,7 @@ mod tests {
 
             assert_eq!(output.shape(), &[3]);
 
-            let output_data = output.data().unwrap();
+            let output_data = output.data().expect("operation failed in test");
 
             // Check if the relationship is monotonic (higher input -> higher output rate)
             if output_data[1] > 0.0 && output_data[2] > 0.0 {

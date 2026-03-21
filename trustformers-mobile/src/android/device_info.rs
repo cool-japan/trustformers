@@ -443,8 +443,9 @@ mod tests {
 
         for status in &statuses {
             // Should be able to serialize/deserialize
-            let serialized = serde_json::to_string(status).unwrap();
-            let deserialized: AndroidThermalStatus = serde_json::from_str(&serialized).unwrap();
+            let serialized = serde_json::to_string(status).expect("JSON serialization failed");
+            let deserialized: AndroidThermalStatus =
+                serde_json::from_str(&serialized).expect("JSON deserialization failed");
             assert_eq!(*status, deserialized);
         }
     }

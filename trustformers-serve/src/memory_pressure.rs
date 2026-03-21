@@ -370,7 +370,7 @@ mod integration_tests {
         let handler = MemoryPressureHandler::new(config);
 
         // Start monitoring
-        handler.start().await.unwrap();
+        handler.start().await.expect("async operation should succeed in test");
 
         // Brief operation
         sleep(Duration::from_millis(100)).await;
@@ -391,7 +391,7 @@ mod integration_tests {
         ));
 
         // Stop monitoring
-        handler.stop().await.unwrap();
+        handler.stop().await.expect("timer stop should succeed");
     }
 
     #[tokio::test]
@@ -406,12 +406,15 @@ mod integration_tests {
                 "test_allocation".to_string(),
             )
             .await
-            .unwrap();
+            .expect("test operation should succeed");
 
         assert!(!allocation_id.is_empty());
 
         // Release allocation
-        handler.release_allocation(&allocation_id).await.unwrap();
+        handler
+            .release_allocation(&allocation_id)
+            .await
+            .expect("async operation should succeed in test");
 
         // Releasing again should fail
         assert!(handler.release_allocation(&allocation_id).await.is_err());
@@ -435,7 +438,10 @@ mod integration_tests {
         let handler = MemoryPressureHandler::new(config);
 
         // Get forecast
-        let forecast = handler.get_memory_forecast(30).await.unwrap();
+        let forecast = handler
+            .get_memory_forecast(30)
+            .await
+            .expect("async operation should succeed in test");
 
         assert!(forecast.predicted_utilization >= 0.0 && forecast.predicted_utilization <= 1.0);
         assert!(forecast.confidence >= 0.0 && forecast.confidence <= 1.0);
@@ -448,7 +454,10 @@ mod integration_tests {
         let handler = MemoryPressureHandler::new(config);
 
         // Get platform insights
-        let _insights = handler.get_platform_memory_insights().await.unwrap();
+        let _insights = handler
+            .get_platform_memory_insights()
+            .await
+            .expect("async operation should succeed in test");
 
         // Should return some insights (content varies by platform)
         // At minimum, should not panic
@@ -470,14 +479,17 @@ mod integration_tests {
         let handler = MemoryPressureHandler::new(config);
 
         // Initialize cleanup handlers first
-        handler.start().await.unwrap();
+        handler.start().await.expect("async operation should succeed in test");
 
         // Trigger emergency cleanup
-        let _freed_bytes = handler.trigger_emergency_cleanup().await.unwrap();
+        let _freed_bytes = handler
+            .trigger_emergency_cleanup()
+            .await
+            .expect("async operation should succeed in test");
 
         // Emergency cleanup should complete without panicking
 
-        handler.stop().await.unwrap();
+        handler.stop().await.expect("timer stop should succeed");
     }
 
     #[tokio::test]

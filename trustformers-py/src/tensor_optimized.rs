@@ -1953,7 +1953,7 @@ mod tests {
         let b = vec![2.0f32; 1000];
         let mut result = vec![0.0f32; 1000];
 
-        TensorOptimizer::simd_add_f32(&a, &b, &mut result).unwrap();
+        TensorOptimizer::simd_add_f32(&a, &b, &mut result).expect("tensor operation failed");
 
         for &val in &result {
             assert_abs_diff_eq!(val, 3.0, epsilon = 1e-6);
@@ -1962,12 +1962,12 @@ mod tests {
 
     #[test]
     fn test_optimized_matmul() {
-        let a = ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let b = ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let a = ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("operation failed in test");
+        let b = ArrayD::from_shape_vec(IxDyn(&[3, 2]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("operation failed in test");
 
-        let result = TensorOptimizer::optimized_matmul(&a, &b).unwrap();
+        let result = TensorOptimizer::optimized_matmul(&a, &b).expect("tensor operation failed");
         let expected =
-            ArrayD::from_shape_vec(IxDyn(&[2, 2]), vec![22.0, 28.0, 49.0, 64.0]).unwrap();
+            ArrayD::from_shape_vec(IxDyn(&[2, 2]), vec![22.0, 28.0, 49.0, 64.0]).expect("operation failed in test");
 
         assert_eq!(result.shape(), expected.shape());
         for (r, e) in result.iter().zip(expected.iter()) {
@@ -1978,8 +1978,8 @@ mod tests {
     #[test]
     fn test_stable_softmax() {
         let tensor =
-            ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let result = TensorOptimizer::stable_softmax(&tensor, Some(1)).unwrap();
+            ArrayD::from_shape_vec(IxDyn(&[2, 3]), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).expect("operation failed in test");
+        let result = TensorOptimizer::stable_softmax(&tensor, Some(1)).expect("tensor operation failed");
 
         // Check that each row sums to approximately 1.0
         for row in result.axis_iter(Axis(0)) {

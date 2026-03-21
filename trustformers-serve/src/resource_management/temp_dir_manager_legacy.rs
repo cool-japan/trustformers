@@ -513,17 +513,17 @@ mod tests {
         assert!(manager2.is_ok());
 
         // Should be the same instance
-        let m1 = manager1.unwrap();
-        let m2 = manager2.unwrap();
+        let m1 = manager1.expect("test operation should succeed");
+        let m2 = manager2.expect("test operation should succeed");
         assert!(Arc::ptr_eq(&m1, &m2));
     }
 
     #[tokio::test]
     async fn test_directory_allocation_and_cleanup() {
-        let manager = create_test_manager().await.unwrap();
+        let manager = create_test_manager().await.expect("async operation should succeed in test");
 
         let test_id = "integration_test";
-        let directories = manager.allocate_directories(2, test_id).await.unwrap();
+        let directories = manager.allocate_directories(2, test_id).await.expect("async operation should succeed in test");
 
         assert_eq!(directories.len(), 2);
 
@@ -534,28 +534,28 @@ mod tests {
         }
 
         // Clean up
-        let cleaned_count = manager.deallocate_directories_for_test(test_id).await.unwrap();
+        let cleaned_count = manager.deallocate_directories_for_test(test_id).await.expect("async operation should succeed in test");
         assert_eq!(cleaned_count, 2);
     }
 
     #[tokio::test]
     async fn test_system_integration() {
         let config = TempDirectoryManagerConfig::default();
-        let system = TempDirectorySystem::new(config).await.unwrap();
+        let system = TempDirectorySystem::new(config).await.expect("async operation should succeed in test");
 
         let report = system.generate_system_report().await;
         assert!(!report.is_empty());
         assert!(report.contains("Temporary Directory Manager"));
 
-        let maintenance_result = system.perform_maintenance().await.unwrap();
+        let maintenance_result = system.perform_maintenance().await.expect("async operation should succeed in test");
         // Should be able to perform maintenance without errors
 
-        system.shutdown().await.unwrap();
+        system.shutdown().await.expect("async operation should succeed in test");
     }
 
     #[tokio::test]
     async fn test_directory_guard() {
-        let guard = allocate_temp_directories_with_guard(1, "guard_test").await.unwrap();
+        let guard = allocate_temp_directories_with_guard(1, "guard_test").await.expect("async operation should succeed in test");
 
         assert_eq!(guard.directories().len(), 1);
         assert_eq!(guard.test_id(), "guard_test");

@@ -172,7 +172,7 @@ mod tests {
     #[tokio::test]
     async fn test_consent_recording() {
         let config = GdprComplianceConfig::default();
-        let service = GdprComplianceService::new(config).unwrap();
+        let service = GdprComplianceService::new(config).expect("test operation should succeed");
 
         let result = service
             .record_consent("test_subject", "marketing", ConsentMechanism::WebForm)
@@ -184,7 +184,7 @@ mod tests {
     #[tokio::test]
     async fn test_data_subject_request_submission() {
         let config = GdprComplianceConfig::default();
-        let service = GdprComplianceService::new(config).unwrap();
+        let service = GdprComplianceService::new(config).expect("test operation should succeed");
 
         let details = RequestDetails {
             description: "Access request".to_string(),

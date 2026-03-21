@@ -1,12 +1,12 @@
 # TrustformeRS 🦀
 
 [![Rust](https://img.shields.io/badge/rust-%23000000.svg?style=for-the-badge&logo=rust&logoColor=white)](https://www.rust-lang.org/)
-[![Version](https://img.shields.io/badge/version-0.1.0--rc.1-blue.svg)](https://github.com/trustformers/trustformers)
+[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](https://github.com/cool-japan/trustformers)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green.svg)](LICENSE)
 
 A high-performance, memory-safe Rust implementation of Hugging Face Transformers. TrustformeRS brings the power of transformer models to the Rust ecosystem with zero-cost abstractions, fearless concurrency, and deployment flexibility from edge to cloud.
 
-> **📢 Project Status**: TrustformeRS 0.1.0-rc.1 is the first release candidate, bringing major performance improvements with 17x CPU BLAS acceleration and comprehensive Metal GPU support. Production-ready with 21+ transformer architectures, full test coverage, and multi-platform deployment (web, server, Python, mobile, C FFI).
+> **Project Status**: TrustformeRS 0.1.0 was released on 2026-03-21. This first stable release delivers 27+ transformer architectures, 5,007 tests with 100% pass rate, ~900,000+ lines of 100% Pure Rust, and full multi-platform deployment (WebAssembly, server REST/gRPC/GraphQL, mobile iOS/Android, RLHF/DPO training). Multi-backend GPU support: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU.
 
 ## 🚀 Why TrustformeRS?
 
@@ -35,12 +35,19 @@ TrustformeRS follows a modular workspace structure inspired by Hugging Face Tran
 
 ```
 trustformers/
-├── trustformers-core/      # Core traits and tensor abstractions
-├── trustformers-models/    # Model implementations (BERT, GPT-2, T5...)
-├── trustformers-tokenizers/# Tokenizer implementations
-├── trustformers-optim/     # Optimizers and training utilities
-└── trustformers/           # Main integration crate
+├── trustformers-core/      # Core traits and tensor abstractions  (121,799 SLoC, Stable)
+├── trustformers-models/    # 27+ model implementations           (113,086 SLoC, Alpha)
+├── trustformers-tokenizers/# BPE, WordPiece, SentencePiece       ( 51,211 SLoC, Stable)
+├── trustformers-optim/     # 20+ optimizers and LR schedulers    ( 43,888 SLoC, Stable)
+├── trustformers-training/  # Distributed training, RLHF/DPO      ( 38,667 SLoC, Stable)
+├── trustformers-serve/     # REST/gRPC/GraphQL serving           (206,636 SLoC, Stable)
+├── trustformers-wasm/      # WebAssembly + WebGPU deployment     ( 55,504 SLoC, Stable)
+├── trustformers-mobile/    # iOS/Android deployment              (131,187 SLoC, Alpha)
+├── trustformers-debug/     # Profilers, visualizers, TensorBoard ( 61,841 SLoC, Alpha)
+└── trustformers/           # High-level integration crate        ( 59,862 SLoC, Alpha)
 ```
+
+**Total**: ~900,000+ SLoC, 100% Pure Rust (COOLJAPAN Policy)
 
 ### Design Principles
 
@@ -55,7 +62,7 @@ trustformers/
 
 ```toml
 [dependencies]
-trustformers = "0.1.0-rc.1"
+trustformers = "0.1.0"
 ```
 
 ### Basic Usage
@@ -101,7 +108,7 @@ let result = classifier("I love writing Rust code!")?;
 
 ## 🏛️ Model Zoo
 
-### Currently Supported (21+ architectures!)
+### Currently Supported (27+ architectures!)
 
 #### Encoder Models
 | Model | Variants | Tasks |
@@ -119,11 +126,14 @@ let result = classifier("I love writing Rust code!")?;
 | GPT-2 | small, medium, large, xl | Text Generation |
 | GPT-Neo | 125M, 1.3B, 2.7B | Text Generation |
 | GPT-J | 6B | Text Generation |
+| GPT-NeoX | various | Text Generation |
 | LLaMA | 7B, 13B, 30B, 65B, 70B | Text Generation |
 | Mistral | 7B | Text Generation |
-| Mixtral | 8x7B | Text Generation (MoE) |
 | Gemma | 2B, 7B | Text Generation |
 | Qwen | 1.8B, 7B, 14B | Text Generation |
+| Phi-3 | mini, small, medium | Text Generation |
+| Falcon | 7B, 40B | Text Generation |
+| StableLM | 1.6B–12B | Text Generation |
 
 #### Encoder-Decoder Models
 | Model | Variants | Tasks |
@@ -133,8 +143,19 @@ let result = classifier("I love writing Rust code!")?;
 #### Vision & Multimodal Models
 | Model | Variants | Tasks |
 |-------|----------|-------|
-| ViT | base, large | Image Classification |
+| ViT | tiny, small, base, large | Image Classification |
 | CLIP | base, large | Text-Image Matching |
+| BLIP-2 | various | Vision-Language |
+| LLaVA | various | Visual Instruction Tuning |
+| DALL-E | various | Text-to-Image Generation |
+| Flamingo | various | Visual Language Model |
+
+#### State-Space & Linear Attention Models
+| Model | Complexity | Tasks |
+|-------|------------|-------|
+| Mamba | O(N) | Long-context Generation |
+| RWKV | O(N) | Recurrent Language Modeling |
+| S4 | O(N log N) | Long-range Sequence Modeling |
 
 ## ⚡ Performance Features
 
@@ -153,31 +174,30 @@ TrustformeRS includes state-of-the-art optimizations not mentioned in typical do
 
 TrustformeRS supports multiple deployment targets:
 
-- **WebAssembly**: Browser deployment with ~566KB bundle size
+- **WebAssembly**: Browser deployment (trustformers-wasm, Stable)
   - WebGPU acceleration support
-  - JavaScript bindings
-  - React/Vue components
-  
-- **Server**: Production-ready REST API
-  - Kubernetes deployment manifests
-  - Docker containers
-  - Auto-scaling support
-  
-- **Python**: pip-installable package
-  - HuggingFace Transformers compatible API
-  - Jupyter notebook support
-  - Seamless model sharing
-  
-- **Edge**: Export to optimized formats
-  - ONNX export/import
-  - GGUF format support
-  - Quantized models for embedded devices
+  - JavaScript/TypeScript bindings
+  - React/Vue component-ready
 
-- **Mobile**: Production-ready mobile deployment
+- **Server**: Production-ready API serving (trustformers-serve, Stable)
+  - REST, gRPC, and GraphQL endpoints
+  - Dynamic batching with Kubernetes deployment manifests
+  - Docker containers and auto-scaling support
+
+- **Training**: Full training infrastructure (trustformers-training, Stable)
+  - RLHF and DPO training support
+  - Distributed training with ZeRO optimization
+  - Mixed precision (FP16/BF16)
+
+- **Mobile**: Native mobile deployment (trustformers-mobile, Alpha)
   - iOS framework with Core ML and Metal acceleration
   - Android library with NNAPI and Vulkan support
   - React Native, Flutter, and Unity integrations
-  - 250+ tests with 100% pass rate
+
+- **Edge**: Export to optimized formats
+  - ONNX export/import
+  - GGUF format support
+  - Quantized models (INT8/INT4, GPTQ, AWQ) for embedded devices
 
 ## 🛠️ Advanced Usage
 
@@ -294,36 +314,34 @@ let outputs = model.forward(&inputs)?;
 
 ## 🎯 Development Status
 
-### Completed Features ✅
-- [x] **21+ transformer architectures** (BERT, GPT-2, T5, LLaMA, Mistral, Gemma, Qwen, CLIP, ViT, etc.)
-- [x] **All major NLP pipelines** fully implemented (text-generation, classification, QA, NER, etc.)
-- [x] **Complete training infrastructure** with distributed training, ZeRO optimization, mixed precision
+### Completed Features (v0.1.0 - 2026-03-21)
+- [x] **27+ transformer architectures** (BERT, RoBERTa, ALBERT, DistilBERT, ELECTRA, DeBERTa, GPT-2, GPT-Neo, GPT-J, GPT-NeoX, LLaMA, Mistral, Gemma, Qwen, Phi-3, Falcon, StableLM, T5, ViT, CLIP, BLIP-2, LLaVA, DALL-E, Flamingo, Mamba, RWKV, S4)
+- [x] **All major NLP pipelines** fully implemented (text-generation, classification, QA, NER, fill-mask, summarization, translation)
+- [x] **Complete training infrastructure** with distributed training, ZeRO optimization, mixed precision, RLHF and DPO support
 - [x] **Mobile deployment** with iOS (Core ML, Metal) and Android (NNAPI, Vulkan) support
-- [x] **WebAssembly deployment** with WebGPU acceleration and 561-line optimized runtime
-- [x] **Python bindings** (PyO3) with HuggingFace-compatible API and NumPy integration
-- [x] **REST/gRPC/GraphQL APIs** with Kubernetes deployment and autoscaling
-- [x] **C API** with FFI bindings for C/C++ integration
+- [x] **WebAssembly deployment** with WebGPU acceleration
+- [x] **REST/gRPC/GraphQL APIs** with dynamic batching, Kubernetes deployment, and autoscaling
+- [x] **Safety filtering pipeline** with configurable content moderation
 - [x] **Advanced optimizations**: FlashAttention, PagedAttention, quantization (INT8/INT4/GPTQ/AWQ)
-- [x] **Hardware acceleration**: CUDA, ROCm, Metal, XLA, Vulkan, TPU support
+- [x] **Hardware acceleration**: CUDA, Metal, ROCm, WebGPU, Vulkan, OpenCL, TPU support
 - [x] **AutoModel/AutoTokenizer** system with HuggingFace Hub integration
-- [x] **Comprehensive test suite**: 1,742+ tests with 100% pass rate
+- [x] **Comprehensive test suite**: 5,007 tests with 100% pass rate
 - [x] **Debugging tools**: Profilers, visualizers, interactive debugging, TensorBoard integration
+- [x] **100% Pure Rust** (COOLJAPAN Policy) - ~900,000+ SLoC across 10 crates
 
-### 🔮 Future Enhancements
+### Future Enhancements
 
 #### High Priority
-- [x] **Latest Architectures**: Mamba, RWKV, Phi-3, Falcon, StableLM, S4, RetNet, Hyena
-- [ ] **Enhanced RLHF**: Advanced reward modeling and DPO/RLAIF methods
-- [ ] **More quantization methods**: GGUF format, AutoGPTQ enhancements
+- [ ] **MPSGraph acceleration**: Awaiting scirs2-core 0.3.0 for 50-200x Metal performance improvement
+- [ ] **More quantization methods**: Enhanced GGUF format, AutoGPTQ improvements
+- [ ] **Additional vision transformer variants**: ViT-Huge, DeiT, Swin
 
 #### Performance
-- [ ] **Custom CUDA kernels**: Further GPU optimization
-- [ ] **ROCm improvements**: Better AMD GPU support
-- [ ] **Streaming inference**: Real-time generation for all pipelines
+- [ ] **Custom CUDA kernels**: Further GPU optimization beyond current FlashAttention
+- [ ] **Streaming inference**: Real-time token streaming for all generation pipelines
 
 #### Documentation
-- [ ] **Comprehensive guides**: Model implementation, deployment, optimization
-- [ ] **Video tutorials**: Getting started, advanced features
+- [ ] **Comprehensive guides**: Model implementation, deployment, optimization tuning
 - [ ] **Cookbook**: Common patterns and best practices
 
 ## 🤝 Contributing
@@ -401,5 +419,5 @@ Licensed under Apache License, Version 2.0 ([LICENSE](LICENSE)).
 ---
 
 <p align="center">
-  Built with 🦀 and ❤️ by the Rust ML community
+  Built with 🦀 and ❤️ by COOLJAPAN OU (Team KitaSan)
 </p>

@@ -15,7 +15,7 @@ Features:
 - Comprehensive text analysis tools
 """
 
-__version__ = "0.1.0rc1"
+__version__ = "0.1.0"
 __author__ = "TrustformeRS Team"
 
 # Import the Rust extension module

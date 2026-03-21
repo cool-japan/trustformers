@@ -592,7 +592,7 @@ mod tests {
                 tokens,
                 AttentionType::SelfAttention,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(visualizer.num_layers(), 1);
     }
@@ -617,9 +617,9 @@ mod tests {
                 tokens,
                 AttentionType::SelfAttention,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let heatmap = visualizer.create_heatmap("layer.0", 0).unwrap();
+        let heatmap = visualizer.create_heatmap("layer.0", 0).expect("operation failed in test");
         assert_eq!(heatmap.layer_name, "layer.0");
         assert_eq!(heatmap.head, 0);
         assert_eq!(heatmap.weights.len(), 3);
@@ -645,9 +645,9 @@ mod tests {
                 tokens,
                 AttentionType::SelfAttention,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let analysis = visualizer.analyze("layer.0").unwrap();
+        let analysis = visualizer.analyze("layer.0").expect("operation failed in test");
         assert_eq!(analysis.entropy_per_head.len(), 1);
         assert_eq!(analysis.sparsity_per_head.len(), 1);
         assert!(!analysis.most_attended_tokens.is_empty());
@@ -672,9 +672,11 @@ mod tests {
                 tokens,
                 AttentionType::SelfAttention,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        visualizer.export_to_json("layer.0", &output_path).unwrap();
+        visualizer
+            .export_to_json("layer.0", &output_path)
+            .expect("operation failed in test");
         assert!(output_path.exists());
 
         // Clean up

@@ -1035,7 +1035,7 @@ mod tests {
 
     #[test]
     fn test_lora_layer_creation() {
-        let lora = LoRALayer::new(768, 768, 8, 16.0, 0.1, true).unwrap();
+        let lora = LoRALayer::new(768, 768, 8, 16.0, 0.1, true).expect("operation failed in test");
         assert_eq!(lora.r, 8);
         assert_eq!(lora.alpha, 16.0);
         assert!(!lora.merged);
@@ -1044,38 +1044,41 @@ mod tests {
 
     #[test]
     fn test_lora_layer_forward() {
-        let mut lora = LoRALayer::new(64, 64, 4, 8.0, 0.0, false).unwrap();
-        lora.initialize_weights().unwrap();
+        let mut lora =
+            LoRALayer::new(64, 64, 4, 8.0, 0.0, false).expect("operation failed in test");
+        lora.initialize_weights().expect("operation failed in test");
 
         let input = Tensor::randn(&[10, 64]).expect("Failed to create random tensor");
-        let output = lora.forward(input.clone()).unwrap();
+        let output = lora.forward(input.clone()).expect("forward pass failed");
 
         assert_eq!(output.shape(), input.shape());
     }
 
     #[test]
     fn test_lora_merge_unmerge() {
-        let mut lora = LoRALayer::new(32, 32, 2, 4.0, 0.0, false).unwrap();
-        lora.initialize_weights().unwrap();
+        let mut lora =
+            LoRALayer::new(32, 32, 2, 4.0, 0.0, false).expect("operation failed in test");
+        lora.initialize_weights().expect("operation failed in test");
 
         assert!(!lora.merged);
 
-        lora.merge_weights().unwrap();
+        lora.merge_weights().expect("merge operation failed");
         assert!(lora.merged);
 
-        lora.unmerge_weights().unwrap();
+        lora.unmerge_weights().expect("merge operation failed");
         assert!(!lora.merged);
     }
 
     #[test]
     fn test_qlora_layer() {
-        let mut qlora = QLoRALayer::new(64, 64, 4, 8.0, 0.1, false).unwrap();
+        let mut qlora =
+            QLoRALayer::new(64, 64, 4, 8.0, 0.1, false).expect("operation failed in test");
 
         let quant_config = crate::quantization::QuantizationConfig::default();
-        qlora.quantize_base(&quant_config).unwrap();
+        qlora.quantize_base(&quant_config).expect("operation failed in test");
 
         let input = Tensor::randn(&[5, 64]).expect("Failed to create random tensor");
-        let output = qlora.forward(input.clone()).unwrap();
+        let output = qlora.forward(input.clone()).expect("forward pass failed");
 
         assert_eq!(output.shape(), input.shape());
     }
@@ -1086,24 +1089,25 @@ mod tests {
         assert_eq!(adapter.bottleneck_size, 32);
 
         let input = Tensor::randn(&[8, 128]).expect("Failed to create random tensor");
-        let output = adapter.forward(input.clone()).unwrap();
+        let output = adapter.forward(input.clone()).expect("forward pass failed");
 
         assert_eq!(output.shape(), input.shape());
     }
 
     #[test]
     fn test_prefix_tuning_layer() {
-        let prefix = PrefixTuningLayer::new(10, 64, 12, 8).unwrap();
+        let prefix = PrefixTuningLayer::new(10, 64, 12, 8).expect("operation failed in test");
         assert_eq!(prefix.prefix_length, 10);
         assert_eq!(prefix.num_layers, 12);
 
-        let prefix_states = prefix.get_prefix_states().unwrap();
+        let prefix_states = prefix.get_prefix_states().expect("operation failed in test");
         assert_eq!(prefix_states.len(), 12);
     }
 
     #[test]
     fn test_prompt_tuning_embedding() {
-        let prompt = PromptTuningEmbedding::new(5, 768, PromptInitMethod::Random).unwrap();
+        let prompt = PromptTuningEmbedding::new(5, 768, PromptInitMethod::Random)
+            .expect("operation failed in test");
         assert_eq!(prompt.num_virtual_tokens, 5);
         assert_eq!(prompt.hidden_size, 768);
 
@@ -1116,7 +1120,7 @@ mod tests {
         let config = PeftConfig::default();
         let mut peft_model = PeftModel::new(config);
 
-        let lora = LoRALayer::new(64, 64, 4, 8.0, 0.1, false).unwrap();
+        let lora = LoRALayer::new(64, 64, 4, 8.0, 0.1, false).expect("operation failed in test");
         peft_model.add_lora_layer("test_layer".to_string(), lora);
 
         assert_eq!(peft_model.peft_layers.len(), 1);
@@ -1144,8 +1148,8 @@ mod tests {
         let input =
             Tensor::from_vec(vec![-1.0, 0.0, 1.0, 2.0], &[4]).expect("Tensor from_vec failed");
 
-        let relu_result = adapter.relu(&input).unwrap();
-        let data = relu_result.data().unwrap();
+        let relu_result = adapter.relu(&input).expect("operation failed in test");
+        let data = relu_result.data().expect("operation failed in test");
         assert_eq!(data[0], 0.0); // ReLU(-1) = 0
         assert_eq!(data[1], 0.0); // ReLU(0) = 0
         assert_eq!(data[2], 1.0); // ReLU(1) = 1

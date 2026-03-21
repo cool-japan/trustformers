@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn test_dot_export() {
         let graph = create_test_graph();
-        let dot = graph.to_dot().unwrap();
+        let dot = graph.to_dot().expect("operation failed in test");
 
         assert!(dot.contains("digraph test_model"));
         assert!(dot.contains("input -> attention"));
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn test_mermaid_export() {
         let graph = create_test_graph();
-        let mermaid = graph.to_mermaid().unwrap();
+        let mermaid = graph.to_mermaid().expect("operation failed in test");
 
         assert!(mermaid.contains("graph TB"));
         assert!(mermaid.contains("input -->"));
@@ -683,7 +683,9 @@ mod tests {
     #[test]
     fn test_visualizer() {
         let visualizer = ModelVisualizer::new();
-        let graph = visualizer.visualize_transformer("bert-base", 12, 768, 12, 30522).unwrap();
+        let graph = visualizer
+            .visualize_transformer("bert-base", 12, 768, 12, 30522)
+            .expect("operation failed in test");
 
         // Check that all layers are created
         assert!(graph.nodes.len() > 12 * 4); // At least 4 nodes per layer

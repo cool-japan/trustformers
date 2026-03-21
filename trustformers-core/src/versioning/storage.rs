@@ -454,9 +454,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_filesystem_storage() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
         let storage = FileSystemStorage::new(temp_dir.path().to_path_buf());
-        storage.initialize().await.unwrap();
+        storage.initialize().await.expect("async operation failed");
 
         let artifact = Artifact::new(
             ArtifactType::Model,
@@ -465,20 +465,23 @@ mod tests {
         );
 
         // Store artifact
-        let ids = storage.store_artifacts(std::slice::from_ref(&artifact)).await.unwrap();
+        let ids = storage
+            .store_artifacts(std::slice::from_ref(&artifact))
+            .await
+            .expect("async operation failed");
         assert_eq!(ids.len(), 1);
         assert_eq!(ids[0], artifact.id);
 
         // Retrieve artifact
-        let retrieved = storage.get_artifact(artifact.id).await.unwrap();
+        let retrieved = storage.get_artifact(artifact.id).await.expect("async operation failed");
         assert!(retrieved.is_some());
-        let retrieved = retrieved.unwrap();
+        let retrieved = retrieved.expect("operation failed in test");
         assert_eq!(retrieved.content, artifact.content);
         assert_eq!(retrieved.content_hash, artifact.content_hash);
 
         // Delete artifact
-        storage.delete_artifacts(&[artifact.id]).await.unwrap();
-        let deleted = storage.get_artifact(artifact.id).await.unwrap();
+        storage.delete_artifacts(&[artifact.id]).await.expect("async operation failed");
+        let deleted = storage.get_artifact(artifact.id).await.expect("async operation failed");
         assert!(deleted.is_none());
     }
 
@@ -493,12 +496,18 @@ mod tests {
         );
 
         // Store and retrieve
-        let ids = storage.store_artifacts(std::slice::from_ref(&artifact)).await.unwrap();
+        let ids = storage
+            .store_artifacts(std::slice::from_ref(&artifact))
+            .await
+            .expect("async operation failed");
         assert_eq!(ids[0], artifact.id);
 
-        let retrieved = storage.get_artifact(artifact.id).await.unwrap();
+        let retrieved = storage.get_artifact(artifact.id).await.expect("async operation failed");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().content, artifact.content);
+        assert_eq!(
+            retrieved.expect("operation failed in test").content,
+            artifact.content
+        );
     }
 
     #[test]

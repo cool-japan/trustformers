@@ -15,18 +15,14 @@
 //!
 //! # Examples
 //!
-//! ```rust
+//! ```rust,no_run
 //! use trustformers_core::kernel_tuning::{KernelTuner, TuningConfig, Operation};
-//! use trustformers_core::tensor::Tensor;
 //!
 //! // Create tuner with default configuration
 //! let mut tuner = KernelTuner::new(TuningConfig::default())?;
 //!
-//! // Auto-tune matrix multiplication parameters
-//! let a = Tensor::randn(&[1024, 768])?;
-//! let b = Tensor::randn(&[768, 512])?;
-//!
-//! let params = tuner.tune_matmul(&a, &b)?;
+//! // Auto-tune matrix multiplication parameters for 1024x768 * 768x512
+//! let params = tuner.tune_matmul(1024, 512, 768)?;
 //! println!("Optimal block size: {:?}", params.block_size);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```

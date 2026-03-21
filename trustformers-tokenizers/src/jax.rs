@@ -1013,7 +1013,7 @@ mod tests {
         let data = vec![1, 2, 3, 4, 5, 6];
         let array = JaxArray::new(data, vec![2, 3], JaxDType::Int32, JaxDevice::Cpu);
 
-        let reshaped = array.reshape(vec![3, 2]).unwrap();
+        let reshaped = array.reshape(vec![3, 2]).expect("Operation failed in test");
         assert_eq!(reshaped.shape, vec![3, 2]);
         assert_eq!(reshaped.size(), 6);
     }
@@ -1023,7 +1023,7 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let jax_tokenizer = JaxTokenizer::from_tokenizer(tokenizer);
 
-        let batch = jax_tokenizer.encode_to_arrays("hello").unwrap();
+        let batch = jax_tokenizer.encode_to_arrays("hello").expect("Operation failed in test");
         assert_eq!(batch.batch_size(), 1);
         assert!(batch.attention_mask.is_some());
     }
@@ -1034,7 +1034,7 @@ mod tests {
         let jax_tokenizer = JaxTokenizer::from_tokenizer(tokenizer);
 
         let texts = vec!["hello".to_string(), "world".to_string()];
-        let batch = jax_tokenizer.encode_batch_to_arrays(&texts).unwrap();
+        let batch = jax_tokenizer.encode_batch_to_arrays(&texts).expect("Operation failed in test");
 
         assert_eq!(batch.batch_size(), 2);
         assert!(batch.attention_mask.is_some());
@@ -1069,11 +1069,11 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let jax_tokenizer = JaxTokenizer::from_tokenizer(tokenizer);
 
-        let compiled = jax_tokenizer.jit_compile().unwrap();
+        let compiled = jax_tokenizer.jit_compile().expect("Operation failed in test");
         assert!(compiled.is_compiled());
 
         let texts = vec!["hello".to_string()];
-        let batch = compiled.encode_batch_compiled(&texts).unwrap();
+        let batch = compiled.encode_batch_compiled(&texts).expect("Operation failed in test");
         assert_eq!(batch.batch_size(), 1);
     }
 

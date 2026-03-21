@@ -46,7 +46,10 @@ fn reasonable_f32_vec(size: usize) -> impl Strategy<Value = Vec<f32>> {
 /// Generate a single f32 value for testing
 fn generate_f32() -> f32 {
     let mut runner = TestRunner::default();
-    reasonable_f32().new_tree(&mut runner).unwrap().current()
+    reasonable_f32()
+        .new_tree(&mut runner)
+        .expect("Failed to create test value tree")
+        .current()
 }
 
 #[cfg(test)]
@@ -68,15 +71,15 @@ mod tensor_property_tests {
         ) {
             let (shape, vals_a) = values_a;
             let mut runner = TestRunner::default();
-            let vals_b: Vec<f32> = reasonable_f32_vec(vals_a.len()).new_tree(&mut runner).unwrap().current();
+            let vals_b: Vec<f32> = reasonable_f32_vec(vals_a.len()).new_tree(&mut runner).expect("operation failed in test").current();
 
             if let (Ok(a), Ok(b)) = (
                 Tensor::from_vec(vals_a, &shape),
                 Tensor::from_vec(vals_b, &shape)
             ) {
                 if let (Ok(ab), Ok(ba)) = (a.add(&b), b.add(&a)) {
-                    let ab_data = ab.data().unwrap();
-                    let ba_data = ba.data().unwrap();
+                    let ab_data = ab.data().expect("operation failed in test");
+                    let ba_data = ba.data().expect("operation failed in test");
                     for (x, y) in ab_data.iter().zip(ba_data.iter()) {
                         assert_relative_eq!(x, y, epsilon = 1e-6);
                     }
@@ -93,9 +96,9 @@ mod tensor_property_tests {
             let size: usize = shape.iter().product();
             if size > 0 && size < 1000 {  // Reasonable size limits
                 let mut runner = TestRunner::default();
-                let vals_a: Vec<f32> = reasonable_f32_vec(size).new_tree(&mut runner).unwrap().current();
-                let vals_b: Vec<f32> = reasonable_f32_vec(size).new_tree(&mut runner).unwrap().current();
-                let vals_c: Vec<f32> = reasonable_f32_vec(size).new_tree(&mut runner).unwrap().current();
+                let vals_a: Vec<f32> = reasonable_f32_vec(size).new_tree(&mut runner).expect("operation failed in test").current();
+                let vals_b: Vec<f32> = reasonable_f32_vec(size).new_tree(&mut runner).expect("operation failed in test").current();
+                let vals_c: Vec<f32> = reasonable_f32_vec(size).new_tree(&mut runner).expect("operation failed in test").current();
 
                 if let (Ok(a), Ok(b), Ok(c)) = (
                     Tensor::from_vec(vals_a, &shape),
@@ -104,8 +107,8 @@ mod tensor_property_tests {
                 ) {
                     if let (Ok(ab), Ok(bc)) = (a.add(&b), b.add(&c)) {
                         if let (Ok(ab_c), Ok(a_bc)) = (ab.add(&c), a.add(&bc)) {
-                            let ab_c_data = ab_c.data().unwrap();
-                            let a_bc_data = a_bc.data().unwrap();
+                            let ab_c_data = ab_c.data().expect("operation failed in test");
+                            let a_bc_data = a_bc.data().expect("operation failed in test");
                             for (x, y) in ab_c_data.iter().zip(a_bc_data.iter()) {
                                 assert_relative_eq!(x, y, epsilon = 1e-4);
                             }
@@ -162,8 +165,8 @@ mod tensor_property_tests {
                             b.mul_scalar(scalar)
                         ) {
                             if let Ok(sa_plus_sb) = sa.add(&sb) {
-                                let s_ab_data = s_ab.data().unwrap();
-                                let sa_plus_sb_data = sa_plus_sb.data().unwrap();
+                                let s_ab_data = s_ab.data().expect("operation failed in test");
+                                let sa_plus_sb_data = sa_plus_sb.data().expect("operation failed in test");
                                 for (x, y) in s_ab_data.iter().zip(sa_plus_sb_data.iter()) {
                                     assert_relative_eq!(x, y, epsilon = 1e-2);
                                 }
@@ -198,8 +201,8 @@ mod tensor_property_tests {
             ) {
                 if let (Ok(ab), Ok(bc)) = (a.matmul(&b), b.matmul(&c)) {
                     if let (Ok(ab_c), Ok(a_bc)) = (ab.matmul(&c), a.matmul(&bc)) {
-                        let ab_c_data = ab_c.data().unwrap();
-                        let a_bc_data = a_bc.data().unwrap();
+                        let ab_c_data = ab_c.data().expect("operation failed in test");
+                        let a_bc_data = a_bc.data().expect("operation failed in test");
                         for (x, y) in ab_c_data.iter().zip(a_bc_data.iter()) {
                             let rel_error = (x - y).abs() / x.abs().max(y.abs()).max(1e-10);
                             assert!(rel_error < 2e-2, "Relative error too large: {} vs {}, error: {}", x, y, rel_error);
@@ -352,8 +355,8 @@ mod tensor_property_tests {
                         tensor.pow(p1 + p2)
                     ) {
                         if let Ok(x_p1_times_x_p2) = x_p1.mul(&x_p2) {
-                            let expected = x_p1_plus_p2.data().unwrap();
-                            let computed = x_p1_times_x_p2.data().unwrap();
+                            let expected = x_p1_plus_p2.data().expect("operation failed in test");
+                            let computed = x_p1_times_x_p2.data().expect("operation failed in test");
                             for (exp, comp) in expected.iter().zip(computed.iter()) {
                                 assert_relative_eq!(exp, comp, epsilon = 1e-4);
                             }
@@ -448,7 +451,7 @@ mod tensor_property_tests {
 
             if let Ok(tensor) = Tensor::from_vec(vals, &[dim1, dim2]) {
                 if let Ok(softmax_result) = tensor.softmax(-1) {
-                    let result_data = softmax_result.data().unwrap();
+                    let result_data = softmax_result.data().expect("operation failed in test");
 
                     // Test: all values > 0
                     for &val in result_data.iter() {
@@ -655,12 +658,12 @@ mod tensor_property_tests {
                                 complex_tensor.imag()
                             ) {
                                 // Real parts should match
-                                for (orig, extr) in real_tensor.data().unwrap().iter().zip(extracted_real.data().unwrap().iter()) {
+                                for (orig, extr) in real_tensor.data().expect("tensor operation failed").iter().zip(extracted_real.data().expect("operation failed in test").iter()) {
                                     assert_relative_eq!(orig, extr, epsilon = 1e-6);
                                 }
 
                                 // Imaginary parts should match
-                                for (orig, extr) in imag_tensor.data().unwrap().iter().zip(extracted_imag.data().unwrap().iter()) {
+                                for (orig, extr) in imag_tensor.data().expect("tensor operation failed").iter().zip(extracted_imag.data().expect("operation failed in test").iter()) {
                                     assert_relative_eq!(orig, extr, epsilon = 1e-6);
                                 }
                             }

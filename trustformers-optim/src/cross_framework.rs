@@ -587,8 +587,9 @@ mod tests {
     #[test]
     fn test_pytorch_to_tensorflow_conversion() {
         let converter = CrossFrameworkConverter::new();
-        let tf_config =
-            converter.pytorch_adam_to_tensorflow(0.001, (0.9, 0.999), 1e-8, 0.01).unwrap();
+        let tf_config = converter
+            .pytorch_adam_to_tensorflow(0.001, (0.9, 0.999), 1e-8, 0.01)
+            .expect("Operation failed in test");
 
         assert_eq!(tf_config.optimizer_type, "Adam");
         assert!((tf_config.learning_rate - 0.001).abs() < 1e-9);
@@ -599,8 +600,9 @@ mod tests {
     #[test]
     fn test_tensorflow_to_pytorch_conversion() {
         let converter = CrossFrameworkConverter::new();
-        let pytorch_config =
-            converter.tensorflow_adam_to_pytorch(0.001, 0.9, 0.999, 1e-8, 0.01).unwrap();
+        let pytorch_config = converter
+            .tensorflow_adam_to_pytorch(0.001, 0.9, 0.999, 1e-8, 0.01)
+            .expect("Operation failed in test");
 
         assert_eq!(pytorch_config.optimizer_type, "Adam");
         assert_eq!(pytorch_config.learning_rate, 0.001);
@@ -611,7 +613,9 @@ mod tests {
     #[test]
     fn test_jax_to_pytorch_conversion() {
         let converter = CrossFrameworkConverter::new();
-        let pytorch_config = converter.jax_adam_to_pytorch(0.001, 0.9, 0.999, 1e-8).unwrap();
+        let pytorch_config = converter
+            .jax_adam_to_pytorch(0.001, 0.9, 0.999, 1e-8)
+            .expect("Operation failed in test");
 
         assert_eq!(pytorch_config.optimizer_type, "Adam");
         assert_eq!(pytorch_config.learning_rate, 0.001);
@@ -629,7 +633,7 @@ mod tests {
 
         let mapped = converter
             .map_parameters(&params, Framework::PyTorch, Framework::TensorFlow)
-            .unwrap();
+            .expect("Operation failed in test");
         assert!(mapped.contains_key("learning_rate"));
     }
 
@@ -643,18 +647,22 @@ mod tests {
             parameters: HashMap::new(),
         };
 
-        let universal = converter.to_universal(&pytorch_config, Framework::PyTorch).unwrap();
+        let universal = converter
+            .to_universal(&pytorch_config, Framework::PyTorch)
+            .expect("Operation failed in test");
         assert_eq!(universal.optimizer_type, "Adam");
         assert_eq!(universal.source_framework, Framework::PyTorch);
 
-        let _tf_config = converter.from_universal(&universal, Framework::TensorFlow).unwrap();
+        let _tf_config = converter
+            .from_universal(&universal, Framework::TensorFlow)
+            .expect("Operation failed in test");
     }
 
     #[test]
     fn test_conversion_matrix() {
         let matrix = utils::create_conversion_matrix();
-        assert!(matrix.get(&(Framework::PyTorch, Framework::TensorFlow)).unwrap());
-        assert!(matrix.get(&(Framework::JAX, Framework::ONNX)).unwrap());
+        assert!(matrix.get(&(Framework::PyTorch, Framework::TensorFlow)).expect("Key not found"));
+        assert!(matrix.get(&(Framework::JAX, Framework::ONNX)).expect("Key not found"));
     }
 
     #[test]
@@ -665,7 +673,7 @@ mod tests {
             Value::Number(serde_json::Number::from_f64(0.001).expect("Invalid constant")),
         );
 
-        utils::validate_parameters("Adam", &params).unwrap();
+        utils::validate_parameters("Adam", &params).expect("Operation failed in test");
 
         // Test invalid learning rate
         params.insert(

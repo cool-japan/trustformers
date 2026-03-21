@@ -2,7 +2,7 @@
 //  TrustformersKitExample.swift
 //  Example usage of TrustformersKit
 //
-//  Copyright (c) 2024 TrustformeRS. All rights reserved.
+//  Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan). All rights reserved.
 //
 
 import UIKit

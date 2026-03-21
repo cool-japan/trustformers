@@ -18,17 +18,15 @@
 //! ```rust,no_run
 //! use trustformers_core::{
 //!     tensor::Tensor,
-//!     device::Device,
 //!     layers::Linear,
+//!     traits::Layer,
 //! };
 //!
-//! // Create a tensor and move to GPU if available
-//! let device = Device::cuda_if_available().unwrap_or(Device::cpu());
+//! // Create a tensor on CPU
 //! let input = Tensor::randn(&[32, 512])?;
-//! let input = input.to_device(&device)?;
 //!
 //! // Create a linear layer
-//! let linear = Linear::new(512, 768, true)?;
+//! let linear = Linear::new(512, 768, true);
 //! let output = linear.forward(input)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```

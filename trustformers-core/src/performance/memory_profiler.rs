@@ -401,7 +401,7 @@ mod tests {
         profiler.record_allocation(1024);
         profiler.record_allocation(2048);
 
-        let delta = tracker.stop_tracking().unwrap();
+        let delta = tracker.stop_tracking().expect("operation failed in test");
         assert_eq!(delta.allocated_delta, 3072);
         assert_eq!(delta.allocations_delta, 2);
     }

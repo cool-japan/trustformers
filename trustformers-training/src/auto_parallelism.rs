@@ -1486,7 +1486,7 @@ mod tests {
 
         let strategies = selector.generate_rule_based_strategies();
         assert!(strategies.is_ok());
-        assert!(!strategies.unwrap().is_empty());
+        assert!(!strategies.expect("operation failed in test").is_empty());
     }
 
     #[test]
@@ -1497,7 +1497,7 @@ mod tests {
         let metrics = selector.estimate_performance_data_parallel();
         assert!(metrics.is_ok());
 
-        let metrics = metrics.unwrap();
+        let metrics = metrics.expect("operation failed in test");
         assert!(metrics.time_per_step.as_secs_f64() > 0.0);
         assert!(metrics.memory_per_device > 0);
     }
@@ -1550,7 +1550,10 @@ mod tests {
 
         let comparison = selector.compare_strategies(&strategy1, &strategy2);
         assert!(comparison.is_ok());
-        assert_eq!(comparison.unwrap(), std::cmp::Ordering::Less); // strategy1 has less time
+        assert_eq!(
+            comparison.expect("operation failed in test"),
+            std::cmp::Ordering::Less
+        ); // strategy1 has less time
     }
 
     #[test]

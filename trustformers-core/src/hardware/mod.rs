@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Hardware acceleration abstraction layer for TrustformeRS
@@ -399,7 +399,7 @@ mod tests {
 
         assert_eq!(params.len(), 5);
 
-        match params.get("learning_rate").unwrap() {
+        match params.get("learning_rate").expect("expected value not found") {
             OperationParameter::Float(val) => assert_eq!(*val, 0.001),
             _ => panic!(
                 "Expected Float parameter but got {:?}",
@@ -407,7 +407,7 @@ mod tests {
             ),
         }
 
-        match params.get("batch_size").unwrap() {
+        match params.get("batch_size").expect("expected value not found") {
             OperationParameter::Integer(val) => assert_eq!(*val, 32),
             _ => panic!(
                 "Expected Integer parameter but got {:?}",

@@ -1140,10 +1140,10 @@ mod tests {
         };
 
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut sequence_parallelism =
-            SequenceParallelism::new(config, 0, 2, process_group).unwrap();
+        let mut sequence_parallelism = SequenceParallelism::new(config, 0, 2, process_group)
+            .expect("operation failed in test");
 
-        let chunks = sequence_parallelism.split_sequence(1800).unwrap();
+        let chunks = sequence_parallelism.split_sequence(1800).expect("operation failed in test");
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].start_position, 0);
         assert_eq!(chunks[0].end_position, 1000);
@@ -1161,12 +1161,12 @@ mod tests {
         };
 
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut sequence_parallelism =
-            SequenceParallelism::new(config, 0, 2, process_group).unwrap();
+        let mut sequence_parallelism = SequenceParallelism::new(config, 0, 2, process_group)
+            .expect("operation failed in test");
 
-        let _chunks = sequence_parallelism.split_sequence(1800).unwrap();
+        let _chunks = sequence_parallelism.split_sequence(1800).expect("operation failed in test");
 
-        let input = Tensor::zeros(&[1000, 768]).unwrap();
+        let input = Tensor::zeros(&[1000, 768]).expect("tensor operation failed");
         let result = sequence_parallelism.forward_chunk(0, &input, None);
         assert!(result.is_ok());
     }
@@ -1179,10 +1179,14 @@ mod tests {
         };
 
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
-        let sequence_parallelism = SequenceParallelism::new(config, 0, 1, process_group).unwrap();
+        let sequence_parallelism = SequenceParallelism::new(config, 0, 1, process_group)
+            .expect("operation failed in test");
 
         let mut gradients = HashMap::new();
-        gradients.insert("test_param".to_string(), Tensor::ones(&[10, 10]).unwrap());
+        gradients.insert(
+            "test_param".to_string(),
+            Tensor::ones(&[10, 10]).expect("tensor operation failed"),
+        );
 
         let result = sequence_parallelism.synchronize_gradients(&mut gradients);
         assert!(result.is_ok());
@@ -1192,7 +1196,8 @@ mod tests {
     fn test_memory_usage_update() {
         let config = SequenceParallelismConfig::default();
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
-        let sequence_parallelism = SequenceParallelism::new(config, 0, 1, process_group).unwrap();
+        let sequence_parallelism = SequenceParallelism::new(config, 0, 1, process_group)
+            .expect("operation failed in test");
 
         let result = sequence_parallelism.update_memory_usage(0, 1024 * 1024 * 1024); // 1GB
         assert!(result.is_ok());
@@ -1209,7 +1214,7 @@ mod tests {
             1024,                   // 1KB per token
             4,                      // world size
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         assert!(config.sequence_parallel_size <= 4);
         assert!(config.max_sequence_length_per_device > 0);

@@ -495,16 +495,19 @@ mod tests {
     fn test_adan_state_dict() {
         let optimizer = Adan::new(1e-3, 0.98, 0.92, 0.99, 1e-8, 0.02);
         let state_dict = optimizer.state_dict();
-        assert!(state_dict.unwrap().contains_key("step_count"));
+        assert!(state_dict.expect("Operation failed in test").contains_key("step_count"));
     }
 
     #[test]
     fn test_adan_load_state_dict() {
         let mut optimizer = Adan::new(1e-3, 0.98, 0.92, 0.99, 1e-8, 0.02);
         let mut state_dict = HashMap::new();
-        state_dict.insert("step_count".to_string(), Tensor::new(vec![10.0]).unwrap());
+        state_dict.insert(
+            "step_count".to_string(),
+            Tensor::new(vec![10.0]).expect("Failed to create tensor"),
+        );
 
-        optimizer.load_state_dict(state_dict).unwrap();
+        optimizer.load_state_dict(state_dict).expect("Failed to load state dict");
         assert_eq!(optimizer.step_count, 10);
     }
 

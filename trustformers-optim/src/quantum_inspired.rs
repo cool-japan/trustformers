@@ -630,7 +630,7 @@ mod tests {
         *optimizer.current_temperature.write() = 0.5;
 
         // Save state
-        let state_dict = optimizer.state_dict().unwrap();
+        let state_dict = optimizer.state_dict().expect("Failed to get state dict");
         assert!(state_dict.contains_key("step_count"));
         assert!(state_dict.contains_key("current_temperature"));
 

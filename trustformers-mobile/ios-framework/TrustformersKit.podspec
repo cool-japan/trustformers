@@ -9,8 +9,8 @@ Pod::Spec.new do |spec|
                          DESC
 
   spec.homepage         = 'https://github.com/cool-japan/trustformers'
-  spec.license          = { :type => 'MIT', :file => 'LICENSE' }
-  spec.author           = { 'TrustformeRS Team' => 'team@trustformers.dev' }
+  spec.license          = { :type => 'Apache-2.0', :file => 'LICENSE' }
+  spec.author           = { 'COOLJAPAN OU (Team KitaSan)' => 'contact@cooljapan.tech' }
   spec.source           = { :git => 'https://github.com/cool-japan/trustformers.git', :tag => spec.version.to_s }
 
   # Platform requirements

@@ -105,7 +105,7 @@ mod tests {
     #[tokio::test]
     async fn test_compliance_assessment() {
         let checker = ComplianceChecker::new(vec![ComplianceStandard::GDPR]);
-        checker.start().await.unwrap();
+        checker.start().await.expect("async operation should succeed in test");
         let assessment = checker.assess_compliance(ComplianceStandard::GDPR).await;
         assert!(assessment.is_ok());
     }

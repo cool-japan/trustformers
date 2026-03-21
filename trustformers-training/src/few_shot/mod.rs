@@ -197,7 +197,7 @@ mod tests {
                 task_id: Some("task1".to_string()),
                 metadata: None,
             };
-            support_set.add_example(example).unwrap();
+            support_set.add_example(example).expect("add operation failed");
         }
 
         assert!(support_set.is_complete());
@@ -209,8 +209,10 @@ mod tests {
         let config = FewShotConfig::default();
         let mut manager = FewShotLearningManager::new(config);
 
-        manager.create_support_set("task1".to_string(), 2).unwrap();
-        manager.create_query_set("task1".to_string()).unwrap();
+        manager
+            .create_support_set("task1".to_string(), 2)
+            .expect("operation failed in test");
+        manager.create_query_set("task1".to_string()).expect("operation failed in test");
 
         let example = FewShotExample {
             input: vec![1.0, 2.0],
@@ -219,8 +221,10 @@ mod tests {
             metadata: None,
         };
 
-        manager.add_support_example("task1", example.clone()).unwrap();
-        manager.add_query_example("task1", example).unwrap();
+        manager
+            .add_support_example("task1", example.clone())
+            .expect("add operation failed");
+        manager.add_query_example("task1", example).expect("add operation failed");
 
         assert!(manager.get_support_set("task1").is_some());
         assert!(manager.get_query_set("task1").is_some());

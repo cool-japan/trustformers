@@ -518,7 +518,7 @@ mod tests {
         let var = Variable::new(tensor, true);
 
         assert!(var.requires_grad());
-        assert_eq!(var.shape().unwrap(), vec![2, 3]);
+        assert_eq!(var.shape().expect("operation failed in test"), vec![2, 3]);
     }
 
     #[test]
@@ -527,14 +527,14 @@ mod tests {
         use std::sync::Arc;
 
         let engine = Arc::new(AutodiffEngine::default());
-        let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
-        let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
+        let a = engine.variable(Tensor::scalar(2.0).expect("tensor operation failed"), true);
+        let b = engine.variable(Tensor::scalar(3.0).expect("tensor operation failed"), true);
 
         let c = a.add(&b).expect("Addition failed");
-        assert_eq!(c.item().unwrap(), 5.0);
+        assert_eq!(c.item().expect("operation failed in test"), 5.0);
 
         let d = a.mul(&b).expect("Multiplication failed");
-        assert_eq!(d.item().unwrap(), 6.0);
+        assert_eq!(d.item().expect("operation failed in test"), 6.0);
     }
 
     #[test]
@@ -543,53 +543,62 @@ mod tests {
         use std::sync::Arc;
 
         let engine = Arc::new(AutodiffEngine::default());
-        let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
-        let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
+        let a = engine.variable(Tensor::scalar(2.0).expect("tensor operation failed"), true);
+        let b = engine.variable(Tensor::scalar(3.0).expect("tensor operation failed"), true);
 
         let c = a.mul(&b).expect("Multiplication failed");
-        engine.backward(&c, None).unwrap();
+        engine.backward(&c, None).expect("operation failed in test");
 
-        let grad_a = engine.get_grad(&a).unwrap().unwrap();
-        let grad_b = engine.get_grad(&b).unwrap().unwrap();
+        let grad_a = engine
+            .get_grad(&a)
+            .expect("operation failed in test")
+            .expect("operation failed in test");
+        let grad_b = engine
+            .get_grad(&b)
+            .expect("operation failed in test")
+            .expect("operation failed in test");
 
-        assert_eq!(grad_a.to_scalar().unwrap(), 3.0);
-        assert_eq!(grad_b.to_scalar().unwrap(), 2.0);
+        assert_eq!(grad_a.to_scalar().expect("operation failed in test"), 3.0);
+        assert_eq!(grad_b.to_scalar().expect("operation failed in test"), 2.0);
     }
 
     #[test]
     fn test_activation_functions() {
-        let x = Variable::scalar(0.0, true).unwrap();
+        let x = Variable::scalar(0.0, true).expect("operation failed in test");
 
         let sigmoid_x = x.sigmoid().expect("Sigmoid failed");
-        assert_eq!(sigmoid_x.item().unwrap(), 0.5);
+        assert_eq!(sigmoid_x.item().expect("operation failed in test"), 0.5);
 
         let tanh_x = x.tanh().expect("Tanh failed");
-        assert_eq!(tanh_x.item().unwrap(), 0.0);
+        assert_eq!(tanh_x.item().expect("operation failed in test"), 0.0);
     }
 
     #[test]
     fn test_tensor_operations() {
-        let x = Variable::ones(&[2, 3], true).unwrap();
+        let x = Variable::ones(&[2, 3], true).expect("operation failed in test");
 
-        let sum_x = x.sum(None).unwrap();
-        assert_eq!(sum_x.item().unwrap(), 6.0);
+        let sum_x = x.sum(None).expect("operation failed in test");
+        assert_eq!(sum_x.item().expect("operation failed in test"), 6.0);
 
         let mean_x = x.mean(None).expect("Mean calculation failed");
-        assert_eq!(mean_x.item().unwrap(), 1.0);
+        assert_eq!(mean_x.item().expect("operation failed in test"), 1.0);
     }
 
     #[test]
     fn test_reshape_operation() {
-        let x = Variable::ones(&[2, 3], true).unwrap();
+        let x = Variable::ones(&[2, 3], true).expect("operation failed in test");
         let reshaped = x.reshape(vec![3, 2]).expect("Reshape failed");
 
-        assert_eq!(reshaped.shape().unwrap(), vec![3, 2]);
+        assert_eq!(
+            reshaped.shape().expect("operation failed in test"),
+            vec![3, 2]
+        );
     }
 
     #[test]
     fn test_detach_operation() {
-        let x = Variable::scalar(2.0, true).unwrap();
-        let y = x.detach().unwrap();
+        let x = Variable::scalar(2.0, true).expect("operation failed in test");
+        let y = x.detach().expect("operation failed in test");
 
         assert!(x.requires_grad());
         assert!(!y.requires_grad());

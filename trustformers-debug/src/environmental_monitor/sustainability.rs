@@ -515,7 +515,7 @@ mod tests {
     #[tokio::test]
     async fn test_goal_initialization() {
         let mut advisor = SustainabilityAdvisor::new();
-        advisor.initialize_sustainability_goals().await.unwrap();
+        advisor.initialize_sustainability_goals().await.expect("async operation failed");
 
         assert!(!advisor.sustainability_goals.is_empty());
         assert!(advisor
@@ -531,15 +531,18 @@ mod tests {
     #[tokio::test]
     async fn test_goal_progress_update() {
         let mut advisor = SustainabilityAdvisor::new();
-        advisor.initialize_sustainability_goals().await.unwrap();
+        advisor.initialize_sustainability_goals().await.expect("async operation failed");
 
-        advisor.update_goal_progress(GoalType::CarbonReduction, 25.0).await.unwrap();
+        advisor
+            .update_goal_progress(GoalType::CarbonReduction, 25.0)
+            .await
+            .expect("async operation failed");
 
         let carbon_goal = advisor
             .sustainability_goals
             .iter()
             .find(|g| g.goal_type == GoalType::CarbonReduction)
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(carbon_goal.current_value, 25.0);
     }
@@ -547,9 +550,12 @@ mod tests {
     #[tokio::test]
     async fn test_sustainability_recommendations() {
         let mut advisor = SustainabilityAdvisor::new();
-        advisor.initialize_sustainability_goals().await.unwrap();
+        advisor.initialize_sustainability_goals().await.expect("async operation failed");
 
-        let recommendations = advisor.get_sustainability_recommendations().await.unwrap();
+        let recommendations = advisor
+            .get_sustainability_recommendations()
+            .await
+            .expect("async operation failed");
         assert!(!recommendations.is_empty());
 
         // Should have recommendations for goals with low progress
@@ -639,6 +645,6 @@ mod tests {
             compliance.iter().find(|(name, _)| name == "ISO 14001 Environmental Management");
 
         assert!(iso_compliance.is_some());
-        assert_eq!(iso_compliance.unwrap().1, 85.0);
+        assert_eq!(iso_compliance.expect("operation failed in test").1, 85.0);
     }
 }

@@ -588,7 +588,9 @@ impl ComputationGraphAnalyzer {
         for (node_id, dependencies) in edges {
             in_degree.insert(node_id.clone(), dependencies.len());
             for dep in dependencies {
-                adj_list.get_mut(dep).unwrap().push(node_id.clone());
+                if let Some(adj) = adj_list.get_mut(dep) {
+                    adj.push(node_id.clone());
+                }
             }
         }
 
@@ -614,9 +616,11 @@ impl ComputationGraphAnalyzer {
             // Process neighbors
             if let Some(neighbors) = adj_list.get(&node_id) {
                 for neighbor in neighbors {
-                    *in_degree.get_mut(neighbor).unwrap() -= 1;
-                    if in_degree[neighbor] == 0 {
-                        queue.push_back((neighbor.clone(), depth + 1));
+                    if let Some(degree) = in_degree.get_mut(neighbor) {
+                        *degree -= 1;
+                        if *degree == 0 {
+                            queue.push_back((neighbor.clone(), depth + 1));
+                        }
                     }
                 }
             }
@@ -910,7 +914,9 @@ impl ComputationGraphAnalyzer {
                         },
                     );
                 } else {
-                    let lifetime = variable_lifetimes.get_mut(dep).unwrap();
+                    let lifetime = variable_lifetimes
+                        .get_mut(dep)
+                        .expect("variable lifetime should exist for previously seen dependency");
                     lifetime.death_node = node_id.clone();
                     lifetime.usage_nodes.push(node_id.clone());
                 }
@@ -1098,8 +1104,10 @@ mod tests {
             ),
         ];
 
-        let graph_id = analyzer.create_graph("test_model".to_string(), operations).unwrap();
-        let analysis = analyzer.analyze_graph(graph_id).unwrap();
+        let graph_id = analyzer
+            .create_graph("test_model".to_string(), operations)
+            .expect("operation failed in test");
+        let analysis = analyzer.analyze_graph(graph_id).expect("operation failed in test");
 
         assert_eq!(analysis.statistics.nodes_by_type.len(), 4); // MatMul, ReLU, Custom("Input"), Custom("Output")
         assert!(!analysis.critical_path.is_empty());
@@ -1127,8 +1135,10 @@ mod tests {
             ),
         ];
 
-        let graph_id = analyzer.create_graph("fusion_test".to_string(), operations).unwrap();
-        let analysis = analyzer.analyze_graph(graph_id).unwrap();
+        let graph_id = analyzer
+            .create_graph("fusion_test".to_string(), operations)
+            .expect("operation failed in test");
+        let analysis = analyzer.analyze_graph(graph_id).expect("operation failed in test");
 
         assert!(analysis
             .optimization_opportunities
@@ -1145,8 +1155,10 @@ mod tests {
             ("b".to_string(), OperationType::ReLU, vec!["a".to_string()]),
         ];
 
-        let graph_id = analyzer.create_graph("simple".to_string(), operations).unwrap();
-        let dot = analyzer.export_to_dot(graph_id).unwrap();
+        let graph_id = analyzer
+            .create_graph("simple".to_string(), operations)
+            .expect("operation failed in test");
+        let dot = analyzer.export_to_dot(graph_id).expect("operation failed in test");
 
         assert!(dot.contains("digraph"));
         assert!(dot.contains("MatMul"));

@@ -891,7 +891,8 @@ mod tests {
         assert!(headers.contains_key("X-Span-Id"));
         assert!(headers.contains_key("X-Trace-Flags"));
 
-        let reconstructed = TraceContext::from_headers(&headers).unwrap();
+        let reconstructed =
+            TraceContext::from_headers(&headers).expect("test operation should succeed");
         assert_eq!(reconstructed.trace_id, context.trace_id);
         assert_eq!(reconstructed.span_id, context.span_id);
     }
@@ -901,14 +902,20 @@ mod tests {
         let config = TracingConfig::default();
         let tracer = DistributedTracer::new(config);
 
-        let context = tracer.start_span("test_operation".to_string(), None).await.unwrap();
+        let context = tracer
+            .start_span("test_operation".to_string(), None)
+            .await
+            .expect("async operation should succeed in test");
 
         tracer
             .add_span_tag(&context.span_id, "key".to_string(), "value".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
 
-        tracer.finish_span(&context.span_id).await.unwrap();
+        tracer
+            .finish_span(&context.span_id)
+            .await
+            .expect("async operation should succeed in test");
 
         // Give some time for background processing
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -923,10 +930,16 @@ mod tests {
         let tracer = Arc::new(DistributedTracer::new(config));
 
         let _span_id = {
-            let context = tracer.start_span("test_operation".to_string(), None).await.unwrap();
+            let context = tracer
+                .start_span("test_operation".to_string(), None)
+                .await
+                .expect("async operation should succeed in test");
             let guard = SpanGuard::new(Arc::clone(&tracer), context.span_id.clone());
 
-            guard.add_tag("test_key".to_string(), "test_value".to_string()).await.unwrap();
+            guard
+                .add_tag("test_key".to_string(), "test_value".to_string())
+                .await
+                .expect("async operation should succeed in test");
 
             context.span_id
         }; // SpanGuard is dropped here

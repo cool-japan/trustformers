@@ -931,7 +931,7 @@ mod tests {
             ..Default::default()
         };
 
-        let node = P2PNode::new(config).await.unwrap();
+        let node = P2PNode::new(config).await.expect("async operation failed");
         assert!(!node.peer_id.is_empty());
     }
 
@@ -977,8 +977,9 @@ mod tests {
             models: Vec::new(),
         };
 
-        let serialized = serde_json::to_string(&peer_info).unwrap();
-        let deserialized: PeerInfo = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&peer_info).expect("JSON serialization failed");
+        let deserialized: PeerInfo =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         assert_eq!(peer_info.peer_id, deserialized.peer_id);
         assert_eq!(peer_info.reputation, deserialized.reputation);

@@ -535,7 +535,7 @@ mod tests {
     fn test_regex_tokenizer_creation() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         assert!(tokenizer.patterns.len() > 0);
         assert!(tokenizer.patterns.iter().any(|p| p.name == "word"));
@@ -546,10 +546,10 @@ mod tests {
     fn test_basic_tokenization() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "Hello world! Test @user #hashtag";
-        let tokens = tokenizer.tokenize_with_metadata(text).unwrap();
+        let tokens = tokenizer.tokenize_with_metadata(text).expect("Operation failed in test");
 
         assert!(tokens.len() > 0);
         assert!(tokens.iter().any(|t| matches!(t.token_type, TokenType::Word)));
@@ -561,28 +561,34 @@ mod tests {
     fn test_email_detection() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "Contact me at user@example.com for details";
-        let tokens = tokenizer.tokenize_with_metadata(text).unwrap();
+        let tokens = tokenizer.tokenize_with_metadata(text).expect("Operation failed in test");
 
         let email_token = tokens.iter().find(|t| matches!(t.token_type, TokenType::Email));
         assert!(email_token.is_some());
-        assert_eq!(email_token.unwrap().text, "user@example.com");
+        assert_eq!(
+            email_token.expect("Operation failed in test").text,
+            "user@example.com"
+        );
     }
 
     #[test]
     fn test_url_detection() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "Visit https://example.com for more info";
-        let tokens = tokenizer.tokenize_with_metadata(text).unwrap();
+        let tokens = tokenizer.tokenize_with_metadata(text).expect("Operation failed in test");
 
         let url_token = tokens.iter().find(|t| matches!(t.token_type, TokenType::Url));
         assert!(url_token.is_some());
-        assert_eq!(url_token.unwrap().text, "https://example.com");
+        assert_eq!(
+            url_token.expect("Operation failed in test").text,
+            "https://example.com"
+        );
     }
 
     #[test]
@@ -594,24 +600,27 @@ mod tests {
             .insert("phone".to_string(), r"\d{3}-\d{3}-\d{4}".to_string());
         config.pattern_priorities.insert("phone".to_string(), 95);
 
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "Call me at 555-123-4567";
-        let tokens = tokenizer.tokenize_with_metadata(text).unwrap();
+        let tokens = tokenizer.tokenize_with_metadata(text).expect("Operation failed in test");
 
         let phone_token = tokens.iter().find(|t| t.pattern_name == "phone");
         assert!(phone_token.is_some());
-        assert_eq!(phone_token.unwrap().text, "555-123-4567");
+        assert_eq!(
+            phone_token.expect("Operation failed in test").text,
+            "555-123-4567"
+        );
     }
 
     #[test]
     fn test_entity_extraction() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "Email me at test@example.com or visit https://example.com #testing @user";
-        let entities = tokenizer.extract_entities(text).unwrap();
+        let entities = tokenizer.extract_entities(text).expect("Operation failed in test");
 
         assert!(entities.len() >= 4);
         assert!(entities.iter().any(|e| matches!(e.entity_type, TokenType::Email)));
@@ -624,10 +633,10 @@ mod tests {
     fn test_pattern_statistics() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "Hello world! This is a test. @user #hashtag";
-        let stats = tokenizer.get_pattern_statistics(text).unwrap();
+        let stats = tokenizer.get_pattern_statistics(text).expect("Operation failed in test");
 
         assert!(stats.total_tokens > 0);
         assert!(stats.pattern_counts.len() > 0);
@@ -638,10 +647,10 @@ mod tests {
     fn test_text_analysis() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "Hello world! This has 123 numbers and @mentions #hashtags";
-        let analysis = tokenizer.analyze_text_patterns(text).unwrap();
+        let analysis = tokenizer.analyze_text_patterns(text).expect("Operation failed in test");
 
         assert!(analysis.word_count > 0);
         assert!(analysis.number_count > 0);
@@ -653,14 +662,14 @@ mod tests {
     fn test_tokenizer_trait_implementation() {
         let vocab = create_test_vocab();
         let config = RegexTokenizerConfig::default();
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "hello world";
-        let result = tokenizer.encode(text).unwrap();
+        let result = tokenizer.encode(text).expect("Encoding failed");
         assert!(result.input_ids.len() > 0);
         assert_eq!(result.input_ids.len(), result.attention_mask.len());
 
-        let decoded = tokenizer.decode(&result.input_ids).unwrap();
+        let decoded = tokenizer.decode(&result.input_ids).expect("Decoding failed");
         assert!(!decoded.is_empty());
 
         assert_eq!(tokenizer.vocab_size(), 7);
@@ -674,10 +683,10 @@ mod tests {
         let mut config = RegexTokenizerConfig::default();
         config.case_insensitive = true;
 
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "HELLO World";
-        let tokens = tokenizer.tokenize_with_metadata(text).unwrap();
+        let tokens = tokenizer.tokenize_with_metadata(text).expect("Operation failed in test");
 
         assert!(tokens.iter().any(|t| t.text.to_lowercase() == "hello"));
         assert!(tokens.iter().any(|t| t.text.to_lowercase() == "world"));
@@ -689,10 +698,10 @@ mod tests {
         let mut config = RegexTokenizerConfig::default();
         config.max_length = Some(3);
 
-        let tokenizer = RegexTokenizer::new(vocab, config).unwrap();
+        let tokenizer = RegexTokenizer::new(vocab, config).expect("Construction failed");
 
         let text = "hello world test more tokens";
-        let result = tokenizer.encode(text).unwrap();
+        let result = tokenizer.encode(text).expect("Encoding failed");
 
         assert!(result.input_ids.len() <= 3);
         assert_eq!(result.input_ids.len(), result.attention_mask.len());

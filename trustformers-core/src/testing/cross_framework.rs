@@ -421,10 +421,18 @@ impl CrossFrameworkValidator {
     ) -> Result<TensorComparison> {
         match (tensor1, tensor2) {
             (Tensor::F32(a1), Tensor::F32(a2)) => {
-                self.compare_f32_arrays(a1.as_slice().unwrap(), a2.as_slice().unwrap())
+                let s1 =
+                    a1.as_slice().ok_or_else(|| anyhow::anyhow!("F32 tensor is not contiguous"))?;
+                let s2 =
+                    a2.as_slice().ok_or_else(|| anyhow::anyhow!("F32 tensor is not contiguous"))?;
+                self.compare_f32_arrays(s1, s2)
             },
             (Tensor::F64(a1), Tensor::F64(a2)) => {
-                self.compare_f64_arrays(a1.as_slice().unwrap(), a2.as_slice().unwrap())
+                let s1 =
+                    a1.as_slice().ok_or_else(|| anyhow::anyhow!("F64 tensor is not contiguous"))?;
+                let s2 =
+                    a2.as_slice().ok_or_else(|| anyhow::anyhow!("F64 tensor is not contiguous"))?;
+                self.compare_f64_arrays(s1, s2)
             },
             _ => {
                 // For other types, convert to f32 and compare
@@ -581,7 +589,7 @@ mod tests {
     #[test]
     fn test_framework_detection() {
         let mut validator = CrossFrameworkValidator::with_defaults();
-        validator.detect_frameworks().unwrap();
+        validator.detect_frameworks().expect("operation failed in test");
 
         // Should at least have TrustformeRS
         assert!(validator.available_frameworks().contains(&Framework::TrustformeRS));
@@ -594,7 +602,8 @@ mod tests {
         let tensor1 = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
         let tensor2 = Tensor::zeros(&[2, 2]).expect("Failed to create zero tensor");
 
-        let result = validator.compare_tensors(&tensor1, &tensor2).unwrap();
+        let result =
+            validator.compare_tensors(&tensor1, &tensor2).expect("tensor operation failed");
         assert!(result.passed);
         assert_eq!(result.max_diff, 0.0);
     }

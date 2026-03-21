@@ -472,8 +472,14 @@ mod tests {
         assert_eq!(result.model_type, "TestModel");
         assert!(result.avg_latency_ms > 0.0);
         assert!(result.throughput_tokens_per_sec > 0.0);
-        assert_eq!(result.parameters.get("batch_size").unwrap(), "4");
-        assert_eq!(result.parameters.get("seq_len").unwrap(), "128");
+        assert_eq!(
+            result.parameters.get("batch_size").expect("expected value not found"),
+            "4"
+        );
+        assert_eq!(
+            result.parameters.get("seq_len").expect("expected value not found"),
+            "128"
+        );
     }
 
     #[test]

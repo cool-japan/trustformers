@@ -681,7 +681,7 @@ mod tests {
                 permissions,
                 vec!["test".to_string()],
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(manager.shared_reports.contains_key(&report_id));
     }
@@ -709,12 +709,12 @@ mod tests {
                 permissions,
                 vec![],
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Start annotation session
         let session_id = manager
             .start_annotation_session(report_id, author.id, vec![author.id], AnnotationType::Note)
-            .unwrap();
+            .expect("operation failed in test");
 
         // Add annotation
         let _annotation_id = manager
@@ -726,12 +726,12 @@ mod tests {
                 "This looks like a bug".to_string(),
                 ImportanceLevel::High,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(manager.annotation_sessions.contains_key(&session_id));
 
         // Verify annotation was added to report
-        let report = manager.shared_reports.get(&report_id).unwrap();
+        let report = manager.shared_reports.get(&report_id).expect("expected value not found");
         assert!(!report.annotations.is_empty());
     }
 
@@ -758,7 +758,7 @@ mod tests {
                 permissions,
                 vec![],
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Create comment thread
         let thread_id = manager
@@ -768,16 +768,16 @@ mod tests {
                 author.id,
                 vec!["discussion".to_string()],
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Add comment
         let _comment_id = manager
             .add_comment(thread_id, author.id, "Great analysis!".to_string(), None)
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(manager.comment_threads.contains_key(&thread_id));
 
-        let thread = manager.comment_threads.get(&thread_id).unwrap();
+        let thread = manager.comment_threads.get(&thread_id).expect("expected value not found");
         assert_eq!(thread.comments.len(), 1);
     }
 
@@ -806,7 +806,7 @@ mod tests {
                 permissions,
                 vec![],
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let stats = manager.get_collaboration_stats();
         assert_eq!(stats.total_reports, 1);

@@ -735,7 +735,7 @@ mod tests {
             },
         };
 
-        let template = LambdaDeployment::generate_sam_template(&config).unwrap();
+        let template = LambdaDeployment::generate_sam_template(&config).expect("generation should succeed in test");
         assert!(template.contains("test-function"));
         assert!(template.contains("MemorySize: 512"));
     }

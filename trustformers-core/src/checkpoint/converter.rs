@@ -462,7 +462,9 @@ mod tests {
 
         // Test reshape
         let transform = WeightTransform::Reshape(vec![4, -1]);
-        converter.apply_transform(&mut weight, &transform).unwrap();
+        converter
+            .apply_transform(&mut weight, &transform)
+            .expect("operation failed in test");
         assert_eq!(weight.shape, vec![4, 1]);
     }
 }

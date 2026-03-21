@@ -407,7 +407,7 @@ mod tests {
         let tokens = vec![("hello".to_string(), 100), ("world".to_string(), 80)];
 
         let tokenizer = FairseqTokenizer::from_tokens(tokens);
-        let result = tokenizer.encode("hello world").unwrap();
+        let result = tokenizer.encode("hello world").expect("Encoding failed");
 
         // Should be: <s> hello world </s>
         assert_eq!(result.input_ids, vec![3, 4, 5, 1]);
@@ -419,7 +419,7 @@ mod tests {
         let tokens = vec![("hello".to_string(), 100), ("world".to_string(), 80)];
 
         let tokenizer = FairseqTokenizer::from_tokens(tokens);
-        let decoded = tokenizer.decode(&[3, 4, 5, 1]).unwrap();
+        let decoded = tokenizer.decode(&[3, 4, 5, 1]).expect("Decoding failed");
 
         assert_eq!(decoded, "hello world");
     }
@@ -429,7 +429,7 @@ mod tests {
         let tokens = vec![("hello".to_string(), 100)];
 
         let tokenizer = FairseqTokenizer::from_tokens(tokens);
-        let result = tokenizer.encode("hello unknown").unwrap();
+        let result = tokenizer.encode("hello unknown").expect("Encoding failed");
 
         // Should be: <s> hello <unk> </s>
         assert_eq!(result.input_ids, vec![3, 4, 2, 1]);
@@ -444,7 +444,8 @@ mod tests {
         ];
 
         let tokenizer = FairseqTokenizer::from_tokens(tokens);
-        let result = tokenizer.encode_pair("hello", "world test").unwrap();
+        let result =
+            tokenizer.encode_pair("hello", "world test").expect("Operation failed in test");
 
         // Should be: <s> hello </s> world test </s>
         assert_eq!(result.input_ids, vec![3, 4, 1, 5, 6, 1]);
@@ -460,7 +461,7 @@ mod tests {
         ];
 
         let tokenizer = FairseqTokenizer::from_tokens(tokens).with_max_length(5);
-        let result = tokenizer.encode("a b c a b c").unwrap();
+        let result = tokenizer.encode("a b c a b c").expect("Encoding failed");
 
         assert_eq!(result.input_ids.len(), 5);
         assert_eq!(result.input_ids[result.input_ids.len() - 1], 1); // Should end with </s>

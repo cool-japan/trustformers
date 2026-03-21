@@ -557,7 +557,7 @@ if (usage.pressureLevel >= 2) {
 
 ## License
 
-MIT License - see LICENSE file for details.
+Apache-2.0 License - see LICENSE file for details.
 
 ## Changelog
 

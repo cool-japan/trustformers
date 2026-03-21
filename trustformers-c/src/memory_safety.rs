@@ -957,7 +957,7 @@ mod tests {
         let verifier = MemorySafetyVerifier::new(config);
 
         let test_ptr = 0x2000 as *mut c_void;
-        verifier.track_allocation(test_ptr, 1024, "test").unwrap();
+        verifier.track_allocation(test_ptr, 1024, "test").expect("tracking should succeed in test");
 
         // First free should succeed
         let result1 = verifier.track_deallocation(test_ptr);
@@ -975,8 +975,8 @@ mod tests {
         let verifier = MemorySafetyVerifier::new(config);
 
         let test_ptr = 0x3000 as *mut c_void;
-        verifier.track_allocation(test_ptr, 1024, "test").unwrap();
-        verifier.track_deallocation(test_ptr).unwrap();
+        verifier.track_allocation(test_ptr, 1024, "test").expect("tracking should succeed in test");
+        verifier.track_deallocation(test_ptr).expect("tracking should succeed in test");
 
         // Access after free should fail
         let result = verifier.validate_memory_access(test_ptr, 4);
@@ -990,7 +990,7 @@ mod tests {
         let verifier = MemorySafetyVerifier::new(config);
 
         let test_ptr = 0x4000 as *mut c_void;
-        verifier.track_allocation(test_ptr, 1024, "test").unwrap();
+        verifier.track_allocation(test_ptr, 1024, "test").expect("tracking should succeed in test");
 
         // Access within bounds should succeed
         let result1 = verifier.validate_memory_access(test_ptr, 512);
@@ -1022,7 +1022,7 @@ mod tests {
         assert_eq!(report.total_freed, 0);
         assert!(!report.has_issues());
 
-        let json = report.to_json().unwrap();
+        let json = report.to_json().expect("test operation should succeed");
         assert!(json.contains("total_allocations"));
         assert!(json.contains("has_issues"));
     }

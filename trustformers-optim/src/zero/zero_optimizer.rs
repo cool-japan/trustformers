@@ -417,7 +417,7 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
 
         let adam = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.01);
         let zero_config = ZeROConfig::default();
@@ -425,7 +425,7 @@ mod tests {
         let zero_optimizer = ZeROOptimizer::new(adam, zero_config, mp_context);
         assert!(zero_optimizer.is_ok());
 
-        let optimizer = zero_optimizer.unwrap();
+        let optimizer = zero_optimizer.expect("Operation failed in test");
         assert_eq!(optimizer.get_stage(), ZeROStage::Stage1);
     }
 
@@ -438,7 +438,7 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
 
         // Test Stage 2
         let adam = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.01);
@@ -470,15 +470,22 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
 
         let adam = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.01);
         let zero_config = ZeROConfig::default();
-        let mut zero_optimizer = ZeROOptimizer::new(adam, zero_config, mp_context).unwrap();
+        let mut zero_optimizer =
+            ZeROOptimizer::new(adam, zero_config, mp_context).expect("Construction failed");
 
         let mut parameters = HashMap::new();
-        parameters.insert("weight1".to_string(), Tensor::ones(&[4, 4]).unwrap());
-        parameters.insert("bias1".to_string(), Tensor::ones(&[4]).unwrap());
+        parameters.insert(
+            "weight1".to_string(),
+            Tensor::ones(&[4, 4]).expect("Failed to create tensor"),
+        );
+        parameters.insert(
+            "bias1".to_string(),
+            Tensor::ones(&[4]).expect("Failed to create tensor"),
+        );
 
         let result = zero_optimizer.register_parameters(parameters);
         assert!(result.is_ok());
@@ -494,11 +501,12 @@ mod tests {
             comm_backend: CommunicationBackend::Custom,
             ..Default::default()
         };
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context = Arc::new(ModelParallelContext::new(config).expect("Construction failed"));
 
         let adam = Adam::new(0.001, (0.9, 0.999), 1e-8, 0.01);
         let zero_config = ZeROConfig::default();
-        let zero_optimizer = ZeROOptimizer::new(adam, zero_config, mp_context).unwrap();
+        let zero_optimizer =
+            ZeROOptimizer::new(adam, zero_config, mp_context).expect("Construction failed");
 
         let stats = zero_optimizer.get_memory_stats();
         assert_eq!(stats.optimizer_memory_saved, 0); // No parameters registered yet

@@ -2,9 +2,11 @@
 
 Comprehensive transformer model implementations for various NLP and vision tasks.
 
+**Version:** 0.1.0 (Alpha) | **Date:** 2026-03-21 | **Tests:** 759 passing | **SLoC:** 113,086 | **Public API items:** 1,220
+
 ## Current State
 
-This crate provides **extensive model coverage** with 15+ transformer architectures implemented, including state-of-the-art models like LLaMA, Mistral, and CLIP. All models are designed for production use with efficient inference and training support.
+This crate provides **comprehensive model coverage** with 27+ transformer architectures implemented, including state-of-the-art models like LLaMA, Mistral, CLIP, Mamba, and RWKV. All models are designed for production use with efficient inference and training support. Each model family is gated behind a dedicated feature flag (28 total).
 
 ## Implemented Models
 
@@ -22,6 +24,7 @@ This crate provides **extensive model coverage** with 15+ transformer architectu
   - Sizes: Small (124M), Medium (355M), Large (774M), XL (1.5B)
 - **GPT-Neo**: Open-source GPT-3 alternative (1.3B, 2.7B)
 - **GPT-J**: 6B parameter GPT-3 style model
+- **GPT-NeoX**: 20B parameter model from EleutherAI
 - **LLaMA**: Large Language Model Meta AI
   - LLaMA 1: 7B, 13B, 30B, 65B
   - LLaMA 2: 7B, 13B, 70B with grouped-query attention
@@ -31,6 +34,9 @@ This crate provides **extensive model coverage** with 15+ transformer architectu
   - Mixtral 8x7B (Mixture of Experts)
 - **Gemma**: Google's efficient models (2B, 7B)
 - **Qwen**: Alibaba's models (0.5B to 72B)
+- **Phi-3**: Microsoft small language model (3.8B, 128K context)
+- **Falcon**: Technology Innovation Institute multi-query attention model
+- **StableLM**: Stability AI models (1.6B–12B, base/zephyr/code variants)
 
 ### Encoder-Decoder Models
 - **T5**: Text-to-Text Transfer Transformer
@@ -38,7 +44,24 @@ This crate provides **extensive model coverage** with 15+ transformer architectu
 
 ### Vision Models
 - **ViT**: Vision Transformer for image classification
-- **CLIP**: Contrastive Language-Image Pre-training (multimodal)
+- **CLIP**: Contrastive Language-Image Pre-training with CLIPEncoderConfig trait
+
+### Multimodal Models
+- **BLIP-2**: Bootstrap Language-Image Pre-training v2 with Q-Former
+- **LLaVA**: Large Language and Vision Assistant (CLIP ViT + LLM)
+- **DALL-E**: Text-to-image generation with VQ-VAE
+- **Flamingo**: Visual language model with Perceiver Resampler (GatedCrossAttention fix applied)
+- **CogVLM**: Visual language model with temporal encoder
+
+### Efficient / Linear-Attention Models
+- **Mamba**: Selective state-space model, O(N) complexity
+- **RWKV**: Receptance Weighted Key Value, linear attention
+- **S4**: Structured State Space with HiPPO initialization
+- **Hyena**: Implicit long convolutions, O(N log N)
+- **Linformer**: Linear-complexity attention via low-rank projection
+- **Performer**: FAVOR+ random feature attention
+- **RetNet**: Multi-scale retention mechanism, O(N) inference
+- **FNet**: Fourier transform-based token mixing
 
 ## Features
 
@@ -134,20 +157,23 @@ trustformers-models/
 
 ## Testing
 
+- 759 passing tests, 0 failing (as of 2026-03-21)
 - Comprehensive unit tests for each model
 - Numerical parity tests against reference implementations
 - Integration tests with real tokenizers
 - Memory leak detection
 - Performance regression tests
 
-## Future Models
+## Feature Flags
 
-Planned additions include:
-- Mamba (state-space models)
-- RWKV (linear attention)
-- Phi-3 series
-- Falcon models
-- More multimodal architectures
+28 feature flags, one per model family:
+
+```toml
+[dependencies]
+trustformers-models = { version = "0.1.0", features = ["bert", "llama", "mistral", "clip"] }
+```
+
+Available flags: `bert`, `roberta`, `albert`, `distilbert`, `electra`, `deberta`, `gpt2`, `gpt_neo`, `gpt_j`, `gpt_neox`, `llama`, `mistral`, `gemma`, `qwen`, `phi3`, `falcon`, `stablelm`, `t5`, `vit`, `clip`, `blip2`, `llava`, `dalle`, `flamingo`, `cogvlm`, `mamba`, `rwkv`, `s4`, `hyena`, `linformer`, `performer`, `retnet`, `fnet`
 
 ## License
 

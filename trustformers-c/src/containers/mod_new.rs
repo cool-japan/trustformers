@@ -510,7 +510,7 @@ mod tests {
             },
         };
 
-        let recommendations = ContainerOptimizer::optimize_configuration(&config).unwrap();
+        let recommendations = ContainerOptimizer::optimize_configuration(&config).expect("test operation should succeed");
         assert!(!recommendations.is_empty());
 
         // Should recommend enabling monitoring

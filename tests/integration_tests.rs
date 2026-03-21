@@ -15,66 +15,66 @@ use trustformers_optim::scheduler::{LinearLRScheduler, CosineAnnealingLRSchedule
 #[test]
 fn test_bert_model_integration() {
     let config = BertConfig::base();
-    let model = BertModel::new(config.clone()).unwrap();
+    let model = BertModel::new(config.clone()).expect("operation failed in test");
 
     // Test forward pass
     let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]); // [CLS] I love BERT [SEP]
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 }
 
 #[test]
 fn test_bert_sequence_classification_integration() {
     let config = BertConfig::base();
-    let model = BertForSequenceClassification::new(config.clone(), 2).unwrap();
+    let model = BertForSequenceClassification::new(config.clone(), 2).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]);
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let logits = result.unwrap();
+    let logits = result.expect("operation failed in test");
     assert_eq!(logits.shape(), &[1, 2]);
 }
 
 #[test]
 fn test_roberta_model_integration() {
     let config = RobertaConfig::base();
-    let model = RobertaModel::new(config.clone()).unwrap();
+    let model = RobertaModel::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![0, 100, 200, 300, 2]); // RoBERTa tokens
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 }
 
 #[test]
 fn test_distilbert_model_integration() {
     let config = DistilBertConfig::base();
-    let model = DistilBertModel::new(config.clone()).unwrap();
+    let model = DistilBertModel::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]);
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 }
 
 #[test]
 fn test_albert_model_integration() {
     let config = AlbertConfig::base();
-    let model = AlbertModel::new(config.clone()).unwrap();
+    let model = AlbertModel::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![2, 100, 200, 300, 3]); // ALBERT tokens
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 }
 
@@ -88,13 +88,13 @@ fn test_electra_model_integration() {
     // Test generator
     let gen_result = model.get_generator().forward(&input_ids);
     assert!(gen_result.is_ok());
-    let gen_output = gen_result.unwrap();
+    let gen_output = gen_result.expect("operation failed in test");
     assert_eq!(gen_output.shape(), &[1, input_ids.len(), config.vocab_size]);
 
     // Test discriminator
     let disc_result = model.get_discriminator().forward(&input_ids);
     assert!(disc_result.is_ok());
-    let disc_output = disc_result.unwrap();
+    let disc_output = disc_result.expect("operation failed in test");
     assert_eq!(disc_output.shape(), &[1, input_ids.len(), config.discriminator_hidden_size]);
 }
 
@@ -107,7 +107,7 @@ fn test_electra_pretraining_integration() {
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let (gen_logits, disc_logits) = result.unwrap();
+    let (gen_logits, disc_logits) = result.expect("operation failed in test");
     assert_eq!(gen_logits.shape(), &[1, input_ids.len(), config.vocab_size]);
     assert_eq!(disc_logits.shape(), &[1, input_ids.len(), 1]);
 }
@@ -115,86 +115,86 @@ fn test_electra_pretraining_integration() {
 #[test]
 fn test_deberta_model_integration() {
     let config = DebertaConfig::base();
-    let model = DebertaModel::new(config.clone()).unwrap();
+    let model = DebertaModel::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![0, 1, 2, 3, 2]); // DeBERTa tokens
     let result = model.forward(&input_ids, None);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 }
 
 #[test]
 fn test_gpt2_model_integration() {
     let config = GPT2Config::small();
-    let model = GPT2Model::new(config.clone()).unwrap();
+    let model = GPT2Model::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![50256, 100, 200, 300]); // GPT-2 tokens
     let result = model.forward(&input_ids, None, None);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.n_embd]);
 }
 
 #[test]
 fn test_gpt2_lm_head_integration() {
     let config = GPT2Config::small();
-    let model = GPT2LMHeadModel::new(config.clone()).unwrap();
+    let model = GPT2LMHeadModel::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![50256, 100, 200, 300]);
     let result = model.forward(&input_ids, None, None);
 
     assert!(result.is_ok());
-    let logits = result.unwrap();
+    let logits = result.expect("operation failed in test");
     assert_eq!(logits.shape(), &[1, input_ids.len(), config.vocab_size]);
 }
 
 #[test]
 fn test_t5_model_integration() {
     let config = T5Config::small();
-    let model = T5Model::new(config.clone()).unwrap();
+    let model = T5Model::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![1, 100, 200, 300, 1]); // T5 tokens
     let decoder_input_ids = Array1::from_vec(vec![0, 50, 100]);
     let result = model.forward(&input_ids, Some(&decoder_input_ids), None);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, decoder_input_ids.len(), config.d_model]);
 }
 
 #[test]
 fn test_t5_conditional_generation_integration() {
     let config = T5Config::small();
-    let model = T5ForConditionalGeneration::new(config.clone()).unwrap();
+    let model = T5ForConditionalGeneration::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![1, 100, 200, 300, 1]);
     let decoder_input_ids = Array1::from_vec(vec![0, 50, 100]);
     let result = model.forward(&input_ids, Some(&decoder_input_ids), None);
 
     assert!(result.is_ok());
-    let logits = result.unwrap();
+    let logits = result.expect("operation failed in test");
     assert_eq!(logits.shape(), &[1, decoder_input_ids.len(), config.vocab_size]);
 }
 
 #[test]
 fn test_vit_model_integration() {
     let config = ViTConfig::tiny(); // Use tiny for faster testing
-    let model = ViTModel::new(config.clone()).unwrap();
+    let model = ViTModel::new(config.clone()).expect("operation failed in test");
 
     // Test with small image (32x32 to make it faster)
     let mut small_config = config.clone();
     small_config.image_size = 32;
     small_config.patch_size = 16;
-    let small_model = ViTModel::new(small_config.clone()).unwrap();
+    let small_model = ViTModel::new(small_config.clone()).expect("operation failed in test");
 
     let images = Array4::zeros((1, 32, 32, 3));
     let result = small_model.forward(&images);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     // 32x32 image with 16x16 patches = 4 patches + 1 class token = 5 tokens
     assert_eq!(output.shape(), &[1, 5, small_config.hidden_size]);
 }
@@ -206,20 +206,20 @@ fn test_vit_classification_integration() {
     config.patch_size = 16;
     config.num_labels = 10; // CIFAR-10 like
 
-    let model = ViTForImageClassification::new(config.clone()).unwrap();
+    let model = ViTForImageClassification::new(config.clone()).expect("operation failed in test");
 
     let images = Array4::zeros((2, 32, 32, 3)); // Batch of 2 images
     let result = model.forward(&images);
 
     assert!(result.is_ok());
-    let logits = result.unwrap();
+    let logits = result.expect("operation failed in test");
     assert_eq!(logits.shape(), &[2, 10]);
 }
 
 #[test]
 fn test_automodel_integration() {
     // Test BERT auto model
-    let bert_model = AutoModel::from_pretrained_name("bert-base-uncased").unwrap();
+    let bert_model = AutoModel::from_pretrained_name("bert-base-uncased").expect("operation failed in test");
     let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]);
 
     match bert_model {
@@ -233,14 +233,14 @@ fn test_automodel_integration() {
 
 #[test]
 fn test_automodel_sequence_classification_integration() {
-    let model = AutoModelForSequenceClassification::from_pretrained_name("bert-base-uncased", 2).unwrap();
+    let model = AutoModelForSequenceClassification::from_pretrained_name("bert-base-uncased", 2).expect("operation failed in test");
     let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]);
 
     match model {
         AutoModelForSequenceClassification::Bert(bert_model) => {
             let result = bert_model.forward(&input_ids);
             assert!(result.is_ok());
-            let logits = result.unwrap();
+            let logits = result.expect("operation failed in test");
             assert_eq!(logits.shape(), &[1, 2]);
         }
         _ => panic!("Expected BERT model"),
@@ -360,7 +360,7 @@ fn test_model_memory_efficiency() {
 fn test_error_handling_integration() {
     // Test invalid input handling
     let config = BertConfig::base();
-    let model = BertModel::new(config).unwrap();
+    let model = BertModel::new(config).expect("operation failed in test");
 
     // Test with empty input
     let empty_input = Array1::from_vec(vec![]);
@@ -369,7 +369,7 @@ fn test_error_handling_integration() {
 
     // Test ViT with invalid image dimensions
     let vit_config = ViTConfig::base();
-    let vit_model = ViTModel::new(vit_config).unwrap();
+    let vit_model = ViTModel::new(vit_config).expect("operation failed in test");
 
     // Wrong number of channels
     let invalid_image = Array4::zeros((1, 224, 224, 1)); // 1 channel instead of 3

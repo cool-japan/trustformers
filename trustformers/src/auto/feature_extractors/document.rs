@@ -821,7 +821,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 512 * 768);
         assert_eq!(output.shape, vec![512, 768]);
         assert!(output.attention_mask.is_some());
@@ -858,7 +858,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 256 * 384);
         assert_eq!(output.shape, vec![256, 384]);
     }
@@ -894,7 +894,7 @@ Some `code` and regular text.
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 128 * 256);
         assert_eq!(output.shape, vec![128, 256]);
     }
@@ -910,7 +910,8 @@ Some `code` and regular text.
             "max_batch_size": 8
         });
 
-        let config = DocumentFeatureConfig::from_config(&model_config).unwrap();
+        let config =
+            DocumentFeatureConfig::from_config(&model_config).expect("operation failed in test");
         assert_eq!(config.feature_size, 768);
         assert_eq!(config.max_length, 512);
         assert!(config.include_layout);
@@ -922,7 +923,8 @@ Some `code` and regular text.
     fn test_document_config_defaults() {
         let minimal_config = serde_json::json!({});
 
-        let config = DocumentFeatureConfig::from_config(&minimal_config).unwrap();
+        let config =
+            DocumentFeatureConfig::from_config(&minimal_config).expect("operation failed in test");
         assert_eq!(config.feature_size, 768);
         assert_eq!(config.max_length, 512);
         assert!(!config.include_layout);
@@ -1022,7 +1024,7 @@ Some `code` and regular text.
             metadata: None,
         };
 
-        let result = extractor.extract_features(&input).unwrap();
+        let result = extractor.extract_features(&input).expect("operation failed in test");
 
         // Check special tokens
         assert_eq!(result.special_tokens.len(), 2);

@@ -1001,7 +1001,7 @@ mod tests {
 
         analyzer.analyze_layer_activations("test_layer", &activations, "relu")?;
 
-        let stats = analyzer.get_layer_stats("test_layer").unwrap();
+        let stats = analyzer.get_layer_stats("test_layer").expect("operation failed in test");
         if let Some(dead_stats) = &stats.dead_neuron_stats {
             assert!(dead_stats.dead_neuron_count > 0);
             assert!(dead_stats.dead_ratio > 0.0);
@@ -1036,7 +1036,7 @@ mod tests {
 
         analyzer.analyze_layer_activations("healthy_layer", &healthy_activations, "relu")?;
 
-        let stats = analyzer.get_layer_stats("healthy_layer").unwrap();
+        let stats = analyzer.get_layer_stats("healthy_layer").expect("operation failed in test");
         assert!(stats.health_assessment.overall_health_score > 0.5);
 
         Ok(())

@@ -184,7 +184,7 @@ impl WeightAnalyzer {
         };
 
         self.analyses.insert(layer_name.to_string(), analysis);
-        Ok(self.analyses.get(layer_name).unwrap())
+        Ok(self.analyses.get(layer_name).expect("analysis should exist after insert"))
     }
 
     /// Compute statistics for weights
@@ -515,7 +515,7 @@ mod tests {
         let mut analyzer = WeightAnalyzer::new();
         let weights = vec![0.1, 0.2, 0.15, 0.3, 0.25];
 
-        let analysis = analyzer.analyze("layer1", &weights).unwrap();
+        let analysis = analyzer.analyze("layer1", &weights).expect("operation failed in test");
         assert_eq!(analysis.layer_name, "layer1");
         assert!(analysis.statistics.mean > 0.0);
         assert!(analysis.statistics.std_dev > 0.0);
@@ -526,7 +526,7 @@ mod tests {
         let mut analyzer = WeightAnalyzer::new();
         let weights = vec![0.1, 0.0, 0.2, 0.0, 0.3]; // Two dead neurons
 
-        let analysis = analyzer.analyze("layer1", &weights).unwrap();
+        let analysis = analyzer.analyze("layer1", &weights).expect("operation failed in test");
         assert_eq!(analysis.dead_neurons.len(), 2);
     }
 
@@ -535,7 +535,7 @@ mod tests {
         let analyzer = WeightAnalyzer::new();
         let weights: Vec<f64> = (0..100).map(|x| x as f64 / 100.0).collect();
 
-        let histogram = analyzer.compute_histogram(&weights).unwrap();
+        let histogram = analyzer.compute_histogram(&weights).expect("operation failed in test");
         assert_eq!(histogram.bin_edges.len(), analyzer.config.num_bins + 1);
         assert_eq!(histogram.total_count, 100);
     }
@@ -545,7 +545,7 @@ mod tests {
         let analyzer = WeightAnalyzer::new();
         let weights = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let stats = analyzer.compute_statistics(&weights).unwrap();
+        let stats = analyzer.compute_statistics(&weights).expect("operation failed in test");
         assert_eq!(stats.mean, 3.0);
         assert!(stats.std_dev > 0.0);
         assert_eq!(stats.min, 1.0);
@@ -584,9 +584,11 @@ mod tests {
         let output_path = temp_dir.join("weight_analysis.json");
 
         let mut analyzer = WeightAnalyzer::new();
-        analyzer.analyze("layer1", &[1.0, 2.0, 3.0]).unwrap();
+        analyzer.analyze("layer1", &[1.0, 2.0, 3.0]).expect("operation failed in test");
 
-        analyzer.export_to_json("layer1", &output_path).unwrap();
+        analyzer
+            .export_to_json("layer1", &output_path)
+            .expect("operation failed in test");
         assert!(output_path.exists());
 
         // Clean up
@@ -598,9 +600,10 @@ mod tests {
         let mut analyzer = WeightAnalyzer::new();
         let weights: Vec<f64> = (0..100).map(|x| x as f64 / 100.0).collect();
 
-        analyzer.analyze("layer1", &weights).unwrap();
+        analyzer.analyze("layer1", &weights).expect("operation failed in test");
 
-        let ascii_plot = analyzer.plot_distribution_ascii("layer1").unwrap();
+        let ascii_plot =
+            analyzer.plot_distribution_ascii("layer1").expect("operation failed in test");
         assert!(ascii_plot.contains("Weight Distribution"));
         assert!(ascii_plot.contains("layer1"));
         assert!(ascii_plot.contains("Statistics"));
@@ -610,8 +613,8 @@ mod tests {
     fn test_print_summary() {
         let mut analyzer = WeightAnalyzer::new();
 
-        analyzer.analyze("layer1", &[1.0, 2.0, 3.0]).unwrap();
-        analyzer.analyze("layer2", &[0.5, 1.0, 1.5]).unwrap();
+        analyzer.analyze("layer1", &[1.0, 2.0, 3.0]).expect("operation failed in test");
+        analyzer.analyze("layer2", &[0.5, 1.0, 1.5]).expect("operation failed in test");
 
         let summary = analyzer.print_summary();
         assert!(summary.contains("layer1"));
@@ -625,7 +628,7 @@ mod tests {
         let analyzer = WeightAnalyzer::new();
         let weights = vec![0.0, 0.0, 0.0, 1.0, 0.0];
 
-        let stats = analyzer.compute_statistics(&weights).unwrap();
+        let stats = analyzer.compute_statistics(&weights).expect("operation failed in test");
         assert_eq!(stats.num_zeros, 4);
         assert_eq!(stats.sparsity, 0.8);
     }
@@ -634,8 +637,8 @@ mod tests {
     fn test_clear_analyses() {
         let mut analyzer = WeightAnalyzer::new();
 
-        analyzer.analyze("layer1", &[1.0]).unwrap();
-        analyzer.analyze("layer2", &[2.0]).unwrap();
+        analyzer.analyze("layer1", &[1.0]).expect("operation failed in test");
+        analyzer.analyze("layer2", &[2.0]).expect("operation failed in test");
 
         assert_eq!(analyzer.num_layers(), 2);
 

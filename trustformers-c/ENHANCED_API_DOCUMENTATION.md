@@ -623,7 +623,7 @@ nvidia-smi -l 1
 
 ## 🔄 Version History
 
-### Version 0.1.0-alpha.1 (Latest)
+### Version 0.1.0 (Latest)
 - ✅ AI-Powered Memory Safety Verification
 - ✅ Advanced Quantization with NAS
 - ✅ Real-Time Performance Analytics

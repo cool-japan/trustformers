@@ -715,7 +715,7 @@ mod tests {
             let output = SDPA::attention(&q, &k, &v, None, false);
             assert!(output.is_ok());
 
-            let output = output.unwrap();
+            let output = output.expect("operation failed in test");
             assert_eq!(output.shape(), vec![2, 4, 32, 64]);
         });
 
@@ -734,7 +734,7 @@ mod tests {
             let output = SDPA::small_sequence_attention(&q, &k, &v, None, false);
             assert!(output.is_ok());
 
-            let output = output.unwrap();
+            let output = output.expect("operation failed in test");
             assert_eq!(output.shape(), vec![1, 8, 128, 64]);
         });
 
@@ -753,7 +753,7 @@ mod tests {
             let output = SDPA::tiled_attention(&q, &k, &v, None, false);
             assert!(output.is_ok());
 
-            let output = output.unwrap();
+            let output = output.expect("operation failed in test");
             assert_eq!(output.shape(), vec![1, 4, 512, 64]);
         });
 
@@ -772,7 +772,7 @@ mod tests {
             let output = SDPA::attention(&q, &k, &v, None, true);
             assert!(output.is_ok());
 
-            let output = output.unwrap();
+            let output = output.expect("operation failed in test");
             assert_eq!(output.shape(), vec![1, 2, 16, 32]);
         });
 
@@ -792,7 +792,7 @@ mod tests {
             let output = SDPA::attention(&q, &k, &v, Some(&mask), false);
             assert!(output.is_ok());
 
-            let output = output.unwrap();
+            let output = output.expect("operation failed in test");
             assert_eq!(output.shape(), vec![1, 2, 16, 32]);
         });
 
@@ -811,7 +811,7 @@ mod tests {
             let output = SDPA::fused_attention_dropout(&q, &k, &v, None, false, 0.1, true);
             assert!(output.is_ok());
 
-            let output = output.unwrap();
+            let output = output.expect("operation failed in test");
             assert_eq!(output.shape(), vec![1, 4, 64, 32]);
         });
 

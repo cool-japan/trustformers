@@ -876,9 +876,15 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        framework.register_contract(contract.clone()).await.unwrap();
+        framework
+            .register_contract(contract.clone())
+            .await
+            .expect("registration should succeed in test");
 
-        let retrieved = framework.get_contract("test-contract").await.unwrap();
+        let retrieved = framework
+            .get_contract("test-contract")
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(retrieved.name, "Test Contract");
         assert_eq!(retrieved.version, "1.0.0");
     }
@@ -897,7 +903,10 @@ mod tests {
             "required": ["name"]
         });
 
-        let result = framework.validate_schema(&schema, "test").await.unwrap();
+        let result = framework
+            .validate_schema(&schema, "test")
+            .await
+            .expect("async operation should succeed in test");
         assert!(result.valid);
         assert_eq!(result.errors.len(), 0);
     }
@@ -939,7 +948,10 @@ mod tests {
         }
         "#;
 
-        let contract = framework.generate_contract_from_openapi(openapi_spec).await.unwrap();
+        let contract = framework
+            .generate_contract_from_openapi(openapi_spec)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(contract.name, "Test API");
         assert_eq!(contract.version, "1.0.0");
         assert_eq!(contract.endpoints.len(), 1);
@@ -980,9 +992,15 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        framework.register_contract(contract).await.unwrap();
+        framework
+            .register_contract(contract)
+            .await
+            .expect("registration should succeed in test");
 
-        let result = framework.run_contract_tests("test-contract").await.unwrap();
+        let result = framework
+            .run_contract_tests("test-contract")
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(result.contract_id, "test-contract");
         assert_eq!(result.endpoint_results.len(), 1);
         assert!(matches!(result.status, TestStatus::Passed));
@@ -1006,10 +1024,19 @@ mod tests {
             updated_at: chrono::Utc::now(),
         };
 
-        framework.register_contract(contract).await.unwrap();
+        framework
+            .register_contract(contract)
+            .await
+            .expect("registration should succeed in test");
 
-        let result = framework.run_contract_tests("test-contract").await.unwrap();
-        let report = framework.generate_test_report(&result.test_id).await.unwrap();
+        let result = framework
+            .run_contract_tests("test-contract")
+            .await
+            .expect("async operation should succeed in test");
+        let report = framework
+            .generate_test_report(&result.test_id)
+            .await
+            .expect("async operation should succeed in test");
 
         assert!(report.contains("Contract Test Report"));
         assert!(report.contains("Summary"));

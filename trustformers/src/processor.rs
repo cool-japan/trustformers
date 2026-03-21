@@ -853,7 +853,7 @@ mod tests {
 
         // Test text detection
         let text_input = "Hello, world!".as_bytes();
-        let modality = processor.detect_modality(text_input).unwrap();
+        let modality = processor.detect_modality(text_input).expect("operation failed in test");
         assert_eq!(modality, Modality::Text);
     }
 
@@ -872,14 +872,17 @@ mod tests {
         let processor = AutoProcessor::new();
         let text_input = "Test input".as_bytes();
 
-        let validation = processor.validate_input(text_input, &Modality::Text).unwrap();
+        let validation = processor
+            .validate_input(text_input, &Modality::Text)
+            .expect("operation failed in test");
         assert!(validation.is_valid);
         assert_eq!(validation.modality, Modality::Text);
     }
 
     #[test]
     fn test_from_pretrained() {
-        let processor = AutoProcessor::from_pretrained("clip-vit-base-patch32").unwrap();
+        let processor = AutoProcessor::from_pretrained("clip-vit-base-patch32")
+            .expect("operation failed in test");
         assert!(processor.supported_modalities.contains(&Modality::Image));
         assert!(processor.supported_modalities.contains(&Modality::Text));
     }

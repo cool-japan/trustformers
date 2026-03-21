@@ -557,7 +557,7 @@ mod tests {
         service.register_check("test_model".to_string(), Box::new(model_check)).await;
 
         // Run checks
-        service.run_all_checks().await.unwrap();
+        service.run_all_checks().await.expect("async operation should succeed in test");
 
         // Get system health
         let health = service.get_system_health().await;

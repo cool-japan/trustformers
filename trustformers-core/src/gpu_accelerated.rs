@@ -869,7 +869,7 @@ mod tests {
     #[test]
     fn test_backend_detection() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
         // Backend should be detected automatically
         let backend = ops.get_backend();
@@ -882,7 +882,7 @@ mod tests {
     #[test]
     fn test_matmul_dimensions() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
         let a = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
         let b = Tensor::ones(&[3, 4]).expect("Failed to create ones tensor");
@@ -890,14 +890,14 @@ mod tests {
         let result = ops.matmul(&a, &b);
         assert!(result.is_ok());
 
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("tensor operation failed");
         assert_eq!(result_tensor.shape(), &[2, 4]);
     }
 
     #[test]
     fn test_batch_matmul_dimensions() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
         let a = Tensor::ones(&[2, 3, 4]).expect("Failed to create ones tensor");
         let b = Tensor::ones(&[2, 4, 5]).expect("Failed to create ones tensor");
@@ -905,14 +905,14 @@ mod tests {
         let result = ops.batch_matmul(&a, &b);
         assert!(result.is_ok());
 
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("tensor operation failed");
         assert_eq!(result_tensor.shape(), &[2, 3, 5]);
     }
 
     #[test]
     fn test_flash_attention_dimensions() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
         let batch_size = 2;
         let seq_len = 10;
@@ -928,14 +928,14 @@ mod tests {
         let result = ops.flash_attention(&query, &key, &value, 0.125, None);
         assert!(result.is_ok());
 
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("tensor operation failed");
         assert_eq!(result_tensor.shape(), &[batch_size, seq_len, hidden_dim]);
     }
 
     #[test]
     fn test_layer_norm_dimensions() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
         let input = Tensor::ones(&[2, 10, 64]).expect("Failed to create ones tensor");
         let gamma = Tensor::ones(&[64]).expect("Failed to create ones tensor");
@@ -944,30 +944,30 @@ mod tests {
         let result = ops.layer_norm(&input, &gamma, &beta, 1e-5);
         assert!(result.is_ok());
 
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("tensor operation failed");
         assert_eq!(result_tensor.shape(), &[2, 10, 64]);
     }
 
     #[test]
     fn test_gelu_dimensions() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
         let input = Tensor::ones(&[2, 10, 64]).expect("Failed to create ones tensor");
 
         let result = ops.gelu(&input);
         assert!(result.is_ok());
 
-        let result_tensor = result.unwrap();
+        let result_tensor = result.expect("tensor operation failed");
         assert_eq!(result_tensor.shape(), &[2, 10, 64]);
     }
 
     #[test]
     fn test_memory_usage() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
-        let (_total, _peak, _free) = ops.get_memory_usage().unwrap();
+        let (_total, _peak, _free) = ops.get_memory_usage().expect("operation failed in test");
         // Should return some values (may be 0 if no GPU available)
         // Note: No need to assert >= 0 for u64 values, they're always non-negative
     }
@@ -975,7 +975,7 @@ mod tests {
     #[test]
     fn test_synchronize() {
         let config = GpuOpsConfig::default();
-        let ops = GpuAcceleratedOps::new(config).unwrap();
+        let ops = GpuAcceleratedOps::new(config).expect("operation failed in test");
 
         let result = ops.synchronize();
         assert!(result.is_ok());

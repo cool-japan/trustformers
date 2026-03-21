@@ -32,8 +32,10 @@ async fn test_basic_debugging_workflow() -> Result<()> {
     debug_session.start().await?;
 
     // Create test tensors with different means for MSE comparison
-    let input_tensor =
-        Array::linspace(0.0, 1.0, 100).to_shape(IxDyn(&[10, 10])).unwrap().to_owned();
+    let input_tensor = Array::linspace(0.0, 1.0, 100)
+        .to_shape(IxDyn(&[10, 10]))
+        .expect("operation failed in test")
+        .to_owned();
     let weight_tensor = Array::<f32, _>::ones(IxDyn(&[10, 10])) * 0.8; // Different mean from input (0.8 vs 0.5)
 
     // Inspect tensors
@@ -133,7 +135,7 @@ async fn test_utilities_functionality() -> Result<()> {
     // Test tensor statistics computation
     let test_tensor = Array::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0])
         .to_shape(IxDyn(&[5]))
-        .unwrap()
+        .expect("operation failed in test")
         .to_owned();
 
     let stats = DebugUtils::compute_tensor_statistics(&test_tensor)?;
@@ -152,7 +154,7 @@ async fn test_utilities_functionality() -> Result<()> {
     // Test tensor with NaN values
     let nan_tensor = Array::from_vec(vec![1.0, f32::NAN, 3.0, 4.0, 5.0])
         .to_shape(IxDyn(&[5]))
-        .unwrap()
+        .expect("operation failed in test")
         .to_owned();
 
     let nan_stats = DebugUtils::compute_tensor_statistics(&nan_tensor)?;
@@ -250,7 +252,7 @@ async fn test_tutorial_system() -> Result<()> {
     // Test navigation
     tutorial.goto_lesson(0)?;
     assert_eq!(
-        tutorial.current_lesson().unwrap().title,
+        tutorial.current_lesson().expect("operation failed in test").title,
         "Getting Started with TrustformeRS Debug"
     );
 
@@ -293,13 +295,13 @@ async fn test_performance_monitoring() -> Result<()> {
     sleep(Duration::from_millis(10)).await;
     let duration1 = monitor.end_checkpoint("operation1");
     assert!(duration1.is_some());
-    assert!(duration1.unwrap().as_millis() >= 10);
+    assert!(duration1.expect("operation failed in test").as_millis() >= 10);
 
     monitor.checkpoint("operation2");
     sleep(Duration::from_millis(20)).await;
     let duration2 = monitor.end_checkpoint("operation2");
     assert!(duration2.is_some());
-    assert!(duration2.unwrap().as_millis() >= 20);
+    assert!(duration2.expect("operation failed in test").as_millis() >= 20);
 
     // Test total elapsed time
     let total = monitor.total_elapsed();
@@ -480,10 +482,9 @@ async fn test_comprehensive_debugging_flow() -> Result<()> {
 
 /// Test macro functionality
 #[tokio::test(flavor = "multi_thread")]
-#[ignore] // FIXME: This test has implementation issues causing slow execution
 async fn test_debug_macros() -> Result<()> {
     // Wrap in timeout to prevent hanging
-    let test_result = tokio::time::timeout(Duration::from_millis(500), async {
+    let test_result = tokio::time::timeout(Duration::from_secs(5), async {
         let mut debug_session = debug_session();
         debug_session.start().await?;
 
@@ -510,13 +511,12 @@ async fn test_debug_macros() -> Result<()> {
 
     match test_result {
         Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!("Test timed out after 500ms")),
+        Err(_) => Err(anyhow::anyhow!("Test timed out after 5s")),
     }
 }
 
 /// Integration test with error conditions
 #[tokio::test]
-#[ignore] // FIXME: Test hangs waiting for background tasks - needs investigation
 async fn test_error_handling() -> Result<()> {
     let mut debug_session = debug_session();
     debug_session.start().await?;
@@ -524,7 +524,7 @@ async fn test_error_handling() -> Result<()> {
     // Test with problematic tensor (NaN values)
     let problematic_tensor = Array::from_vec(vec![1.0, f32::NAN, 3.0, f32::INFINITY])
         .to_shape(IxDyn(&[2, 2]))
-        .unwrap()
+        .expect("operation failed in test")
         .to_owned();
 
     let tensor_id = debug_session.tensor_inspector_mut().inspect_tensor(

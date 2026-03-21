@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn test_math_tokenizer_creation() {
-        let tokenizer = MathTokenizer::new().unwrap();
+        let tokenizer = MathTokenizer::new().expect("Construction failed");
         assert!(tokenizer.math_functions.contains("sin"));
         assert!(tokenizer.greek_letters.contains("π"));
         assert!(tokenizer.math_operators.contains("+"));
@@ -943,8 +943,8 @@ mod tests {
 
     #[test]
     fn test_number_tokenization() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        let tokens = tokenizer.tokenize_math("123 3.14 2e10").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        let tokens = tokenizer.tokenize_math("123 3.14 2e10").expect("Operation failed in test");
 
         assert_eq!(tokens.len(), 3);
         assert_eq!(tokens[0].text, "123");
@@ -957,8 +957,10 @@ mod tests {
 
     #[test]
     fn test_function_tokenization() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        let tokens = tokenizer.tokenize_math("sin(x) cos(θ) log(n)").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        let tokens = tokenizer
+            .tokenize_math("sin(x) cos(θ) log(n)")
+            .expect("Operation failed in test");
 
         let function_tokens: Vec<&MathToken> =
             tokens.iter().filter(|t| t.token_type == MathTokenType::Function).collect();
@@ -971,8 +973,10 @@ mod tests {
 
     #[test]
     fn test_latex_commands() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        let tokens = tokenizer.tokenize_math("\\frac{x}{y} \\sum_{i=1}^n").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        let tokens = tokenizer
+            .tokenize_math("\\frac{x}{y} \\sum_{i=1}^n")
+            .expect("Operation failed in test");
 
         let latex_tokens: Vec<&MathToken> =
             tokens.iter().filter(|t| t.token_type == MathTokenType::LaTeXCommand).collect();
@@ -984,8 +988,8 @@ mod tests {
 
     #[test]
     fn test_greek_letters() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        let tokens = tokenizer.tokenize_math("α + β = γ").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        let tokens = tokenizer.tokenize_math("α + β = γ").expect("Operation failed in test");
 
         let greek_tokens: Vec<&MathToken> =
             tokens.iter().filter(|t| t.token_type == MathTokenType::GreekLetter).collect();
@@ -998,8 +1002,8 @@ mod tests {
 
     #[test]
     fn test_operators_and_symbols() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        let tokens = tokenizer.tokenize_math("x ∈ ℝ, x ≥ 0").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        let tokens = tokenizer.tokenize_math("x ∈ ℝ, x ≥ 0").expect("Operation failed in test");
 
         let symbol_tokens: Vec<&MathToken> = tokens
             .iter()
@@ -1016,9 +1020,9 @@ mod tests {
 
     #[test]
     fn test_tokenizer_interface() {
-        let tokenizer = MathTokenizer::new().unwrap();
+        let tokenizer = MathTokenizer::new().expect("Construction failed");
 
-        let encoded = tokenizer.encode("x^2 + y^2 = r^2").unwrap();
+        let encoded = tokenizer.encode("x^2 + y^2 = r^2").expect("Encoding failed");
         assert!(!encoded.input_ids.is_empty());
         // Test that we can get tokens back from IDs
         let tokens: Vec<String> = encoded
@@ -1035,8 +1039,10 @@ mod tests {
 
     #[test]
     fn test_math_analysis() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        let tokens = tokenizer.tokenize_math("sin(x) + cos(y) = 1").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        let tokens = tokenizer
+            .tokenize_math("sin(x) + cos(y) = 1")
+            .expect("Operation failed in test");
         let analysis = tokenizer.analyze_math(&tokens);
 
         assert!(analysis.total_tokens > 0);
@@ -1052,8 +1058,8 @@ mod tests {
         config.custom_functions.insert("myFunc".to_string());
         config.preserve_whitespace = true;
 
-        let mut tokenizer = MathTokenizer::with_config(config).unwrap();
-        let tokens = tokenizer.tokenize_math("myFunc (x)").unwrap();
+        let mut tokenizer = MathTokenizer::with_config(config).expect("Operation failed in test");
+        let tokens = tokenizer.tokenize_math("myFunc (x)").expect("Operation failed in test");
 
         // Should have function, whitespace, delimiter, variable, delimiter
         assert_eq!(tokens.len(), 5);
@@ -1063,8 +1069,9 @@ mod tests {
 
     #[test]
     fn test_scientific_notation() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        let tokens = tokenizer.tokenize_math("6.022e23 1.602E-19").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        let tokens =
+            tokenizer.tokenize_math("6.022e23 1.602E-19").expect("Operation failed in test");
 
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].text, "6.022e23");
@@ -1075,14 +1082,16 @@ mod tests {
 
     #[test]
     fn test_complexity_analysis() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
 
         // Simple expression
-        let simple_tokens = tokenizer.tokenize_math("x + 1").unwrap();
+        let simple_tokens = tokenizer.tokenize_math("x + 1").expect("Operation failed in test");
         let simple_analysis = tokenizer.analyze_math(&simple_tokens);
 
         // Complex expression
-        let complex_tokens = tokenizer.tokenize_math("∫₀^∞ e^(-x²) dx = √π/2").unwrap();
+        let complex_tokens = tokenizer
+            .tokenize_math("∫₀^∞ e^(-x²) dx = √π/2")
+            .expect("Operation failed in test");
         let complex_analysis = tokenizer.analyze_math(&complex_tokens);
 
         assert!(complex_analysis.complexity_score() > simple_analysis.complexity_score());
@@ -1090,8 +1099,8 @@ mod tests {
 
     #[test]
     fn test_vocab_stats() {
-        let mut tokenizer = MathTokenizer::new().unwrap();
-        tokenizer.tokenize_math("sin(x) + cos(y)").unwrap();
+        let mut tokenizer = MathTokenizer::new().expect("Construction failed");
+        tokenizer.tokenize_math("sin(x) + cos(y)").expect("Operation failed in test");
 
         let stats = tokenizer.vocab_stats();
         assert!(stats.contains_key("total_tokens"));

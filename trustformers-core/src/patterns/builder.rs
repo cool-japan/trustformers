@@ -691,7 +691,7 @@ mod tests {
         builder.data_mut().value = 42;
         builder.data_mut().enabled = true;
 
-        let obj = builder.complete().build().unwrap();
+        let obj = builder.complete().build().expect("operation failed in test");
         assert_eq!(obj.name, "test");
         assert_eq!(obj.value, 42);
         assert!(obj.enabled);
@@ -748,8 +748,8 @@ mod tests {
             retries: 3,
         };
 
-        let json = config.to_json().unwrap();
-        let deserialized = TestConfig::from_json(&json).unwrap();
+        let json = config.to_json().expect("operation failed in test");
+        let deserialized = TestConfig::from_json(&json).expect("operation failed in test");
 
         assert_eq!(config.timeout, deserialized.timeout);
         assert_eq!(config.retries, deserialized.retries);
@@ -783,7 +783,7 @@ mod tests {
             .temperature(0.7)
             .top_p(0.9)
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(config.name, "test-model");
         assert_eq!(config.model_type, "gpt");
@@ -823,7 +823,7 @@ mod tests {
             .weight_decay(0.001)
             .gradient_clipping(0.5)
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(config.learning_rate, 1e-3);
         assert_eq!(config.epochs, 5);
@@ -834,7 +834,7 @@ mod tests {
 
     #[test]
     fn test_training_config_builder_defaults() {
-        let config = TrainingConfigBuilder::new().build().unwrap();
+        let config = TrainingConfigBuilder::new().build().expect("operation failed in test");
 
         assert_eq!(config.learning_rate, 1e-4);
         assert_eq!(config.epochs, 10);

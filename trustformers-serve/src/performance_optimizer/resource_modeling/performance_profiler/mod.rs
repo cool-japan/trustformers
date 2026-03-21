@@ -19,7 +19,8 @@ pub mod profilingsessionstate_traits;
 pub mod queuedepthoptimizer_traits;
 pub mod storagedeviceanalyzer_traits;
 pub mod types;
+pub mod types_profilers;
 
-// Re-export all types
+// Re-export all types (types_profilers is re-exported via types.rs)
 pub use functions::*;
 pub use types::*;

@@ -49,8 +49,10 @@ pub mod trainingscheduler_traits;
 pub mod trendanalysisalgorithm_traits;
 pub mod trenddirection_traits;
 pub mod types;
+pub mod types_engine;
 pub mod versioncontrol_traits;
 
 // Re-export only types module which is actually used
+// types_engine is re-exported via types.rs
 pub use functions::*;
 pub use types::*;

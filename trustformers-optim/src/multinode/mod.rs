@@ -571,16 +571,20 @@ mod tests {
     fn test_gradient_sync_buffer() {
         let mut buffer = GradientSyncBuffer::new();
 
-        let grad1 = Tensor::ones(&[2, 2]).unwrap();
-        let grad2 = Tensor::ones(&[2, 2]).unwrap();
+        let grad1 = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
+        let grad2 = Tensor::ones(&[2, 2]).expect("Failed to create tensor");
 
-        buffer.add_gradient("param1".to_string(), grad1).unwrap();
-        buffer.add_gradient("param1".to_string(), grad2).unwrap();
+        buffer
+            .add_gradient("param1".to_string(), grad1)
+            .expect("Operation failed in test");
+        buffer
+            .add_gradient("param1".to_string(), grad2)
+            .expect("Operation failed in test");
 
         assert_eq!(buffer.accumulation_steps, 2);
         assert_eq!(buffer.gradients.len(), 1);
 
-        buffer.average_gradients().unwrap();
+        buffer.average_gradients().expect("Operation failed in test");
         // After averaging, each element should be 1.0 (2.0 / 2)
 
         buffer.clear();

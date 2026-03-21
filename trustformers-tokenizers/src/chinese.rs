@@ -611,7 +611,7 @@ mod tests {
         let vocab = create_test_vocab();
         let tokenizer = ChineseTokenizer::new(config, vocab);
 
-        let result = tokenizer.encode("中国人民").unwrap();
+        let result = tokenizer.encode("中国人民").expect("Encoding failed");
         assert!(!result.input_ids.is_empty());
         assert_eq!(result.input_ids.len(), result.attention_mask.len());
     }
@@ -623,7 +623,7 @@ mod tests {
         let tokenizer = ChineseTokenizer::new(config, vocab);
 
         let token_ids = vec![5, 6, 7]; // "中", "国", "人"
-        let decoded = tokenizer.decode(&token_ids).unwrap();
+        let decoded = tokenizer.decode(&token_ids).expect("Decoding failed");
         assert_eq!(decoded, "中国人");
     }
 
@@ -633,11 +633,11 @@ mod tests {
         let vocab = create_test_vocab();
         let tokenizer = ChineseTokenizer::new(config, vocab);
 
-        let result = tokenizer.encode_pair("中国", "人民").unwrap();
+        let result = tokenizer.encode_pair("中国", "人民").expect("Operation failed in test");
         assert!(!result.input_ids.is_empty());
         assert!(result.token_type_ids.is_some());
 
-        let token_type_ids = result.token_type_ids.unwrap();
+        let token_type_ids = result.token_type_ids.expect("Operation failed in test");
         assert!(token_type_ids.contains(&0)); // First sequence
         assert!(token_type_ids.contains(&1)); // Second sequence
     }

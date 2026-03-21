@@ -671,36 +671,36 @@ impl Tensor {
                     // Already contiguous
                     Ok(self.clone())
                 } else {
-                    // Make contiguous by creating owned copy
-                    Ok(Tensor::F32(a.to_owned()))
+                    // Make contiguous by forcing standard (C-contiguous) layout
+                    Ok(Tensor::F32(a.as_standard_layout().to_owned()))
                 }
             },
             Tensor::F64(a) => {
                 if a.is_standard_layout() {
                     Ok(self.clone())
                 } else {
-                    Ok(Tensor::F64(a.to_owned()))
+                    Ok(Tensor::F64(a.as_standard_layout().to_owned()))
                 }
             },
             Tensor::I64(a) => {
                 if a.is_standard_layout() {
                     Ok(self.clone())
                 } else {
-                    Ok(Tensor::I64(a.to_owned()))
+                    Ok(Tensor::I64(a.as_standard_layout().to_owned()))
                 }
             },
             Tensor::C32(a) => {
                 if a.is_standard_layout() {
                     Ok(self.clone())
                 } else {
-                    Ok(Tensor::C32(a.to_owned()))
+                    Ok(Tensor::C32(a.as_standard_layout().to_owned()))
                 }
             },
             Tensor::C64(a) => {
                 if a.is_standard_layout() {
                     Ok(self.clone())
                 } else {
-                    Ok(Tensor::C64(a.to_owned()))
+                    Ok(Tensor::C64(a.as_standard_layout().to_owned()))
                 }
             },
             _ => {

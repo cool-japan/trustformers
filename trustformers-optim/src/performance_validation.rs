@@ -1674,17 +1674,17 @@ mod tests {
             Duration::from_millis(13),
         ];
 
-        let metrics = analyzer.analyze(&step_times, 0.95).unwrap();
+        let metrics = analyzer.analyze(&step_times, 0.95).expect("Operation failed in test");
         assert!(metrics.mean > Duration::from_millis(9));
         assert!(metrics.mean < Duration::from_millis(14));
     }
 
     #[test]
     fn test_test_data_creation() {
-        let parameters = create_test_parameters(vec![10, 20]).unwrap();
+        let parameters = create_test_parameters(vec![10, 20]).expect("Operation failed in test");
         assert_eq!(parameters.len(), 2);
 
-        let gradients = create_benchmark_gradients(&[10, 20], 5).unwrap();
+        let gradients = create_benchmark_gradients(&[10, 20], 5).expect("Operation failed in test");
         assert_eq!(gradients.len(), 2);
     }
 
@@ -1708,10 +1708,12 @@ mod tests {
             statistical_metrics: None,
         };
 
-        let regression = detector.detect_regression(&baseline, &current, 5.0).unwrap();
+        let regression = detector
+            .detect_regression(&baseline, &current, 5.0)
+            .expect("Operation failed in test");
         assert!(regression.is_some());
 
-        let regression_info = regression.unwrap();
+        let regression_info = regression.expect("Operation failed in test");
         assert!(regression_info.regression_percentage > 5.0);
     }
 }

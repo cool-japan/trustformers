@@ -1210,10 +1210,10 @@ mod tests {
         let manager = GradientRecoveryManager::new(config);
 
         let mut gradients = HashMap::new();
-        let tensor = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3]).unwrap();
+        let tensor = Tensor::from_data(vec![1.0, 2.0, 3.0], &[3]).expect("tensor operation failed");
         gradients.insert("layer1".to_string(), tensor);
 
-        let norm = manager.compute_gradient_norm(&gradients).unwrap();
+        let norm = manager.compute_gradient_norm(&gradients).expect("operation failed in test");
         assert!(norm > 0.0);
     }
 
@@ -1222,8 +1222,9 @@ mod tests {
         let config = GradientRecoveryConfig::default();
         let manager = GradientRecoveryManager::new(config);
 
-        let tensor = Tensor::from_data(vec![1.0, -2.0, 0.0, 3.5], &[4]).unwrap();
-        let stats = manager.compute_layer_stats(&tensor).unwrap();
+        let tensor =
+            Tensor::from_data(vec![1.0, -2.0, 0.0, 3.5], &[4]).expect("tensor operation failed");
+        let stats = manager.compute_layer_stats(&tensor).expect("tensor operation failed");
 
         assert!(stats.norm > 0.0);
         assert!(!stats.has_nan);

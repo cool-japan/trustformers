@@ -531,7 +531,7 @@ mod tests {
 
         visualizer.mark_input("input");
 
-        visualizer.export_to_dot(&output_path).unwrap();
+        visualizer.export_to_dot(&output_path).expect("operation failed in test");
         assert!(output_path.exists());
 
         // Clean up
@@ -546,7 +546,7 @@ mod tests {
         let mut visualizer = GraphVisualizer::new("test");
         visualizer.add_node("node1", "N1", "Linear", None, None, HashMap::new());
 
-        visualizer.export_to_json(&output_path).unwrap();
+        visualizer.export_to_json(&output_path).expect("operation failed in test");
         assert!(output_path.exists());
 
         // Clean up

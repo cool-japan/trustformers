@@ -693,13 +693,13 @@ mod tests {
         gradients.insert("weight".to_string(), Tensor::ones(&[2, 2])? * 0.1);
 
         // Store original value
-        let original_value = parameters.get("weight").unwrap().mean()?.to_scalar::<f32>()?;
+        let original_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
 
         // Perform optimization step
         optimizer.step(&mut parameters, &gradients)?;
 
         // Check that parameter was updated
-        let updated_value = parameters.get("weight").unwrap().mean()?.to_scalar::<f32>()?;
+        let updated_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
         assert_ne!(updated_value, original_value);
 
         Ok(())
@@ -854,11 +854,11 @@ mod tests {
         let mut gradients = HashMap::new();
         gradients.insert("weight".to_string(), Tensor::zeros(&[2, 2])?);
 
-        let initial_param_value = parameters.get("weight").unwrap().mean()?.to_scalar::<f32>()?;
+        let initial_param_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
 
         optimizer.step(&mut parameters, &gradients)?;
 
-        let final_param_value = parameters.get("weight").unwrap().mean()?.to_scalar::<f32>()?;
+        let final_param_value = parameters.get("weight").expect("Key not found").mean()?.to_scalar::<f32>()?;
 
         // With weight decay, parameter should decrease even with zero gradient
         assert!(final_param_value < initial_param_value);

@@ -413,7 +413,7 @@ mod tests {
         let tokenizer = SimdTokenizer::new();
         let text = "Hello, World! How are you?";
 
-        let tokens = tokenizer.preprocess_text(text).unwrap();
+        let tokens = tokenizer.preprocess_text(text).expect("Operation failed in test");
 
         assert!(tokens.len() > 0);
         assert!(tokens.contains(&"Hello,".to_string()));

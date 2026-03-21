@@ -1120,7 +1120,7 @@ mod tests {
         let device_info = MobileDeviceDetector::detect();
         assert!(device_info.is_ok());
 
-        let info = device_info.unwrap();
+        let info = device_info.expect("operation failed in test");
         assert!(info.cpu_info.total_cores > 0);
         assert!(info.memory_info.total_mb > 0);
         assert!(!info.available_backends.is_empty());
@@ -1128,7 +1128,7 @@ mod tests {
 
     #[test]
     fn test_config_generation() {
-        let device_info = MobileDeviceDetector::detect().unwrap();
+        let device_info = MobileDeviceDetector::detect().expect("operation failed in test");
         let config = MobileDeviceDetector::generate_optimized_config(&device_info);
 
         assert!(config.validate().is_ok());
@@ -1159,7 +1159,7 @@ mod tests {
 
     #[test]
     fn test_feature_support() {
-        let device_info = MobileDeviceDetector::detect().unwrap();
+        let device_info = MobileDeviceDetector::detect().expect("operation failed in test");
 
         // Test basic feature support
         let _simd_support = device_info.supports_feature("simd");
@@ -1168,7 +1168,7 @@ mod tests {
 
     #[test]
     fn test_memory_allocation() {
-        let device_info = MobileDeviceDetector::detect().unwrap();
+        let device_info = MobileDeviceDetector::detect().expect("operation failed in test");
         let allocation = device_info.get_recommended_memory_allocation();
 
         assert!(allocation >= 128);

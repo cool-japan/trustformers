@@ -955,7 +955,7 @@ mod tests {
             ..Default::default()
         };
 
-        let mirror = HubMirror::new(config).unwrap();
+        let mirror = HubMirror::new(config).expect("operation failed in test");
         assert_eq!(
             mirror.cache.read().expect("lock should not be poisoned").len(),
             0
@@ -970,11 +970,11 @@ mod tests {
             ..Default::default()
         };
 
-        let mirror = HubMirror::new(config).unwrap();
+        let mirror = HubMirror::new(config).expect("operation failed in test");
 
         // Test cache save/load
-        mirror.save_cache().await.unwrap();
-        mirror.load_cache().await.unwrap();
+        mirror.save_cache().await.expect("async operation failed");
+        mirror.load_cache().await.expect("async operation failed");
     }
 
     #[test]

@@ -807,7 +807,7 @@ mod tests {
             .await;
 
         let active_tasks = tracker.active_tasks.read().await;
-        let task = active_tasks.get(&task_id).unwrap();
+        let task = active_tasks.get(&task_id).expect("key should exist in test data");
         assert_eq!(task.contention_events.len(), 1);
     }
 }

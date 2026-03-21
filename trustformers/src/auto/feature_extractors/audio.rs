@@ -813,7 +813,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         let expected_frames = 16000 / 160; // input_length / hop_length
         assert_eq!(output.shape, vec![expected_frames, 80]);
         assert_eq!(output.features.len(), expected_frames * 80);
@@ -834,7 +834,8 @@ mod tests {
 
         // Test resampling from 8kHz to 16kHz
         let samples_8k: Vec<f32> = (0..8000).map(|i| (i as f32 * 0.001).sin()).collect();
-        let resampled = extractor.resample(&samples_8k, 8000, 16000).unwrap();
+        let resampled =
+            extractor.resample(&samples_8k, 8000, 16000).expect("operation failed in test");
 
         // Should double the length
         assert_eq!(resampled.len(), 16000);
@@ -850,7 +851,8 @@ mod tests {
             "normalize": false
         });
 
-        let config = AudioFeatureConfig::from_config(&config_json).unwrap();
+        let config =
+            AudioFeatureConfig::from_config(&config_json).expect("operation failed in test");
 
         assert_eq!(config.sampling_rate, 22050);
         assert_eq!(config.feature_size, 128);

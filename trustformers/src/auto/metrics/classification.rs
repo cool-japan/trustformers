@@ -394,9 +394,9 @@ mod tests {
         let predictions = MetricInput::Classifications(vec![0, 1, 0, 1]);
         let references = MetricInput::Classifications(vec![0, 0, 1, 1]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "classification");
         assert_eq!(result.value, 0.5); // 50% accuracy
         assert!(result.details.contains_key("macro_f1"));
@@ -409,9 +409,9 @@ mod tests {
         let predictions = MetricInput::Classifications(vec![0, 1, 2, 0, 1, 2]);
         let references = MetricInput::Classifications(vec![0, 1, 2, 0, 1, 2]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, 1.0); // 100% accuracy
         assert_eq!(result.details.get("accuracy"), Some(&1.0));
         assert_eq!(result.details.get("macro_f1"), Some(&1.0));
@@ -428,9 +428,9 @@ mod tests {
         ]);
         let references = MetricInput::Classifications(vec![0, 1]);
 
-        metric.add_batch(&probabilities, &references).unwrap();
+        metric.add_batch(&probabilities, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, 1.0); // Should be 100% accurate
     }
 
@@ -440,7 +440,7 @@ mod tests {
 
         let predictions = MetricInput::Classifications(vec![0, 1]);
         let references = MetricInput::Classifications(vec![0, 1]);
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
         metric.reset();
 
@@ -466,7 +466,7 @@ mod tests {
         let predictions = MetricInput::Classifications(vec![0, 1]);
         let references = MetricInput::Classifications(vec![0]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
         let result = metric.compute();
         assert!(result.is_err());

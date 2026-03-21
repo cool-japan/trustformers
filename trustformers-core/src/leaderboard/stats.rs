@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn test_leaderboard_stats() {
         let entries = create_test_entries();
-        let stats = LeaderboardStats::from_entries(&entries).unwrap();
+        let stats = LeaderboardStats::from_entries(&entries).expect("operation failed in test");
 
         assert_eq!(stats.total_entries, 2);
         assert_eq!(stats.unique_models, 1);
@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn test_trend_analysis() {
         let entries = create_test_entries();
-        let trend = TrendAnalysis::analyze(&entries, "latency").unwrap();
+        let trend = TrendAnalysis::analyze(&entries, "latency").expect("operation failed in test");
 
         assert_eq!(trend.model_name, "model1");
         assert_eq!(trend.metric_name, "latency");

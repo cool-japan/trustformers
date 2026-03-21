@@ -745,7 +745,10 @@ mod tests {
         let config = MemoryPressureConfig::default();
         let monitor = MemoryMonitor::new(config);
 
-        let prediction = monitor.update_memory_patterns(0.5).await.unwrap();
+        let prediction = monitor
+            .update_memory_patterns(0.5)
+            .await
+            .expect("async operation should succeed in test");
         assert!((0.0..=1.0).contains(&prediction));
     }
 
@@ -764,11 +767,23 @@ mod tests {
         let monitor = MemoryMonitor::new(config);
 
         // Add some pattern data first
-        monitor.update_memory_patterns(0.5).await.unwrap();
-        monitor.update_memory_patterns(0.6).await.unwrap();
-        monitor.update_memory_patterns(0.7).await.unwrap();
+        monitor
+            .update_memory_patterns(0.5)
+            .await
+            .expect("async operation should succeed in test");
+        monitor
+            .update_memory_patterns(0.6)
+            .await
+            .expect("async operation should succeed in test");
+        monitor
+            .update_memory_patterns(0.7)
+            .await
+            .expect("async operation should succeed in test");
 
-        let forecast = monitor.get_memory_forecast(30).await.unwrap();
+        let forecast = monitor
+            .get_memory_forecast(30)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(forecast.window_seconds, 30 * 60);
         assert!(forecast.predicted_utilization >= 0.0 && forecast.predicted_utilization <= 1.0);
         assert!(forecast.confidence >= 0.0 && forecast.confidence <= 1.0);

@@ -152,11 +152,13 @@ fn test_image_to_text_pipeline_e2e() {
     use trustformers::{AutoModel, AutoTokenizer};
 
     // Test pipeline creation with builder pattern
-    let model = AutoModel::from_pretrained("nlpconnect/vit-gpt2-image-captioning").unwrap();
-    let tokenizer = AutoTokenizer::from_pretrained("nlpconnect/vit-gpt2-image-captioning").unwrap();
+    let model = AutoModel::from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+        .expect("operation failed in test");
+    let tokenizer = AutoTokenizer::from_pretrained("nlpconnect/vit-gpt2-image-captioning")
+        .expect("operation failed in test");
 
     let _pipeline = ImageToTextPipeline::new(model, tokenizer)
-        .unwrap()
+        .expect("operation failed in test")
         .with_max_new_tokens(50)
         .with_temperature(1.0)
         .with_sampling(false);
@@ -189,9 +191,12 @@ fn test_speech_to_text_pipeline_e2e() {
     };
 
     // Validate speech-to-text configuration
-    assert!(config.chunk_length_s.unwrap() > config.stride_length_s.unwrap());
-    assert!(config.chunk_length_s.unwrap() > 0.0);
-    assert!(config.stride_length_s.unwrap() >= 0.0);
+    assert!(
+        config.chunk_length_s.expect("operation failed in test")
+            > config.stride_length_s.expect("operation failed in test")
+    );
+    assert!(config.chunk_length_s.expect("operation failed in test") > 0.0);
+    assert!(config.stride_length_s.expect("operation failed in test") >= 0.0);
 }
 
 #[rstest]

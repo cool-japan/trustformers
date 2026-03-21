@@ -468,7 +468,7 @@ mod tests {
         optimizer.variance.insert("param_0".to_string(), vec![0.01, 0.04, 0.09]);
 
         // Save state
-        let state_dict = optimizer.state_dict().unwrap();
+        let state_dict = optimizer.state_dict().expect("Failed to get state dict");
         assert!(state_dict.contains_key("step"));
         assert!(state_dict.contains_key("short_momentum_param_0"));
         assert!(state_dict.contains_key("long_momentum_param_0"));
@@ -476,7 +476,7 @@ mod tests {
 
         // Create new optimizer and load state
         let mut new_optimizer = AdEMAMix::new();
-        new_optimizer.load_state_dict(state_dict).unwrap();
+        new_optimizer.load_state_dict(state_dict).expect("Failed to load state dict");
         assert_eq!(new_optimizer.state.step, 10);
         assert_eq!(new_optimizer.short_momentum["param_0"], vec![0.1, 0.2, 0.3]);
         assert_eq!(
@@ -541,8 +541,9 @@ mod tests {
             bias_correction: true,
         };
 
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: AdEMAMixConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("Serialization failed");
+        let deserialized: AdEMAMixConfig =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
 
         assert_relative_eq!(deserialized.learning_rate, config.learning_rate);
         assert_relative_eq!(deserialized.alpha, config.alpha);

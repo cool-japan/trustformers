@@ -152,7 +152,7 @@ fn main() -> anyhow::Result<()> {
 
     match matches.subcommand() {
         Some(("list", sub_matches)) => {
-            let list_type = sub_matches.get_one::<String>("type").unwrap();
+            let list_type = sub_matches.get_one::<String>("type").expect("'type' argument is required by clap");
             match list_type.as_str() {
                 "languages" => list_languages(),
                 "templates" => list_templates(),
@@ -162,17 +162,17 @@ fn main() -> anyhow::Result<()> {
             return Ok(());
         },
         Some(("validate", sub_matches)) => {
-            let source_dir = PathBuf::from(sub_matches.get_one::<String>("source").unwrap());
+            let source_dir = PathBuf::from(sub_matches.get_one::<String>("source").expect("'source' argument is required by clap"));
             return validate_interface(&source_dir);
         },
         _ => {},
     }
 
     // Main generation logic
-    let source_dir = PathBuf::from(matches.get_one::<String>("source").unwrap());
-    let output_dir = PathBuf::from(matches.get_one::<String>("output").unwrap());
-    let package_name = matches.get_one::<String>("package-name").unwrap().clone();
-    let package_version = matches.get_one::<String>("package-version").unwrap().clone();
+    let source_dir = PathBuf::from(matches.get_one::<String>("source").expect("'source' argument is required by clap"));
+    let output_dir = PathBuf::from(matches.get_one::<String>("output").expect("'output' argument is required by clap"));
+    let package_name = matches.get_one::<String>("package-name").expect("'package-name' argument is required by clap").clone();
+    let package_version = matches.get_one::<String>("package-version").expect("'package-version' argument is required by clap").clone();
     let generate_docs = matches.get_flag("docs");
     let validate = matches.get_flag("validate");
     let incremental = matches.get_flag("incremental");

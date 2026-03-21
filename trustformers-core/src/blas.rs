@@ -679,7 +679,7 @@ mod tests {
         let b =
             Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Tensor from_vec failed");
 
-        let result = optimizer.gemm(&a, &b, 1.0, 0.0, None).unwrap();
+        let result = optimizer.gemm(&a, &b, 1.0, 0.0, None).expect("operation failed in test");
         let expected_data = [19.0, 22.0, 43.0, 50.0]; // Expected matrix multiplication result
 
         let result_data = result.to_vec_f32()?;
@@ -703,7 +703,7 @@ mod tests {
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[2, 2]).expect("Tensor from_vec failed");
         let x = Tensor::from_vec(vec![5.0, 6.0], &[2]).expect("Tensor from_vec failed");
 
-        let result = optimizer.gemv(&a, &x, 1.0, 0.0, None).unwrap();
+        let result = optimizer.gemv(&a, &x, 1.0, 0.0, None).expect("operation failed in test");
         let expected_data = [17.0, 39.0]; // [1*5+2*6, 3*5+4*6]
 
         let result_data = result.to_vec_f32()?;
@@ -726,7 +726,7 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Tensor from_vec failed");
         let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], &[3]).expect("Tensor from_vec failed");
 
-        let result = optimizer.dot(&x, &y).unwrap();
+        let result = optimizer.dot(&x, &y).expect("operation failed in test");
         let expected = 32.0; // 1*4 + 2*5 + 3*6
 
         assert!(
@@ -742,7 +742,7 @@ mod tests {
         let optimizer = BlasOptimizer::default();
 
         let x = Tensor::from_vec(vec![3.0, 4.0], &[2]).expect("Tensor from_vec failed");
-        let result = optimizer.nrm2(&x).unwrap();
+        let result = optimizer.nrm2(&x).expect("operation failed in test");
         let expected = 5.0; // sqrt(3^2 + 4^2)
 
         assert!(
@@ -758,7 +758,7 @@ mod tests {
         let optimizer = BlasOptimizer::default();
 
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Tensor from_vec failed");
-        let result = optimizer.scal(2.0, &x).unwrap();
+        let result = optimizer.scal(2.0, &x).expect("operation failed in test");
         let expected_data = [2.0, 4.0, 6.0];
 
         let result_data = result.to_vec_f32()?;
@@ -781,7 +781,7 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0, 2.0, 3.0], &[3]).expect("Tensor from_vec failed");
         let y = Tensor::from_vec(vec![4.0, 5.0, 6.0], &[3]).expect("Tensor from_vec failed");
 
-        let result = optimizer.axpy(2.0, &x, &y).unwrap();
+        let result = optimizer.axpy(2.0, &x, &y).expect("operation failed in test");
         let expected_data = [6.0, 9.0, 12.0]; // 2*[1,2,3] + [4,5,6]
 
         let result_data = result.to_vec_f32()?;
@@ -802,7 +802,7 @@ mod tests {
         let mut optimizer = BlasOptimizer::default();
 
         let workload_sizes = vec![(100, 100, 100), (500, 500, 500), (1000, 1000, 1000)];
-        optimizer.auto_tune(&workload_sizes).unwrap();
+        optimizer.auto_tune(&workload_sizes).expect("operation failed in test");
 
         assert_eq!(optimizer.kernel_cache.len(), 3);
     }
@@ -814,7 +814,7 @@ mod tests {
         let b =
             Tensor::from_vec(vec![5.0, 6.0, 7.0, 8.0], &[2, 2]).expect("Tensor from_vec failed");
 
-        let result = optimized_gemm(&a, &b).unwrap();
+        let result = optimized_gemm(&a, &b).expect("operation failed in test");
         assert_eq!(result.shape(), vec![2, 2]);
     }
 

@@ -870,7 +870,10 @@ mod tests {
         let pipeline = create_speculative_decoding_pipeline(config);
         let input_tokens = vec![1, 2, 3, 4, 5];
 
-        let selected_model = pipeline.select_draft_model(&input_tokens).await.unwrap();
+        let selected_model = pipeline
+            .select_draft_model(&input_tokens)
+            .await
+            .expect("async operation failed");
         assert_eq!(selected_model.get_model_profile().model_id, "fast_draft");
     }
 
@@ -885,7 +888,10 @@ mod tests {
         let pipeline = create_speculative_decoding_pipeline(config);
 
         // Test with high acceptance rate
-        let depth = pipeline.determine_speculation_depth("test_model").await.unwrap();
+        let depth = pipeline
+            .determine_speculation_depth("test_model")
+            .await
+            .expect("async operation failed");
         assert!(depth > 0);
     }
 
@@ -906,10 +912,16 @@ mod tests {
     async fn test_mock_draft_model() {
         let draft_model = MockDraftModel::new("test".to_string(), 50.0, 0.8);
 
-        let draft_tokens = draft_model.generate_draft(&[1, 2, 3], 3, 0.8).await.unwrap();
+        let draft_tokens = draft_model
+            .generate_draft(&[1, 2, 3], 3, 0.8)
+            .await
+            .expect("async operation failed");
         assert_eq!(draft_tokens.len(), 3);
 
-        let tree = draft_model.generate_tree_draft(&[1, 2, 3], 2, 3, 0.8).await.unwrap();
+        let tree = draft_model
+            .generate_tree_draft(&[1, 2, 3], 2, 3, 0.8)
+            .await
+            .expect("async operation failed");
         assert_eq!(tree.max_depth, 2);
         assert!(!tree.nodes.is_empty());
     }
@@ -919,7 +931,10 @@ mod tests {
         let target_model = MockTargetModel;
 
         let draft_tokens = vec![1000, 1001, 1002];
-        let result = target_model.verify_tokens(&[1, 2, 3], &draft_tokens, 0.8).await.unwrap();
+        let result = target_model
+            .verify_tokens(&[1, 2, 3], &draft_tokens, 0.8)
+            .await
+            .expect("async operation failed");
 
         assert!(!result.accepted_tokens.is_empty());
         assert!(result.acceptance_rate > 0.0);

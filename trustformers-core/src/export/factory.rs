@@ -846,7 +846,7 @@ mod tests {
         let requirements = factory.get_requirements(ExportFormat::ONNX);
 
         assert!(requirements.is_ok());
-        let req = requirements.unwrap();
+        let req = requirements.expect("operation failed in test");
         assert!(!req.supported_precisions.is_empty());
     }
 

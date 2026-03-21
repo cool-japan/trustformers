@@ -33,10 +33,12 @@ pub mod resource_modeling;
 pub mod system_models;
 pub mod test_characterization;
 pub mod types;
+pub mod types_ml;
 
 // Re-export main types for backward compatibility
 pub use manager::PerformanceOptimizer;
 pub use types::*;
+// types_ml is re-exported via types.rs
 
 // Re-export component types for easy access
 pub use adaptive_parallelism::PerformanceSnapshot;

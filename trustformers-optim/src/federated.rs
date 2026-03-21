@@ -637,17 +637,21 @@ mod tests {
         let mut fedavg = FedAvg::new(FedAvgConfig::default());
 
         // Test random selection
-        let selected = fedavg.select_clients(&clients, ClientSelectionStrategy::Random).unwrap();
+        let selected = fedavg
+            .select_clients(&clients, ClientSelectionStrategy::Random)
+            .expect("Operation failed in test");
         assert!(!selected.is_empty());
 
         // Test data size selection
-        let selected = fedavg.select_clients(&clients, ClientSelectionStrategy::DataSize).unwrap();
+        let selected = fedavg
+            .select_clients(&clients, ClientSelectionStrategy::DataSize)
+            .expect("Operation failed in test");
         assert!(!selected.is_empty());
     }
 
     #[test]
     fn test_secure_aggregation_creation() {
-        let secure_agg = SecureAggregation::new(3, 5).unwrap();
+        let secure_agg = SecureAggregation::new(3, 5).expect("Construction failed");
         assert_eq!(secure_agg.threshold, 3);
         assert_eq!(secure_agg.total_clients, 5);
 

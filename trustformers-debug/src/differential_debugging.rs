@@ -852,15 +852,35 @@ impl DifferentialDebugger {
         higher_is_better: bool,
     ) -> Result<MetricComparison> {
         let best_model = if higher_is_better {
-            values.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0.clone()
+            values
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .ok_or_else(|| anyhow::anyhow!("No values to compare"))?
+                .0
+                .clone()
         } else {
-            values.iter().min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0.clone()
+            values
+                .iter()
+                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .ok_or_else(|| anyhow::anyhow!("No values to compare"))?
+                .0
+                .clone()
         };
 
         let worst_model = if higher_is_better {
-            values.iter().min_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0.clone()
+            values
+                .iter()
+                .min_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .ok_or_else(|| anyhow::anyhow!("No values to compare"))?
+                .0
+                .clone()
         } else {
-            values.iter().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0.clone()
+            values
+                .iter()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+                .ok_or_else(|| anyhow::anyhow!("No values to compare"))?
+                .0
+                .clone()
         };
 
         let best_value = values[&best_model];
@@ -1037,7 +1057,7 @@ impl DifferentialDebugger {
         let std_dev = variance.sqrt();
 
         let mut sorted_data = data.to_vec();
-        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let min = sorted_data[0];
         let max = sorted_data[sorted_data.len() - 1];
@@ -1129,7 +1149,12 @@ impl DifferentialDebugger {
         };
 
         let recommendation = if practical_significance && confidence > 0.9 {
-            format!("Recommend deploying {}", winner.as_ref().unwrap())
+            format!(
+                "Recommend deploying {}",
+                winner.as_ref().expect(
+                    "winner should be Some when practical_significance and confidence > 0.9"
+                )
+            )
         } else {
             "Insufficient evidence for a clear recommendation".to_string()
         };
@@ -1277,11 +1302,12 @@ impl DifferentialDebugger {
     fn generate_model_summary(&self) -> HashMap<String, String> {
         let mut summary = HashMap::new();
 
-        if let Some((best_name, best_model)) = self
-            .model_snapshots
-            .iter()
-            .max_by(|a, b| a.1.metrics.val_accuracy.partial_cmp(&b.1.metrics.val_accuracy).unwrap())
-        {
+        if let Some((best_name, best_model)) = self.model_snapshots.iter().max_by(|a, b| {
+            a.1.metrics
+                .val_accuracy
+                .partial_cmp(&b.1.metrics.val_accuracy)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             summary.insert("best_accuracy_model".to_string(), best_name.clone());
             summary.insert(
                 "best_accuracy_value".to_string(),
@@ -1293,7 +1319,7 @@ impl DifferentialDebugger {
             a.1.metrics
                 .inference_latency_ms
                 .partial_cmp(&b.1.metrics.inference_latency_ms)
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             summary.insert("fastest_model".to_string(), fastest_name.clone());
             summary.insert(
@@ -1342,7 +1368,7 @@ mod tests {
         let mut debugger = DifferentialDebugger::new(config);
 
         let snapshot = create_test_snapshot("test_model");
-        debugger.add_model_snapshot(snapshot).unwrap();
+        debugger.add_model_snapshot(snapshot).expect("add operation failed");
         assert_eq!(debugger.model_snapshots.len(), 1);
     }
 
@@ -1355,8 +1381,8 @@ mod tests {
         let snapshot1 = create_test_snapshot("model_a");
         let snapshot2 = create_test_snapshot("model_b");
 
-        debugger.add_model_snapshot(snapshot1).unwrap();
-        debugger.add_model_snapshot(snapshot2).unwrap();
+        debugger.add_model_snapshot(snapshot1).expect("add operation failed");
+        debugger.add_model_snapshot(snapshot2).expect("add operation failed");
 
         let result = debugger
             .compare_models(vec!["model_a".to_string(), "model_b".to_string()])

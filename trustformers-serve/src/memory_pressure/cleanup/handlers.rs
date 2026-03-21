@@ -670,7 +670,9 @@ mod tests {
         assert_eq!(handler.get_priority(), 100);
         assert!(handler.estimate_memory_freed() > 0);
 
-        let memory_freed = handler.cleanup(MemoryPressureLevel::High).unwrap();
+        let memory_freed = handler
+            .cleanup(MemoryPressureLevel::High)
+            .expect("test operation should succeed");
         assert!(memory_freed > 0);
     }
 
@@ -682,7 +684,9 @@ mod tests {
         assert_eq!(handler.get_priority(), 150);
         assert!(handler.estimate_memory_freed() > 0);
 
-        let memory_freed = handler.cleanup(MemoryPressureLevel::Medium).unwrap();
+        let memory_freed = handler
+            .cleanup(MemoryPressureLevel::Medium)
+            .expect("test operation should succeed");
         assert!(memory_freed > 0);
     }
 
@@ -698,7 +702,9 @@ mod tests {
         assert!(!handler.should_execute(MemoryPressureLevel::Low));
         assert!(handler.should_execute(MemoryPressureLevel::High));
 
-        let memory_freed = handler.cleanup(MemoryPressureLevel::High).unwrap();
+        let memory_freed = handler
+            .cleanup(MemoryPressureLevel::High)
+            .expect("test operation should succeed");
         assert!(memory_freed > 0);
     }
 
@@ -717,7 +723,9 @@ mod tests {
         assert!(!handler.should_reject_request());
 
         // After cleanup with critical pressure, should activate rejection
-        handler.cleanup(MemoryPressureLevel::Critical).unwrap();
+        handler
+            .cleanup(MemoryPressureLevel::Critical)
+            .expect("test operation should succeed");
         assert!(handler.should_reject_request());
     }
 
@@ -725,8 +733,12 @@ mod tests {
     fn test_pressure_level_scaling() {
         let gc_handler = GarbageCollectionHandler::new();
 
-        let low_pressure_freed = gc_handler.cleanup(MemoryPressureLevel::Low).unwrap();
-        let high_pressure_freed = gc_handler.cleanup(MemoryPressureLevel::Critical).unwrap();
+        let low_pressure_freed = gc_handler
+            .cleanup(MemoryPressureLevel::Low)
+            .expect("test operation should succeed");
+        let high_pressure_freed = gc_handler
+            .cleanup(MemoryPressureLevel::Critical)
+            .expect("test operation should succeed");
 
         // Higher pressure should free more memory
         assert!(high_pressure_freed > low_pressure_freed);

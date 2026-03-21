@@ -287,7 +287,7 @@ mod tests {
             ..Default::default()
         };
 
-        let pool = ThreadPool::new(config).unwrap();
+        let pool = ThreadPool::new(config).expect("test operation should succeed");
         assert_eq!(pool.thread_count(), 2);
         assert!(!pool.is_shutdown());
     }
@@ -299,7 +299,7 @@ mod tests {
             ..Default::default()
         };
 
-        let pool = ThreadPool::new(config).unwrap();
+        let pool = ThreadPool::new(config).expect("test operation should succeed");
         let counter = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..10 {
@@ -307,7 +307,7 @@ mod tests {
             pool.execute(move || {
                 counter.fetch_add(1, Ordering::Relaxed);
             })
-            .unwrap();
+            .expect("test operation should succeed");
         }
 
         // Wait a bit for tasks to complete
@@ -323,7 +323,7 @@ mod tests {
             ..Default::default()
         };
 
-        init_global_thread_pool(config).unwrap();
+        init_global_thread_pool(config).expect("initialization should succeed in test");
 
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
@@ -331,7 +331,7 @@ mod tests {
         execute_global(move || {
             counter_clone.fetch_add(1, Ordering::Relaxed);
         })
-        .unwrap();
+        .expect("test operation should succeed");
 
         thread::sleep(Duration::from_millis(50));
 

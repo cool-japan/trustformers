@@ -205,7 +205,7 @@ impl OpenApiGenerator {
                 paths.insert(path.clone(), json!({}));
             }
 
-            let path_item = paths.get_mut(&path).unwrap();
+            let path_item = paths.get_mut(&path).expect("path was just inserted above");
             if let Some(obj) = path_item.as_object_mut() {
                 obj.insert(method, operation);
             }
@@ -1322,7 +1322,7 @@ mod tests {
     #[test]
     fn test_extract_tag_from_function() {
         let config = create_test_config();
-        let generator = OpenApiGenerator::new(&config).unwrap();
+        let generator = OpenApiGenerator::new(&config).expect("test operation should succeed");
 
         assert_eq!(
             generator.extract_tag_from_function("trustformers_model_load"),
@@ -1341,7 +1341,7 @@ mod tests {
     #[test]
     fn test_function_to_endpoint() {
         let config = create_test_config();
-        let generator = OpenApiGenerator::new(&config).unwrap();
+        let generator = OpenApiGenerator::new(&config).expect("test operation should succeed");
 
         let mut func = FfiFunction::default();
         func.name = "model_load".to_string();
@@ -1359,7 +1359,7 @@ mod tests {
     #[test]
     fn test_type_to_openapi_schema() {
         let config = create_test_config();
-        let generator = OpenApiGenerator::new(&config).unwrap();
+        let generator = OpenApiGenerator::new(&config).expect("test operation should succeed");
 
         let int_type = FfiType {
             name: "c_int".to_string(),
@@ -1386,7 +1386,7 @@ mod tests {
     #[test]
     fn test_generate_swagger_ui_html() {
         let config = create_test_config();
-        let generator = OpenApiGenerator::new(&config).unwrap();
+        let generator = OpenApiGenerator::new(&config).expect("test operation should succeed");
 
         let html = generator.generate_swagger_ui_html();
         assert!(html.contains("swagger-ui"));

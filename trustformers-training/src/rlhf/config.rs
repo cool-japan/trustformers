@@ -307,8 +307,9 @@ mod tests {
     #[test]
     fn test_reward_model_type_serialization() {
         let model_type = RewardModelType::MLP;
-        let serialized = serde_json::to_string(&model_type).unwrap();
-        let deserialized: RewardModelType = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&model_type).expect("JSON serialization failed");
+        let deserialized: RewardModelType =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(model_type, deserialized);
     }
 

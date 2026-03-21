@@ -391,14 +391,14 @@ mod tests {
 
     #[test]
     fn test_tensorboard_logger_creation() {
-        let temp_dir = tempdir().unwrap();
-        let _logger = TensorBoardLogger::new(temp_dir.path()).unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
+        let _logger = TensorBoardLogger::new(temp_dir.path()).expect("tensor operation failed");
         assert!(temp_dir.path().exists());
     }
 
     #[test]
     fn test_scalar_logging() -> Result<()> {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let mut logger = TensorBoardLogger::new(temp_dir.path())?;
 
         logger.log_scalar("test/loss", 0.5, Some(0))?;
@@ -409,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_histogram_logging() -> Result<()> {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let mut logger = TensorBoardLogger::new(temp_dir.path())?;
 
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
@@ -420,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_training_metrics_logging() -> Result<()> {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let mut logger = TensorBoardLogger::new(temp_dir.path())?;
 
         let metrics = TrainingMetrics::new()
@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn test_attention_heatmap_logging() -> Result<()> {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let mut logger = TensorBoardLogger::new(temp_dir.path())?;
 
         // Create mock attention weights
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn test_multiple_scalars_logging() -> Result<()> {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("temp file creation failed");
         let mut logger = TensorBoardLogger::new(temp_dir.path())?;
 
         let mut scalars = HashMap::new();

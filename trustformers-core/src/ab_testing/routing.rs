@@ -299,8 +299,8 @@ mod tests {
             min_sample_size: 100,
             max_duration_hours: 24,
         };
-        let mut exp = Experiment::new(config).unwrap();
-        exp.start().unwrap();
+        let mut exp = Experiment::new(config).expect("operation failed in test");
+        exp.start().expect("operation failed in test");
         exp
     }
 
@@ -311,8 +311,8 @@ mod tests {
 
         // Same user should always get same variant
         let user_id = "test-user-123";
-        let variant1 = splitter.route(&experiment, user_id).unwrap();
-        let variant2 = splitter.route(&experiment, user_id).unwrap();
+        let variant1 = splitter.route(&experiment, user_id).expect("operation failed in test");
+        let variant2 = splitter.route(&experiment, user_id).expect("operation failed in test");
         assert_eq!(variant1, variant2);
     }
 
@@ -326,7 +326,8 @@ mod tests {
 
         // Should alternate between variants
         for _ in 0..10 {
-            let variant = splitter.route(&experiment, "any-user").unwrap();
+            let variant =
+                splitter.route(&experiment, "any-user").expect("operation failed in test");
             match variant.name() {
                 "control" => control_count += 1,
                 "treatment" => treatment_count += 1,
@@ -344,11 +345,11 @@ mod tests {
         let experiment = create_test_experiment();
 
         let user_id = "sticky-user";
-        let first_variant = splitter.route(&experiment, user_id).unwrap();
+        let first_variant = splitter.route(&experiment, user_id).expect("operation failed in test");
 
         // Multiple calls should return same variant
         for _ in 0..10 {
-            let variant = splitter.route(&experiment, user_id).unwrap();
+            let variant = splitter.route(&experiment, user_id).expect("operation failed in test");
             assert_eq!(variant, first_variant);
         }
     }
@@ -364,8 +365,8 @@ mod tests {
             min_sample_size: 100,
             max_duration_hours: 24,
         };
-        let mut exp = Experiment::new(config).unwrap();
-        exp.start().unwrap();
+        let mut exp = Experiment::new(config).expect("operation failed in test");
+        exp.start().expect("operation failed in test");
 
         let splitter = TrafficSplitter::new();
         let mut included_count = 0;
@@ -373,7 +374,7 @@ mod tests {
         // Test with many users
         for i in 0..1000 {
             let user_id = format!("user-{}", i);
-            let variant = splitter.route(&exp, &user_id).unwrap();
+            let variant = splitter.route(&exp, &user_id).expect("operation failed in test");
 
             // If included in experiment, might get treatment
             if variant.name() != "control" || splitter.should_include_in_experiment(&exp, &user_id)

@@ -1047,7 +1047,8 @@ mod tests {
         let stats = optimizer.qp_solver_stats();
         assert_eq!(stats.len(), 1);
 
-        let (iterations, solve_time, _consensus_error, _converged) = stats.values().next().unwrap();
+        let (iterations, solve_time, _consensus_error, _converged) =
+            stats.values().next().expect("Operation failed in test");
         assert!(*iterations <= 10);
         assert!(*solve_time >= 0.0);
 

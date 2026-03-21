@@ -17,19 +17,23 @@ The `trustformers-mobile` crate provides mobile deployment infrastructure for iO
 
 ## Current Status
 
+**Version:** 0.1.0 | **Date:** 2026-03-21 | **Status:** Alpha
+
 ### Implementation Status
-✅ **PRODUCTION-READY** - Complete mobile infrastructure
-✅ **250 TESTS PASSING** - 100% test success rate
-✅ **ZERO COMPILATION ERRORS** - Clean compilation
-✅ **IOS COMPLETE** - Swift framework, Core ML, Metal
-✅ **ANDROID COMPLETE** - Kotlin, NNAPI, Vulkan
-✅ **FRAMEWORKS INTEGRATED** - React Native, Flutter, Unity
+🔵 **ALPHA** - Core infrastructure implemented; API may change
+✅ **1 RUST INTEGRATION TEST** - Passing
+✅ **ZERO COMPILATION ERRORS** - Clean compilation across all platforms
+✅ **IOS IMPLEMENTED** - Swift framework, Core ML, Metal
+✅ **ANDROID IMPLEMENTED** - Kotlin, NNAPI, Vulkan
+✅ **FRAMEWORKS INTEGRATED** - React Native, Flutter, Unity, Expo
+✅ **ON-DEVICE TRAINING** - Federated learning with differential privacy
+✅ **MOBILE OPTIMIZATIONS** - Battery, thermal, and memory pressure handling
 
 ### Feature Coverage
 - **iOS:** Swift framework, Core ML, Metal, Neural Engine, ARKit
 - **Android:** AAR package, NNAPI, Vulkan, Edge TPU, Wear OS, Android Auto
-- **Cross-Platform:** Model management, quantization, federated learning
-- **Frameworks:** React Native (Turbo Modules), Flutter (Dart FFI), Unity (IL2CPP)
+- **Cross-Platform:** Model management (OTA, INT4/INT8/FP16 quantization), federated learning
+- **Frameworks:** React Native (Turbo Modules/JSI), Flutter (Dart FFI), Unity (IL2CPP), Expo
 - **Optimizations:** Battery-aware, thermal management, memory pressure handling
 
 ---
@@ -715,7 +719,9 @@ fun TrustformersDemo() {
 
 ---
 
-**Last Updated:** Refactored for alpha.1 release
-**Status:** Production-ready mobile infrastructure
-**Test Suite:** 250 tests, 100% pass rate
+**Last Updated:** 2026-03-21
+**Version:** 0.1.0
+**Status:** Alpha
+**Test Suite:** 1 Rust integration test
+**SLoC:** 131,187
 **Platforms:** iOS 14+, Android 8.0+ (API 26+)

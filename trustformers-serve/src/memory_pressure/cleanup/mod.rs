@@ -478,7 +478,7 @@ mod tests {
             .priority(150)
             .estimated_memory_freed(1024 * 1024)
             .build()
-            .unwrap();
+            .expect("test operation should succeed");
 
         assert_eq!(action.strategy, CleanupStrategy::CacheEviction);
         assert_eq!(action.priority, 150);
@@ -512,7 +512,9 @@ mod tests {
         assert!(handler.should_execute(MemoryPressureLevel::Medium));
         assert!(!handler.should_execute(MemoryPressureLevel::Normal));
 
-        let result = handler.cleanup(MemoryPressureLevel::High).unwrap();
+        let result = handler
+            .cleanup(MemoryPressureLevel::High)
+            .expect("test operation should succeed");
         assert_eq!(result, 50 * 1024 * 1024);
     }
 

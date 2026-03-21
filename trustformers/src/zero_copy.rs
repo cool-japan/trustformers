@@ -853,7 +853,7 @@ mod tests {
     #[test]
     fn test_zero_copy_view_creation() {
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let view = ZeroCopyView::from_slice(&data, vec![2, 3]).unwrap();
+        let view = ZeroCopyView::from_slice(&data, vec![2, 3]).expect("operation failed in test");
 
         assert_eq!(view.shape(), &[2, 3]);
         assert_eq!(view.len(), 6);
@@ -863,28 +863,37 @@ mod tests {
     #[test]
     fn test_zero_copy_subview() {
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let view = ZeroCopyView::from_slice(&data, vec![2, 3]).unwrap();
+        let view = ZeroCopyView::from_slice(&data, vec![2, 3]).expect("operation failed in test");
 
-        let subview = view.subview(&[0..1, 1..3]).unwrap();
+        let subview = view.subview(&[0..1, 1..3]).expect("operation failed in test");
         assert_eq!(subview.shape(), &[1, 2]);
 
-        let first_element = subview.get(&[0, 0]).unwrap();
+        let first_element = subview.get(&[0, 0]).expect("expected value not found");
         assert_eq!(*first_element, 2.0); // data[0 * 3 + 1]
     }
 
     #[test]
     fn test_zero_copy_transpose() {
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let view = ZeroCopyView::from_slice(&data, vec![2, 3]).unwrap();
+        let view = ZeroCopyView::from_slice(&data, vec![2, 3]).expect("operation failed in test");
 
-        let transposed = view.transpose(&[1, 0]).unwrap();
+        let transposed = view.transpose(&[1, 0]).expect("operation failed in test");
         assert_eq!(transposed.shape(), &[3, 2]);
 
         // Original: [[1, 2, 3], [4, 5, 6]]
         // Transposed: [[1, 4], [2, 5], [3, 6]]
-        assert_eq!(*transposed.get(&[0, 0]).unwrap(), 1.0);
-        assert_eq!(*transposed.get(&[0, 1]).unwrap(), 4.0);
-        assert_eq!(*transposed.get(&[1, 0]).unwrap(), 2.0);
+        assert_eq!(
+            *transposed.get(&[0, 0]).expect("expected value not found"),
+            1.0
+        );
+        assert_eq!(
+            *transposed.get(&[0, 1]).expect("expected value not found"),
+            4.0
+        );
+        assert_eq!(
+            *transposed.get(&[1, 0]).expect("expected value not found"),
+            2.0
+        );
     }
 
     #[test]
@@ -892,8 +901,8 @@ mod tests {
         let config = ZeroCopyConfig::default();
         let pool = MemoryPool::new(config);
 
-        let ptr1 = pool.allocate(1024).unwrap();
-        let ptr2 = pool.allocate(512).unwrap();
+        let ptr1 = pool.allocate(1024).expect("operation failed in test");
+        let ptr2 = pool.allocate(512).expect("operation failed in test");
 
         assert_ne!(ptr1.as_ptr(), ptr2.as_ptr());
 
@@ -913,10 +922,11 @@ mod tests {
         let mut data_a = vec![1.0f32, 2.0, 3.0, 4.0];
         let data_b = vec![1.0f32, 1.0, 1.0, 1.0];
 
-        let mut view_a = ZeroCopyView::from_slice_mut(&mut data_a, vec![4]).unwrap();
-        let view_b = ZeroCopyView::from_slice(&data_b, vec![4]).unwrap();
+        let mut view_a =
+            ZeroCopyView::from_slice_mut(&mut data_a, vec![4]).expect("operation failed in test");
+        let view_b = ZeroCopyView::from_slice(&data_b, vec![4]).expect("operation failed in test");
 
-        ZeroCopyOps::add_inplace(&mut view_a, &view_b).unwrap();
+        ZeroCopyOps::add_inplace(&mut view_a, &view_b).expect("add operation failed");
 
         assert_eq!(data_a, vec![2.0, 3.0, 4.0, 5.0]);
     }

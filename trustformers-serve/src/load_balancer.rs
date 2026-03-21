@@ -1037,7 +1037,7 @@ mod tests {
                 last_health_check: None,
                 metadata: HashMap::new(),
             };
-            lb.add_instance(instance).await.unwrap();
+            lb.add_instance(instance).await.expect("async operation should succeed in test");
         }
 
         let context = RequestContext {
@@ -1051,10 +1051,26 @@ mod tests {
         };
 
         // Test round-robin behavior
-        let selected1 = lb.select_instance(&context).await.unwrap().unwrap();
-        let selected2 = lb.select_instance(&context).await.unwrap().unwrap();
-        let selected3 = lb.select_instance(&context).await.unwrap().unwrap();
-        let selected4 = lb.select_instance(&context).await.unwrap().unwrap();
+        let selected1 = lb
+            .select_instance(&context)
+            .await
+            .expect("async operation should succeed in test")
+            .expect("async operation should succeed in test");
+        let selected2 = lb
+            .select_instance(&context)
+            .await
+            .expect("async operation should succeed in test")
+            .expect("async operation should succeed in test");
+        let selected3 = lb
+            .select_instance(&context)
+            .await
+            .expect("async operation should succeed in test")
+            .expect("async operation should succeed in test");
+        let selected4 = lb
+            .select_instance(&context)
+            .await
+            .expect("async operation should succeed in test")
+            .expect("async operation should succeed in test");
 
         assert_eq!(selected1.id, "test-0");
         assert_eq!(selected2.id, "test-1");
@@ -1080,15 +1096,15 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        lb.add_instance(instance).await.unwrap();
+        lb.add_instance(instance).await.expect("async operation should succeed in test");
 
         // Record some requests
         lb.record_request_result("test-1", true, Duration::from_millis(100))
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         lb.record_request_result("test-1", false, Duration::from_millis(200))
             .await
-            .unwrap();
+            .expect("test operation should succeed");
 
         let metrics = lb.get_metrics().await;
         assert_eq!(metrics.total_requests, 2);

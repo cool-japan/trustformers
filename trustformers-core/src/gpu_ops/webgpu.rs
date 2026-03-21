@@ -98,9 +98,9 @@ impl WebGpuBackend {
         use pollster::FutureExt;
 
         // Request adapter
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
 
         let adapter = instance
@@ -375,7 +375,7 @@ fn matmul_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Create pipeline layout
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Matmul Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -584,7 +584,7 @@ fn gelu_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Create pipeline
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GELU Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -862,7 +862,7 @@ fn layernorm_main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         // Create pipeline
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("LayerNorm Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
+            bind_group_layouts: &[Some(&bind_group_layout)],
             immediate_size: 0,
         });
 

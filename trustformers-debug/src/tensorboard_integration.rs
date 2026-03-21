@@ -268,7 +268,9 @@ impl TensorBoardWriter {
     /// Add a graph definition for model architecture visualization
     pub fn add_graph(&mut self, graph: &GraphDef) -> Result<()> {
         let graph_path = self.log_dir.join(&self.run_name).join("graph.json");
-        fs::create_dir_all(graph_path.parent().unwrap())?;
+        if let Some(parent) = graph_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
 
         let graph_json = serde_json::to_string_pretty(graph)?;
         fs::write(graph_path, graph_json)?;
@@ -387,18 +389,18 @@ mod tests {
     #[test]
     fn test_tensorboard_writer_creation() {
         let temp_dir = env::temp_dir().join("tensorboard_test");
-        let writer = TensorBoardWriter::new(&temp_dir).unwrap();
+        let writer = TensorBoardWriter::new(&temp_dir).expect("tensor operation failed");
         assert!(writer.log_dir().exists());
     }
 
     #[test]
     fn test_add_scalar() {
         let temp_dir = env::temp_dir().join("tensorboard_scalar_test");
-        let mut writer = TensorBoardWriter::new(&temp_dir).unwrap();
+        let mut writer = TensorBoardWriter::new(&temp_dir).expect("tensor operation failed");
 
-        writer.add_scalar("test/loss", 0.5, 0).unwrap();
-        writer.add_scalar("test/loss", 0.4, 1).unwrap();
-        writer.add_scalar("test/loss", 0.3, 2).unwrap();
+        writer.add_scalar("test/loss", 0.5, 0).expect("add operation failed");
+        writer.add_scalar("test/loss", 0.4, 1).expect("add operation failed");
+        writer.add_scalar("test/loss", 0.3, 2).expect("add operation failed");
 
         assert_eq!(writer.scalar_logs.len(), 3);
         assert_eq!(writer.scalar_logs[0].value, 0.5);
@@ -408,10 +410,10 @@ mod tests {
     #[test]
     fn test_add_histogram() {
         let temp_dir = env::temp_dir().join("tensorboard_histogram_test");
-        let mut writer = TensorBoardWriter::new(&temp_dir).unwrap();
+        let mut writer = TensorBoardWriter::new(&temp_dir).expect("tensor operation failed");
 
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        writer.add_histogram("test/weights", &values, 0).unwrap();
+        writer.add_histogram("test/weights", &values, 0).expect("add operation failed");
 
         assert_eq!(writer.histogram_logs.len(), 1);
         assert_eq!(writer.histogram_logs[0].min, 1.0);
@@ -422,9 +424,9 @@ mod tests {
     #[test]
     fn test_add_text() {
         let temp_dir = env::temp_dir().join("tensorboard_text_test");
-        let mut writer = TensorBoardWriter::new(&temp_dir).unwrap();
+        let mut writer = TensorBoardWriter::new(&temp_dir).expect("tensor operation failed");
 
-        writer.add_text("test/note", "This is a test", 0).unwrap();
+        writer.add_text("test/note", "This is a test", 0).expect("add operation failed");
         assert_eq!(writer.text_logs.len(), 1);
         assert_eq!(writer.text_logs[0].text, "This is a test");
     }
@@ -432,10 +434,10 @@ mod tests {
     #[test]
     fn test_flush() {
         let temp_dir = env::temp_dir().join("tensorboard_flush_test");
-        let mut writer = TensorBoardWriter::new(&temp_dir).unwrap();
+        let mut writer = TensorBoardWriter::new(&temp_dir).expect("tensor operation failed");
 
-        writer.add_scalar("test/metric", 1.0, 0).unwrap();
-        writer.flush().unwrap();
+        writer.add_scalar("test/metric", 1.0, 0).expect("add operation failed");
+        writer.flush().expect("operation failed in test");
 
         let scalars_path = temp_dir.join(writer.run_name()).join("scalars.jsonl");
         assert!(scalars_path.exists());
@@ -444,25 +446,27 @@ mod tests {
     #[test]
     fn test_add_scalars() {
         let temp_dir = env::temp_dir().join("tensorboard_scalars_test");
-        let mut writer = TensorBoardWriter::new(&temp_dir).unwrap();
+        let mut writer = TensorBoardWriter::new(&temp_dir).expect("tensor operation failed");
 
         let mut metrics = HashMap::new();
         metrics.insert("loss".to_string(), 0.5);
         metrics.insert("accuracy".to_string(), 0.95);
 
-        writer.add_scalars("train", metrics, 0).unwrap();
+        writer.add_scalars("train", metrics, 0).expect("add operation failed");
         assert_eq!(writer.scalar_logs.len(), 2);
     }
 
     #[test]
     fn test_add_embedding() {
         let temp_dir = env::temp_dir().join("tensorboard_embedding_test");
-        let mut writer = TensorBoardWriter::new(&temp_dir).unwrap();
+        let mut writer = TensorBoardWriter::new(&temp_dir).expect("tensor operation failed");
 
         let embeddings = vec![vec![0.1, 0.2, 0.3], vec![0.4, 0.5, 0.6]];
         let labels = vec!["class1".to_string(), "class2".to_string()];
 
-        writer.add_embedding("test/emb", embeddings, Some(labels), 0).unwrap();
+        writer
+            .add_embedding("test/emb", embeddings, Some(labels), 0)
+            .expect("add operation failed");
         assert_eq!(writer.embedding_logs.len(), 1);
     }
 

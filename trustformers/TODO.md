@@ -1,5 +1,7 @@
 # trustformers TODO List
 
+**Version:** 0.1.0 | **Status:** Alpha | **Updated:** 2026-03-21
+
 ## Overview
 
 The `trustformers` crate is the main integration crate providing high-level APIs, pipelines, and HuggingFace Hub integration. It re-exports functionality from all specialized crates and provides a unified user-facing API.
@@ -16,18 +18,35 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 
 ## Current Status
 
-### Implementation Status
-✅ **PRODUCTION-READY** - Complete high-level API
-✅ **HUB INTEGRATED** - Full HuggingFace Hub support
-✅ **PIPELINE COMPLETE** - All major pipelines implemented
-✅ **AUTO CLASSES** - Auto* classes for model/tokenizer loading
-✅ **EXAMPLES READY** - Comprehensive example applications
+### Implementation Status (as of 2026-03-21)
+
+- [x] **HIGH-LEVEL API** - Complete (AutoModel, AutoTokenizer, AutoConfig, AutoModelFor*)
+- [x] **HUB INTEGRATED** - Full HuggingFace Hub support (download, cache, mirror, auth)
+- [x] **PIPELINE COMPLETE** - 23+ pipeline types implemented
+- [x] **AUTO CLASSES** - Auto* classes for model/tokenizer/config loading
+- [x] **PIPELINE COMPOSITION** - ComposedPipeline, EnsemblePipeline, PipelineChain, PipelineComposer
+- [x] **SAFETY FILTERING** - SafetyFilter, ExtendedSafetyConfig, EnhancedSafetyFilter (multi-risk)
+- [x] **ASYNC STREAMING** - Token-by-token async streaming for generation pipelines
+- [x] **INFRASTRUCTURE** - MemoryPool, ConfigurationManager, EnhancedProfiler, HubMirror, ValidationManager, BenchmarkSuite
+- [x] **PRELUDE EXPORTS** - 50+ public API exports in prelude
+- [ ] **STUB CLEANUP** - 11 stubs remaining in complex pipeline composition code (minor)
+
+### Metrics (2026-03-21)
+
+- **SLoC:** ~59,862
+- **Tests:** ~1,740
+- **Pipeline types:** 23+
+- **Public API exports:** 50+
+- **Stubs remaining:** 11 (minor, in complex pipeline code)
 
 ### Feature Coverage
-- **API:** AutoModel, AutoTokenizer, AutoConfig
-- **Pipelines:** text-generation, classification, QA, NER, summarization, translation
-- **Hub:** Model download, caching, authentication
-- **Examples:** 20+ example applications
+
+- **API:** AutoModel, AutoTokenizer, AutoConfig, AutoModelForCausalLM, AutoModelForMaskedLM, AutoModelForSequenceClassification, AutoModelForTokenClassification, AutoModelForQuestionAnswering, AutoModelForSeq2SeqLM
+- **Pipelines:** TextGeneration, TextClassification, QuestionAnswering, TokenClassification, Summarization, Translation, FillMask, ZeroShotClassification, ConversationalPipeline, MultiModal, DocumentUnderstanding, and 12+ more
+- **Pipeline Composition:** ComposedPipeline, EnsemblePipeline, PipelineChain, PipelineComposer
+- **Safety:** SafetyFilter (ExtendedSafetyConfig), EnhancedSafetyFilter (toxicity, hate speech, personal info, violence, adult content, harassment, bias)
+- **Hub:** Model download, caching, authentication, mirror support
+- **Infrastructure:** MemoryPool, ConfigurationManager, EnhancedProfiler, HubMirror, ValidationManager, BenchmarkSuite
 
 ---
 
@@ -39,7 +58,7 @@ The `trustformers` crate is the main integration crate providing high-level APIs
 
 **Automatic model class selection**
 
-- ✅ **Model Types**
+- [x] **Model Types**
   - AutoModel - Base model
   - AutoModelForCausalLM - Causal LM (GPT-2, LLaMA)
   - AutoModelForMaskedLM - Masked LM (BERT, RoBERTa)
@@ -66,7 +85,7 @@ let model = AutoModelForCausalLM::from_pretrained("gpt2")?;
 
 **Automatic tokenizer selection**
 
-- ✅ **Tokenizer Types**
+- [x] **Tokenizer Types**
   - BPE (GPT-2, GPT-J, LLaMA)
   - WordPiece (BERT, DistilBERT)
   - SentencePiece (T5, ALBERT, XLNet)
@@ -93,7 +112,7 @@ let text = tokenizer.decode(&encoding.input_ids, true)?;
 
 **Automatic configuration loading**
 
-- ✅ **Features**
+- [x] **Features**
   - Load config from Hub
   - Load from local path
   - Auto-detect model type
@@ -116,12 +135,13 @@ println!("Hidden size: {}", config.hidden_size());
 
 **Generate text from prompts**
 
-- ✅ **Features**
+- [x] **Features**
   - Greedy decoding
   - Beam search
   - Nucleus sampling (top-p)
   - Top-k sampling
   - Temperature control
+  - Async streaming output
 
 **Example:**
 ```rust
@@ -147,7 +167,7 @@ for seq in result {
 
 **Classify text into categories**
 
-- ✅ **Features**
+- [x] **Features**
   - Sentiment analysis
   - Multi-label classification
   - Zero-shot classification
@@ -175,7 +195,7 @@ let result = classifier("This is about technology", &json!({
 
 **Extract answers from context**
 
-- ✅ **Features**
+- [x] **Features**
   - Extractive QA
   - Span prediction
   - Confidence scores
@@ -201,7 +221,7 @@ println!("Score: {}", result["score"]);
 
 **Classify individual tokens**
 
-- ✅ **Use Cases**
+- [x] **Use Cases**
   - Named Entity Recognition (NER)
   - Part-of-Speech tagging
   - Chunking
@@ -224,7 +244,7 @@ for entity in result {
 
 **Generate text summaries**
 
-- ✅ **Features**
+- [x] **Features**
   - Abstractive summarization
   - Length control
   - Beam search
@@ -250,7 +270,7 @@ println!("Summary: {}", result[0]["summary_text"]);
 
 **Translate between languages**
 
-- ✅ **Features**
+- [x] **Features**
   - Multi-language support
   - Language pair detection
   - Beam search
@@ -267,18 +287,87 @@ println!("Translation: {}", result[0]["translation_text"]);
 
 ---
 
+#### ConversationalPipeline
+
+**Multi-turn dialogue management**
+
+- [x] **Features**
+  - Conversation history tracking
+  - Context window management
+  - Multi-turn state
+
+---
+
+#### MultiModal Pipeline
+
+**Vision-language tasks**
+
+- [x] **Features**
+  - Image captioning
+  - Visual question answering
+  - Image-text matching
+
+---
+
+#### DocumentUnderstanding Pipeline
+
+**Document analysis**
+
+- [x] **Features**
+  - Document layout analysis
+  - Information extraction
+  - Form understanding
+
+---
+
+### Pipeline Composition
+
+- [x] **ComposedPipeline** - Sequential multi-stage pipeline execution
+- [x] **EnsemblePipeline** - Aggregated predictions from multiple models
+- [x] **PipelineChain** - Chained pipeline execution with data flow
+- [x] **PipelineComposer** - Dynamic pipeline construction and management
+- [ ] **Stub cleanup** - 11 minor stubs remain in composition internals
+
+---
+
+### Safety Filtering
+
+- [x] **SafetyFilter** with `ExtendedSafetyConfig` (boxed to prevent stack overflow)
+- [x] **EnhancedSafetyFilter** with multi-risk assessment:
+  - [x] Toxicity detection
+  - [x] Hate speech classification
+  - [x] Personal information detection
+  - [x] Violence content filtering
+  - [x] Adult content filtering
+  - [x] Harassment detection
+  - [x] Bias assessment
+
+---
+
+### Infrastructure
+
+- [x] **MemoryPool** - Efficient tensor memory management
+- [x] **ConfigurationManager** - Centralized configuration handling
+- [x] **EnhancedProfiler** - Performance profiling and tracing
+- [x] **HubMirror** - Mirror support for model hub access
+- [x] **ValidationManager** - Input/output validation
+- [x] **BenchmarkSuite** - Built-in benchmarking utilities
+
+---
+
 ### HuggingFace Hub Integration
 
 #### Model Download
 
 **Download models from Hub**
 
-- ✅ **Features**
+- [x] **Features**
   - Automatic model download
   - Resume interrupted downloads
   - Model caching
   - Version/revision support
   - Authentication for private models
+  - Mirror support via HubMirror
 
 **Example:**
 ```rust
@@ -302,7 +391,7 @@ let model_path = download_model("private-org/private-model")?;
 
 **Search for models on Hub**
 
-- ✅ **Features**
+- [x] **Features**
   - Search by task
   - Filter by language
   - Sort by downloads/likes
@@ -332,7 +421,7 @@ for model in models {
 
 **Simplified device selection**
 
-- ✅ **Features**
+- [x] **Features**
   - Auto-detect best device
   - Multi-GPU support
   - Device mapping
@@ -358,7 +447,7 @@ let model = AutoModel::from_pretrained("llama-2-70b")?
 
 **Efficient model caching**
 
-- ✅ **Features**
+- [x] **Features**
   - LRU cache
   - Disk caching
   - Cache invalidation
@@ -366,33 +455,43 @@ let model = AutoModel::from_pretrained("llama-2-70b")?
 
 ---
 
-## Known Limitations
+## Remaining Work
 
+### Minor Stubs (11 total, low priority)
+
+These are located in complex pipeline composition code and do not block core functionality:
+
+- [ ] Stub implementations in `ComposedPipeline` internals
+- [ ] Stub implementations in `EnsemblePipeline` aggregation logic
+- [ ] Stub implementations in `PipelineComposer` dynamic routing
+
+### Future Enhancements
+
+#### High Priority
+- [ ] Resolve all 11 remaining stubs in pipeline composition code
+- [ ] More pipeline types (audio, vision-only)
+- [ ] Enhanced Hub features (upload, model cards creation)
+- [ ] Better error messages and diagnostics
+
+#### Performance
+- [ ] Faster model loading
+- [ ] Better caching strategies
+- [ ] Reduced memory usage for large models
+
+#### Features
+- [ ] Fine-tuning helpers
+- [ ] Evaluation metrics integration
+- [ ] More auto classes (AutoModelForAudioClassification, etc.)
+
+---
+
+## Known Limitations (Alpha)
+
+- 11 stubs remaining in complex pipeline composition code (minor)
 - Some pipelines require specific model types
 - Hub download requires internet connection
 - Large models require significant disk space
 - Caching may use substantial disk space
-
----
-
-## Future Enhancements
-
-### High Priority
-- More pipeline types (audio, vision, multimodal)
-- Enhanced Hub features (upload, model cards)
-- Better error messages
-- Streaming inference for all pipelines
-
-### Performance
-- Faster model loading
-- Better caching strategies
-- Reduced memory usage
-
-### Features
-- More auto classes
-- Model composition utilities
-- Fine-tuning helpers
-- Evaluation metrics
 
 ---
 
@@ -401,7 +500,7 @@ let model = AutoModel::from_pretrained("llama-2-70b")?
 ### Code Standards
 - **API Design:** Simple, HuggingFace-compatible
 - **Documentation:** Comprehensive examples
-- **Testing:** Integration tests with actual models
+- **Testing:** Integration tests with actual models (~1,740 tests)
 - **Naming:** Follow HuggingFace conventions
 
 ### Build & Test Commands
@@ -478,7 +577,8 @@ let model = AutoModel::from_config(&config)?;
 
 ---
 
-**Last Updated:** Refactored for alpha.1 release
-**Status:** Production-ready main integration crate
+**Last Updated:** 2026-03-21
+**Version:** 0.1.0
+**Status:** Alpha
 **API:** HuggingFace-compatible high-level API
 **Hub:** Full integration with HuggingFace Hub

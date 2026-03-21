@@ -19,10 +19,11 @@
 //!
 //! # Examples
 //!
-//! ```rust
-//! use trustformers_core::quantization::gguf_k_quants::{KQuantConfig, KQuantizer, KQuantType};
+//! ```rust,no_run
+//! use trustformers_core::quantization::{KQuantConfig, KQuantizer, KQuantType};
 //! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = KQuantConfig {
 //!     quant_type: KQuantType::Q4_K,
 //!     ..Default::default()
@@ -33,7 +34,8 @@
 //!
 //! let quantized = quantizer.quantize(&tensor)?;
 //! let dequantized = quantizer.dequantize(&quantized)?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::errors::{Result, TrustformersError};

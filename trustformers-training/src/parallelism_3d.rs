@@ -812,7 +812,7 @@ mod tests {
         let parallelism = Parallelism3D::new(config, 0, 2, dp_group, mp_group, pp_group);
 
         assert!(parallelism.is_ok());
-        let p = parallelism.unwrap();
+        let p = parallelism.expect("operation failed in test");
         assert_eq!(p.dp_rank, 0);
         assert_eq!(p.mp_rank, 0);
         assert_eq!(p.pp_rank, 0);
@@ -831,8 +831,9 @@ mod tests {
             };
 
             // Should be able to serialize/deserialize
-            let json = serde_json::to_string(&config).unwrap();
-            let deserialized: ParallelismConfig = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&config).expect("JSON serialization failed");
+            let deserialized: ParallelismConfig =
+                serde_json::from_str(&json).expect("JSON deserialization failed");
 
             assert!(matches!(deserialized.memory_optimization, _));
         }
@@ -851,8 +852,9 @@ mod tests {
             };
 
             // Should be able to serialize/deserialize
-            let json = serde_json::to_string(&config).unwrap();
-            let deserialized: ParallelismConfig = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(&config).expect("JSON serialization failed");
+            let deserialized: ParallelismConfig =
+                serde_json::from_str(&json).expect("JSON deserialization failed");
 
             assert!(matches!(deserialized.pipeline_schedule, _));
         }
@@ -871,7 +873,7 @@ mod tests {
         let stats = manager.get_aggregate_stats();
         assert!(stats.is_ok());
 
-        let stats = stats.unwrap();
+        let stats = stats.expect("operation failed in test");
         assert_eq!(stats.num_coordinators, 0);
         assert_eq!(stats.average_pipeline_efficiency, 0.0);
     }
@@ -891,8 +893,9 @@ mod tests {
             memory_optimization: MemoryOptimization::High,
         };
 
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: ParallelismConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("JSON serialization failed");
+        let deserialized: ParallelismConfig =
+            serde_json::from_str(&json).expect("JSON deserialization failed");
 
         assert_eq!(config.dp_size, deserialized.dp_size);
         assert_eq!(config.mp_size, deserialized.mp_size);

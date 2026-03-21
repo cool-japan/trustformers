@@ -732,7 +732,7 @@ mod tests {
             accuracy: Some(0.8),
         };
 
-        let update = scheduler.step(dynamics).unwrap();
+        let update = scheduler.step(dynamics).expect("operation failed in test");
         assert!(update.new_lr > 0.0);
         assert!(!update.adaptation_reason.is_empty());
     }
@@ -754,7 +754,7 @@ mod tests {
                 learning_rate: scheduler.get_lr(),
                 accuracy: None,
             };
-            scheduler.step(dynamics).unwrap();
+            scheduler.step(dynamics).expect("operation failed in test");
         }
 
         let stats = scheduler.get_statistics();
@@ -775,7 +775,7 @@ mod tests {
                 learning_rate: scheduler.get_lr(),
                 accuracy: None,
             };
-            scheduler.step(dynamics).unwrap();
+            scheduler.step(dynamics).expect("operation failed in test");
         }
 
         let stats = scheduler.get_statistics();

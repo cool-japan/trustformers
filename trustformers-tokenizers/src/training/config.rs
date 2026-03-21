@@ -238,8 +238,9 @@ mod tests {
             min_improvement: 0.001,
         };
 
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: AdvancedTrainingConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("Serialization failed");
+        let deserialized: AdvancedTrainingConfig =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
 
         assert_eq!(
             config.base_config.vocab_size,

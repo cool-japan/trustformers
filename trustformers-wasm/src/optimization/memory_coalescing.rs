@@ -545,7 +545,7 @@ mod tests {
         let shader = optimizer.generate_optimized_shader("matmul", &shape);
         assert!(shader.is_ok());
 
-        let shader_code = shader.unwrap();
+        let shader_code = shader.expect("test operation should succeed");
         assert!(shader_code.contains("matmul_coalesced"));
     }
 
@@ -557,7 +557,7 @@ mod tests {
         let shader = optimizer.generate_optimized_shader("transpose", &shape);
         assert!(shader.is_ok());
 
-        let shader_code = shader.unwrap();
+        let shader_code = shader.expect("test operation should succeed");
         assert!(shader_code.contains("transpose_coalesced"));
         assert!(shader_code.contains("shared_mem"));
     }

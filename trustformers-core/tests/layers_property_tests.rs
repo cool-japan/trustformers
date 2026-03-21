@@ -26,9 +26,9 @@ proptest! {
 
         let input_shape = vec![batch_size, in_features];
         let input_data = vec![0.1; batch_size * in_features];
-        let input = Tensor::from_vec(input_data, &input_shape).unwrap();
+        let input = Tensor::from_vec(input_data, &input_shape).expect("tensor operation failed");
 
-        let output = layer.forward(input).unwrap();
+        let output = layer.forward(input).expect("forward pass failed");
 
         // Output shape should be [batch_size, out_features]
         prop_assert_eq!(output.shape(), vec![batch_size, out_features]);
@@ -43,14 +43,14 @@ proptest! {
         features in layer_dimension_strategy()
     ) {
         let normalized_shape = vec![features];
-        let layer_norm = LayerNorm::new(normalized_shape, 1e-5).unwrap();
+        let layer_norm = LayerNorm::new(normalized_shape, 1e-5).expect("operation failed in test");
 
         let input_shape = vec![batch_size, features];
         let input_data = vec![1.0; batch_size * features];
-        let input = Tensor::from_vec(input_data, &input_shape).unwrap();
+        let input = Tensor::from_vec(input_data, &input_shape).expect("tensor operation failed");
 
         let input_shape_copy = input_shape.clone();
-        let output = layer_norm.forward(input).unwrap();
+        let output = layer_norm.forward(input).expect("forward pass failed");
 
         // Shape should be preserved
         prop_assert_eq!(output.shape(), input_shape_copy);
@@ -71,16 +71,16 @@ proptest! {
             .collect();
 
         let normalized_shape = vec![features];
-        let layer_norm = LayerNorm::new(normalized_shape, 1e-5).unwrap();
+        let layer_norm = LayerNorm::new(normalized_shape, 1e-5).expect("operation failed in test");
 
         let input_shape = vec![batch_size, features];
         let input_data: Vec<f32> = values;
-        let input = Tensor::from_vec(input_data, &input_shape).unwrap();
+        let input = Tensor::from_vec(input_data, &input_shape).expect("tensor operation failed");
 
-        let output = layer_norm.forward(input).unwrap();
+        let output = layer_norm.forward(input).expect("forward pass failed");
 
         // Check that each sample has approximately zero mean and unit variance
-        let output_data = output.data().unwrap();
+        let output_data = output.data().expect("operation failed in test");
         for b in 0..batch_size {
             let start = b * features;
             let end = start + features;
@@ -113,7 +113,7 @@ proptest! {
         embedding_dim in layer_dimension_strategy(),
         seq_len in 1usize..128
     ) {
-        let embedding = Embedding::new(vocab_size, embedding_dim, None).unwrap();
+        let embedding = Embedding::new(vocab_size, embedding_dim, None).expect("operation failed in test");
 
         // Generate valid token indices
         let mut rng = thread_rng();
@@ -146,13 +146,13 @@ proptest! {
         dropout in 0.0f32..0.5
     ) {
         let dim_feedforward = d_model * dim_feedforward_factor;
-        let ff = FeedForward::new(d_model, dim_feedforward, dropout).unwrap();
+        let ff = FeedForward::new(d_model, dim_feedforward, dropout).expect("operation failed in test");
 
         let input_shape = vec![batch_size, d_model];
         let input_data = vec![0.1; batch_size * d_model];
-        let input = Tensor::from_vec(input_data, &input_shape).unwrap();
+        let input = Tensor::from_vec(input_data, &input_shape).expect("tensor operation failed");
 
-        let output = ff.forward(input).unwrap();
+        let output = ff.forward(input).expect("forward pass failed");
 
         // Output should have same shape as input
         prop_assert_eq!(output.shape(), vec![batch_size, d_model]);
@@ -174,15 +174,15 @@ proptest! {
         let head_dim = d_model / num_heads;
         prop_assume!(head_dim >= 32);
 
-        let mha = MultiHeadAttention::new(d_model, num_heads, 0.1, true).unwrap();
+        let mha = MultiHeadAttention::new(d_model, num_heads, 0.1, true).expect("operation failed in test");
 
         let input_shape = vec![batch_size, seq_len, d_model];
         let input_data = vec![0.1; batch_size * seq_len * d_model];
-        let input = Tensor::from_vec(input_data, &input_shape).unwrap();
+        let input = Tensor::from_vec(input_data, &input_shape).expect("tensor operation failed");
 
         // With self-attention
         let input_shape_copy = input_shape.clone();
-        let output = mha.forward(input).unwrap();
+        let output = mha.forward(input).expect("forward pass failed");
 
         // Output shape should match input shape
         prop_assert_eq!(output.shape(), input_shape_copy);
@@ -200,22 +200,22 @@ proptest! {
         let num_heads = 4;
         prop_assume!(d_model % num_heads == 0);
 
-        let mha = MultiHeadAttention::new(d_model, num_heads, 0.0, true).unwrap(); // No dropout for deterministic test
+        let mha = MultiHeadAttention::new(d_model, num_heads, 0.0, true).expect("operation failed in test"); // No dropout for deterministic test
 
         let input_shape = vec![batch_size, seq_len, d_model];
         let input_data = vec![1.0; batch_size * seq_len * d_model];
-        let input = Tensor::from_vec(input_data.clone(), &input_shape).unwrap();
+        let input = Tensor::from_vec(input_data.clone(), &input_shape).expect("tensor operation failed");
 
         // Since the Layer trait API doesn't expose mask functionality directly,
         // we'll just test that the attention produces consistent outputs
-        let input_copy = Tensor::from_vec(input_data, &input_shape).unwrap();
+        let input_copy = Tensor::from_vec(input_data, &input_shape).expect("tensor operation failed");
 
-        let output1 = mha.forward(input).unwrap();
-        let output2 = mha.forward(input_copy).unwrap();
+        let output1 = mha.forward(input).expect("forward pass failed");
+        let output2 = mha.forward(input_copy).expect("forward pass failed");
 
         // With identical inputs, outputs should be the same (deterministic)
-        let data1 = output1.data().unwrap();
-        let data2 = output2.data().unwrap();
+        let data1 = output1.data().expect("operation failed in test");
+        let data2 = output2.data().expect("operation failed in test");
         let diff: f32 = data1.iter()
             .zip(data2.iter())
             .map(|(a, b)| (a - b).abs())
@@ -237,15 +237,15 @@ proptest! {
         let dropout = Dropout::new(dropout_rate);
 
         let input_data = vec![1.0; size];
-        let _input = Tensor::from_vec(input_data, &[size]).unwrap();
+        let _input = Tensor::from_vec(input_data, &[size]).expect("tensor operation failed");
 
         // Apply dropout multiple times and check statistics
         let mut zero_counts = Vec::new();
 
         for _ in 0..10 {
-            let input = Tensor::from_vec(vec![1.0; size], &[size]).unwrap();
-            let output = dropout.forward(input).unwrap();
-            let output_data = output.data().unwrap();
+            let input = Tensor::from_vec(vec![1.0; size], &[size]).expect("tensor operation failed");
+            let output = dropout.forward(input).expect("forward pass failed");
+            let output_data = output.data().expect("operation failed in test");
             let zero_count = output_data.iter().filter(|&&x| x == 0.0).count();
             zero_counts.push(zero_count);
         }
@@ -267,20 +267,20 @@ proptest! {
         d_model in (64usize..256).prop_filter("divisible by 8", |x| x % 8 == 0)
     ) {
         // Build a small transformer block
-        let mha = MultiHeadAttention::new(d_model, 8, 0.1, true).unwrap();
-        let ff = FeedForward::new(d_model, d_model * 4, 0.1).unwrap();
-        let ln1 = LayerNorm::new(vec![d_model], 1e-5).unwrap();
-        let ln2 = LayerNorm::new(vec![d_model], 1e-5).unwrap();
+        let mha = MultiHeadAttention::new(d_model, 8, 0.1, true).expect("operation failed in test");
+        let ff = FeedForward::new(d_model, d_model * 4, 0.1).expect("operation failed in test");
+        let ln1 = LayerNorm::new(vec![d_model], 1e-5).expect("operation failed in test");
+        let ln2 = LayerNorm::new(vec![d_model], 1e-5).expect("operation failed in test");
 
         let input_shape = vec![batch_size, seq_len, d_model];
         let input_data = vec![0.1; batch_size * seq_len * d_model];
-        let input = Tensor::from_vec(input_data, &input_shape).unwrap();
+        let input = Tensor::from_vec(input_data, &input_shape).expect("tensor operation failed");
 
         // Forward through all layers
-        let attn_out = mha.forward(input).unwrap();
-        let norm1_out = ln1.forward(attn_out).unwrap();
-        let ff_out = ff.forward(norm1_out).unwrap();
-        let final_out = ln2.forward(ff_out).unwrap();
+        let attn_out = mha.forward(input).expect("forward pass failed");
+        let norm1_out = ln1.forward(attn_out).expect("forward pass failed");
+        let ff_out = ff.forward(norm1_out).expect("forward pass failed");
+        let final_out = ln2.forward(ff_out).expect("forward pass failed");
 
         // Batch size should be preserved throughout
         prop_assert_eq!(final_out.shape()[0], batch_size);

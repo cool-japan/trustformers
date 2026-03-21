@@ -447,7 +447,7 @@ mod tests {
                 0.8,        // 80% utilization
                 Some(65.0), // 65°C temperature
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(measurement.device_id, "gpu-0");
         assert_eq!(measurement.power_watts, 200.0);

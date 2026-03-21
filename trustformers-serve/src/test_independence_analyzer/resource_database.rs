@@ -1332,7 +1332,7 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        db.record_usage(record).unwrap();
+        db.record_usage(record).expect("test operation should succeed");
 
         let report = db.generate_usage_report();
         assert_eq!(report.total_usage_records, 1);

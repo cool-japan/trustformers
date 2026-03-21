@@ -716,8 +716,10 @@ mod tests {
     #[test]
     fn test_tree_structure_building() {
         let config = HierarchicalConfig::new(2, 4, 0, 0);
-        let topology = HierarchicalAggregator::detect_network_topology(&config).unwrap();
-        let tree = HierarchicalAggregator::build_tree_structure(&config, &topology).unwrap();
+        let topology = HierarchicalAggregator::detect_network_topology(&config)
+            .expect("Operation failed in test");
+        let tree = HierarchicalAggregator::build_tree_structure(&config, &topology)
+            .expect("Operation failed in test");
 
         assert_eq!(tree.parent, None); // Root node
         assert_eq!(tree.children, vec![1, 2]);
@@ -727,7 +729,8 @@ mod tests {
     #[test]
     fn test_ring_structure_building() {
         let config = HierarchicalConfig::new(2, 4, 0, 1);
-        let ring = HierarchicalAggregator::build_ring_structure(&config).unwrap();
+        let ring = HierarchicalAggregator::build_ring_structure(&config)
+            .expect("Operation failed in test");
 
         assert_eq!(ring.next_rank, 2);
         assert_eq!(ring.prev_rank, 0);
@@ -737,13 +740,18 @@ mod tests {
     #[test]
     fn test_adaptive_strategy_selection() {
         let config = HierarchicalConfig::new(4, 4, 0, 0);
-        let aggregator = HierarchicalAggregator::new(config).unwrap();
+        let aggregator = HierarchicalAggregator::new(config).expect("Construction failed");
 
         let mut gradients = HashMap::new();
         // Create a large tensor that exceeds 100MB threshold: 8000x8000x4bytes = 256MB
-        gradients.insert("param1".to_string(), Tensor::zeros(&[8000, 8000]).unwrap());
+        gradients.insert(
+            "param1".to_string(),
+            Tensor::zeros(&[8000, 8000]).expect("Failed to create tensor"),
+        );
 
-        let strategy = aggregator.adaptive_strategy_selection(&gradients).unwrap();
+        let strategy = aggregator
+            .adaptive_strategy_selection(&gradients)
+            .expect("Operation failed in test");
         // Should select ring for large data
         assert!(matches!(strategy, AggregationStrategy::Ring));
     }
@@ -751,14 +759,17 @@ mod tests {
     #[test]
     fn test_aggregation_stats_update() {
         let config = HierarchicalConfig::new(2, 2, 0, 0);
-        let mut aggregator = HierarchicalAggregator::new(config).unwrap();
+        let mut aggregator = HierarchicalAggregator::new(config).expect("Construction failed");
 
         let mut gradients = HashMap::new();
-        gradients.insert("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap());
+        gradients.insert(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        );
 
         aggregator
             .update_aggregation_stats(AggregationStrategy::BinaryTree, 100.0, &gradients)
-            .unwrap();
+            .expect("Operation failed in test");
 
         let stats = aggregator.get_stats();
         assert_eq!(stats.total_operations, 1);
@@ -772,14 +783,16 @@ mod tests {
     #[test]
     fn test_recommended_strategy() {
         let small_config = HierarchicalConfig::new(2, 2, 0, 0);
-        let small_aggregator = HierarchicalAggregator::new(small_config).unwrap();
+        let small_aggregator =
+            HierarchicalAggregator::new(small_config).expect("Construction failed");
         assert!(matches!(
             small_aggregator.get_recommended_strategy(),
             AggregationStrategy::BinaryTree
         ));
 
         let large_config = HierarchicalConfig::new(20, 1, 0, 0);
-        let large_aggregator = HierarchicalAggregator::new(large_config).unwrap();
+        let large_aggregator =
+            HierarchicalAggregator::new(large_config).expect("Construction failed");
         assert!(matches!(
             large_aggregator.get_recommended_strategy(),
             AggregationStrategy::Butterfly
@@ -789,7 +802,8 @@ mod tests {
     #[test]
     fn test_butterfly_structure() {
         let config = HierarchicalConfig::new(1, 8, 0, 0);
-        let butterfly = HierarchicalAggregator::build_butterfly_structure(&config).unwrap();
+        let butterfly = HierarchicalAggregator::build_butterfly_structure(&config)
+            .expect("Operation failed in test");
 
         assert_eq!(butterfly.num_stages, 3); // log2(8) = 3
         assert_eq!(butterfly.connections.len(), 3);
@@ -798,7 +812,8 @@ mod tests {
     #[test]
     fn test_network_topology_detection() {
         let config = HierarchicalConfig::new(3, 2, 0, 0);
-        let topology = HierarchicalAggregator::detect_network_topology(&config).unwrap();
+        let topology = HierarchicalAggregator::detect_network_topology(&config)
+            .expect("Operation failed in test");
 
         assert_eq!(topology.node_adjacency.len(), 3);
         assert_eq!(topology.node_bandwidth.len(), 3);

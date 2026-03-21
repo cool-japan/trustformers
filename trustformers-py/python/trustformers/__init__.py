@@ -5,7 +5,7 @@ TrustformeRS: Simplified Core Tensor Operations
 This is a simplified version that only exposes the core tensor operations that are currently working.
 """
 
-__version__ = "0.1.0rc1"
+__version__ = "0.1.0"
 
 # Import only the working Rust extension components
 try:

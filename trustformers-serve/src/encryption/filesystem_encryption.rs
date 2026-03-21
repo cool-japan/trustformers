@@ -1211,10 +1211,10 @@ mod tests {
             }
         ];
 
-        pattern_matcher.compile_patterns(&patterns).await.unwrap();
+        pattern_matcher.compile_patterns(&patterns).await.expect("async operation should succeed in test");
 
         let result = pattern_matcher.matches_pattern(Path::new("model.safetensors")).await;
-        assert!(result.unwrap());
+        assert!(result.expect("test operation should succeed"));
     }
 
     #[tokio::test]

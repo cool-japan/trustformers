@@ -13,7 +13,7 @@ mod tests {
     use tokio::test;
     #[test]
     async fn test_performance_metrics_initialization() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         let snapshot = metrics.get_current_snapshot().await;
         assert_eq!(snapshot.total_allocations, 0);
         assert_eq!(snapshot.total_deallocations, 0);
@@ -22,7 +22,7 @@ mod tests {
     }
     #[test]
     async fn test_allocation_success_recording() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         metrics.record_allocation_success(Duration::from_millis(50)).await;
         metrics.record_allocation_success(Duration::from_millis(75)).await;
         let snapshot = metrics.get_current_snapshot().await;
@@ -32,7 +32,7 @@ mod tests {
     }
     #[test]
     async fn test_allocation_failure_recording() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         metrics.record_allocation_success(Duration::from_millis(50)).await;
         metrics.record_allocation_failure().await;
         let snapshot = metrics.get_current_snapshot().await;
@@ -41,7 +41,7 @@ mod tests {
     }
     #[test]
     async fn test_conflict_recording() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         metrics.record_allocation_success(Duration::from_millis(50)).await;
         metrics.record_conflict().await;
         let snapshot = metrics.get_current_snapshot().await;
@@ -50,7 +50,7 @@ mod tests {
     }
     #[test]
     async fn test_snapshot_creation_and_history() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         metrics.record_allocation_success(Duration::from_millis(50)).await;
         let snapshot1 = metrics.create_snapshot().await;
         metrics.record_allocation_success(Duration::from_millis(100)).await;
@@ -62,7 +62,7 @@ mod tests {
     }
     #[test]
     async fn test_performance_trends_calculation() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         for i in 1..=5 {
             metrics.record_allocation_success(Duration::from_millis(i * 10)).await;
             metrics.create_snapshot().await;
@@ -72,7 +72,7 @@ mod tests {
     }
     #[test]
     async fn test_percentile_calculations() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         let times = vec![10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
         for time in times {
             metrics.record_allocation_success(Duration::from_millis(time)).await;
@@ -84,7 +84,7 @@ mod tests {
     }
     #[test]
     async fn test_performance_report_generation() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         metrics.record_allocation_success(Duration::from_millis(50)).await;
         metrics.record_deallocation_success(Duration::from_millis(25)).await;
         metrics.record_conflict().await;
@@ -96,7 +96,7 @@ mod tests {
     }
     #[test]
     async fn test_performance_analysis() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         for i in 1..=10 {
             metrics.record_allocation_success(Duration::from_millis(i * 20)).await;
             metrics.create_snapshot().await;
@@ -106,7 +106,7 @@ mod tests {
     }
     #[test]
     async fn test_configuration_update() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         let mut new_config = PerformanceConfig::default();
         new_config.history_size = 50;
         new_config.enable_detailed_timing = false;
@@ -117,7 +117,7 @@ mod tests {
     }
     #[test]
     async fn test_metrics_reset() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         metrics.record_allocation_success(Duration::from_millis(50)).await;
         metrics.record_conflict().await;
         metrics.create_snapshot().await;
@@ -130,7 +130,7 @@ mod tests {
     }
     #[test]
     async fn test_data_cleanup() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         for _ in 0..1000 {
             metrics.record_allocation_success(Duration::from_millis(50)).await;
         }
@@ -139,10 +139,10 @@ mod tests {
     }
     #[test]
     async fn test_data_export() {
-        let metrics = PortPerformanceMetrics::new().await.unwrap();
+        let metrics = PortPerformanceMetrics::new().await.expect("async operation should succeed in test");
         metrics.record_allocation_success(Duration::from_millis(50)).await;
         metrics.create_snapshot().await;
-        let export_data = metrics.export_performance_data().await.unwrap();
+        let export_data = metrics.export_performance_data().await.expect("async operation should succeed in test");
         assert!(export_data.contains("current_snapshot"));
         assert!(export_data.contains("trends"));
         assert!(export_data.contains("history"));
@@ -151,7 +151,7 @@ mod tests {
     async fn test_concurrent_metrics_recording() {
         use std::sync::Arc;
         use tokio::task;
-        let metrics = Arc::new(PortPerformanceMetrics::new().await.unwrap());
+        let metrics = Arc::new(PortPerformanceMetrics::new().await.expect("async operation should succeed in test"));
         let mut handles = vec![];
         for i in 0..10 {
             let metrics_clone = Arc::clone(&metrics);
@@ -165,7 +165,7 @@ mod tests {
             handles.push(handle);
         }
         for handle in handles {
-            handle.await.unwrap();
+            handle.await.expect("async operation should succeed in test");
         }
         let snapshot = metrics.get_current_snapshot().await;
         assert_eq!(snapshot.total_allocations, 100);

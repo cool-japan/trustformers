@@ -698,7 +698,7 @@ mod tests {
                 HashSet::new(),
                 None,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(cache.get("key1"), Some("value1".to_string()));
         assert_eq!(cache.get("nonexistent"), None);
@@ -726,7 +726,7 @@ mod tests {
                 HashSet::new(),
                 None,
             )
-            .unwrap();
+            .expect("operation failed in test");
         cache
             .insert(
                 "key2".to_string(),
@@ -736,7 +736,7 @@ mod tests {
                 HashSet::new(),
                 None,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Access key1 to make it more recent
         cache.get("key1");
@@ -751,7 +751,7 @@ mod tests {
                 HashSet::new(),
                 None,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(cache.get("key1"), Some("value1".to_string()));
         assert_eq!(cache.get("key3"), Some("value3".to_string()));
@@ -778,7 +778,7 @@ mod tests {
                 HashSet::new(),
                 Some(Duration::from_millis(50)),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Should be available immediately
         assert_eq!(cache.get("key1"), Some("value1".to_string()));
@@ -812,7 +812,7 @@ mod tests {
                 tags1,
                 None,
             )
-            .unwrap();
+            .expect("operation failed in test");
         cache
             .insert(
                 "key2".to_string(),
@@ -822,7 +822,7 @@ mod tests {
                 tags2,
                 None,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Test get by tag
         let bert_keys = cache.get_by_tag("bert");

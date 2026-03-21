@@ -602,7 +602,7 @@ impl TensorInspector {
         // Compute percentiles
         let mut sorted_values =
             values.iter().cloned().filter(|x| x.is_finite()).collect::<Vec<_>>();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut percentiles = HashMap::new();
         for &p in &[5.0, 25.0, 50.0, 75.0, 95.0, 99.0] {

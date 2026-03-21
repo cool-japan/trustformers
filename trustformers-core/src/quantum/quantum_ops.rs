@@ -653,7 +653,7 @@ mod tests {
             angle: std::f64::consts::PI,
         };
 
-        let result = x_gate.apply(&state).unwrap();
+        let result = x_gate.apply(&state).expect("operation failed in test");
         assert!(result.amplitudes[0].magnitude() < 1e-10);
         assert!((result.amplitudes[1].magnitude() - 1.0).abs() < 1e-10);
     }
@@ -672,7 +672,7 @@ mod tests {
             parameters: vec![],
         };
 
-        let result = cnot.apply(&state).unwrap();
+        let result = cnot.apply(&state).expect("operation failed in test");
         assert!(result.amplitudes[2].magnitude() < 1e-10);
         assert!((result.amplitudes[3].magnitude() - 1.0).abs() < 1e-10);
     }

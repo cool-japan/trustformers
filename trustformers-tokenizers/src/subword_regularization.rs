@@ -304,7 +304,7 @@ mod tests {
         let result = regularizer.encode("hello");
         assert!(result.is_ok());
 
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
     }
 
@@ -336,7 +336,7 @@ mod tests {
         let results = regularizer.encode_with_regularization("hello world");
         assert!(results.is_ok());
 
-        let tokenized_results = results.unwrap();
+        let tokenized_results = results.expect("Operation failed in test");
         assert_eq!(tokenized_results.len(), 3);
 
         for result in tokenized_results {
@@ -360,7 +360,7 @@ mod tests {
         let result = regularizer.sample_segmentation("hello");
         assert!(result.is_ok());
 
-        let segmentation = result.unwrap();
+        let segmentation = result.expect("Operation failed in test");
         assert!(!segmentation.is_empty());
     }
 
@@ -398,8 +398,9 @@ mod tests {
             debug: true,
         };
 
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: SubwordRegularizationConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("Serialization failed");
+        let deserialized: SubwordRegularizationConfig =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
 
         assert_eq!(config.alpha, deserialized.alpha);
         assert_eq!(config.num_samples, deserialized.num_samples);

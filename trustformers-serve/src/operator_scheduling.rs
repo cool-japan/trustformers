@@ -1143,7 +1143,10 @@ mod tests {
             is_available: true,
             last_updated: SystemTime::now(),
         };
-        service.register_device(device, resource).await.unwrap();
+        service
+            .register_device(device, resource)
+            .await
+            .expect("registration should succeed in test");
 
         // Create and submit a task
         let task = OperatorTask {

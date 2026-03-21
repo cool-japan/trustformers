@@ -605,7 +605,7 @@ mod tests {
         let result = quantizer.quantize(&data);
         assert!(result.is_ok());
 
-        let quantized = result.unwrap();
+        let quantized = result.expect("quantization should succeed in test");
         assert_eq!(quantized.quant_type, GGUFQuantType::Q4_0);
         assert!(!quantized.scales.is_empty());
     }
@@ -622,7 +622,7 @@ mod tests {
         let result = quantizer.quantize(&data);
         assert!(result.is_ok());
 
-        let quantized = result.unwrap();
+        let quantized = result.expect("quantization should succeed in test");
         assert_eq!(quantized.quant_type, GGUFQuantType::Q4_1);
         assert!(!quantized.scales.is_empty());
         assert!(!quantized.biases.is_empty());
@@ -640,7 +640,7 @@ mod tests {
         let result = quantizer.quantize(&data);
         assert!(result.is_ok());
 
-        let quantized = result.unwrap();
+        let quantized = result.expect("quantization should succeed in test");
         assert_eq!(quantized.quant_type, GGUFQuantType::Q8_0);
     }
 
@@ -656,7 +656,7 @@ mod tests {
         let result = quantizer.quantize(&data);
         assert!(result.is_ok());
 
-        let quantized = result.unwrap();
+        let quantized = result.expect("quantization should succeed in test");
         assert_eq!(quantized.quant_type, GGUFQuantType::F16);
         assert_eq!(quantized.metadata.compression_ratio, 2.0);
     }
@@ -670,8 +670,10 @@ mod tests {
         let quantizer = GGUFBlockQuantizer::new(config);
 
         let original_data = vec![1.0, 2.0, 3.0, -1.0, -2.0, -3.0, 0.5, -0.5];
-        let quantized = quantizer.quantize(&original_data).unwrap();
-        let dequantized = quantizer.dequantize(&quantized).unwrap();
+        let quantized =
+            quantizer.quantize(&original_data).expect("quantization should succeed in test");
+        let dequantized =
+            quantizer.dequantize(&quantized).expect("quantization should succeed in test");
 
         // Check that dequantized data has same length
         assert_eq!(dequantized.len(), original_data.len());

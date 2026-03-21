@@ -573,24 +573,30 @@ mod tests {
         let var = engine.variable(tensor, true);
 
         assert!(var.requires_grad());
-        assert_eq!(var.shape().unwrap(), vec![2, 3]);
+        assert_eq!(var.shape().expect("operation failed in test"), vec![2, 3]);
     }
 
     #[test]
     fn test_gradient_computation() {
         let engine = AutodiffEngine::default();
 
-        let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
-        let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
+        let a = engine.variable(Tensor::scalar(2.0).expect("tensor operation failed"), true);
+        let b = engine.variable(Tensor::scalar(3.0).expect("tensor operation failed"), true);
         let c = a.mul(&b).expect("Multiplication failed");
 
-        engine.backward(&c, None).unwrap();
+        engine.backward(&c, None).expect("operation failed in test");
 
-        let grad_a = engine.get_grad(&a).unwrap().unwrap();
-        let grad_b = engine.get_grad(&b).unwrap().unwrap();
+        let grad_a = engine
+            .get_grad(&a)
+            .expect("operation failed in test")
+            .expect("operation failed in test");
+        let grad_b = engine
+            .get_grad(&b)
+            .expect("operation failed in test")
+            .expect("operation failed in test");
 
-        assert_eq!(grad_a.to_scalar().unwrap(), 3.0);
-        assert_eq!(grad_b.to_scalar().unwrap(), 2.0);
+        assert_eq!(grad_a.to_scalar().expect("operation failed in test"), 3.0);
+        assert_eq!(grad_b.to_scalar().expect("operation failed in test"), 2.0);
     }
 
     #[test]
@@ -622,7 +628,7 @@ mod tests {
         let tensor = Tensor::ones(&[100, 100]).expect("Failed to create ones tensor");
         let _var = engine.variable(tensor, true);
 
-        let memory_info = engine.memory_info().unwrap();
+        let memory_info = engine.memory_info().expect("operation failed in test");
         assert!(memory_info.total_memory_bytes > 0);
         assert!(memory_info.num_tensors > 0);
         assert!(memory_info.num_nodes > 0);
@@ -636,7 +642,7 @@ mod tests {
         };
         let engine = AutodiffEngine::new(config);
 
-        let var = engine.variable(Tensor::scalar(1.0).unwrap(), true);
+        let var = engine.variable(Tensor::scalar(1.0).expect("tensor operation failed"), true);
         let result = engine.check_anomalies(&var);
 
         assert!(result.is_ok());
@@ -645,11 +651,11 @@ mod tests {
     #[test]
     fn test_graph_export() {
         let engine = AutodiffEngine::default();
-        let a = engine.variable(Tensor::scalar(2.0).unwrap(), true);
-        let b = engine.variable(Tensor::scalar(3.0).unwrap(), true);
+        let a = engine.variable(Tensor::scalar(2.0).expect("tensor operation failed"), true);
+        let b = engine.variable(Tensor::scalar(3.0).expect("tensor operation failed"), true);
         let _c = a.mul(&b).expect("Multiplication failed");
 
-        let dot_graph = engine.export_graph().unwrap();
+        let dot_graph = engine.export_graph().expect("operation failed in test");
         assert!(dot_graph.contains("digraph G"));
         assert!(dot_graph.contains("->"));
     }

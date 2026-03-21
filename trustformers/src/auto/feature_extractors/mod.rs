@@ -609,7 +609,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("Feature extraction should succeed");
         assert_eq!(output.features.len(), 768);
         assert_eq!(output.shape, vec![768]);
     }
@@ -649,15 +649,24 @@ mod tests {
         let caps = extractor.capabilities();
 
         assert_eq!(
-            caps.get("feature_size").unwrap().as_u64().expect("expected u64 value"),
+            caps.get("feature_size")
+                .expect("missing feature_size capability")
+                .as_u64()
+                .expect("expected u64 value"),
             80
         );
         assert_eq!(
-            caps.get("supports_batching").unwrap().as_bool().unwrap(),
+            caps.get("supports_batching")
+                .expect("missing supports_batching capability")
+                .as_bool()
+                .expect("expected bool value"),
             true
         );
         assert_eq!(
-            caps.get("max_batch_size").unwrap().as_u64().expect("expected u64 value"),
+            caps.get("max_batch_size")
+                .expect("missing max_batch_size capability")
+                .as_u64()
+                .expect("expected u64 value"),
             16
         );
     }

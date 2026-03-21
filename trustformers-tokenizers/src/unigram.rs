@@ -193,8 +193,8 @@ mod tests {
         scores.insert("he".to_string(), -2.0);
         scores.insert("llo".to_string(), -2.0);
 
-        let tokenizer = UnigramTokenizer::new(vocab, scores).unwrap();
-        let result = tokenizer.encode("hello world").unwrap();
+        let tokenizer = UnigramTokenizer::new(vocab, scores).expect("Construction failed");
+        let result = tokenizer.encode("hello world").expect("Encoding failed");
 
         assert_eq!(result.input_ids, vec![0, 1]);
         assert_eq!(result.attention_mask, vec![1, 1]);

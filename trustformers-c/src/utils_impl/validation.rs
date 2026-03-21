@@ -533,19 +533,19 @@ mod tests {
 
     #[test]
     fn test_model_name_validation() {
-        let valid_name = CString::new("bert-base-uncased").unwrap();
+        let valid_name = CString::new("bert-base-uncased").expect("CString creation should succeed for valid test input");
         assert!(validate_model_name(valid_name.as_ptr()).is_ok());
 
-        let invalid_name = CString::new("../../../etc/passwd").unwrap();
+        let invalid_name = CString::new("../../../etc/passwd").expect("CString creation should succeed for valid test input");
         assert!(validate_model_name(invalid_name.as_ptr()).is_err());
     }
 
     #[test]
     fn test_path_validation() {
-        let valid_path = CString::new("models/bert/config.json").unwrap();
+        let valid_path = CString::new("models/bert/config.json").expect("CString creation should succeed for valid test input");
         assert!(validate_file_path(valid_path.as_ptr()).is_ok());
 
-        let invalid_path = CString::new("../../../etc/passwd").unwrap();
+        let invalid_path = CString::new("../../../etc/passwd").expect("CString creation should succeed for valid test input");
         assert!(validate_file_path(invalid_path.as_ptr()).is_err());
     }
 
@@ -558,10 +558,10 @@ mod tests {
 
     #[test]
     fn test_json_validation() {
-        let valid_json = CString::new(r#"{"key": "value", "number": 42}"#).unwrap();
+        let valid_json = CString::new(r#"{"key": "value", "number": 42}"#).expect("CString creation should succeed for valid test input");
         assert!(json_validation::validate_json_string(valid_json.as_ptr()).is_ok());
 
-        let invalid_json = CString::new("not json").unwrap();
+        let invalid_json = CString::new("not json").expect("CString creation should succeed for valid test input");
         assert!(json_validation::validate_json_string(invalid_json.as_ptr()).is_err());
     }
 

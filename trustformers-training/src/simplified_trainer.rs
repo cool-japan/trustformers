@@ -825,7 +825,7 @@ mod tests {
             .build();
 
         assert!(result.is_ok());
-        let trainer = result.unwrap();
+        let trainer = result.expect("operation failed in test");
         assert_eq!(trainer.config.learning_rate, 0.001);
         assert_eq!(trainer.config.batch_size, 16);
         assert_eq!(trainer.config.num_epochs, 5);

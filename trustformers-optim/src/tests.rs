@@ -28,7 +28,7 @@ pub mod test_utils {
     /// Creates a test tensor with specified shape and initial values.
     pub fn create_test_tensor(shape: &[usize], value: f32) -> Tensor {
         let size = shape.iter().product();
-        Tensor::new(vec![value; size]).unwrap()
+        Tensor::new(vec![value; size]).expect("Failed to create test tensor")
     }
 
     /// Creates a test gradient tensor with random values.
@@ -38,7 +38,7 @@ pub mod test_utils {
         for i in 0..size {
             data.push((i as f32 % 100.0) * 0.001 - 0.05); // Values between -0.05 and 0.05
         }
-        Tensor::new(data).unwrap()
+        Tensor::new(data).expect("Failed to create test gradient tensor")
     }
 
     /// Measures optimizer performance for a given number of steps.
@@ -56,7 +56,9 @@ pub mod test_utils {
                 let grad = create_test_gradient(&[size]);
 
                 // Use standard update method from Optimizer trait
-                optimizer.update(&mut param, &grad).unwrap();
+                optimizer
+                    .update(&mut param, &grad)
+                    .expect("Optimizer update failed during benchmark");
                 total_elements += size;
             }
             optimizer.step();
@@ -102,18 +104,18 @@ mod integration_tests {
         let grad = create_test_gradient(&[1000]);
 
         // Test basic functionality
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
 
         assert_eq!(optimizer.get_lr(), 1e-3);
         assert_eq!(optimizer.num_parameters(), 1);
 
         // Test state management
-        let state_dict = optimizer.state_dict().unwrap();
+        let state_dict = optimizer.state_dict().expect("Failed to get state dict");
         assert!(!state_dict.is_empty());
 
         let mut new_optimizer = StandardizedAdam::adamw(1e-3, 0.01);
-        new_optimizer.load_state_dict(state_dict).unwrap();
+        new_optimizer.load_state_dict(state_dict).expect("Failed to load state dict");
     }
 
     #[test]
@@ -122,7 +124,7 @@ mod integration_tests {
         let mut param = create_test_tensor(&[2048], 0.5);
         let grad = create_test_gradient(&[2048]);
 
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
 
         let stats = optimizer.cache_stats();
@@ -140,8 +142,8 @@ mod integration_tests {
         let grad2 = create_test_gradient(&[1500]);
 
         // Test single parameter updates
-        optimizer.update(&mut param1, &grad1).unwrap();
-        optimizer.update(&mut param2, &grad2).unwrap();
+        optimizer.update(&mut param1, &grad1).expect("Optimizer update failed");
+        optimizer.update(&mut param2, &grad2).expect("Optimizer update failed");
         optimizer.step();
 
         let stats = optimizer.parallel_stats();
@@ -155,7 +157,7 @@ mod integration_tests {
         let mut param = create_test_tensor(&[512], 2.0);
         let grad = create_test_gradient(&[512]);
 
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
 
         let stats = optimizer.layout_stats();
@@ -169,7 +171,7 @@ mod integration_tests {
         let mut param = create_test_tensor(&[1024], 1.5);
         let grad = create_test_gradient(&[1024]);
 
-        optimizer.update(&mut param, &grad).unwrap();
+        optimizer.update(&mut param, &grad).expect("Optimizer update failed");
         optimizer.step();
 
         let stats = optimizer.gpu_stats();
@@ -313,7 +315,7 @@ mod memory_tests {
         // Add parameters and check memory growth
         let mut param1 = create_test_tensor(&[1000], 1.0);
         let grad1 = create_test_gradient(&[1000]);
-        optimizer.update(&mut param1, &grad1).unwrap();
+        optimizer.update(&mut param1, &grad1).expect("Optimizer update failed");
 
         let stats_after_param1 = optimizer.memory_usage();
         assert_eq!(stats_after_param1.num_parameters, 1);
@@ -321,7 +323,7 @@ mod memory_tests {
 
         let mut param2 = create_test_tensor(&[2000], 1.0);
         let grad2 = create_test_gradient(&[2000]);
-        optimizer.update(&mut param2, &grad2).unwrap();
+        optimizer.update(&mut param2, &grad2).expect("Optimizer update failed");
 
         let stats_after_param2 = optimizer.memory_usage();
         assert_eq!(stats_after_param2.num_parameters, 2);
@@ -342,7 +344,7 @@ mod memory_tests {
 
         // Add parameters to optimizer
         for i in 0..10 {
-            optimizer.update(&mut params[i], &grads[i]).unwrap();
+            optimizer.update(&mut params[i], &grads[i]).expect("Optimizer update failed");
         }
 
         let stats_before = optimizer.memory_usage();
@@ -371,7 +373,7 @@ mod memory_tests {
 
         // Update parameters with optimizer
         for i in 0..param_sizes.len() {
-            optimizer.update(&mut params[i], &grads[i]).unwrap();
+            optimizer.update(&mut params[i], &grads[i]).expect("Optimizer update failed");
         }
 
         let stats = optimizer.parallel_stats();
@@ -402,8 +404,8 @@ mod convergence_tests {
                 let _loss = (x - target).powi(2);
                 let grad_val = 2.0 * (x - target); // Gradient of (x - 2)^2
 
-                let grad = Tensor::new(vec![grad_val]).unwrap();
-                optimizer.update(&mut param, &grad).unwrap();
+                let grad = Tensor::new(vec![grad_val]).expect("Failed to create tensor");
+                optimizer.update(&mut param, &grad).expect("Optimizer update failed");
                 optimizer.step();
 
                 // Check convergence
@@ -433,7 +435,7 @@ mod convergence_tests {
         let mut param = create_test_tensor(&[1], 1.0);
 
         // Apply consistent positive gradient for several steps (parameter should decrease)
-        let consistent_grad = Tensor::new(vec![0.1]).unwrap();
+        let consistent_grad = Tensor::new(vec![0.1]).expect("Failed to create tensor");
 
         let mut param_values = Vec::new();
         for _step in 0..10 {
@@ -441,7 +443,7 @@ mod convergence_tests {
                 param_values.push(param_data[0]);
             }
 
-            optimizer.update(&mut param, &consistent_grad).unwrap();
+            optimizer.update(&mut param, &consistent_grad).expect("Optimizer update failed");
             optimizer.step();
         }
 
@@ -472,11 +474,13 @@ mod convergence_tests {
 
         let mut param_l2 = create_test_tensor(&[1], 2.0);
         let mut param_decoupled = create_test_tensor(&[1], 2.0);
-        let zero_grad = Tensor::new(vec![0.0]).unwrap(); // Zero gradient to isolate weight decay effect
+        let zero_grad = Tensor::new(vec![0.0]).expect("Failed to create tensor"); // Zero gradient to isolate weight decay effect
 
         // Apply zero gradient to see pure weight decay effect
-        adam_l2.update(&mut param_l2, &zero_grad).unwrap();
-        adamw_decoupled.update(&mut param_decoupled, &zero_grad).unwrap();
+        adam_l2.update(&mut param_l2, &zero_grad).expect("Optimizer update failed");
+        adamw_decoupled
+            .update(&mut param_decoupled, &zero_grad)
+            .expect("Optimizer update failed");
 
         // Both should apply weight decay, but differently
         if let (Tensor::F32(ref l2_data), Tensor::F32(ref decoupled_data)) =
@@ -544,8 +548,8 @@ mod error_handling_tests {
     #[test]
     fn test_empty_tensors() {
         let mut optimizer = StandardizedAdam::adamw(1e-3, 0.01);
-        let mut param = Tensor::zeros(&[0]).unwrap();
-        let grad = Tensor::zeros(&[0]).unwrap();
+        let mut param = Tensor::zeros(&[0]).expect("Failed to create tensor");
+        let grad = Tensor::zeros(&[0]).expect("Failed to create tensor");
 
         let result = optimizer.update(&mut param, &grad);
         assert!(result.is_ok(), "Empty tensors should be handled gracefully");
@@ -572,7 +576,7 @@ mod error_handling_tests {
     fn test_nan_gradient_handling() {
         let mut optimizer = StandardizedAdam::adamw(1e-3, 0.01);
         let mut param = create_test_tensor(&[100], 1.0);
-        let grad = Tensor::new(vec![f32::NAN; 100]).unwrap();
+        let grad = Tensor::new(vec![f32::NAN; 100]).expect("Failed to create tensor");
 
         let result = optimizer.update(&mut param, &grad);
 

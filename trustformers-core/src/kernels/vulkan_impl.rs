@@ -805,7 +805,7 @@ mod tests {
             let stats = vulkan.get_memory_stats();
             assert!(stats.is_ok());
 
-            let (total, peak, free) = stats.unwrap();
+            let (total, peak, free) = stats.expect("operation failed in test");
             // assert!(total >= 0);
             // assert!(peak >= 0);
             // assert!(free >= 0);

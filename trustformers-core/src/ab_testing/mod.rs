@@ -200,10 +200,11 @@ mod tests {
             max_duration_hours: 168,
         };
 
-        let experiment_id = manager.create_experiment(config).unwrap();
+        let experiment_id = manager.create_experiment(config).expect("operation failed in test");
         assert!(!experiment_id.is_empty());
 
-        let status = manager.get_experiment_status(&experiment_id).unwrap();
+        let status =
+            manager.get_experiment_status(&experiment_id).expect("operation failed in test");
         assert_eq!(status, ExperimentStatus::Draft);
     }
 
@@ -220,10 +221,10 @@ mod tests {
             max_duration_hours: 24,
         };
 
-        let experiment_id = manager.create_experiment(config).unwrap();
+        let experiment_id = manager.create_experiment(config).expect("operation failed in test");
 
         // Start the experiment
-        manager.start_experiment(&experiment_id).unwrap();
+        manager.start_experiment(&experiment_id).expect("operation failed in test");
 
         // Route multiple requests and verify distribution
         let mut control_count = 0;
@@ -231,7 +232,9 @@ mod tests {
 
         for i in 0..1000 {
             let user_id = format!("user-{}", i);
-            let variant = manager.route_request(&experiment_id, &user_id).unwrap();
+            let variant = manager
+                .route_request(&experiment_id, &user_id)
+                .expect("operation failed in test");
 
             match variant.name() {
                 "control" => control_count += 1,

@@ -728,7 +728,7 @@ mod tests {
         let state_dict = optimizer.state_dict();
         assert!(state_dict.is_ok());
 
-        let state = state_dict.unwrap();
+        let state = state_dict.expect("Operation failed in test");
         assert!(state.contains_key("step"));
     }
 
@@ -739,8 +739,11 @@ mod tests {
         assert!(serialized.is_ok());
 
         let deserialized: std::result::Result<AMacPConfig, _> =
-            serde_json::from_str(&serialized.unwrap());
+            serde_json::from_str(&serialized.expect("Deserialization failed"));
         assert!(deserialized.is_ok());
-        assert_eq!(deserialized.unwrap().learning_rate, 6e-4);
+        assert_eq!(
+            deserialized.expect("Operation failed in test").learning_rate,
+            6e-4
+        );
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Intel oneAPI implementation for TrustformeRS hardware acceleration
@@ -383,7 +383,7 @@ mod tests {
         let _ = api::init_intel();
         let info = api::intel_device_info();
         assert!(info.is_ok());
-        let info_str = info.unwrap();
+        let info_str = info.expect("operation failed in test");
         assert!(info_str.contains("Intel"));
     }
 
@@ -413,7 +413,7 @@ mod tests {
         let _ = api::intel_matmul(&a, &b, &mut c);
 
         // Check stats
-        let stats = api::intel_performance_stats().unwrap();
+        let stats = api::intel_performance_stats().expect("operation failed in test");
         assert!(stats.total_operations > 0);
         assert!(stats.kernel_launches > 0);
     }
@@ -424,7 +424,7 @@ mod tests {
         let stats = api::intel_memory_stats();
         assert!(stats.is_ok());
 
-        let (_used, total) = stats.unwrap();
+        let (_used, total) = stats.expect("operation failed in test");
         assert!(total > 0); // Should have some memory available
     }
 
@@ -434,7 +434,7 @@ mod tests {
         let devices = api::intel_list_devices();
         assert!(devices.is_ok());
 
-        let device_list = devices.unwrap();
+        let device_list = devices.expect("operation failed in test");
         assert!(!device_list.is_empty()); // Should have at least fallback device
     }
 
@@ -445,7 +445,7 @@ mod tests {
         assert!(precision.is_ok());
 
         // Should return some valid precision
-        match precision.unwrap() {
+        match precision.expect("operation failed in test") {
             IntelPrecision::FP32 | IntelPrecision::FP16 | IntelPrecision::BF16 => (),
             other => panic!("Unexpected precision recommendation: {:?}", other),
         }

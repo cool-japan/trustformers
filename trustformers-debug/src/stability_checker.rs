@@ -478,7 +478,7 @@ mod tests {
         let mut checker = StabilityChecker::new();
         let values = vec![1.0, f64::NAN, 2.0, f64::NAN];
 
-        let issues = checker.check_tensor("layer1", &values).unwrap();
+        let issues = checker.check_tensor("layer1", &values).expect("tensor operation failed");
         assert!(issues > 0);
         assert!(checker.has_issues());
     }
@@ -488,7 +488,7 @@ mod tests {
         let mut checker = StabilityChecker::new();
         let values = vec![1.0, f64::INFINITY, 2.0, f64::NEG_INFINITY];
 
-        let issues = checker.check_tensor("layer1", &values).unwrap();
+        let issues = checker.check_tensor("layer1", &values).expect("tensor operation failed");
         assert!(issues > 0);
         assert!(checker.has_issues());
     }
@@ -498,7 +498,7 @@ mod tests {
         let mut checker = StabilityChecker::new();
         let values = vec![1.0, 1e-20, 2.0, 1e-18];
 
-        let issues = checker.check_tensor("layer1", &values).unwrap();
+        let issues = checker.check_tensor("layer1", &values).expect("tensor operation failed");
         assert!(issues > 0);
     }
 
@@ -510,7 +510,7 @@ mod tests {
         let mut checker = StabilityChecker::with_config(config);
         let values = vec![1.0, 200.0, 2.0, 300.0];
 
-        let issues = checker.check_tensor("layer1", &values).unwrap();
+        let issues = checker.check_tensor("layer1", &values).expect("tensor operation failed");
         assert!(issues > 0);
     }
 
@@ -518,8 +518,12 @@ mod tests {
     fn test_summary() {
         let mut checker = StabilityChecker::new();
 
-        checker.check_tensor("layer1", &[f64::NAN, 1.0]).unwrap();
-        checker.check_tensor("layer2", &[f64::INFINITY, 2.0]).unwrap();
+        checker
+            .check_tensor("layer1", &[f64::NAN, 1.0])
+            .expect("tensor operation failed");
+        checker
+            .check_tensor("layer2", &[f64::INFINITY, 2.0])
+            .expect("tensor operation failed");
 
         let summary = checker.summary();
         assert!(summary.total_issues > 0);
@@ -529,7 +533,9 @@ mod tests {
     #[test]
     fn test_report() {
         let mut checker = StabilityChecker::new();
-        checker.check_tensor("layer1", &[f64::NAN, 1.0]).unwrap();
+        checker
+            .check_tensor("layer1", &[f64::NAN, 1.0])
+            .expect("tensor operation failed");
 
         let report = checker.report();
         assert!(report.contains("Numerical Stability Report"));
@@ -544,9 +550,11 @@ mod tests {
         let output_path = temp_dir.join("stability_issues.json");
 
         let mut checker = StabilityChecker::new();
-        checker.check_tensor("layer1", &[f64::NAN, 1.0]).unwrap();
+        checker
+            .check_tensor("layer1", &[f64::NAN, 1.0])
+            .expect("tensor operation failed");
 
-        checker.export_to_json(&output_path).unwrap();
+        checker.export_to_json(&output_path).expect("operation failed in test");
         assert!(output_path.exists());
 
         // Clean up
@@ -556,7 +564,7 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut checker = StabilityChecker::new();
-        checker.check_tensor("layer1", &[f64::NAN]).unwrap();
+        checker.check_tensor("layer1", &[f64::NAN]).expect("tensor operation failed");
 
         assert!(checker.has_issues());
 
@@ -570,7 +578,7 @@ mod tests {
         let mut checker = StabilityChecker::new();
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
 
-        let issues = checker.check_tensor("layer1", &values).unwrap();
+        let issues = checker.check_tensor("layer1", &values).expect("tensor operation failed");
         assert_eq!(issues, 0);
         assert!(!checker.has_issues());
     }
@@ -591,7 +599,7 @@ mod tests {
         let values = vec![1.0, f64::INFINITY, f64::NAN];
 
         // Should only detect NaN, not Inf
-        let issues = checker.check_tensor("layer1", &values).unwrap();
+        let issues = checker.check_tensor("layer1", &values).expect("tensor operation failed");
         assert_eq!(issues, 1);
     }
 }

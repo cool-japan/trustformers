@@ -21,8 +21,8 @@
     "native",
     "performance"
   ],
-  "author": "TrustformeRS Team",
-  "license": "MIT",
+  "author": "COOLJAPAN OU (Team KitaSan) <contact@cooljapan.tech>",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/cool-japan/trustformers.git",

@@ -562,13 +562,14 @@ mod tests {
             ..Default::default()
         };
 
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
+        let mp_context =
+            Arc::new(ModelParallelContext::new(config).expect("operation failed in test"));
 
         let model = PipelineModelBuilder::new(mp_context)
             .add_stage(PipelineStage::new(0, 0))
             .add_stage(PipelineStage::new(1, 1))
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(model.num_stages(), 2);
     }

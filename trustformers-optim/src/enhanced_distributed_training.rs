@@ -1559,11 +1559,12 @@ mod tests {
         };
 
         let mut compressor = GradientCompressor::new(config);
-        let gradient = Tensor::ones(&[10]).unwrap();
+        let gradient = Tensor::ones(&[10]).expect("Failed to create tensor");
         let mut gradients = HashMap::new();
         gradients.insert("test".to_string(), gradient);
 
-        let compressed = compressor.compress_gradients(&gradients).unwrap();
+        let compressed =
+            compressor.compress_gradients(&gradients).expect("Operation failed in test");
         assert!(compressed.contains_key("test"));
 
         let compressed_grad = &compressed["test"];
@@ -1583,7 +1584,7 @@ mod tests {
             communication_bandwidth: Arc::new(Mutex::new(1000.0)),
         })];
 
-        let metrics = monitor.collect_metrics(&gpu_contexts).unwrap();
+        let metrics = monitor.collect_metrics(&gpu_contexts).expect("Operation failed in test");
         assert_eq!(metrics.gpu_utilization.len(), 1);
         assert_eq!(metrics.memory_usage.len(), 1);
     }
@@ -1604,7 +1605,8 @@ mod tests {
 
         // Simulate low utilization
         let low_utilization = vec![0.5, 0.6];
-        let _adjusted = batcher.update_batch_sizes(&low_utilization).unwrap();
+        let _adjusted =
+            batcher.update_batch_sizes(&low_utilization).expect("Operation failed in test");
 
         // Should increase batch sizes due to low utilization
         // Note: May not adjust on first call due to frequency requirements

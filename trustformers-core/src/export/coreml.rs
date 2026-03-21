@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn test_coreml_weight_params() {
         let exporter = CoreMLExporter::new();
-        let weights = exporter.create_dummy_weights(100).unwrap();
+        let weights = exporter.create_dummy_weights(100).expect("operation failed in test");
 
         assert_eq!(weights.float_value.len(), 100);
         assert!(weights.float16_value.is_empty());

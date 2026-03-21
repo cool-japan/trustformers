@@ -730,7 +730,7 @@ mod tests {
 
         let tensor =
             Tensor::from_vec(vec![1.0, 2.0, 3.0, 4.0], &[4]).expect("Tensor from_vec failed");
-        observer.update(&tensor).unwrap();
+        observer.update(&tensor).expect("tensor operation failed");
 
         assert_eq!(observer.num_observations, 4);
         assert!(observer.min_val <= 1.0);
@@ -821,7 +821,8 @@ mod tests {
         let quantized =
             Tensor::from_vec(vec![1.1, 1.9, 3.1, 3.9], &[4]).expect("Tensor from_vec failed");
 
-        let noise = QATUtils::calculate_quantization_noise(&original, &quantized).unwrap();
+        let noise = QATUtils::calculate_quantization_noise(&original, &quantized)
+            .expect("operation failed in test");
         assert!(noise > 0.0);
         assert!(noise < 1.0); // Should be small for close values
     }

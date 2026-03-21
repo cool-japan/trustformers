@@ -909,13 +909,16 @@ mod tests {
         // Add shares from multiple clients
         for i in 0..5 {
             let mut share = HashMap::new();
-            share.insert("weight".to_string(), Tensor::ones(&[10, 10]).unwrap());
+            share.insert(
+                "weight".to_string(),
+                Tensor::ones(&[10, 10]).expect("tensor operation failed"),
+            );
             aggregator.add_share(format!("client_{}", i), share);
         }
 
         let result = aggregator.aggregate();
         assert!(result.is_ok());
-        assert!(result.unwrap().contains_key("weight"));
+        assert!(result.expect("operation failed in test").contains_key("weight"));
     }
 
     #[test]

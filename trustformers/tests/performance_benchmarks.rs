@@ -93,7 +93,7 @@ fn benchmark_error_creation_performance() {
 #[rstest]
 fn benchmark_profiler_overhead() {
     let profiler = trustformers::profiler::get_global_profiler();
-    let session_id = profiler.start_session("benchmark_session").unwrap();
+    let session_id = profiler.start_session("benchmark_session").expect("operation failed in test");
 
     let iterations = 1000;
 
@@ -131,7 +131,7 @@ fn benchmark_profiler_overhead() {
         overhead_per_op
     );
 
-    profiler.end_session(&session_id).unwrap();
+    profiler.end_session(&session_id).expect("operation failed in test");
 }
 
 #[rstest]
@@ -580,16 +580,17 @@ fn benchmark_json_operations() {
     // JSON serialization
     let start = Instant::now();
     for _ in 0..iterations {
-        let _serialized = serde_json::to_string(&test_config).unwrap();
+        let _serialized = serde_json::to_string(&test_config).expect("JSON serialization failed");
         std::hint::black_box(_serialized);
     }
     let serialize_duration = start.elapsed();
 
     // JSON deserialization
-    let json_string = serde_json::to_string(&test_config).unwrap();
+    let json_string = serde_json::to_string(&test_config).expect("JSON serialization failed");
     let start = Instant::now();
     for _ in 0..iterations {
-        let _deserialized: Value = serde_json::from_str(&json_string).unwrap();
+        let _deserialized: Value =
+            serde_json::from_str(&json_string).expect("JSON deserialization failed");
         std::hint::black_box(_deserialized);
     }
     let deserialize_duration = start.elapsed();
@@ -660,7 +661,8 @@ mod regression_tests {
     #[rstest]
     fn test_no_performance_regression_profiler() {
         let profiler = trustformers::profiler::get_global_profiler();
-        let session_id = profiler.start_session("regression_test").unwrap();
+        let session_id =
+            profiler.start_session("regression_test").expect("operation failed in test");
 
         // Baseline: profiler overhead should be minimal
         let iterations = 1000;
@@ -690,7 +692,7 @@ mod regression_tests {
             overhead_per_op
         );
 
-        profiler.end_session(&session_id).unwrap();
+        profiler.end_session(&session_id).expect("operation failed in test");
     }
 }
 
@@ -721,7 +723,7 @@ mod load_tests {
 
                 thread::spawn(move || {
                     for _ in 0..iterations_per_thread {
-                        let manager = config_manager.lock().unwrap();
+                        let manager = config_manager.lock().expect("lock acquisition failed");
                         let _ = manager.validate_config("model", &config);
                     }
                 })
@@ -729,7 +731,7 @@ mod load_tests {
             .collect();
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("thread join failed");
         }
 
         let duration = start.elapsed();
@@ -771,7 +773,7 @@ mod load_tests {
 
         let mut results = Vec::new();
         while let Some(res) = set.join_next().await {
-            results.push(res.unwrap());
+            results.push(res.expect("operation failed in test"));
         }
 
         let duration = start.elapsed();

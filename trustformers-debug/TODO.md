@@ -1,33 +1,44 @@
 # trustformers-debug TODO List
 
+**Version:** 0.1.0 | **Status:** Alpha | **Tests:** 216 | **SLoC:** 61,841 | **Updated:** 2026-03-21
+
 ## Overview
 
-The `trustformers-debug` crate provides debugging and visualization tools for model development and troubleshooting. It includes profilers, memory analyzers, graph visualizers, and interactive debugging interfaces.
+The `trustformers-debug` crate provides debugging and visualization tools for model development and troubleshooting. It includes profilers, memory analyzers, graph visualizers, flame graph generation, AI code analysis, and interactive debugging interfaces with VS Code integration.
 
 **Key Responsibilities:**
-- Model profiling and performance analysis
-- Memory usage tracking and leak detection
-- Computation graph visualization
-- Layer-wise activation inspection
-- Gradient flow analysis
+- Tensor/gradient analysis with NaN/Inf detection
+- Dead neuron detection
+- Memory profiling with deadlock-safe mutex scoping
+- Visualization via Plotters, Ratatui, and TensorBoard
+- Performance profiling and flame graph generation
+- AI code analysis with architecture smell detection
+- VS Code integration via LSP/DAP diagnostics
 - Interactive debugging interface
 - Export to various visualization formats
+
+**Feature Flags:** `visual`, `video`, `gif`, `wasm`, `atomics`, `headless`
 
 ---
 
 ## Current Status
 
 ### Implementation Status
-✅ **PRODUCTION-READY** - Complete debugging infrastructure
-✅ **ZERO COMPILATION ERRORS** - Clean compilation
-✅ **COMPREHENSIVE TOOLS** - Full debugging suite
-✅ **VISUALIZATION SUPPORT** - Multiple export formats
-✅ **INTERACTIVE MODE** - Real-time debugging
+- [x] **ALPHA** - Core debugging infrastructure implemented
+- [x] **ZERO COMPILATION ERRORS** - Clean compilation
+- [x] **COMPREHENSIVE TOOLS** - Full debugging suite
+- [x] **VISUALIZATION SUPPORT** - Plotters, Ratatui, TensorBoard export
+- [x] **INTERACTIVE MODE** - Real-time debugging
+- [x] **FLAME GRAPHS** - Inferno-compatible flamegraph output
+- [x] **AI CODE ANALYSIS** - Architecture smell detection, anti-pattern matching
+- [x] **VS CODE INTEGRATION** - LSP diagnostic JSON and DAP event emission
 
 ### Feature Coverage
-- **Profiling:** CPU, GPU, memory, latency analysis
-- **Visualization:** Graph viz, activation maps, attention patterns
-- **Analysis:** Gradient flow, weight distribution, numerical stability
+- **Profiling:** CPU, memory (deadlock-safe), latency analysis, flame graphs
+- **Visualization:** Plotters (`visual`), Ratatui TUI (`headless`), TensorBoard, GIF (`gif`), video (`video`)
+- **Analysis:** Gradient flow, weight distribution, NaN/Inf detection, dead neurons, numerical stability
+- **AI Analysis:** Architecture pattern matching, anti-pattern detection, actionable suggestions
+- **VS Code:** LSP diagnostic output, DAP event emission, tensor shape hover annotations
 - **Export:** TensorBoard, Netron, GraphViz, JSON
 
 ---
@@ -40,14 +51,14 @@ The `trustformers-debug` crate provides debugging and visualization tools for mo
 
 **Comprehensive performance analysis**
 
-- ✅ **Metrics**
+- [x] **Metrics**
   - Layer-wise execution time
   - Memory usage per layer
   - GPU utilization
   - FLOPS calculation
   - Throughput (tokens/sec)
 
-- ✅ **Reports**
+- [x] **Reports**
   - Summary statistics
   - Bottleneck identification
   - Optimization recommendations
@@ -75,13 +86,14 @@ println!("{}", report);
 
 #### Memory Profiler
 
-**Memory usage tracking**
+**Deadlock-safe memory usage tracking**
 
-- ✅ **Features**
-  - Peak memory tracking
-  - Memory allocation timeline
+- [x] **Features**
+  - Peak memory tracking with RAII-scoped mutex guards (no `unwrap`, no lock poisoning)
+  - Memory allocation timeline with per-layer attribution
   - Leak detection
   - Fragmentation analysis
+  - Thread-safe snapshot API with bounded async scope
 
 **Example:**
 ```rust
@@ -103,19 +115,45 @@ println!("Leaks detected: {}", report.leaks().len());
 
 ---
 
+#### Flame Graph Generator
+
+**Inferno-compatible call stack visualization**
+
+- [x] **Features**
+  - Collapsed stack format compatible with `inferno-flamegraph`
+  - Per-layer timing attribution
+  - Forward and backward pass separation
+  - Export to `/tmp/` for safe temporary handling
+
+**Example:**
+```rust
+use trustformers_debug::profiler::FlameGraphBuilder;
+
+let mut builder = FlameGraphBuilder::new();
+builder.record_frame("forward", "transformer_block_0", 15_200);
+builder.record_frame("forward/attention", "multi_head_attn", 9_800);
+
+// Write to temp file
+let path = std::env::temp_dir().join("trustformers_flame.txt");
+builder.write_to_file(&path)?;
+// Run: inferno-flamegraph < /tmp/trustformers_flame.txt > flame.svg
+```
+
+---
+
 ### Visualization Tools
 
 #### Computation Graph Visualizer
 
 **Visual representation of model architecture**
 
-- ✅ **Export Formats**
+- [x] **Export Formats**
   - GraphViz (DOT)
   - Netron (ONNX)
   - TensorBoard graph
   - Custom JSON format
 
-- ✅ **Features**
+- [x] **Features**
   - Node annotations (shape, dtype, device)
   - Edge labels (tensor dimensions)
   - Subgraph clustering
@@ -138,12 +176,12 @@ viz.serve_interactive(&model, 8080)?;
 
 ---
 
-#### Activation Visualizer
+#### Activation Visualizer (`visual` feature)
 
 **Inspect layer activations**
 
-- ✅ **Features**
-  - Heatmaps for attention weights
+- [x] **Features**
+  - Heatmaps for attention weights (via Plotters)
   - Distribution histograms
   - Activation statistics (mean, std, min, max)
   - Outlier detection
@@ -170,15 +208,15 @@ viz.plot_distribution(&activations, "activation_dist.png")?;
 
 ---
 
-#### Attention Visualizer
+#### Attention Visualizer (`visual` feature)
 
 **Visualize attention patterns**
 
-- ✅ **Features**
-  - Attention weight heatmaps
+- [x] **Features**
+  - Attention weight heatmaps (Plotters)
   - Head-by-head visualization
   - Token-to-token attention flow
-  - BertViz-style visualizations
+  - BertViz-style HTML export
 
 **Example:**
 ```rust
@@ -196,13 +234,71 @@ viz.export_to_bertviz(&attention, tokens, "attention.html")?;
 
 ---
 
+#### Terminal Visualization (`headless` feature)
+
+**Ratatui TUI dashboards and ASCII plots for headless environments**
+
+- [x] **Features**
+  - Ratatui-based TUI training dashboard
+  - ASCII histogram and line plots
+  - Live updating metrics panel
+  - No GUI dependency
+
+**Example:**
+```rust
+use trustformers_debug::TerminalVisualizer;
+
+let terminal_viz = TerminalVisualizer::new(80, 24);
+
+// ASCII histogram
+let histogram = terminal_viz.ascii_histogram(&values, 10);
+println!("{}", histogram);
+
+// ASCII line plot
+let line_plot = terminal_viz.ascii_line_plot(&x_values, &y_values, "Training Loss");
+println!("{}", line_plot);
+```
+
+---
+
+#### TensorBoard Integration
+
+**Export to TensorBoard**
+
+- [x] **Features**
+  - Scalar logging
+  - Histogram logging
+  - Graph visualization
+  - Embedding projector
+
+**Example:**
+```rust
+use trustformers_debug::TensorBoardWriter;
+
+let writer = TensorBoardWriter::new("runs/experiment1")?;
+
+// Log scalars
+writer.add_scalar("loss", loss_value, step)?;
+
+// Log histograms
+writer.add_histogram("layer.0.weight", weights, step)?;
+
+// Log graph
+writer.add_graph(&model)?;
+
+// Log embeddings
+writer.add_embedding(embeddings, labels, step)?;
+```
+
+---
+
 ### Analysis Tools
 
 #### Gradient Flow Analyzer
 
 **Analyze gradient propagation**
 
-- ✅ **Features**
+- [x] **Features**
   - Gradient norm tracking
   - Vanishing/exploding gradient detection
   - Layer-wise gradient statistics
@@ -232,7 +328,7 @@ println!("Exploding gradients in: {:?}", report.exploding_layers());
 
 **Analyze weight distributions**
 
-- ✅ **Features**
+- [x] **Features**
   - Histogram plots
   - Statistical summaries
   - Dead neuron detection
@@ -259,9 +355,9 @@ analyzer.plot_weight_histogram(&model, "weights.png")?;
 
 #### Numerical Stability Checker
 
-**Detect numerical issues**
+**Detect NaN, Inf, and numerical issues**
 
-- ✅ **Checks**
+- [x] **Checks**
   - NaN detection
   - Inf detection
   - Underflow/overflow detection
@@ -285,13 +381,59 @@ for issue in issues {
 
 ---
 
+### AI Code Analysis
+
+**Automated architecture smell and anti-pattern detection**
+
+- [x] **Features**
+  - Pattern matching for gradient checkpoint misuse
+  - Redundant recomputation detection
+  - Degenerate attention head identification
+  - Excessive depth without skip connection warnings
+  - Actionable suggestions with layer-level annotations
+
+**Example:**
+```rust
+use trustformers_debug::ai_analysis::CodeAnalyzer;
+
+let analyzer = CodeAnalyzer::new();
+let report = analyzer.analyze_model_config(&model_config)?;
+
+for suggestion in report.suggestions() {
+    println!("[{}] {}: {}", suggestion.severity, suggestion.layer, suggestion.message);
+}
+```
+
+---
+
+### VS Code Integration
+
+**LSP diagnostic and DAP event output**
+
+- [x] **Features**
+  - Structured JSON diagnostic output (LSP DiagnosticSeverity format)
+  - DAP (Debug Adapter Protocol) event emission for breakpoints
+  - Tensor shape annotations in hover-compatible JSON
+  - Compatible with Rust Analyzer extension
+
+**Example:**
+```rust
+use trustformers_debug::vscode::DiagnosticEmitter;
+
+let emitter = DiagnosticEmitter::new();
+emitter.emit_tensor_shape_diagnostic("layer.0.attention", &[1, 12, 512, 512])?;
+// Outputs JSON-RPC notification compatible with VS Code LSP client
+```
+
+---
+
 ### Interactive Debugging
 
 #### Debug Console
 
 **Interactive debugging interface**
 
-- ✅ **Features**
+- [x] **Features**
   - REPL-style interface
   - Tensor inspection
   - Layer-wise execution
@@ -321,42 +463,11 @@ console.run(&model, input)?;
 
 ### Export and Integration
 
-#### TensorBoard Integration
-
-**Export to TensorBoard**
-
-- ✅ **Features**
-  - Scalar logging
-  - Histogram logging
-  - Graph visualization
-  - Embedding projector
-
-**Example:**
-```rust
-use trustformers_debug::TensorBoardWriter;
-
-let writer = TensorBoardWriter::new("runs/experiment1")?;
-
-// Log scalars
-writer.add_scalar("loss", loss_value, step)?;
-
-// Log histograms
-writer.add_histogram("layer.0.weight", weights, step)?;
-
-// Log graph
-writer.add_graph(&model)?;
-
-// Log embeddings
-writer.add_embedding(embeddings, labels, step)?;
-```
-
----
-
 #### Netron Export
 
 **Export for Netron visualizer**
 
-- ✅ **Features**
+- [x] **Features**
   - ONNX export
   - Model metadata
   - Interactive exploration
@@ -365,31 +476,32 @@ writer.add_embedding(embeddings, labels, step)?;
 
 ## Known Limitations
 
-- Some visualizations require GUI environment
+- Some visualizations require the `visual` feature flag (GUI environment)
 - Large models may take time to visualize
 - GPU profiling requires CUDA/ROCm support
 - Interactive debugging may slow down execution
+- `wasm` feature disables filesystem I/O; use in-memory buffers only
 
 ---
 
 ## Future Enhancements
 
 ### High Priority
-- Enhanced profiling for distributed training
-- Better visualization for large models
-- Real-time debugging dashboard
-- More export formats
+- Enhanced profiling for distributed training across multiple ranks
+- Better visualization for very large models (>100B params)
+- Real-time debugging dashboard with WebSocket streaming
+- More export formats (Perfetto, Tracy)
 
 ### Performance
-- Faster graph generation
-- Reduced overhead for profiling
-- Better memory efficiency
+- Faster graph generation for large architectures
+- Reduced overhead for profiling hooks (lock-free ring buffer)
+- Better memory efficiency for long training runs
 
 ### Features
-- More interactive visualizations
-- Integration with MLflow
+- More interactive visualizations (animated gradient flow)
+- Integration with MLflow experiment tracking
 - Custom visualization plugins
-- Automated performance tuning
+- Automated performance tuning recommendations
 
 ---
 
@@ -400,6 +512,7 @@ writer.add_embedding(embeddings, labels, step)?;
 - **Testing:** Comprehensive test coverage
 - **Documentation:** Examples for all tools
 - **Performance:** Minimal overhead when disabled
+- **Temp files:** Always use `std::env::temp_dir()` in tests
 
 ### Build & Test Commands
 
@@ -410,6 +523,9 @@ cargo build --release -p trustformers-debug
 # Run tests
 cargo test -p trustformers-debug
 
+# Run with all features
+cargo test -p trustformers-debug --all-features
+
 # Run examples
 cargo run --example profiler
 cargo run --example visualizer
@@ -418,65 +534,7 @@ cargo run --example interactive_debug
 
 ---
 
-## Usage Examples
-
-### Basic Profiling
-
-```rust
-use trustformers::AutoModel;
-use trustformers_debug::Profiler;
-
-// Load model
-let model = AutoModel::from_pretrained("gpt2")?;
-
-// Create profiler
-let profiler = Profiler::new()?;
-
-// Profile inference
-profiler.start("inference")?;
-let output = model.forward(input)?;
-profiler.stop("inference")?;
-
-// Print report
-println!("{}", profiler.report()?);
-```
-
-### Visualization
-
-```rust
-use trustformers_debug::GraphVisualizer;
-
-let viz = GraphVisualizer::new()?;
-
-// Export to GraphViz
-viz.visualize_model(&model, "model.dot")?;
-
-// Convert to PNG
-std::process::Command::new("dot")
-    .args(&["-Tpng", "model.dot", "-o", "model.png"])
-    .output()?;
-
-// Or export to Netron
-viz.export_to_netron(&model, "model.onnx")?;
-```
-
-### Interactive Debugging
-
-```rust
-use trustformers_debug::DebugConsole;
-
-let console = DebugConsole::new()?;
-
-// Set breakpoints
-console.breakpoint("layer.0")?;
-console.breakpoint("layer.11")?;
-
-// Run with debugging
-console.debug(&model, input)?;
-```
-
----
-
-**Last Updated:** Refactored for alpha.1 release
-**Status:** Production-ready debugging tools
-**Tools:** Profiling, visualization, analysis, interactive debugging
+**Last Updated:** 2026-03-21 - 0.1.0 Alpha Release
+**Status:** Alpha - core features implemented, API may change
+**Tests:** 216 (100% pass rate)
+**Tools:** Profiling, flame graphs, visualization (Plotters/Ratatui/TensorBoard), analysis, AI code analysis, VS Code integration

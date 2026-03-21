@@ -198,7 +198,10 @@ mod tests {
         suite.add_result(result);
         assert_eq!(suite.results.len(), 1);
         assert!(suite.get_average_score("accuracy").is_some());
-        assert_eq!(suite.get_average_score("accuracy").unwrap(), 0.85);
+        assert_eq!(
+            suite.get_average_score("accuracy").expect("operation failed in test"),
+            0.85
+        );
     }
 
     #[test]

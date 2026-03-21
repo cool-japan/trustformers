@@ -780,8 +780,9 @@ mod tests {
     #[test]
     fn test_config_serialization() {
         let config = ProdigyConfig::for_language_models();
-        let serialized = serde_json::to_string(&config).unwrap();
-        let deserialized: ProdigyConfig = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&config).expect("Serialization failed");
+        let deserialized: ProdigyConfig =
+            serde_json::from_str(&serialized).expect("Deserialization failed");
 
         assert_eq!(config.d0, deserialized.d0);
         assert_eq!(config.beta1, deserialized.beta1);
@@ -798,13 +799,13 @@ mod tests {
         );
 
         // Save state dict
-        let state_dict = optimizer.state_dict().unwrap();
+        let state_dict = optimizer.state_dict().expect("Failed to get state dict");
         assert!(state_dict.contains_key("lr"));
         assert!(state_dict.contains_key("global_step"));
 
         // Create new optimizer and load state
         let mut new_optimizer = Prodigy::new();
-        new_optimizer.load_state_dict(state_dict).unwrap();
+        new_optimizer.load_state_dict(state_dict).expect("Failed to load state dict");
 
         assert_eq!(new_optimizer.state.global_step, 50);
         // Note: parameter states are not fully implemented in load_state_dict yet

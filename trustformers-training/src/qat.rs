@@ -1231,11 +1231,14 @@ mod tests {
 
     #[test]
     fn test_fake_quantize() {
-        let tensor = Tensor::from_vec(vec![-1.0, 0.0, 1.0, 2.0], &[4]).unwrap();
-        let scale = Tensor::from_vec(vec![0.1], &[1]).unwrap();
-        let zero_point = Some(Tensor::from_vec(vec![128.0], &[1]).unwrap());
+        let tensor =
+            Tensor::from_vec(vec![-1.0, 0.0, 1.0, 2.0], &[4]).expect("tensor operation failed");
+        let scale = Tensor::from_vec(vec![0.1], &[1]).expect("tensor operation failed");
+        let zero_point =
+            Some(Tensor::from_vec(vec![128.0], &[1]).expect("tensor operation failed"));
 
-        let quantized = fake_quantize(&tensor, &scale, zero_point.as_ref(), 8, false).unwrap();
+        let quantized = fake_quantize(&tensor, &scale, zero_point.as_ref(), 8, false)
+            .expect("tensor operation failed");
         assert_eq!(quantized.shape(), tensor.shape());
     }
 
@@ -1243,11 +1246,12 @@ mod tests {
     fn test_quantization_params() {
         let mut params = QuantizationParams::new(&[1], true);
 
-        let tensor1 = Tensor::from_vec(vec![-1.0, 0.0, 1.0], &[3]).unwrap();
-        params.update_stats(&tensor1, 0.9).unwrap();
+        let tensor1 =
+            Tensor::from_vec(vec![-1.0, 0.0, 1.0], &[3]).expect("tensor operation failed");
+        params.update_stats(&tensor1, 0.9).expect("tensor operation failed");
 
         assert!(params.num_observations == 1);
-        params.compute_params(8, true).unwrap();
+        params.compute_params(8, true).expect("operation failed in test");
     }
 
     #[test]

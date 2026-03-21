@@ -9,7 +9,7 @@ mod tests {
     #[tokio::test]
     async fn test_multimodal_service_creation() {
         let config = MultiModalConfig::default();
-        let service = MultiModalService::new(config).unwrap();
+        let service = MultiModalService::new(config).expect("test operation should succeed");
         assert!(service.config.enabled);
     }
     #[test]

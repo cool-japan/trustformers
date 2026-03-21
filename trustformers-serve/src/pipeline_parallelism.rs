@@ -674,14 +674,16 @@ mod tests {
     #[tokio::test]
     async fn test_pipeline_creation() {
         let config = PipelineConfig::default();
-        let manager = PipelineParallelismManager::new(config).unwrap();
+        let manager =
+            PipelineParallelismManager::new(config).expect("test operation should succeed");
         assert_eq!(manager.config.num_stages, 4);
     }
 
     #[tokio::test]
     async fn test_stage_assignment() {
         let config = PipelineConfig::default();
-        let manager = PipelineParallelismManager::new(config).unwrap();
+        let manager =
+            PipelineParallelismManager::new(config).expect("test operation should succeed");
 
         let request = PipelineRequest {
             id: Uuid::new_v4(),
@@ -698,7 +700,10 @@ mod tests {
             stage_times: HashMap::new(),
         };
 
-        let stage_id = manager.assign_request_to_stage(&request).await.unwrap();
+        let stage_id = manager
+            .assign_request_to_stage(&request)
+            .await
+            .expect("async operation should succeed in test");
         assert!(stage_id < manager.config.num_stages);
     }
 

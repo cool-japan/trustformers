@@ -603,7 +603,7 @@ mod tests {
         let config = AlignmentConfig::default();
         let mut allocator = AlignedAllocator::new(config);
 
-        let _ptr = allocator.allocate_aligned::<f32>(1000).unwrap();
+        let _ptr = allocator.allocate_aligned::<f32>(1000).expect("Operation failed in test");
         // Pointer is allocated successfully
 
         let memory_usage = allocator.memory_usage();
@@ -615,7 +615,9 @@ mod tests {
         let config = AlignmentConfig::default();
         let mut state = SoAOptimizerState::new(config);
 
-        state.add_parameter("param1".to_string(), 1000).unwrap();
+        state
+            .add_parameter("param1".to_string(), 1000)
+            .expect("Operation failed in test");
         assert!(state.get_parameter_info("param1").is_some());
 
         let stats = state.layout_stats();
@@ -638,8 +640,12 @@ mod tests {
         let config = AlignmentConfig::default();
         let mut state = SoAOptimizerState::new(config);
 
-        state.add_parameter("param1".to_string(), 100).unwrap();
-        state.add_parameter("param2".to_string(), 200).unwrap();
+        state
+            .add_parameter("param1".to_string(), 100)
+            .expect("Operation failed in test");
+        state
+            .add_parameter("param2".to_string(), 200)
+            .expect("Operation failed in test");
 
         let stats = state.layout_stats();
         assert_eq!(stats.total_parameters, 2);

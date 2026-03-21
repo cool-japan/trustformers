@@ -826,7 +826,7 @@ mod performance_tests {
 
             println!("CUDA GEMM Performance: {:.2} GFLOPS", gflops);
 
-            let baseline = baselines.get("gemm_1024_fp32").unwrap();
+            let baseline = baselines.get("gemm_1024_fp32").expect("expected value not found");
             if gflops < *baseline {
                 println!(
                     "WARNING: Performance below baseline ({:.2} < {:.2} GFLOPS)",

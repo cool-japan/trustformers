@@ -80,7 +80,7 @@ mod tests {
             ),
         );
         let secure_memory_manager = SecureMemoryManager::new(dek_manager);
-        secure_memory_manager.start().await.unwrap();
+        secure_memory_manager.start().await.expect("async operation should succeed in test");
         let buffer = secure_memory_manager
             .allocate_secure(1024, ProtectionLevel::Basic)
             .await;

@@ -731,8 +731,10 @@ mod tests {
             added_tokens: vec![],
         };
 
-        let bytes = ProtobufSerializer::to_protobuf_bytes(&model).unwrap();
-        let recovered = ProtobufSerializer::from_protobuf_bytes(&bytes).unwrap();
+        let bytes =
+            ProtobufSerializer::to_protobuf_bytes(&model).expect("Operation failed in test");
+        let recovered =
+            ProtobufSerializer::from_protobuf_bytes(&bytes).expect("Operation failed in test");
 
         assert_eq!(model.metadata.name, recovered.metadata.name);
         assert_eq!(model.metadata.version, recovered.metadata.version);
@@ -766,13 +768,13 @@ mod tests {
             added_tokens: vec![],
         };
 
-        let text = ProtobufSerializer::to_proto_text(&model).unwrap();
+        let text = ProtobufSerializer::to_proto_text(&model).expect("Operation failed in test");
         assert!(text.contains("name: \"test-tokenizer\""));
         assert!(text.contains("version: \"1.0\""));
         assert!(text.contains("vocab_size: 100"));
         assert!(text.contains("do_lower_case: true"));
 
-        let parsed = ProtobufSerializer::from_proto_text(&text).unwrap();
+        let parsed = ProtobufSerializer::from_proto_text(&text).expect("Operation failed in test");
         assert_eq!(parsed.metadata.name, "test-tokenizer");
         assert_eq!(parsed.metadata.version, "1.0");
         assert_eq!(parsed.metadata.vocab_size, 100);
@@ -813,7 +815,8 @@ mod tests {
             added_tokens: vec![],
         };
 
-        let warnings = ProtobufSerializer::validate_model(&model).unwrap();
+        let warnings =
+            ProtobufSerializer::validate_model(&model).expect("Operation failed in test");
         assert!(!warnings.is_empty());
         assert!(warnings[0].contains("Vocabulary size mismatch"));
     }
@@ -846,8 +849,10 @@ mod tests {
             added_tokens: vec![],
         };
 
-        let compressed = ProtobufSerializer::compress_model(&model).unwrap();
-        let decompressed = ProtobufSerializer::decompress_model(&compressed).unwrap();
+        let compressed =
+            ProtobufSerializer::compress_model(&model).expect("Operation failed in test");
+        let decompressed =
+            ProtobufSerializer::decompress_model(&compressed).expect("Operation failed in test");
 
         assert_eq!(model.metadata.name, decompressed.metadata.name);
     }

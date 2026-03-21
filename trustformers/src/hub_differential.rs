@@ -927,8 +927,11 @@ mod tests {
         let base_data = b"Hello, World!";
         let target_data = b"Hello, Rust!";
 
-        let diff = engine.create_xdelta3_diff(base_data, target_data).unwrap();
-        let reconstructed = engine.apply_xdelta3_diff(base_data, &diff).unwrap();
+        let diff = engine
+            .create_xdelta3_diff(base_data, target_data)
+            .expect("operation failed in test");
+        let reconstructed =
+            engine.apply_xdelta3_diff(base_data, &diff).expect("operation failed in test");
 
         assert_eq!(target_data, reconstructed.as_slice());
     }
@@ -941,8 +944,12 @@ mod tests {
         let mut target_data = base_data.clone();
         target_data[1024..1536].fill(255); // Change middle 512 bytes
 
-        let diff = engine.create_layer_wise_diff(&base_data, &target_data).unwrap();
-        let reconstructed = engine.apply_layer_wise_diff(&base_data, &diff).unwrap();
+        let diff = engine
+            .create_layer_wise_diff(&base_data, &target_data)
+            .expect("operation failed in test");
+        let reconstructed = engine
+            .apply_layer_wise_diff(&base_data, &diff)
+            .expect("operation failed in test");
 
         assert_eq!(target_data, reconstructed);
     }
@@ -950,7 +957,8 @@ mod tests {
     #[test]
     fn test_version_manager() {
         let temp_dir = TempDir::new().expect("failed to create temp dir");
-        let mut manager = ModelVersionManager::new(temp_dir.path().to_path_buf()).unwrap();
+        let mut manager = ModelVersionManager::new(temp_dir.path().to_path_buf())
+            .expect("temp file creation failed");
 
         let version1 = ModelVersion {
             id: "v1".to_string(),
@@ -980,12 +988,12 @@ mod tests {
             metadata: HashMap::new(),
         };
 
-        manager.add_version(version1).unwrap();
-        manager.add_version(version2).unwrap();
+        manager.add_version(version1).expect("add operation failed");
+        manager.add_version(version2).expect("add operation failed");
 
         let path = manager.get_version_path("v1", "v2");
         assert!(path.is_some());
-        assert_eq!(path.unwrap(), vec!["v1", "v2"]);
+        assert_eq!(path.expect("operation failed in test"), vec!["v1", "v2"]);
     }
 
     #[test]
@@ -993,8 +1001,8 @@ mod tests {
         let engine = BinaryDiffEngine::default();
         let data = b"This is test data for compression. ".repeat(100);
 
-        let compressed = engine.compress_delta(&data).unwrap();
-        let decompressed = engine.decompress_delta(&compressed).unwrap();
+        let compressed = engine.compress_delta(&data).expect("operation failed in test");
+        let decompressed = engine.decompress_delta(&compressed).expect("operation failed in test");
 
         assert_eq!(data, decompressed);
         assert!(compressed.len() < data.len()); // Should be compressed

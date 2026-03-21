@@ -314,7 +314,7 @@ impl WsMessage {
             data,
             timestamp: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs(),
         }
     }
@@ -512,8 +512,9 @@ mod tests {
     #[test]
     fn test_ws_message_serialization() {
         let msg = WsMessage::text("test".to_string());
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: WsMessage = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&msg).expect("JSON serialization should succeed");
+        let deserialized: WsMessage =
+            serde_json::from_str(&json).expect("JSON parsing should succeed for valid test input");
 
         assert_eq!(msg.data, deserialized.data);
     }

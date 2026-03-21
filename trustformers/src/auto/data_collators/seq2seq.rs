@@ -579,7 +579,8 @@ mod tests {
             "vocab_size": 32000
         });
 
-        let config = Seq2SeqCollatorConfig::from_config(&config_json).unwrap();
+        let config =
+            Seq2SeqCollatorConfig::from_config(&config_json).expect("operation failed in test");
         assert_eq!(config.max_length, Some(512));
         assert_eq!(config.max_target_length, Some(64));
         assert_eq!(config.pad_token_id, 1);
@@ -614,12 +615,12 @@ mod tests {
             },
         ];
 
-        let batch = collator.collate(&examples).unwrap();
+        let batch = collator.collate(&examples).expect("operation failed in test");
         assert_eq!(batch.batch_size, 2);
         assert_eq!(batch.input_ids.len(), 2);
         assert!(batch.labels.is_some());
 
-        let labels = batch.labels.as_ref().unwrap();
+        let labels = batch.labels.as_ref().expect("operation failed in test");
         assert_eq!(labels.len(), 2);
     }
 
@@ -630,7 +631,8 @@ mod tests {
             "pad_token_id": 0
         });
 
-        let config = Seq2SeqCollatorConfig::for_summarization(&model_config, Some(0.2)).unwrap();
+        let config = Seq2SeqCollatorConfig::for_summarization(&model_config, Some(0.2))
+            .expect("operation failed in test");
         assert_eq!(config.max_length, Some(1024));
         assert_eq!(config.max_target_length, Some(204)); // 1024 * 0.2 = 204.8 -> 204
     }

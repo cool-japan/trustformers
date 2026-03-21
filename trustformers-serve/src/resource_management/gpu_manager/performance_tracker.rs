@@ -843,7 +843,7 @@ mod rand {
         let mut hasher = DefaultHasher::new();
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_nanos()
             .hash(&mut hasher);
         let raw = hasher.finish();
@@ -876,13 +876,18 @@ mod tests {
         let tracker = GpuPerformanceTracker::new();
 
         // Run various benchmark types
-        let compute_result = tracker.run_benchmark(0, GpuBenchmarkType::Compute).await.unwrap();
+        let compute_result = tracker
+            .run_benchmark(0, GpuBenchmarkType::Compute)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(compute_result.device_id, 0);
         assert!(compute_result.score > 0.0);
         assert!(compute_result.execution_time.as_millis() > 0);
 
-        let memory_result =
-            tracker.run_benchmark(0, GpuBenchmarkType::MemoryBandwidth).await.unwrap();
+        let memory_result = tracker
+            .run_benchmark(0, GpuBenchmarkType::MemoryBandwidth)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(memory_result.device_id, 0);
         assert!(memory_result.score > 0.0);
 
@@ -900,13 +905,16 @@ mod tests {
         assert!(baseline.is_none());
 
         // Run benchmark to establish baseline
-        tracker.run_benchmark(0, GpuBenchmarkType::Compute).await.unwrap();
+        tracker
+            .run_benchmark(0, GpuBenchmarkType::Compute)
+            .await
+            .expect("async operation should succeed in test");
 
         // Verify baseline was established
         let baseline = tracker.get_device_baseline(0).await;
         assert!(baseline.is_some());
 
-        let baseline = baseline.unwrap();
+        let baseline = baseline.expect("test operation should succeed");
         assert_eq!(baseline.device_id, 0);
         assert_eq!(baseline.sample_count, 1);
         assert!(baseline.confidence_level > 0.0);
@@ -918,9 +926,18 @@ mod tests {
         let tracker = GpuPerformanceTracker::new();
 
         // Run multiple benchmarks to trigger analysis
-        tracker.run_benchmark(0, GpuBenchmarkType::Compute).await.unwrap();
-        tracker.run_benchmark(0, GpuBenchmarkType::Compute).await.unwrap();
-        tracker.run_benchmark(0, GpuBenchmarkType::MemoryBandwidth).await.unwrap();
+        tracker
+            .run_benchmark(0, GpuBenchmarkType::Compute)
+            .await
+            .expect("async operation should succeed in test");
+        tracker
+            .run_benchmark(0, GpuBenchmarkType::Compute)
+            .await
+            .expect("async operation should succeed in test");
+        tracker
+            .run_benchmark(0, GpuBenchmarkType::MemoryBandwidth)
+            .await
+            .expect("async operation should succeed in test");
 
         // Get analysis results
         let analysis = tracker.get_analysis().await;
@@ -937,8 +954,14 @@ mod tests {
         let tracker = GpuPerformanceTracker::new();
 
         // Create some test data
-        tracker.run_benchmark(0, GpuBenchmarkType::Compute).await.unwrap();
-        tracker.run_benchmark(1, GpuBenchmarkType::MemoryBandwidth).await.unwrap();
+        tracker
+            .run_benchmark(0, GpuBenchmarkType::Compute)
+            .await
+            .expect("async operation should succeed in test");
+        tracker
+            .run_benchmark(1, GpuBenchmarkType::MemoryBandwidth)
+            .await
+            .expect("async operation should succeed in test");
 
         // Verify data exists
         assert!(!tracker.get_benchmark_history(0).await.is_empty());
@@ -960,9 +983,18 @@ mod tests {
         let tracker = GpuPerformanceTracker::new();
 
         // Run benchmarks on multiple devices
-        tracker.run_benchmark(0, GpuBenchmarkType::Compute).await.unwrap();
-        tracker.run_benchmark(0, GpuBenchmarkType::MemoryBandwidth).await.unwrap();
-        tracker.run_benchmark(1, GpuBenchmarkType::MLInference).await.unwrap();
+        tracker
+            .run_benchmark(0, GpuBenchmarkType::Compute)
+            .await
+            .expect("async operation should succeed in test");
+        tracker
+            .run_benchmark(0, GpuBenchmarkType::MemoryBandwidth)
+            .await
+            .expect("async operation should succeed in test");
+        tracker
+            .run_benchmark(1, GpuBenchmarkType::MLInference)
+            .await
+            .expect("async operation should succeed in test");
 
         // Get performance summary
         let summary = tracker.get_performance_summary().await;
@@ -971,7 +1003,10 @@ mod tests {
         assert_eq!(summary.total_benchmarks_run, 3);
         assert_eq!(summary.devices_with_baselines, 2);
         assert!(summary.average_baseline_confidence > 0.0);
-        assert!(summary.last_analysis_time > DateTime::from_timestamp(0, 0).unwrap());
+        assert!(
+            summary.last_analysis_time
+                > DateTime::from_timestamp(0, 0).expect("test operation should succeed")
+        );
     }
 
     #[tokio::test]
@@ -994,7 +1029,7 @@ mod tests {
         // Verify all benchmarks completed successfully
         for result in results {
             assert!(result.is_ok());
-            assert!(result.unwrap().is_ok());
+            assert!(result.expect("test operation should succeed").is_ok());
         }
 
         // Verify data was collected for all devices
@@ -1016,6 +1051,9 @@ mod tests {
         .await;
 
         assert!(result.is_ok(), "Benchmark should complete within timeout");
-        assert!(result.unwrap().is_ok(), "Benchmark should succeed");
+        assert!(
+            result.expect("test operation should succeed").is_ok(),
+            "Benchmark should succeed"
+        );
     }
 }

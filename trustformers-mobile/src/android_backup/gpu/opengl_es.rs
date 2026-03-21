@@ -673,7 +673,7 @@ mod tests {
             return;
         }
 
-        let context = context.unwrap();
+        let context = context.expect("operation failed in test");
         assert!(context.supports_compute_shaders());
         assert!(!context.get_version().is_empty());
     }

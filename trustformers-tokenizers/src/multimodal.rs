@@ -1198,7 +1198,7 @@ mod tests {
 
         let result = multimodal_tokenizer.tokenize_multimodal(&input);
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
         assert!(tokenized.modality_boundaries.contains_key(&ModalityType::Text));
     }
@@ -1251,7 +1251,7 @@ mod tests {
 
         let result = multimodal_tokenizer.tokenize_multimodal(&input);
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(tokenized.modality_boundaries.contains_key(&ModalityType::Text));
         assert!(tokenized.modality_boundaries.contains_key(&ModalityType::Image));
     }
@@ -1282,7 +1282,7 @@ mod tests {
 
         let result = multimodal_tokenizer.tokenize_multimodal(&input);
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(tokenized.modality_boundaries.contains_key(&ModalityType::Table));
     }
 

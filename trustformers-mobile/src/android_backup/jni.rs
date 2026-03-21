@@ -378,9 +378,9 @@ mod tests {
     #[test]
     fn test_tensor_conversion() {
         let original_data = vec![1.0f32, 2.0, 3.0, 4.0];
-        let bytes = utils::tensor_to_bytes(&Tensor::from_vec(original_data.clone(), &[4]).unwrap()).unwrap();
-        let reconstructed = utils::bytes_to_tensor(&bytes, &[4]).unwrap();
-        let reconstructed_data = reconstructed.as_slice::<f32>().unwrap();
+        let bytes = utils::tensor_to_bytes(&Tensor::from_vec(original_data.clone(), &[4]).expect("tensor operation failed")).expect("operation failed in test");
+        let reconstructed = utils::bytes_to_tensor(&bytes, &[4]).expect("tensor operation failed");
+        let reconstructed_data = reconstructed.as_slice::<f32>().expect("operation failed in test");
 
         assert_eq!(original_data, reconstructed_data);
     }

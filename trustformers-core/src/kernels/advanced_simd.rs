@@ -543,16 +543,17 @@ mod tests {
                 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
             ],
         )
-        .unwrap();
+        .expect("operation failed in test");
 
-        let b =
-            Array2::from_shape_vec((4, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]).unwrap();
+        let b = Array2::from_shape_vec((4, 2), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+            .expect("operation failed in test");
 
-        let c = optimized_matmul::matmul_f32(&a.view(), &b.view()).unwrap();
+        let c =
+            optimized_matmul::matmul_f32(&a.view(), &b.view()).expect("operation failed in test");
 
         // Expected result
-        let expected =
-            Array2::from_shape_vec((3, 2), vec![50.0, 60.0, 114.0, 140.0, 178.0, 220.0]).unwrap();
+        let expected = Array2::from_shape_vec((3, 2), vec![50.0, 60.0, 114.0, 140.0, 178.0, 220.0])
+            .expect("operation failed in test");
 
         for i in 0..3 {
             for j in 0..2 {
@@ -564,7 +565,7 @@ mod tests {
     #[test]
     fn test_gelu() {
         let input = Array1::from_vec(vec![-2.0, -1.0, 0.0, 1.0, 2.0]);
-        let output = fused_ops::gelu_f32(&input.view()).unwrap();
+        let output = fused_ops::gelu_f32(&input.view()).expect("operation failed in test");
 
         // GELU is approximately: x * Φ(x) where Φ is CDF of standard normal
         // At x=0, GELU(0) = 0
@@ -579,8 +580,8 @@ mod tests {
         let gamma = Array1::from_vec(vec![1.0; 5]);
         let beta = Array1::from_vec(vec![0.0; 5]);
 
-        let output =
-            fused_ops::layer_norm_f32(&input.view(), &gamma.view(), &beta.view(), 1e-5).unwrap();
+        let output = fused_ops::layer_norm_f32(&input.view(), &gamma.view(), &beta.view(), 1e-5)
+            .expect("operation failed in test");
 
         // After normalization, mean should be ~0 and variance should be ~1
         let mean: f32 = output.sum() / output.len() as f32;
@@ -590,7 +591,7 @@ mod tests {
     #[test]
     fn test_softmax() {
         let input = Array1::from_vec(vec![1.0, 2.0, 3.0]);
-        let output = fused_ops::softmax_f32(&input.view()).unwrap();
+        let output = fused_ops::softmax_f32(&input.view()).expect("operation failed in test");
 
         // Softmax properties:
         // 1. All values in (0, 1)

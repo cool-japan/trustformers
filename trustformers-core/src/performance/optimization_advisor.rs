@@ -1093,7 +1093,7 @@ mod tests {
             current_config: HashMap::new(),
         };
 
-        let report = advisor.analyze(&context).unwrap();
+        let report = advisor.analyze(&context).expect("operation failed in test");
         assert!(!report.suggestions.is_empty());
     }
 

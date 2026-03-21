@@ -817,21 +817,21 @@ mod tests {
     #[test]
     fn test_target_language() {
         let config = CodeGenConfig::default();
-        let generator = MarkdownDocGenerator::new(&config).unwrap();
+        let generator = MarkdownDocGenerator::new(&config).expect("test operation should succeed");
         assert_eq!(generator.target_language(), TargetLanguage::Markdown);
     }
 
     #[test]
     fn test_file_extension() {
         let config = CodeGenConfig::default();
-        let generator = MarkdownDocGenerator::new(&config).unwrap();
+        let generator = MarkdownDocGenerator::new(&config).expect("test operation should succeed");
         assert_eq!(generator.file_extension(), "md");
     }
 
     #[test]
     fn test_categorize_functions() {
         let config = CodeGenConfig::default();
-        let generator = MarkdownDocGenerator::new(&config).unwrap();
+        let generator = MarkdownDocGenerator::new(&config).expect("test operation should succeed");
 
         let functions = vec![
             FfiFunction {
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn test_format_type() {
         let config = CodeGenConfig::default();
-        let generator = MarkdownDocGenerator::new(&config).unwrap();
+        let generator = MarkdownDocGenerator::new(&config).expect("test operation should succeed");
 
         let pointer_type = FfiType {
             name: "c_char".to_string(),
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn test_generate_table_of_contents() {
         let config = CodeGenConfig::default();
-        let generator = MarkdownDocGenerator::new(&config).unwrap();
+        let generator = MarkdownDocGenerator::new(&config).expect("test operation should succeed");
 
         let mut interface = FfiInterface::default();
         interface.enums.push(FfiEnum {

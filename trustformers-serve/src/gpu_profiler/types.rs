@@ -186,7 +186,7 @@ impl GpuPrometheusMetrics {
                 ),
                 &["gpu_id"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&[""]);
         let gpu_memory_utilization = register_gauge_vec!(
@@ -202,7 +202,7 @@ impl GpuPrometheusMetrics {
                 ),
                 &["gpu_id"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&[""]);
         let gpu_temperature = register_gauge_vec!(
@@ -215,7 +215,7 @@ impl GpuPrometheusMetrics {
                 prometheus::opts!("gpu_temperature_celsius", "GPU temperature in Celsius"),
                 &["gpu_id"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&[""]);
         let gpu_power_consumption = register_gauge_vec!(
@@ -231,7 +231,7 @@ impl GpuPrometheusMetrics {
                 ),
                 &["gpu_id"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&[""]);
         let gpu_memory_fragmentation = register_gauge_vec!(
@@ -247,7 +247,7 @@ impl GpuPrometheusMetrics {
                 ),
                 &["gpu_id"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&[""]);
         let gpu_efficiency = register_gauge_vec!(
@@ -260,7 +260,7 @@ impl GpuPrometheusMetrics {
                 prometheus::opts!("gpu_efficiency_score", "GPU overall efficiency score"),
                 &["gpu_id"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&[""]);
         let gpu_kernel_duration = register_histogram_vec!(
@@ -276,7 +276,7 @@ impl GpuPrometheusMetrics {
                 ),
                 &["gpu_id", "kernel_name"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&["", ""]);
         let gpu_thermal_events = register_counter_vec!(
@@ -292,7 +292,7 @@ impl GpuPrometheusMetrics {
                 ),
                 &["gpu_id", "event_type"],
             )
-            .unwrap()
+            .expect("static prometheus opts should be valid")
         })
         .with_label_values(&["", ""]);
         Ok(Self {

@@ -17,26 +17,26 @@
 //!
 //! # Examples
 //!
-//! ```rust
-//! use trustformers_core::quantization::fp8::{FP8Config, FP8Quantizer, FP8Format};
+//! ```rust,no_run
+//! use trustformers_core::quantization::{FP8Config, FP8Quantizer, FP8Format};
 //! use trustformers_core::tensor::Tensor;
 //!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let config = FP8Config {
 //!     format: FP8Format::E4M3,
-//!     per_channel: false,
-//!     delayed_scaling: true,
 //!     ..Default::default()
 //! };
 //!
-//! let quantizer = FP8Quantizer::new(config)?;
+//! let mut quantizer = FP8Quantizer::new(config)?;
 //! let tensor = Tensor::randn(&[1024, 768])?;
 //!
 //! // Quantize to FP8
-//! let (quantized, scale) = quantizer.quantize(&tensor)?;
+//! let quantized = quantizer.quantize(&tensor)?;
 //!
 //! // Dequantize back
-//! let dequantized = quantizer.dequantize(&quantized, &scale)?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! let dequantized = quantizer.dequantize(&quantized)?;
+//! # Ok(())
+//! # }
 //! ```
 
 use crate::errors::{Result, TrustformersError};

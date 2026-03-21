@@ -398,7 +398,7 @@ mod tests {
 
         let (tf_name, transform) = mapping
             .pytorch_to_tensorflow("encoder.layer.0.attention.self.query.weight")
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(tf_name, "bert/encoder/layer_0/attention/self/query/kernel");
         assert!(matches!(transform, Some(WeightTransform::Transpose(_))));
@@ -408,10 +408,13 @@ mod tests {
     fn test_gpt2_mapping() {
         let mapping = WeightMapping::new(ModelType::GPT2);
 
-        let (tf_name, _) = mapping.pytorch_to_tensorflow("wte.weight").unwrap();
+        let (tf_name, _) =
+            mapping.pytorch_to_tensorflow("wte.weight").expect("tensor operation failed");
         assert_eq!(tf_name, "model/wte");
 
-        let (tf_name, transform) = mapping.pytorch_to_tensorflow("h.0.attn.c_attn.weight").unwrap();
+        let (tf_name, transform) = mapping
+            .pytorch_to_tensorflow("h.0.attn.c_attn.weight")
+            .expect("tensor operation failed");
         assert_eq!(tf_name, "model/h0/attn/c_attn/kernel");
         assert!(matches!(transform, Some(WeightTransform::Transpose(_))));
     }
@@ -420,12 +423,14 @@ mod tests {
     fn test_jax_mapping() {
         let mapping = WeightMapping::new(ModelType::Generic);
 
-        let (jax_name, _) =
-            mapping.pytorch_to_jax("encoder_layer_0_attention_query_weight").unwrap();
+        let (jax_name, _) = mapping
+            .pytorch_to_jax("encoder_layer_0_attention_query_weight")
+            .expect("operation failed in test");
         assert_eq!(jax_name, "params.encoder.layer.0.attention.query.weight");
 
-        let (pytorch_name, _) =
-            mapping.jax_to_pytorch("params.encoder.layer.0.attention.query.weight").unwrap();
+        let (pytorch_name, _) = mapping
+            .jax_to_pytorch("params.encoder.layer.0.attention.query.weight")
+            .expect("operation failed in test");
         assert_eq!(pytorch_name, "encoder_layer_0_attention_query_weight");
     }
 }

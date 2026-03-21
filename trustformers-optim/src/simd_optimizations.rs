@@ -664,7 +664,7 @@ mod tests {
                 1e-8,
                 1,
             )
-            .unwrap();
+            .expect("Operation failed in test");
 
         // Check that parameters were updated
         assert!(params[0] < 1.0);
@@ -692,7 +692,7 @@ mod tests {
                 1e-8,
                 1,
             )
-            .unwrap();
+            .expect("Operation failed in test");
 
         // Verify update occurred
         assert!(params.iter().all(|&p| p < 1.0));
@@ -718,7 +718,7 @@ mod tests {
         {
             if is_x86_feature_detected!("avx2") {
                 unsafe {
-                    optimizer.vector_add_avx2(&mut a, &b, 2.0).unwrap();
+                    optimizer.vector_add_avx2(&mut a, &b, 2.0).expect("Operation failed in test");
                 }
                 assert_eq!(a, [2.0f32, 3.0, 4.0, 5.0]);
             }
@@ -735,7 +735,8 @@ mod tests {
         {
             if is_x86_feature_detected!("avx2") {
                 unsafe {
-                    let result = optimizer.dot_product_avx2(&a, &b).unwrap();
+                    let result =
+                        optimizer.dot_product_avx2(&a, &b).expect("Operation failed in test");
                     assert_eq!(result, 10.0);
                 }
             }

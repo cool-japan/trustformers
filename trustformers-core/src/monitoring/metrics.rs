@@ -750,8 +750,14 @@ mod tests {
 
         let metrics = collector.collect_metrics()?;
         assert_eq!(metrics.get("request_duration_count"), Some(&3.0));
-        assert!((metrics.get("request_duration_sum").unwrap() - 0.45).abs() < 1e-10);
-        assert!((metrics.get("request_duration_mean").unwrap() - 0.15).abs() < 1e-10);
+        assert!(
+            (metrics.get("request_duration_sum").expect("expected value not found") - 0.45).abs()
+                < 1e-10
+        );
+        assert!(
+            (metrics.get("request_duration_mean").expect("expected value not found") - 0.15).abs()
+                < 1e-10
+        );
 
         Ok(())
     }
@@ -793,7 +799,7 @@ mod tests {
 
         let metrics = collector.collect_metrics()?;
         assert!(metrics.contains_key("test_operation_count"));
-        assert!(metrics.get("test_operation_count").unwrap() == &1.0);
+        assert!(metrics.get("test_operation_count").expect("expected value not found") == &1.0);
 
         Ok(())
     }

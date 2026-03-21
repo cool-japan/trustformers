@@ -197,8 +197,8 @@ proptest! {
 
         // Property: Multiple cleanup calls should be safe and effective
         for _ in 0..iterations {
-            let gc_freed = gc_handler.cleanup(pressure_level).unwrap();
-            let buffer_freed = buffer_handler.cleanup(pressure_level).unwrap();
+            let gc_freed = gc_handler.cleanup(pressure_level).expect("operation failed in test");
+            let buffer_freed = buffer_handler.cleanup(pressure_level).expect("operation failed in test");
 
             total_gc_freed += gc_freed;
             total_buffer_freed += buffer_freed;
@@ -371,7 +371,7 @@ proptest! {
 
                 let utilization = utilization.clamp(0.0, 1.0);
 
-                let prediction = handler.update_memory_prediction(utilization).await.unwrap();
+                let prediction = handler.update_memory_prediction(utilization).await.expect("async operation failed");
                 predictions.push((utilization, prediction));
 
                 // Property: Each prediction should be valid
@@ -407,7 +407,7 @@ proptest! {
 
             // Property: Emergency cleanup should work multiple times
             for _ in 0..stress_iterations {
-                let freed = handler.trigger_emergency_cleanup().await.unwrap();
+                let freed = handler.trigger_emergency_cleanup().await.expect("merge operation failed");
                 total_freed += freed;
 
                 // Property: Should always free some memory
@@ -493,7 +493,7 @@ proptest! {
                 }
             }
 
-            let forecast = handler.get_memory_forecast(forecast_minutes).await.unwrap();
+            let forecast = handler.get_memory_forecast(forecast_minutes).await.expect("async operation failed");
 
             // Property: Forecast should be structurally valid
             prop_assert!(forecast.predicted_utilization >= 0.0 && forecast.predicted_utilization <= 1.0);
@@ -578,7 +578,11 @@ mod stress_tests {
             "Stress test should complete within 30 seconds"
         );
 
-        let completed_tasks: Vec<_> = results.unwrap().into_iter().filter_map(|r| r.ok()).collect();
+        let completed_tasks: Vec<_> = results
+            .expect("operation failed in test")
+            .into_iter()
+            .filter_map(|r| r.ok())
+            .collect();
         assert_eq!(
             completed_tasks.len(),
             num_tasks,

@@ -2,9 +2,11 @@
 
 Mobile deployment infrastructure for running transformer models on iOS and Android devices with hardware acceleration and cross-platform framework support.
 
+**Version:** 0.1.0 | **Status:** Alpha | **Tests:** 1 | **SLoC:** 131,187 | **Last Updated:** 2026-03-21
+
 ## Status
 
-✅ **Production-Ready**: Complete mobile deployment infrastructure with 250+ tests passing (100% pass rate).
+**Alpha**: Infrastructure is in active development. Core iOS and Android bindings are implemented; cross-platform framework integrations and on-device training are at alpha stability. 1 Rust integration test passing.
 
 ## Features
 
@@ -137,9 +139,9 @@ dependencies:
 trustformers-mobile/
 ├── ios-framework/          # iOS Swift framework (TrustformersKit)
 ├── android-lib/            # Android AAR library
-├── react-native/           # React Native module
-├── flutter/                # Flutter plugin
-├── unity-package/          # Unity package
+├── react-native-plugin/    # React Native Turbo Module
+├── flutter-plugin/         # Flutter Dart FFI plugin
+├── unity-package/          # Unity package (C# / IL2CPP)
 ├── src/                    # Shared Rust core
 │   ├── ios.rs             # iOS FFI bindings
 │   ├── android.rs         # Android JNI bindings
@@ -182,10 +184,25 @@ trustformers-mobile/
 - **Vulkan**: Android 7.0+ on supported devices
 - **Edge TPU**: Devices with Google Coral
 
+## Feature Flags
+
+- `ios` — iOS Swift framework and Core ML bindings
+- `android` — Android JNI/NNAPI bindings
+- `coreml` — Core ML model conversion and inference
+- `nnapi` — Android Neural Networks API delegate
+- `tflite-nnapi` — TensorFlow Lite NNAPI backend
+- `on-device-training` — Federated learning and LoRA training
+- `web` — WebAssembly/WebView bridge
+- `react-native` — Turbo Modules / JSI bindings
+- `flutter` — Dart FFI plugin
+- `unity` — C# / IL2CPP bindings
+- `expo` — Expo config plugin
+- `mobile-optimized` — Battery, thermal, and memory pressure optimizations
+
 ## Testing
 
 ```bash
-# Run tests
+# Run Rust tests
 cargo test --all-features -p trustformers-mobile
 
 # Test iOS framework
@@ -203,19 +220,20 @@ cargo test --features device-farm-integration
 ### Building iOS Framework
 
 ```bash
-./scripts/build_ios_framework.sh
+./build-ios.sh
 # Output: target/TrustformersKit.xcframework
 ```
 
 ### Building Android AAR
 
 ```bash
-./scripts/build_android_aar.sh
+./build-android.sh
 # Output: target/trustformers-mobile.aar
 ```
 
 ## Known Limitations
 
+- Alpha status: API surface may change before 0.2.0
 - Core ML Neural Engine requires iOS 16+ for latest features
 - NNAPI performance varies significantly across Android devices
 - Large models require quantization for mobile deployment
@@ -227,6 +245,7 @@ cargo test --features device-farm-integration
 - Better thermal management algorithms
 - More AR/VR integrations
 - Real-time collaboration features
+- WebNN integration for future platforms
 
 ## License
 
@@ -234,7 +253,9 @@ Licensed under Apache License, Version 2.0 ([LICENSE](LICENSE)).
 
 ---
 
-**Last Updated:** Refactored for alpha.1 release
-**Status:** Production-ready mobile infrastructure
-**Test Suite:** 250 tests, 100% pass rate
+**Last Updated:** 2026-03-21
+**Version:** 0.1.0
+**Status:** Alpha
+**Test Suite:** 1 Rust integration test
+**SLoC:** 131,187
 **Platforms:** iOS 14+, Android 8.0+ (API 26+)

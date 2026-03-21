@@ -63,7 +63,12 @@ impl AnalysisCache {
                 EvictionPolicyImpl::Ttl(TtlEvictionPolicy::new(config.default_ttl))
             },
             EvictionPolicyType::Custom(ref name) => {
-                panic!("Custom eviction policy '{}' not implemented", name)
+                warn!(
+                    policy_name = %name,
+                    "Custom eviction policy '{}' is not implemented, falling back to LRU",
+                    name
+                );
+                EvictionPolicyImpl::CustomLruFallback(name.clone(), LruEvictionPolicy::new())
             },
         });
 
@@ -792,6 +797,8 @@ enum EvictionPolicyImpl {
     Lru(LruEvictionPolicy),
     Lfu(LfuEvictionPolicy),
     Ttl(TtlEvictionPolicy),
+    /// Custom policy that falls back to LRU eviction
+    CustomLruFallback(#[allow(dead_code)] String, LruEvictionPolicy),
 }
 
 impl EvictionPolicyImpl {
@@ -804,6 +811,9 @@ impl EvictionPolicyImpl {
             EvictionPolicyImpl::Lru(policy) => policy.select_for_eviction(cache, count),
             EvictionPolicyImpl::Lfu(policy) => policy.select_for_eviction(cache, count),
             EvictionPolicyImpl::Ttl(policy) => policy.select_for_eviction(cache, count),
+            EvictionPolicyImpl::CustomLruFallback(_, lru_policy) => {
+                lru_policy.select_for_eviction(cache, count)
+            },
         }
     }
 }
@@ -940,4 +950,65 @@ pub fn generate_grouping_cache_key(
         GroupingStrategyType::Custom(name) => name,
     };
     format!("grouping_{}_{}tests_v{}", strategy_str, test_count, version)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_custom_eviction_policy_falls_back_to_lru() {
+        // Creating a cache with a custom eviction policy should not panic
+        // and should fall back to LRU behavior.
+        let config = CacheConfig {
+            eviction_policy_type: EvictionPolicyType::Custom("my_custom_policy".to_string()),
+            max_entries_per_type: 2,
+            ..CacheConfig::default()
+        };
+
+        let cache = AnalysisCache::with_config(config);
+
+        // Verify the eviction policy is the CustomLruFallback variant
+        assert!(
+            matches!(
+                cache.eviction_policy.as_ref(),
+                EvictionPolicyImpl::CustomLruFallback(name, _) if name == "my_custom_policy"
+            ),
+            "Expected CustomLruFallback with name 'my_custom_policy'"
+        );
+
+        // Verify LRU eviction actually works by filling the cache beyond capacity.
+        // With max_entries_per_type = 2, inserting a 3rd entry should trigger eviction.
+        let make_dep_analysis = |key: &str| CachedDependencyAnalysis {
+            metadata: CacheMetadata {
+                cache_key: key.to_string(),
+                created_at: Utc::now(),
+                last_accessed: Utc::now(),
+                access_count: 0,
+            },
+            version: 1,
+            data: Vec::new(),
+        };
+
+        // Store 3 entries into a cache with max 2 per type
+        assert!(cache.store_dependency_analysis("key1", make_dep_analysis("key1")).is_ok());
+        assert!(cache.store_dependency_analysis("key2", make_dep_analysis("key2")).is_ok());
+        assert!(cache.store_dependency_analysis("key3", make_dep_analysis("key3")).is_ok());
+
+        // After eviction, we should have at most 2 entries
+        let dep_cache = cache.dependency_cache.read();
+        assert!(
+            dep_cache.len() <= 2,
+            "Expected at most 2 entries after eviction, got {}",
+            dep_cache.len()
+        );
+
+        // The eviction count should have been incremented
+        let stats = cache.get_statistics();
+        assert!(
+            stats.evictions >= 1,
+            "Expected at least 1 eviction, got {}",
+            stats.evictions
+        );
+    }
 }

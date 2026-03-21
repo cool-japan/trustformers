@@ -684,7 +684,7 @@ mod tests {
         let result = monitor.detect_nan_inf(f32::NAN, &gradients);
 
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(result.expect("operation failed in test"));
     }
 
     #[test]

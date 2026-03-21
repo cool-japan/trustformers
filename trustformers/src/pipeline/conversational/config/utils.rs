@@ -163,7 +163,7 @@ mod tests {
             .max_response_tokens(1024)
             .conversation_mode(ConversationMode::Educational)
             .build()
-            .unwrap();
+            .expect("Failed to build conversational config");
 
         assert_eq!(config.temperature, 0.8);
         assert_eq!(config.max_response_tokens, 1024);
@@ -214,7 +214,8 @@ mod tests {
             .max_response_tokens(2048)
             .build_unchecked();
 
-        let merged = ConfigurationMerger::merge(&base, &override_config).unwrap();
+        let merged =
+            ConfigurationMerger::merge(&base, &override_config).expect("Failed to merge configs");
         assert_eq!(merged.temperature, 0.9);
         assert_eq!(merged.max_response_tokens, 2048);
         // Other values should remain from base
@@ -228,7 +229,8 @@ mod tests {
         env::set_var("TRUSTFORMERS_MAX_RESPONSE_TOKENS", "800");
         env::set_var("TRUSTFORMERS_CONVERSATION_MODE", "educational");
 
-        let manager = ConfigurationManager::from_environment().unwrap();
+        let manager = ConfigurationManager::from_environment()
+            .expect("Failed to create config from environment");
         assert_eq!(manager.config().temperature, 0.6);
         assert_eq!(manager.config().max_response_tokens, 800);
         assert!(matches!(
@@ -271,13 +273,15 @@ mod tests {
         let config = ConfigurationPresets::educational_config();
 
         // Test JSON serialization
-        let json = serde_json::to_string(&config).unwrap();
-        let deserialized: ConversationalConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&config).expect("Failed to serialize config to JSON");
+        let deserialized: ConversationalConfig =
+            serde_json::from_str(&json).expect("Failed to deserialize config from JSON");
         assert_eq!(config.temperature, deserialized.temperature);
 
         // Test YAML serialization
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let deserialized: ConversationalConfig = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_yaml::to_string(&config).expect("Failed to serialize config to YAML");
+        let deserialized: ConversationalConfig =
+            serde_yaml::from_str(&yaml).expect("Failed to deserialize config from YAML");
         assert_eq!(config.temperature, deserialized.temperature);
     }
 
@@ -310,7 +314,7 @@ mod tests {
                 config.temperature = 0.9;
                 config.max_response_tokens = 1500;
             })
-            .unwrap();
+            .expect("Failed to update config");
 
         assert_eq!(manager.config().temperature, 0.9);
         assert_eq!(manager.config().max_response_tokens, 1500);

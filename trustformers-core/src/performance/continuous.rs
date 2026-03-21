@@ -430,7 +430,7 @@ mod tests {
     #[test]
     fn test_regression_detection() {
         let config = ContinuousBenchmarkConfig::default();
-        let benchmark = ContinuousBenchmark::new(config).unwrap();
+        let benchmark = ContinuousBenchmark::new(config).expect("operation failed in test");
 
         let regression = benchmark.check_metric_regression(
             "test_benchmark",
@@ -441,7 +441,7 @@ mod tests {
         );
 
         assert!(regression.is_some());
-        let reg = regression.unwrap();
+        let reg = regression.expect("operation failed in test");
         assert_eq!(reg.regression_percent, 10.0);
     }
 

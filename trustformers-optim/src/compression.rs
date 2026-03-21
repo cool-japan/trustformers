@@ -345,7 +345,8 @@ mod tests {
         let mut compressor = GradientCompressor::new(CompressionMethod::TopK { k: 3 });
         let gradient = vec![0.1, 0.8, 0.2, -0.9, 0.3, -0.1];
 
-        let compressed = compressor.compress_single(&gradient, "test").unwrap();
+        let compressed =
+            compressor.compress_single(&gradient, "test").expect("Operation failed in test");
 
         assert_eq!(compressed.indices.len(), 3);
         assert_eq!(compressed.values.len(), 3);
@@ -364,7 +365,8 @@ mod tests {
             GradientCompressor::new(CompressionMethod::Threshold { threshold: 0.5 });
         let gradient = vec![0.1, 0.8, 0.2, -0.9, 0.3, -0.1];
 
-        let compressed = compressor.compress_single(&gradient, "test").unwrap();
+        let compressed =
+            compressor.compress_single(&gradient, "test").expect("Operation failed in test");
 
         // Only values with abs > 0.5 should be included: 0.8, -0.9
         assert_eq!(compressed.values.len(), 2);
@@ -377,7 +379,8 @@ mod tests {
         let mut compressor = GradientCompressor::new(CompressionMethod::SignSGD);
         let gradient = vec![0.1, -0.8, 0.2, -0.9, 0.3, -0.1];
 
-        let compressed = compressor.compress_single(&gradient, "test").unwrap();
+        let compressed =
+            compressor.compress_single(&gradient, "test").expect("Operation failed in test");
 
         assert_eq!(compressed.values.len(), gradient.len());
         assert_eq!(compressed.compression_ratio, 1.0 / 32.0);
@@ -396,13 +399,17 @@ mod tests {
         let grad_data = vec![0.1, 0.8, 0.2, -0.9, 0.3, -0.1];
         gradients.insert(
             "param1".to_string(),
-            Tensor::new(grad_data.clone()).unwrap(),
+            Tensor::new(grad_data.clone()).expect("Failed to create tensor"),
         );
 
-        let compressed = compressor.compress(&gradients).unwrap();
-        let decompressed = compressor.decompress(&compressed).unwrap();
+        let compressed = compressor.compress(&gradients).expect("Operation failed in test");
+        let decompressed = compressor.decompress(&compressed).expect("Operation failed in test");
 
-        let result_data = decompressed.get("param1").unwrap().data().unwrap();
+        let result_data = decompressed
+            .get("param1")
+            .expect("Key not found")
+            .data()
+            .expect("Operation failed in test");
         assert_eq!(result_data.len(), grad_data.len());
 
         // Check that the largest values are preserved
@@ -419,11 +426,18 @@ mod tests {
 
         let mut gradients = HashMap::new();
         let grad_data = vec![0.4, 0.8, 0.2, -0.6];
-        gradients.insert("param1".to_string(), Tensor::new(grad_data).unwrap());
+        gradients.insert(
+            "param1".to_string(),
+            Tensor::new(grad_data).expect("Failed to create tensor"),
+        );
 
-        let result = all_reduce.all_reduce(&gradients).unwrap();
+        let result = all_reduce.all_reduce(&gradients).expect("Operation failed in test");
 
-        let result_data = result.get("param1").unwrap().data().unwrap();
+        let result_data = result
+            .get("param1")
+            .expect("Key not found")
+            .data()
+            .expect("Operation failed in test");
         assert_eq!(result_data.len(), 4);
 
         // Values should be averaged across workers (divided by world_size)

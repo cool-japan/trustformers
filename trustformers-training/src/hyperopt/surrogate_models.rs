@@ -387,9 +387,9 @@ mod tests {
 
         let observations = vec![(params1.clone(), 0.5), (params2.clone(), 1.5)];
 
-        gp.fit(&observations).unwrap();
+        gp.fit(&observations).expect("operation failed in test");
 
-        let (mean, variance) = gp.predict(&params1).unwrap();
+        let (mean, variance) = gp.predict(&params1).expect("operation failed in test");
         assert!(mean >= 0.0);
         assert!(variance > 0.0);
     }
@@ -402,7 +402,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("x".to_string(), ParameterValue::Float(0.5));
 
-        let acquisition_value = ei.compute(&params, &gp, 1.0).unwrap();
+        let acquisition_value = ei.compute(&params, &gp, 1.0).expect("operation failed in test");
         assert!(acquisition_value >= 0.0);
     }
 
@@ -414,7 +414,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("x".to_string(), ParameterValue::Float(0.5));
 
-        let acquisition_value = ucb.compute(&params, &gp, 1.0).unwrap();
+        let acquisition_value = ucb.compute(&params, &gp, 1.0).expect("operation failed in test");
         assert!(acquisition_value.is_finite());
     }
 

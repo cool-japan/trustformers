@@ -513,10 +513,10 @@ mod tests {
             comm_backend: CommunicationBackend::Custom, // Use mock backend for tests
             ..Default::default()
         })
-        .unwrap();
+        .expect("operation failed in test");
 
         let tensor = Tensor::zeros(&[128, 512]).expect("Failed to create zero tensor");
-        let distributed = ctx.partition_tensor(&tensor, 0).unwrap();
+        let distributed = ctx.partition_tensor(&tensor, 0).expect("tensor operation failed");
 
         // Verify partition metadata is correct
         assert_eq!(distributed.global_shape, vec![128, 512]);
@@ -532,7 +532,8 @@ mod tests {
 
     #[test]
     fn test_device_mesh() {
-        let mesh = DeviceMesh::new(&[0, 1, 2, 3], ModelParallelStrategy::Tensor).unwrap();
+        let mesh = DeviceMesh::new(&[0, 1, 2, 3], ModelParallelStrategy::Tensor)
+            .expect("tensor operation failed");
 
         assert_eq!(mesh.device_at(&[0, 0]), Some(0));
         assert_eq!(mesh.device_at(&[0, 1]), Some(1));

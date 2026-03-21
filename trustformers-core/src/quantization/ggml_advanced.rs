@@ -654,7 +654,7 @@ mod tests {
     fn test_q5_0_quantization() {
         // Create test tensor
         let values: Vec<f32> = (0..64).map(|i| i as f32 * 0.1).collect();
-        let tensor = Tensor::from_vec(values.clone(), &[64]).unwrap();
+        let tensor = Tensor::from_vec(values.clone(), &[64]).expect("tensor operation failed");
 
         // Quantize
         let quantizer = AdvancedGGMLQuantizer::new(GGMLQuantType::Q5_0);
@@ -668,7 +668,7 @@ mod tests {
         let dequantized = quantized.dequantize().expect("Dequantization failed");
         match dequantized {
             Tensor::F32(data) => {
-                let deq_values = data.as_slice().unwrap();
+                let deq_values = data.as_slice().expect("operation failed in test");
                 let max_error = values
                     .iter()
                     .zip(deq_values.iter())
@@ -685,7 +685,7 @@ mod tests {
     fn test_q6_k_quantization() {
         // Create larger test tensor for super-blocks
         let values: Vec<f32> = (0..512).map(|i| (i as f32 * 0.01).sin()).collect();
-        let tensor = Tensor::from_vec(values.clone(), &[512]).unwrap();
+        let tensor = Tensor::from_vec(values.clone(), &[512]).expect("tensor operation failed");
 
         // Quantize
         let quantizer = AdvancedGGMLQuantizer::new(GGMLQuantType::Q6K);
@@ -699,7 +699,7 @@ mod tests {
         let dequantized = quantized.dequantize().expect("Dequantization failed");
         match dequantized {
             Tensor::F32(data) => {
-                let deq_values = data.as_slice().unwrap();
+                let deq_values = data.as_slice().expect("operation failed in test");
                 assert_eq!(deq_values.len(), values.len());
 
                 // Check reconstruction quality
@@ -719,8 +719,9 @@ mod tests {
 
         // Test F64 support
         let values_f32: Vec<f32> = (0..64).map(|i| i as f32 * 0.1).collect();
-        let base_tensor_f64 = Tensor::from_vec(values_f32.clone(), &[64]).unwrap();
-        let tensor_f64 = base_tensor_f64.to_dtype(DType::F64).unwrap();
+        let base_tensor_f64 =
+            Tensor::from_vec(values_f32.clone(), &[64]).expect("tensor operation failed");
+        let tensor_f64 = base_tensor_f64.to_dtype(DType::F64).expect("tensor operation failed");
 
         let quantizer = AdvancedGGMLQuantizer::new(GGMLQuantType::Q5_0);
         let quantized_f64 = quantizer.quantize(&tensor_f64).expect("Quantization failed");
@@ -728,7 +729,7 @@ mod tests {
 
         match dequantized_f64 {
             Tensor::F32(data) => {
-                let deq_values = data.as_slice().unwrap();
+                let deq_values = data.as_slice().expect("operation failed in test");
                 let max_error = values_f32
                     .iter()
                     .zip(deq_values.iter())
@@ -741,15 +742,16 @@ mod tests {
 
         // Test I64 support
         let values_i32: Vec<f32> = (0..64).map(|i| i as f32).collect();
-        let base_tensor_i64 = Tensor::from_vec(values_i32.clone(), &[64]).unwrap();
-        let tensor_i64 = base_tensor_i64.to_dtype(DType::I64).unwrap();
+        let base_tensor_i64 =
+            Tensor::from_vec(values_i32.clone(), &[64]).expect("tensor operation failed");
+        let tensor_i64 = base_tensor_i64.to_dtype(DType::I64).expect("tensor operation failed");
 
         let quantized_i64 = quantizer.quantize(&tensor_i64).expect("Quantization failed");
         let dequantized_i64 = quantized_i64.dequantize().expect("Dequantization failed");
 
         match dequantized_i64 {
             Tensor::F32(data) => {
-                let deq_values = data.as_slice().unwrap();
+                let deq_values = data.as_slice().expect("operation failed in test");
                 let max_error = values_i32
                     .iter()
                     .zip(deq_values.iter())

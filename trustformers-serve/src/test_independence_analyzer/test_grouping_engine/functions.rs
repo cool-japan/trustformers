@@ -118,7 +118,9 @@ mod tests {
             create_test_metadata("test3", TestCategory::Integration),
             create_test_metadata("test4", TestCategory::Integration),
         ];
-        let groups = engine.create_test_groups(&tests, &[], &[]).unwrap();
+        let groups = engine
+            .create_test_groups(&tests, &[], &[])
+            .expect("creation should succeed in test");
         assert!(!groups.is_empty());
         assert!(groups.iter().all(|g| !g.tests.is_empty()));
         let total_assigned_tests: usize = groups.iter().map(|g| g.tests.len()).sum();
@@ -149,7 +151,9 @@ mod tests {
                 last_occurrence: None,
             },
         }];
-        let groups = engine.create_test_groups(&tests, &[], &conflicts).unwrap();
+        let groups = engine
+            .create_test_groups(&tests, &[], &conflicts)
+            .expect("creation should succeed in test");
         let test1_groups: Vec<_> =
             groups.iter().filter(|g| g.tests.contains(&"test1".to_string())).collect();
         let test2_groups: Vec<_> =

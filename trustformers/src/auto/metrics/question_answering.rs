@@ -427,9 +427,9 @@ mod tests {
             "July 20, 1969".to_string(),
         ]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "question_answering");
         assert!(result.value >= 0.0 && result.value <= 1.0);
         assert!(result.details.contains_key("exact_match"));
@@ -443,9 +443,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["Barack Obama".to_string()]);
         let references = MetricInput::Text(vec!["Barack Obama".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.details.get("exact_match"), Some(&1.0));
         assert_eq!(result.details.get("f1"), Some(&1.0));
         assert_eq!(result.value, 1.0); // Average of 1.0 and 1.0
@@ -458,9 +458,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["completely different".to_string()]);
         let references = MetricInput::Text(vec!["Barack Obama".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.details.get("exact_match"), Some(&0.0));
         assert_eq!(result.details.get("f1"), Some(&0.0));
         assert_eq!(result.value, 0.0); // Average of 0.0 and 0.0
@@ -473,13 +473,13 @@ mod tests {
         let predictions = MetricInput::Text(vec!["Barack Obama".to_string()]);
         let references = MetricInput::Text(vec!["Barack Hussein Obama".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.details.get("exact_match"), Some(&0.0)); // No exact match
 
         // F1 should be > 0 due to overlapping tokens
-        let f1 = result.details.get("f1").unwrap();
+        let f1 = result.details.get("f1").expect("expected value not found");
         assert!(*f1 > 0.0 && *f1 < 1.0);
     }
 
@@ -490,9 +490,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["  Barack H. Obama!  ".to_string()]);
         let references = MetricInput::Text(vec!["Barack H Obama".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.details.get("exact_match"), Some(&1.0)); // Should match after normalization
     }
 
@@ -503,9 +503,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["".to_string()]);
         let references = MetricInput::Text(vec!["Barack Obama".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.details.get("exact_match"), Some(&0.0));
         assert_eq!(result.details.get("f1"), Some(&0.0)); // No tokens to match
     }
@@ -520,7 +520,7 @@ mod tests {
                 &MetricInput::Text(vec!["Barack Obama".to_string()]),
                 &MetricInput::Text(vec!["Barack Obama".to_string()]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Second batch - no match
         metric
@@ -528,9 +528,9 @@ mod tests {
                 &MetricInput::Text(vec!["different answer".to_string()]),
                 &MetricInput::Text(vec!["Barack Obama".to_string()]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Should average: (1.0 + 0.0) / 2 = 0.5 for EM, (1.0 + 0.0) / 2 = 0.5 for F1
         assert_eq!(result.details.get("exact_match"), Some(&0.5));
         assert_eq!(result.details.get("f1"), Some(&0.5));
@@ -546,7 +546,7 @@ mod tests {
                 &MetricInput::Text(vec!["Barack Obama".to_string()]),
                 &MetricInput::Text(vec!["Barack Obama".to_string()]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         metric.reset();
 
@@ -590,9 +590,9 @@ mod tests {
         let predictions = MetricInput::Text(vec!["BARACK OBAMA".to_string()]);
         let references = MetricInput::Text(vec!["barack obama".to_string()]);
 
-        metric.add_batch(&predictions, &references).unwrap();
+        metric.add_batch(&predictions, &references).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.details.get("exact_match"), Some(&1.0));
         assert_eq!(result.details.get("f1"), Some(&1.0));
     }

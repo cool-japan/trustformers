@@ -41,8 +41,8 @@ impl Default for SphinxConfig {
         Self {
             project_name: "TrustformeRS C API".to_string(),
             version: "0.1.0".to_string(),
-            author: "TrustformeRS Team".to_string(),
-            copyright: "2024, TrustformeRS Team".to_string(),
+            author: "COOLJAPAN OU (Team KitaSan)".to_string(),
+            copyright: "2025-2026, COOLJAPAN OU (Team KitaSan)".to_string(),
             theme: "sphinx_rtd_theme".to_string(),
             language: "en".to_string(),
             enable_autodoc: true,
@@ -358,7 +358,7 @@ todo_include_todos = True
         category_names.sort();
 
         for category in category_names {
-            let funcs = categories.get(&category).unwrap();
+            let funcs = categories.get(&category).expect("category key came from categories.keys()");
 
             content.push(String::new());
             content.push(format!("{}", category));
@@ -1467,7 +1467,7 @@ mod tests {
     #[test]
     fn test_categorize_function() {
         let config = CodeGenConfig::default();
-        let generator = SphinxDocGenerator::new(&config).unwrap();
+        let generator = SphinxDocGenerator::new(&config).expect("test operation should succeed");
 
         assert_eq!(
             generator.categorize_function("trustformers_model_load"),
@@ -1486,7 +1486,7 @@ mod tests {
     #[test]
     fn test_format_type() {
         let config = CodeGenConfig::default();
-        let generator = SphinxDocGenerator::new(&config).unwrap();
+        let generator = SphinxDocGenerator::new(&config).expect("test operation should succeed");
 
         let int_type = FfiType {
             name: "int".to_string(),

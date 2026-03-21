@@ -489,9 +489,18 @@ mod tests {
         let generation_id = Uuid::new_v4();
         let stream = TokenStream::new(config, generation_id);
 
-        stream.start_generation("Hello".to_string()).await.unwrap();
-        stream.add_token("world".to_string(), Some(-0.5)).await.unwrap();
-        stream.complete_generation(CompletionReason::Finished).await.unwrap();
+        stream
+            .start_generation("Hello".to_string())
+            .await
+            .expect("async operation should succeed in test");
+        stream
+            .add_token("world".to_string(), Some(-0.5))
+            .await
+            .expect("async operation should succeed in test");
+        stream
+            .complete_generation(CompletionReason::Finished)
+            .await
+            .expect("async operation should succeed in test");
 
         assert_eq!(stream.get_token_count().await, 1);
         assert_eq!(stream.get_generated_text().await, "world");

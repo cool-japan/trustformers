@@ -501,7 +501,7 @@ mod tests {
         optimizer.step(&mut parameters, &gradients, initial_loss)?;
 
         // Check that parameter was updated
-        let updated_param = parameters.get("weight").unwrap();
+        let updated_param = parameters.get("weight").expect("Key not found");
         let expected_value = 1.0 - 1e-2 * 0.1; // 1.0 - lr * grad
 
         // Due to GENIE's preconditioning, the exact update may differ, but parameter should change
@@ -610,11 +610,11 @@ mod tests {
         let mut gradients = HashMap::new();
         gradients.insert("weight".to_string(), Tensor::zeros(&[2, 2])?);
 
-        let initial_param_value = parameters.get("weight").unwrap().to_scalar::<f32>()?;
+        let initial_param_value = parameters.get("weight").expect("Key not found").to_scalar::<f32>()?;
 
         optimizer.step(&mut parameters, &gradients, 1.0)?;
 
-        let final_param_value = parameters.get("weight").unwrap().to_scalar::<f32>()?;
+        let final_param_value = parameters.get("weight").expect("Key not found").to_scalar::<f32>()?;
 
         // With weight decay, parameter should decrease even with zero gradient
         assert!(final_param_value < initial_param_value);

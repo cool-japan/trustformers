@@ -947,7 +947,7 @@ mod tests {
             ..Default::default()
         };
 
-        let relay_ir = exporter.build_relay_ir(&model, &config).unwrap();
+        let relay_ir = exporter.build_relay_ir(&model, &config).expect("operation failed in test");
 
         assert_eq!(relay_ir["version"], "0.0.5");
         assert_eq!(relay_ir["target"], "llvm");
@@ -970,7 +970,9 @@ mod tests {
             ..Default::default()
         };
 
-        let runtime_config = exporter.build_runtime_config(&model, &config).unwrap();
+        let runtime_config = exporter
+            .build_runtime_config(&model, &config)
+            .expect("operation failed in test");
 
         assert_eq!(runtime_config["runtime"]["target"], "llvm");
         assert_eq!(runtime_config["runtime"]["device_type"], 1);
@@ -994,7 +996,9 @@ mod tests {
             ..Default::default()
         };
 
-        let script = exporter.generate_compilation_script(&model, &config).unwrap();
+        let script = exporter
+            .generate_compilation_script(&model, &config)
+            .expect("operation failed in test");
 
         assert!(script.contains("import tvm"));
         assert!(script.contains("from tvm import relay"));

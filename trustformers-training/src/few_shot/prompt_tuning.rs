@@ -416,7 +416,8 @@ mod tests {
     #[test]
     fn test_soft_prompt_creation() {
         let config = PromptConfig::default();
-        let prompt = SoftPrompt::new(config.clone(), "test_task".to_string()).unwrap();
+        let prompt = SoftPrompt::new(config.clone(), "test_task".to_string())
+            .expect("operation failed in test");
 
         assert_eq!(
             prompt.embeddings.shape(),
@@ -429,12 +430,13 @@ mod tests {
     #[test]
     fn test_prompt_update() {
         let config = PromptConfig::default();
-        let mut prompt = SoftPrompt::new(config.clone(), "test_task".to_string()).unwrap();
+        let mut prompt = SoftPrompt::new(config.clone(), "test_task".to_string())
+            .expect("operation failed in test");
 
         let gradients = Array2::ones((config.prompt_length, config.embedding_dim));
         let initial_embeddings = prompt.embeddings.clone();
 
-        prompt.update(&gradients).unwrap();
+        prompt.update(&gradients).expect("operation failed in test");
 
         assert_ne!(prompt.embeddings, initial_embeddings);
         assert_eq!(prompt.get_step(), 1);
@@ -445,8 +447,8 @@ mod tests {
         let config = PromptConfig::default();
         let mut tuner = PromptTuner::new(config.clone());
 
-        tuner.create_prompt("task1".to_string()).unwrap();
-        tuner.create_prompt("task2".to_string()).unwrap();
+        tuner.create_prompt("task1".to_string()).expect("operation failed in test");
+        tuner.create_prompt("task2".to_string()).expect("operation failed in test");
 
         assert!(tuner.get_prompt("task1").is_some());
         assert!(tuner.get_prompt("task2").is_some());
@@ -461,10 +463,12 @@ mod tests {
             ..Default::default()
         };
         let mut tuner = PromptTuner::new(config.clone());
-        tuner.create_prompt("test_task".to_string()).unwrap();
+        tuner.create_prompt("test_task".to_string()).expect("operation failed in test");
 
         let input_embeddings = Array2::ones((8, 10)); // 8 tokens, 10 dims
-        let result = tuner.apply_prompt("test_task", &input_embeddings).unwrap();
+        let result = tuner
+            .apply_prompt("test_task", &input_embeddings)
+            .expect("operation failed in test");
 
         assert_eq!(result.shape(), &[13, 10]); // 5 prompt + 8 input tokens
     }
@@ -477,10 +481,12 @@ mod tests {
             ..Default::default()
         };
         let mut tuner = PromptTuner::new(config.clone());
-        tuner.create_prompt("test_task".to_string()).unwrap();
+        tuner.create_prompt("test_task".to_string()).expect("operation failed in test");
 
         let input_batch = Array3::ones((2, 4, 5)); // batch_size=2, seq_len=4, embed_dim=5
-        let result = tuner.apply_prompt_batch("test_task", &input_batch).unwrap();
+        let result = tuner
+            .apply_prompt_batch("test_task", &input_batch)
+            .expect("operation failed in test");
 
         assert_eq!(result.shape(), &[2, 7, 5]); // 3 prompt + 4 input tokens per batch
     }
@@ -494,11 +500,15 @@ mod tests {
         stats.record_step("task1", 1.2, &gradients);
 
         assert_abs_diff_eq!(
-            stats.get_average_loss("task1").unwrap(),
+            stats.get_average_loss("task1").expect("operation failed in test"),
             1.35,
             epsilon = 1e-6
         );
-        assert_abs_diff_eq!(stats.get_latest_loss("task1").unwrap(), 1.2, epsilon = 1e-6);
+        assert_abs_diff_eq!(
+            stats.get_latest_loss("task1").expect("operation failed in test"),
+            1.2,
+            epsilon = 1e-6
+        );
         assert_eq!(stats.get_steps("task1"), 2);
     }
 
@@ -520,7 +530,8 @@ mod tests {
         ];
 
         for config in configs {
-            let prompt = SoftPrompt::new(config.clone(), "test".to_string()).unwrap();
+            let prompt = SoftPrompt::new(config.clone(), "test".to_string())
+                .expect("operation failed in test");
             assert_eq!(
                 prompt.embeddings.shape(),
                 &[config.prompt_length, config.embedding_dim]

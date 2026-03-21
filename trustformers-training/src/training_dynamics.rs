@@ -948,7 +948,7 @@ mod tests {
         let gradients = HashMap::new();
         let weights = HashMap::new();
 
-        analyzer.update(1, 1.0, &gradients, &weights).unwrap();
+        analyzer.update(1, 1.0, &gradients, &weights).expect("operation failed in test");
         assert_eq!(analyzer.loss_history.len(), 1);
         assert_eq!(analyzer.loss_history[0], 1.0);
     }
@@ -958,8 +958,8 @@ mod tests {
         let config = TrainingDynamicsConfig::default();
         let analyzer = TrainingDynamicsAnalyzer::new(config);
 
-        let tensor = Tensor::from_vec(vec![3.0, 4.0], &[2]).unwrap();
-        let norm = analyzer.compute_tensor_norm(&tensor).unwrap();
+        let tensor = Tensor::from_vec(vec![3.0, 4.0], &[2]).expect("tensor operation failed");
+        let norm = analyzer.compute_tensor_norm(&tensor).expect("tensor operation failed");
         assert!((norm - 5.0).abs() < 1e-6); // sqrt(3^2 + 4^2) = 5
     }
 
@@ -968,8 +968,10 @@ mod tests {
         let config = TrainingDynamicsConfig::default();
         let analyzer = TrainingDynamicsAnalyzer::new(config);
 
-        let weights = Tensor::from_vec(vec![0.0, 1e-8, 0.1, 0.5], &[4]).unwrap();
-        let (dead, active) = analyzer.analyze_neuron_activity(&weights).unwrap();
+        let weights =
+            Tensor::from_vec(vec![0.0, 1e-8, 0.1, 0.5], &[4]).expect("tensor operation failed");
+        let (dead, active) =
+            analyzer.analyze_neuron_activity(&weights).expect("operation failed in test");
         assert_eq!(dead, 2); // 0.0 and 1e-8 are below threshold
         assert_eq!(active, 2); // 0.1 and 0.5 are above threshold
     }
@@ -979,9 +981,10 @@ mod tests {
         let config = TrainingDynamicsConfig::default();
         let analyzer = TrainingDynamicsAnalyzer::new(config);
 
-        let prev = Tensor::from_vec(vec![1.0, 2.0], &[2]).unwrap();
-        let curr = Tensor::from_vec(vec![1.1, 2.1], &[2]).unwrap();
-        let change = analyzer.compute_weight_change(&prev, &curr).unwrap();
+        let prev = Tensor::from_vec(vec![1.0, 2.0], &[2]).expect("tensor operation failed");
+        let curr = Tensor::from_vec(vec![1.1, 2.1], &[2]).expect("tensor operation failed");
+        let change =
+            analyzer.compute_weight_change(&prev, &curr).expect("operation failed in test");
 
         // sqrt((0.1)^2 + (0.1)^2) = sqrt(0.02) ≈ 0.1414
         assert!((change - 0.1414).abs() < 1e-3);

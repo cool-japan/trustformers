@@ -450,11 +450,11 @@ mod tests {
 
     #[test]
     fn test_string_operations_c_api() {
-        let test_str = CString::new("Hello World").unwrap();
+        let test_str = CString::new("Hello World").expect("CString creation should succeed for valid test input");
         let result = trustformers_string_to_uppercase(test_str.as_ptr());
         assert!(!result.is_null());
 
-        let back_to_rust = unsafe { c_str_to_string(result) }.unwrap();
+        let back_to_rust = unsafe { c_str_to_string(result) }.expect("test operation should succeed");
         assert_eq!(back_to_rust, "HELLO WORLD");
 
         unsafe {
@@ -464,11 +464,11 @@ mod tests {
 
     #[test]
     fn test_validation_c_api() {
-        let valid_str = CString::new("ValidString123").unwrap();
+        let valid_str = CString::new("ValidString123").expect("CString creation should succeed for valid test input");
         let result = trustformers_validate_string(valid_str.as_ptr(), 5, 50, true);
         assert_eq!(result, TrustformersError::Success as i32);
 
-        let invalid_str = CString::new("").unwrap();
+        let invalid_str = CString::new("").expect("CString creation should succeed for valid test input");
         let result = trustformers_validate_string(invalid_str.as_ptr(), 5, 50, false);
         assert_ne!(result, TrustformersError::Success as i32);
     }

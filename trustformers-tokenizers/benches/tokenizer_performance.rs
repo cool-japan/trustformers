@@ -151,7 +151,7 @@ fn benchmark_tokenizers(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("char", "batch"), &texts, |b, texts| {
         b.iter(|| {
             for text in texts {
-                char_tokenizer.encode(black_box(text)).unwrap();
+                char_tokenizer.encode(black_box(text)).expect("encoding failed");
             }
         })
     });
@@ -159,7 +159,7 @@ fn benchmark_tokenizers(c: &mut Criterion) {
     group.bench_with_input(BenchmarkId::new("bpe", "batch"), &texts, |b, texts| {
         b.iter(|| {
             for text in texts {
-                bpe_tokenizer.encode(black_box(text)).unwrap();
+                bpe_tokenizer.encode(black_box(text)).expect("encoding failed");
             }
         })
     });

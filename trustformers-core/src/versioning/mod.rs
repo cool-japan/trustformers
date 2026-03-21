@@ -329,12 +329,15 @@ mod tests {
         let version_id = manager
             .register_version("test_model", "1.0.0", metadata, artifacts)
             .await
-            .unwrap();
+            .expect("operation failed in test");
         assert!(!version_id.is_nil());
 
-        let retrieved = manager.get_version(version_id).await.unwrap();
+        let retrieved = manager.get_version(version_id).await.expect("async operation failed");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().version(), "1.0.0");
+        assert_eq!(
+            retrieved.expect("operation failed in test").version(),
+            "1.0.0"
+        );
     }
 
     #[tokio::test]
@@ -348,11 +351,14 @@ mod tests {
             .model_type("transformer".to_string())
             .build();
 
-        let version_id =
-            manager.register_version("test_model", "1.0.0", metadata, vec![]).await.unwrap();
+        let version_id = manager
+            .register_version("test_model", "1.0.0", metadata, vec![])
+            .await
+            .expect("async operation failed");
 
         // Should start in development
-        let status = manager.lifecycle.get_status(version_id).await.unwrap();
+        let status =
+            manager.lifecycle.get_status(version_id).await.expect("async operation failed");
         assert_eq!(status, VersionStatus::Development);
 
         // Move to staging
@@ -360,8 +366,9 @@ mod tests {
             .lifecycle
             .transition(version_id, VersionTransition::ToStaging)
             .await
-            .unwrap();
-        let status = manager.lifecycle.get_status(version_id).await.unwrap();
+            .expect("operation failed in test");
+        let status =
+            manager.lifecycle.get_status(version_id).await.expect("async operation failed");
         assert_eq!(status, VersionStatus::Staging);
     }
 }

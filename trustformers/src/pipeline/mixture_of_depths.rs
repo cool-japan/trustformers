@@ -786,8 +786,14 @@ mod tests {
             "resources".to_string(),
         ];
 
-        let simple_analysis = analyzer.analyze_complexity(&simple_input).await.unwrap();
-        let complex_analysis = analyzer.analyze_complexity(&complex_input).await.unwrap();
+        let simple_analysis = analyzer
+            .analyze_complexity(&simple_input)
+            .await
+            .expect("async operation failed");
+        let complex_analysis = analyzer
+            .analyze_complexity(&complex_input)
+            .await
+            .expect("async operation failed");
 
         assert!(simple_analysis.overall_complexity < complex_analysis.overall_complexity);
         assert!(simple_analysis.predicted_optimal_depth < complex_analysis.predicted_optimal_depth);
@@ -806,7 +812,8 @@ mod tests {
             "!".to_string(),
         ];
 
-        let classifications = classifier.classify_tokens(&tokens).await.unwrap();
+        let classifications =
+            classifier.classify_tokens(&tokens).await.expect("async operation failed");
 
         assert_eq!(classifications[0], TokenType::Function); // "The"
         assert_eq!(classifications[4], TokenType::Numeric); // "123"

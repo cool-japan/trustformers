@@ -378,7 +378,7 @@ impl VersionedModel {
 
         // Semver pattern
         if regex::Regex::new(r"^\d+\.\d+\.\d+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$")
-            .unwrap()
+            .expect("semver regex pattern is valid")
             .is_match(version)
         {
             return true;
@@ -386,7 +386,7 @@ impl VersionedModel {
 
         // Git tag pattern
         if regex::Regex::new(r"^v?\d+\.\d+(\.\d+)?(-[a-zA-Z0-9.-]+)?$")
-            .unwrap()
+            .expect("git tag regex pattern is valid")
             .is_match(version)
         {
             return true;

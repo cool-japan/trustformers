@@ -383,8 +383,9 @@ mod tests {
     #[test]
     fn test_convergence_status_serialization() {
         let status = ConvergenceStatus::Converging;
-        let serialized = serde_json::to_string(&status).unwrap();
-        let deserialized: ConvergenceStatus = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&status).expect("JSON serialization failed");
+        let deserialized: ConvergenceStatus =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
 
         matches!(deserialized, ConvergenceStatus::Converging);
     }

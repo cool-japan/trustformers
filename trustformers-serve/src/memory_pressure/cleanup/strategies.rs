@@ -687,7 +687,10 @@ mod tests {
         let context = CleanupContext::new(MemoryPressureLevel::Medium, 0.7, 1024 * 1024 * 1024);
 
         let strategies = vec![CleanupStrategy::GarbageCollection];
-        let actions_queued = engine.queue_cleanup_actions(strategies, context).await.unwrap();
+        let actions_queued = engine
+            .queue_cleanup_actions(strategies, context)
+            .await
+            .expect("async operation should succeed in test");
 
         assert_eq!(actions_queued, 1);
 

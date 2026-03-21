@@ -917,14 +917,14 @@ mod tests {
 
     #[test]
     fn test_jax_adam_creation() {
-        let optimizer = JAXAdam::with_defaults().unwrap();
+        let optimizer = JAXAdam::with_defaults().expect("Operation failed in test");
         assert_eq!(optimizer.name(), "adam");
         assert_eq!(optimizer.learning_rate, 1e-3);
     }
 
     #[test]
     fn test_jax_adamw_creation() {
-        let optimizer = JAXAdamW::with_defaults().unwrap();
+        let optimizer = JAXAdamW::with_defaults().expect("Operation failed in test");
         assert_eq!(optimizer.name(), "adamw");
         assert_eq!(optimizer.learning_rate, 1e-3);
         assert_eq!(optimizer.weight_decay, 1e-4);
@@ -932,7 +932,7 @@ mod tests {
 
     #[test]
     fn test_jax_sgd_creation() {
-        let optimizer = JAXSGD::with_defaults().unwrap();
+        let optimizer = JAXSGD::with_defaults().expect("Operation failed in test");
         assert_eq!(optimizer.name(), "sgd");
         assert_eq!(optimizer.learning_rate, 1e-3);
         assert_eq!(optimizer.momentum, 0.0);
@@ -964,29 +964,38 @@ mod tests {
 
     #[test]
     fn test_jax_optimizer_factory() {
-        let adam = JAXOptimizerFactory::adam(1e-3, 0.9, 0.999, 1e-8, 0.0, None).unwrap();
+        let adam = JAXOptimizerFactory::adam(1e-3, 0.9, 0.999, 1e-8, 0.0, None)
+            .expect("Operation failed in test");
         assert_eq!(adam.name(), "adam");
 
-        let adamw = JAXOptimizerFactory::adamw(1e-3, 0.9, 0.999, 1e-8, 0.0, 1e-4).unwrap();
+        let adamw = JAXOptimizerFactory::adamw(1e-3, 0.9, 0.999, 1e-8, 0.0, 1e-4)
+            .expect("Operation failed in test");
         assert_eq!(adamw.name(), "adamw");
 
-        let sgd = JAXOptimizerFactory::sgd(1e-3, 0.9, false, None).unwrap();
+        let sgd =
+            JAXOptimizerFactory::sgd(1e-3, 0.9, false, None).expect("Operation failed in test");
         assert_eq!(sgd.name(), "sgd");
     }
 
     #[test]
     fn test_jax_optimizer_init() {
         use std::collections::HashMap;
-        let optimizer = JAXAdam::with_defaults().unwrap();
+        let optimizer = JAXAdam::with_defaults().expect("Operation failed in test");
         let params: HashMap<String, Tensor> = [
-            ("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap()),
-            ("param2".to_string(), Tensor::zeros(&[5, 5]).unwrap()),
+            (
+                "param1".to_string(),
+                Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+            ),
+            (
+                "param2".to_string(),
+                Tensor::zeros(&[5, 5]).expect("Failed to create tensor"),
+            ),
         ]
         .iter()
         .cloned()
         .collect();
 
-        let state = optimizer.init(&params).unwrap();
+        let state = optimizer.init(&params).expect("Init failed");
         assert_eq!(state.step, 0);
         assert!(state.params.contains_key("param1_m"));
         assert!(state.params.contains_key("param1_v"));
@@ -997,23 +1006,28 @@ mod tests {
     #[test]
     fn test_jax_optimizer_update() {
         use std::collections::HashMap;
-        let optimizer = JAXAdam::with_defaults().unwrap();
-        let params: HashMap<String, Tensor> =
-            [("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())]
-                .iter()
-                .cloned()
-                .collect();
+        let optimizer = JAXAdam::with_defaults().expect("Operation failed in test");
+        let params: HashMap<String, Tensor> = [(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        )]
+        .iter()
+        .cloned()
+        .collect();
 
-        let state = optimizer.init(&params).unwrap();
+        let state = optimizer.init(&params).expect("Init failed");
 
-        let gradients: HashMap<String, Tensor> =
-            [("param1".to_string(), Tensor::ones(&[10, 10]).unwrap())]
-                .iter()
-                .cloned()
-                .collect();
+        let gradients: HashMap<String, Tensor> = [(
+            "param1".to_string(),
+            Tensor::ones(&[10, 10]).expect("Failed to create tensor"),
+        )]
+        .iter()
+        .cloned()
+        .collect();
 
-        let (updated_params, updated_state) =
-            optimizer.update(&gradients, &state, Some(&params)).unwrap();
+        let (updated_params, updated_state) = optimizer
+            .update(&gradients, &state, Some(&params))
+            .expect("Optimizer update failed");
         assert_eq!(updated_state.step, 1);
         assert!(updated_params.contains_key("param1"));
     }
@@ -1021,20 +1035,24 @@ mod tests {
     #[test]
     fn test_jax_chain_transformation() {
         use std::collections::HashMap;
-        let adam = JAXOptimizerFactory::adam(1e-3, 0.9, 0.999, 1e-8, 0.0, None).unwrap();
-        let sgd = JAXOptimizerFactory::sgd(1e-3, 0.9, false, None).unwrap();
+        let adam = JAXOptimizerFactory::adam(1e-3, 0.9, 0.999, 1e-8, 0.0, None)
+            .expect("Operation failed in test");
+        let sgd =
+            JAXOptimizerFactory::sgd(1e-3, 0.9, false, None).expect("Operation failed in test");
 
         let chain = JAXOptimizerFactory::chain(vec![Box::new(adam), Box::new(sgd)]);
 
         assert_eq!(chain.name(), "chain");
 
-        let params: HashMap<String, Tensor> =
-            [("param1".to_string(), Tensor::zeros(&[5, 5]).unwrap())]
-                .iter()
-                .cloned()
-                .collect();
+        let params: HashMap<String, Tensor> = [(
+            "param1".to_string(),
+            Tensor::zeros(&[5, 5]).expect("Failed to create tensor"),
+        )]
+        .iter()
+        .cloned()
+        .collect();
 
-        let state = chain.init(&params).unwrap();
+        let state = chain.init(&params).expect("Init failed");
         assert!(state.params.contains_key("chain_0"));
         assert!(state.params.contains_key("chain_1"));
     }
@@ -1042,7 +1060,8 @@ mod tests {
     #[test]
     fn test_schedule_with_optimizer() {
         let schedule = Box::new(JAXExponentialDecay::new(0.1, 0.96, 100, 0, false, None));
-        let optimizer = JAXAdam::with_schedule(schedule, 0.9, 0.999, 1e-8, 0.0, None).unwrap();
+        let optimizer = JAXAdam::with_schedule(schedule, 0.9, 0.999, 1e-8, 0.0, None)
+            .expect("Operation failed in test");
 
         assert_eq!(optimizer.learning_rate, 0.1);
         assert!(optimizer.lr_schedule.is_some());

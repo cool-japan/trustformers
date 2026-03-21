@@ -548,25 +548,34 @@ mod tests {
 
         // Register a model
         let model = create_test_model("gpt2", "1.0.0", vec![ModelTag::new("production")]).await;
-        let version_id = registry.register(model.clone()).await.unwrap();
+        let version_id = registry.register(model.clone()).await.expect("async operation failed");
         assert_eq!(version_id, model.id());
 
         // Get by ID
-        let retrieved = registry.get_version(version_id).await.unwrap();
+        let retrieved = registry.get_version(version_id).await.expect("async operation failed");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().version(), "1.0.0");
+        assert_eq!(
+            retrieved.expect("operation failed in test").version(),
+            "1.0.0"
+        );
 
         // Get by name and version
-        let retrieved = registry.get_version_by_name("gpt2", "1.0.0").await.unwrap();
+        let retrieved = registry
+            .get_version_by_name("gpt2", "1.0.0")
+            .await
+            .expect("async operation failed");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().model_name(), "gpt2");
+        assert_eq!(
+            retrieved.expect("operation failed in test").model_name(),
+            "gpt2"
+        );
 
         // List versions
-        let versions = registry.list_versions("gpt2").await.unwrap();
+        let versions = registry.list_versions("gpt2").await.expect("async operation failed");
         assert_eq!(versions.len(), 1);
 
         // List models
-        let models = registry.list_models().await.unwrap();
+        let models = registry.list_models().await.expect("async operation failed");
         assert_eq!(models, vec!["gpt2"]);
     }
 
@@ -582,22 +591,22 @@ mod tests {
         ];
 
         for model in models {
-            registry.register(model).await.unwrap();
+            registry.register(model).await.expect("async operation failed");
         }
 
         // Query by model name pattern
         let query = VersionQuery::new().model_name_pattern("gpt*".to_string());
-        let results = registry.query_versions(query).await.unwrap();
+        let results = registry.query_versions(query).await.expect("async operation failed");
         assert_eq!(results.len(), 2);
 
         // Query by tag
         let query = VersionQuery::new().with_tag("production".to_string());
-        let results = registry.query_versions(query).await.unwrap();
+        let results = registry.query_versions(query).await.expect("async operation failed");
         assert_eq!(results.len(), 2);
 
         // Query with limit
         let query = VersionQuery::new().limit(1);
-        let results = registry.query_versions(query).await.unwrap();
+        let results = registry.query_versions(query).await.expect("async operation failed");
         assert_eq!(results.len(), 1);
     }
 
@@ -612,13 +621,19 @@ mod tests {
         )
         .await;
 
-        registry.register(model).await.unwrap();
+        registry.register(model).await.expect("async operation failed");
 
         // Get by tag
-        let results = registry.get_versions_by_tag("production").await.unwrap();
+        let results = registry
+            .get_versions_by_tag("production")
+            .await
+            .expect("async operation failed");
         assert_eq!(results.len(), 1);
 
-        let results = registry.get_versions_by_tag("nonexistent").await.unwrap();
+        let results = registry
+            .get_versions_by_tag("nonexistent")
+            .await
+            .expect("async operation failed");
         assert_eq!(results.len(), 0);
     }
 
@@ -629,7 +644,7 @@ mod tests {
         let model1 = create_test_model("test", "1.0.0", vec![]).await;
         let model2 = create_test_model("test", "1.0.0", vec![]).await;
 
-        registry.register(model1).await.unwrap();
+        registry.register(model1).await.expect("async operation failed");
         let result = registry.register(model2).await;
         assert!(result.is_err());
     }
@@ -639,9 +654,9 @@ mod tests {
         let registry = ModelRegistry::new();
 
         let model = create_test_model("test", "1.0.0", vec![ModelTag::new("test")]).await;
-        registry.register(model).await.unwrap();
+        registry.register(model).await.expect("async operation failed");
 
-        let stats = registry.get_statistics().await.unwrap();
+        let stats = registry.get_statistics().await.expect("async operation failed");
         assert_eq!(stats.total_versions, 1);
         assert_eq!(stats.total_models, 1);
         assert_eq!(stats.total_tags, 1);

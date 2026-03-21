@@ -283,10 +283,10 @@ mod tests {
         let mut trainer = EWCTrainer::new(config);
 
         trainer.start_task("task1".to_string());
-        trainer.add_parameter("weight1".to_string(), 3).unwrap();
+        trainer.add_parameter("weight1".to_string(), 3).expect("add operation failed");
 
         let gradient = Array1::from_vec(vec![1.0, 2.0, 3.0]);
-        trainer.update_fisher("weight1", &gradient).unwrap();
+        trainer.update_fisher("weight1", &gradient).expect("operation failed in test");
 
         let optimal_params = {
             let mut params = HashMap::new();
@@ -294,7 +294,7 @@ mod tests {
             params
         };
 
-        trainer.finalize_task(optimal_params).unwrap();
+        trainer.finalize_task(optimal_params).expect("operation failed in test");
 
         // Test penalty computation
         let current_params = {

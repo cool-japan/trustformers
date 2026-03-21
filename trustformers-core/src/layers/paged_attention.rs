@@ -534,7 +534,8 @@ mod tests {
 
     #[test]
     fn test_sequence_allocation() {
-        let paged_attn = PagedAttention::new(256, 8, 0.0, true, 32, 100).unwrap();
+        let paged_attn =
+            PagedAttention::new(256, 8, 0.0, true, 32, 100).expect("operation failed in test");
 
         // Allocate sequence
         let result = paged_attn.allocate_sequence(1, 128);

@@ -527,10 +527,12 @@ mod tests {
         token_map.insert("world".to_string(), 1);
         let vocab = Vocab::from_map(token_map);
 
-        let vocab_ref = pool.get_or_insert("test_vocab".to_string(), vocab).unwrap();
+        let vocab_ref = pool
+            .get_or_insert("test_vocab".to_string(), vocab)
+            .expect("Operation failed in test");
         assert_eq!(vocab_ref.size(), 2);
 
-        let retrieved = pool.get_by_id("test_vocab").unwrap();
+        let retrieved = pool.get_by_id("test_vocab").expect("Operation failed in test");
         assert_eq!(retrieved.size(), 2);
 
         let stats = pool.get_stats();
@@ -551,8 +553,12 @@ mod tests {
         let vocab1 = Vocab::from_map(token_map.clone());
         let vocab2 = Vocab::from_map(token_map);
 
-        let vocab_ref1 = pool.get_or_insert("vocab1".to_string(), vocab1).unwrap();
-        let vocab_ref2 = pool.get_or_insert("vocab2".to_string(), vocab2).unwrap();
+        let vocab_ref1 = pool
+            .get_or_insert("vocab1".to_string(), vocab1)
+            .expect("Operation failed in test");
+        let vocab_ref2 = pool
+            .get_or_insert("vocab2".to_string(), vocab2)
+            .expect("Operation failed in test");
 
         // Should be the same reference due to deduplication
         assert!(Arc::ptr_eq(&vocab_ref1, &vocab_ref2));
@@ -571,11 +577,13 @@ mod tests {
 
         // Insert and immediately drop the reference
         {
-            let _vocab_ref = pool.get_or_insert("temp_vocab".to_string(), vocab).unwrap();
+            let _vocab_ref = pool
+                .get_or_insert("temp_vocab".to_string(), vocab)
+                .expect("Operation failed in test");
         }
 
         // Force cleanup
-        let removed_count = pool.cleanup().unwrap();
+        let removed_count = pool.cleanup().expect("Operation failed in test");
         assert_eq!(removed_count, 1);
 
         let stats = pool.get_stats();
@@ -590,8 +598,8 @@ mod tests {
         token_map.insert("pooled".to_string(), 0);
         let vocab = Vocab::from_map(token_map);
 
-        let pooled_vocab =
-            PooledVocab::new(pool.clone(), "pooled_test".to_string(), vocab).unwrap();
+        let pooled_vocab = PooledVocab::new(pool.clone(), "pooled_test".to_string(), vocab)
+            .expect("Construction failed");
 
         assert_eq!(pooled_vocab.id(), "pooled_test");
         assert_eq!(pooled_vocab.size(), 1);
@@ -613,7 +621,9 @@ mod tests {
         }
         let vocab = Vocab::from_map(token_map);
 
-        let _vocab_ref = pool.get_or_insert("large_vocab".to_string(), vocab).unwrap();
+        let _vocab_ref = pool
+            .get_or_insert("large_vocab".to_string(), vocab)
+            .expect("Operation failed in test");
 
         // The memory threshold should trigger automatic cleanup
         // Add another vocab to trigger the check
@@ -621,7 +631,9 @@ mod tests {
         small_map.insert("small".to_string(), 0);
         let small_vocab = Vocab::from_map(small_map);
 
-        let _small_ref = pool.get_or_insert("small_vocab".to_string(), small_vocab).unwrap();
+        let _small_ref = pool
+            .get_or_insert("small_vocab".to_string(), small_vocab)
+            .expect("Operation failed in test");
 
         // Check that some cleanup occurred
         let stats = pool.get_stats();

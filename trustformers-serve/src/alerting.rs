@@ -1165,13 +1165,16 @@ mod tests {
             dependencies: Vec::new(),
         };
 
-        service.add_rule(rule).await.unwrap();
+        service.add_rule(rule).await.expect("async operation should succeed in test");
 
         // Test with high CPU usage
         let mut metrics = HashMap::new();
         metrics.insert("cpu_usage".to_string(), 85.0);
 
-        let results = service.evaluate_rules(&metrics).await.unwrap();
+        let results = service
+            .evaluate_rules(&metrics)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(results.len(), 1);
         assert!(results[0].condition_met);
 
@@ -1225,7 +1228,10 @@ mod tests {
         assert!(result.is_ok());
 
         // Check acknowledgment
-        let acknowledged_alert = service.get_alert("test_alert").await.unwrap();
+        let acknowledged_alert = service
+            .get_alert("test_alert")
+            .await
+            .expect("async operation should succeed in test");
         assert!(acknowledged_alert.acknowledged);
         assert_eq!(
             acknowledged_alert.acknowledged_by,

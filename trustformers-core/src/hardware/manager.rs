@@ -1,4 +1,4 @@
-// Copyright (c) 2024 TrustformeRS Contributors
+// Copyright (c) 2025-2026 COOLJAPAN OU (Team KitaSan)
 // SPDX-License-Identifier: Apache-2.0
 
 //! Hardware manager for TrustformeRS
@@ -436,6 +436,9 @@ mod tests {
 
         let retrieved_metrics = manager.get_device_metrics("test_device");
         assert!(retrieved_metrics.is_some());
-        assert_eq!(retrieved_metrics.unwrap().utilization, 50.0);
+        assert_eq!(
+            retrieved_metrics.expect("operation failed in test").utilization,
+            50.0
+        );
     }
 }

@@ -860,7 +860,7 @@ mod tests {
         let test_data = vec![0u8; 4096];
         let sensitivities = compressor.analyze_sensitivity(&test_data);
         assert!(sensitivities.is_ok());
-        assert!(!sensitivities.unwrap().is_empty());
+        assert!(!sensitivities.expect("test operation should succeed").is_empty());
     }
 
     #[test]

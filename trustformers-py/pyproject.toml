@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "trustformers"
-version = "0.1.0rc1"
+version = "0.1.0"
 description = "Python bindings for TrustformeRS - High-performance Rust Transformers library"
 readme = "README.md"
 requires-python = ">=3.9"

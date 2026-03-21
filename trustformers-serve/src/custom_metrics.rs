@@ -962,14 +962,16 @@ mod tests {
     #[tokio::test]
     async fn test_custom_metrics_collector_creation() {
         let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).unwrap();
+        let collector =
+            CustomMetricsCollector::new(config).expect("collection should succeed in test");
         assert!(collector.config.enabled);
     }
 
     #[tokio::test]
     async fn test_metric_collection() {
         let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).unwrap();
+        let collector =
+            CustomMetricsCollector::new(config).expect("collection should succeed in test");
 
         let result = collector.collect_business_metric("revenue", 1000.0, HashMap::new()).await;
 
@@ -982,17 +984,21 @@ mod tests {
     #[tokio::test]
     async fn test_analytics() {
         let config = CustomMetricsConfig::default();
-        let collector = CustomMetricsCollector::new(config).unwrap();
+        let collector =
+            CustomMetricsCollector::new(config).expect("collection should succeed in test");
 
         // Collect some test metrics
         for i in 0..10 {
             collector
                 .collect_performance_metric("latency", i as f64 * 10.0, None, HashMap::new())
                 .await
-                .unwrap();
+                .expect("test operation should succeed");
         }
 
-        let analytics = collector.analyze_metrics().await.unwrap();
+        let analytics = collector
+            .analyze_metrics()
+            .await
+            .expect("async operation should succeed in test");
         assert!(!analytics.averages.is_empty());
     }
 }

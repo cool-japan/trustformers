@@ -879,7 +879,8 @@ mod tests {
             download_url: Some("https://example.com/models/test-model.bin".to_string()),
         };
 
-        let metadata_json = serde_json::to_string(&metadata).unwrap();
+        let metadata_json =
+            serde_json::to_string(&metadata).expect("JSON serialization should succeed");
         let result = manager.register_model(&metadata_json);
         assert!(result.is_ok());
         assert_eq!(manager.model_registry.len(), 1);
@@ -903,15 +904,19 @@ mod tests {
             min_tokens: Some(10),
             max_tokens: Some(100),
         };
-        let context: serde_json::Value = serde_json::from_str(r#"{"token_count": 50}"#).unwrap();
+        let context: serde_json::Value = serde_json::from_str(r#"{"token_count": 50}"#)
+            .expect("JSON parsing should succeed for valid test input");
 
-        let matches = manager.matches_routing_condition(&condition, &context).unwrap();
+        let matches = manager
+            .matches_routing_condition(&condition, &context)
+            .expect("matching should succeed in test");
         assert!(matches);
 
-        let context_too_small: serde_json::Value =
-            serde_json::from_str(r#"{"token_count": 5}"#).unwrap();
-        let matches_small =
-            manager.matches_routing_condition(&condition, &context_too_small).unwrap();
+        let context_too_small: serde_json::Value = serde_json::from_str(r#"{"token_count": 5}"#)
+            .expect("JSON parsing should succeed for valid test input");
+        let matches_small = manager
+            .matches_routing_condition(&condition, &context_too_small)
+            .expect("matching should succeed in test");
         assert!(!matches_small);
     }
 }

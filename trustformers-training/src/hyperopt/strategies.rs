@@ -895,7 +895,7 @@ mod tests {
     #[test]
     fn test_grid_search() {
         let search_space = create_discrete_search_space();
-        let mut strategy = GridSearch::new(&search_space).unwrap();
+        let mut strategy = GridSearch::new(&search_space).expect("operation failed in test");
         let history = TrialHistory::new(Direction::Maximize);
 
         // Should suggest all combinations
@@ -1108,7 +1108,7 @@ mod tests {
         for _i in 0..3 {
             let suggestion = strategy.suggest(&search_space, &history);
             assert!(suggestion.is_some());
-            assert!(search_space.validate(&suggestion.unwrap()).is_ok());
+            assert!(search_space.validate(&suggestion.expect("operation failed in test")).is_ok());
         }
 
         // Should return None after initial population
@@ -1147,8 +1147,8 @@ mod tests {
 
         let best_member = strategy.get_best_member();
         assert!(best_member.is_some());
-        assert_eq!(best_member.unwrap().id, 2);
-        assert_eq!(best_member.unwrap().score, 0.95);
+        assert_eq!(best_member.expect("operation failed in test").id, 2);
+        assert_eq!(best_member.expect("operation failed in test").score, 0.95);
     }
 
     #[test]

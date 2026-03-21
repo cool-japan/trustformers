@@ -298,7 +298,7 @@ mod tests {
         let device_info = DeviceInfo::detect_current_device();
         assert!(device_info.is_ok());
 
-        let info = device_info.unwrap();
+        let info = device_info.expect("operation failed in test");
         assert!(!info.device_name.is_empty());
         assert!(info.ram_mb > 0);
         assert!(info.storage_gb > 0);

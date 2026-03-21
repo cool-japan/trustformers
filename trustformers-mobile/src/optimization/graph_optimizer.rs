@@ -695,7 +695,7 @@ mod tests {
         };
 
         let simplify = AlgebraicSimplification::new();
-        let modified = simplify.apply(&mut graph).unwrap();
+        let modified = simplify.apply(&mut graph).expect("operation failed in test");
 
         assert!(modified);
         assert_eq!(

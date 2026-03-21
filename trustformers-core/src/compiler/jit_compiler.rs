@@ -1085,14 +1085,14 @@ mod tests {
     #[test]
     fn test_cache_key_generation() {
         let config = CompilerConfig::default();
-        let compiler = JitCompiler::new(&config).unwrap();
+        let compiler = JitCompiler::new(&config).expect("operation failed in test");
 
         let graph = ComputationGraph::new();
         let cache_key = compiler.generate_cache_key(&graph);
         assert!(cache_key.is_ok());
 
-        let key1 = cache_key.unwrap();
-        let key2 = compiler.generate_cache_key(&graph).unwrap();
+        let key1 = cache_key.expect("operation failed in test");
+        let key2 = compiler.generate_cache_key(&graph).expect("operation failed in test");
         assert_eq!(key1, key2); // Same graph should generate same key
     }
 
@@ -1118,7 +1118,7 @@ mod tests {
         let backend = InterpreterBackend::new(&config);
         assert!(backend.is_ok());
 
-        let backend = backend.unwrap();
+        let backend = backend.expect("operation failed in test");
         assert_eq!(backend.name(), "Interpreter");
         assert!(!backend.supported_targets().is_empty());
     }

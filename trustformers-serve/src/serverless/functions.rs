@@ -65,7 +65,7 @@ mod tests {
         orchestrator
             .register_provider(ServerlessProvider::AwsLambda, provider)
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         let config = ServerlessConfig {
             provider: ServerlessProvider::AwsLambda,
             function_name: "test-function".to_string(),
@@ -129,8 +129,14 @@ mod tests {
                 ("team".to_string(), "ml-platform".to_string()),
             ]),
         };
-        let deployment_id = orchestrator.deploy_function(config).await.unwrap();
-        let deployment = orchestrator.get_deployment(deployment_id).await.unwrap();
+        let deployment_id = orchestrator
+            .deploy_function(config)
+            .await
+            .expect("async operation should succeed in test");
+        let deployment = orchestrator
+            .get_deployment(deployment_id)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(deployment.status, DeploymentStatus::Active);
         assert!(deployment.function_arn.is_some());
         assert!(deployment.function_url.is_some());
@@ -142,7 +148,7 @@ mod tests {
         orchestrator
             .register_provider(ServerlessProvider::AwsLambda, provider)
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         let config = ServerlessConfig {
             provider: ServerlessProvider::AwsLambda,
             function_name: "test-function".to_string(),
@@ -181,9 +187,15 @@ mod tests {
             region: Some("us-east-1".to_string()),
             tags: HashMap::new(),
         };
-        let deployment_id = orchestrator.deploy_function(config).await.unwrap();
+        let deployment_id = orchestrator
+            .deploy_function(config)
+            .await
+            .expect("async operation should succeed in test");
         let payload = serde_json::json!({ "message" : "Hello, World!" });
-        let result = orchestrator.invoke_function(deployment_id, payload).await.unwrap();
+        let result = orchestrator
+            .invoke_function(deployment_id, payload)
+            .await
+            .expect("async operation should succeed in test");
         assert!(result.get("statusCode").is_some());
     }
     #[tokio::test]
@@ -193,7 +205,7 @@ mod tests {
         orchestrator
             .register_provider(ServerlessProvider::AwsLambda, provider)
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         let result = orchestrator.collect_metrics().await;
         assert!(result.is_ok());
     }

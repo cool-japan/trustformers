@@ -20,13 +20,13 @@ mod tests {
     #[tokio::test]
     async fn test_gpu_profiler_creation() {
         let config = GpuProfilerConfig::default();
-        let profiler = GpuProfiler::new(config).unwrap();
+        let profiler = GpuProfiler::new(config).expect("test operation should succeed");
         assert!(profiler.config.enabled);
     }
     #[tokio::test]
     async fn test_utilization_collection() {
         let config = GpuProfilerConfig::default();
-        let profiler = GpuProfiler::new(config).unwrap();
+        let profiler = GpuProfiler::new(config).expect("test operation should succeed");
         let result = profiler.collect_utilization_metrics(0).await;
         assert!(result.is_ok());
         let metrics = profiler.get_utilization_metrics().await;
@@ -35,7 +35,7 @@ mod tests {
     #[tokio::test]
     async fn test_alert_generation() {
         let config = GpuProfilerConfig::default();
-        let profiler = GpuProfiler::new(config).unwrap();
+        let profiler = GpuProfiler::new(config).expect("test operation should succeed");
         let result = profiler
             .generate_alert(0, GpuAlertType::HighTemperature, AlertSeverity::High, 85.0)
             .await;
@@ -46,8 +46,11 @@ mod tests {
     #[tokio::test]
     async fn test_report_generation() {
         let config = GpuProfilerConfig::default();
-        let profiler = GpuProfiler::new(config).unwrap();
-        profiler.collect_utilization_metrics(0).await.unwrap();
+        let profiler = GpuProfiler::new(config).expect("test operation should succeed");
+        profiler
+            .collect_utilization_metrics(0)
+            .await
+            .expect("async operation should succeed in test");
         let report = profiler.generate_report().await;
         assert!(report.is_ok());
     }

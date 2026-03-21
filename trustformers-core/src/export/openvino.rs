@@ -865,7 +865,7 @@ mod tests {
             ..Default::default()
         };
 
-        let xml = exporter.build_openvino_xml(&model, &config).unwrap();
+        let xml = exporter.build_openvino_xml(&model, &config).expect("operation failed in test");
 
         assert!(xml.contains(r#"<net name="trustformers_model""#));
         assert!(xml.contains("batch=\"2\""));
@@ -888,7 +888,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mapping = exporter.build_mapping_file(&model, &config).unwrap();
+        let mapping =
+            exporter.build_mapping_file(&model, &config).expect("operation failed in test");
 
         assert!(mapping.contains("# OpenVINO Layer Mapping File"));
         assert!(mapping.contains("embedding,"));
@@ -910,7 +911,9 @@ mod tests {
             ..Default::default()
         };
 
-        let opt_config = exporter.build_optimization_config(&model, &config).unwrap();
+        let opt_config = exporter
+            .build_optimization_config(&model, &config)
+            .expect("operation failed in test");
 
         assert_eq!(opt_config["model_optimizer"]["target_device"], "CPU");
         assert_eq!(opt_config["model_optimizer"]["precision"], "FP16");

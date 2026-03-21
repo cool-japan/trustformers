@@ -604,7 +604,8 @@ mod tests {
             ..Default::default()
         };
 
-        let assignments = ExpertParallelism::create_expert_assignments(&config, 4).unwrap();
+        let assignments = ExpertParallelism::create_expert_assignments(&config, 4)
+            .expect("operation failed in test");
         assert_eq!(assignments.len(), 8);
 
         // Check that experts are distributed correctly
@@ -624,7 +625,8 @@ mod tests {
             ..Default::default()
         };
 
-        let assignments = ExpertParallelism::create_expert_assignments(&config, 4).unwrap();
+        let assignments = ExpertParallelism::create_expert_assignments(&config, 4)
+            .expect("operation failed in test");
         let local_experts = ExpertParallelism::get_local_experts(&assignments, 1);
 
         assert_eq!(local_experts, vec![2, 3]);
@@ -643,7 +645,7 @@ mod tests {
         let expert_parallelism = ExpertParallelism::new(config, 0, 4, process_group);
 
         assert!(expert_parallelism.is_ok());
-        let ep = expert_parallelism.unwrap();
+        let ep = expert_parallelism.expect("operation failed in test");
         assert_eq!(ep.local_experts(), &[0, 1]);
     }
 
@@ -658,10 +660,13 @@ mod tests {
         };
 
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 4));
-        let expert_parallelism = ExpertParallelism::new(config, 0, 4, process_group).unwrap();
+        let expert_parallelism =
+            ExpertParallelism::new(config, 0, 4, process_group).expect("operation failed in test");
 
-        let tokens = Tensor::zeros(&[8, 16]).unwrap();
-        let routing = expert_parallelism.hash_based_routing(&tokens).unwrap();
+        let tokens = Tensor::zeros(&[8, 16]).expect("tensor operation failed");
+        let routing = expert_parallelism
+            .hash_based_routing(&tokens)
+            .expect("operation failed in test");
 
         assert_eq!(routing.token_indices.len(), 8);
         assert_eq!(routing.expert_assignments.len(), 8);
@@ -671,11 +676,18 @@ mod tests {
     fn test_load_balancing_update() {
         let config = ExpertParallelismConfig::default();
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 4));
-        let expert_parallelism = ExpertParallelism::new(config, 0, 4, process_group).unwrap();
+        let expert_parallelism =
+            ExpertParallelism::new(config, 0, 4, process_group).expect("operation failed in test");
 
         let mut expert_outputs = HashMap::new();
-        expert_outputs.insert(0, Tensor::zeros(&[10, 16]).unwrap());
-        expert_outputs.insert(1, Tensor::zeros(&[15, 16]).unwrap());
+        expert_outputs.insert(
+            0,
+            Tensor::zeros(&[10, 16]).expect("tensor operation failed"),
+        );
+        expert_outputs.insert(
+            1,
+            Tensor::zeros(&[15, 16]).expect("tensor operation failed"),
+        );
 
         let result = expert_parallelism.update_load_balancing(&expert_outputs);
         assert!(result.is_ok());
@@ -687,7 +699,8 @@ mod tests {
 
     #[test]
     fn test_optimal_expert_config_calculation() {
-        let config = utils::calculate_optimal_expert_config(16, 8, 1000, 4000).unwrap();
+        let config = utils::calculate_optimal_expert_config(16, 8, 1000, 4000)
+            .expect("operation failed in test");
         assert!(config.experts_per_device <= 4);
         assert!(config.expert_parallel_size > 0);
     }

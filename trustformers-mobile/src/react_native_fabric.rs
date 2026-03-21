@@ -1051,8 +1051,14 @@ mod tests {
         };
 
         let props = ComponentProps::from_inference_request(&request);
-        assert_eq!(props.model_id.unwrap(), "test_model");
-        assert_eq!(props.input_data.unwrap(), vec![1.0, 2.0, 3.0]);
+        assert_eq!(
+            props.model_id.expect("operation failed in test"),
+            "test_model"
+        );
+        assert_eq!(
+            props.input_data.expect("operation failed in test"),
+            vec![1.0, 2.0, 3.0]
+        );
     }
 
     #[test]

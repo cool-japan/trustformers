@@ -22,11 +22,11 @@ use std::sync::{Arc, RwLock};
 /// # Example
 ///
 /// ```no_run
-/// use trustformers_core::plugins::{PluginRegistry, PluginInfo};
+/// use trustformers_core::plugins::{PluginRegistry, PluginInfo, PluginManager};
 /// use std::path::Path;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut registry = PluginRegistry::new();
+/// let registry = PluginRegistry::new();
 ///
 /// // Register a plugin
 /// let info = PluginInfo::new(
@@ -36,9 +36,6 @@ use std::sync::{Arc, RwLock};
 ///     &["trustformers-core >= 0.1.0"]
 /// );
 /// registry.register("custom_attention", info)?;
-///
-/// // Load the plugin
-/// let plugin = registry.load_plugin("custom_attention")?;
 ///
 /// // List all available plugins
 /// let plugins = registry.list_plugins();

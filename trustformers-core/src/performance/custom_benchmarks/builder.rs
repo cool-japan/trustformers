@@ -380,7 +380,7 @@ mod tests {
                 })
             })
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(benchmark.name(), "test_benchmark");
         assert_eq!(benchmark.description(), "Test benchmark");
@@ -392,7 +392,7 @@ mod tests {
         let benchmark = BenchmarkDSL::latency_benchmark("latency_test")
             .measure("operation", || Ok(Duration::from_millis(50)))
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(benchmark.tags().contains(&"latency".to_string()));
     }
@@ -403,7 +403,7 @@ mod tests {
             .batch_size(32)
             .measure("process_batch", 32, || Ok(Duration::from_millis(100)))
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(benchmark.tags().contains(&"throughput".to_string()));
     }

@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_builder() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_tokenizer.zc");
 
         let mut builder = ZeroCopyBuilder::new();
@@ -708,7 +708,7 @@ mod tests {
 
     #[test]
     fn test_zero_copy_tokenizer_loading() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_load.zc");
 
         // Build a test file
@@ -718,10 +718,10 @@ mod tests {
             .add_token("token".to_string(), 2, 1.0, false)
             .add_token("[CLS]".to_string(), 0, 1.0, true);
 
-        builder.build_to_file(&file_path).unwrap();
+        builder.build_to_file(&file_path).expect("Operation failed in test");
 
         // Load the tokenizer
-        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).unwrap();
+        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).expect("Operation failed in test");
 
         assert_eq!(tokenizer.vocab_size(), 3);
         assert_eq!(tokenizer.get_id_unchecked("test"), Some(1));
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_tokenizer_interface() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_interface.zc");
 
         // Build a test file
@@ -747,19 +747,22 @@ mod tests {
             false,
         );
 
-        builder.build_to_file(&file_path).unwrap();
+        builder.build_to_file(&file_path).expect("Operation failed in test");
 
         // Load and test tokenizer interface
-        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).unwrap();
+        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).expect("Operation failed in test");
 
-        let encoded = tokenizer.encode("hello world").unwrap();
+        let encoded = tokenizer.encode("hello world").expect("Encoding failed");
         assert_eq!(encoded.input_ids, vec![1, 2]);
         // Test that we can get the tokens back using id_to_token
-        let tokens: Vec<String> =
-            encoded.input_ids.iter().map(|&id| tokenizer.id_to_token(id).unwrap()).collect();
+        let tokens: Vec<String> = encoded
+            .input_ids
+            .iter()
+            .map(|&id| tokenizer.id_to_token(id).expect("Operation failed in test"))
+            .collect();
         assert_eq!(tokens, vec!["hello", "world"]);
 
-        let decoded = tokenizer.decode(&[1, 2]).unwrap();
+        let decoded = tokenizer.decode(&[1, 2]).expect("Decoding failed");
         assert_eq!(decoded, "hello world");
 
         let vocab = tokenizer.get_vocab();
@@ -770,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_memory_stats() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_stats.zc");
 
         let mut builder = ZeroCopyBuilder::new();
@@ -780,9 +783,9 @@ mod tests {
             .set_metadata(b"test metadata".to_vec())
             .set_special_tokens(b"special".to_vec());
 
-        builder.build_to_file(&file_path).unwrap();
+        builder.build_to_file(&file_path).expect("Operation failed in test");
 
-        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).unwrap();
+        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).expect("Operation failed in test");
         let stats = tokenizer.memory_stats();
 
         assert!(stats.file_size > 0);
@@ -794,7 +797,7 @@ mod tests {
 
     #[test]
     fn test_integrity_verification() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_integrity.zc");
 
         let mut builder = ZeroCopyBuilder::new();
@@ -805,15 +808,15 @@ mod tests {
             false,
         );
 
-        builder.build_to_file(&file_path).unwrap();
+        builder.build_to_file(&file_path).expect("Operation failed in test");
 
-        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).unwrap();
-        assert!(tokenizer.verify_integrity().unwrap());
+        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).expect("Operation failed in test");
+        assert!(tokenizer.verify_integrity().expect("Operation failed in test"));
     }
 
     #[test]
     fn test_utils_file_info() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_info.zc");
 
         let mut builder = ZeroCopyBuilder::new();
@@ -824,31 +827,31 @@ mod tests {
             false,
         );
 
-        builder.build_to_file(&file_path).unwrap();
+        builder.build_to_file(&file_path).expect("Operation failed in test");
 
-        let info = ZeroCopyUtils::get_file_info(&file_path).unwrap();
+        let info = ZeroCopyUtils::get_file_info(&file_path).expect("Operation failed in test");
 
-        assert_eq!(info.get("format").unwrap(), "ZeroCopy");
-        assert_eq!(info.get("vocab_size").unwrap(), "2");
+        assert_eq!(info.get("format").expect("Key not found"), "ZeroCopy");
+        assert_eq!(info.get("vocab_size").expect("Key not found"), "2");
         assert!(info.contains_key("file_size"));
     }
 
     #[test]
     fn test_utils_validation() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_validation.zc");
 
         let mut builder = ZeroCopyBuilder::new();
         builder.add_token("validate".to_string(), 1, 1.0, false);
 
-        builder.build_to_file(&file_path).unwrap();
+        builder.build_to_file(&file_path).expect("Operation failed in test");
 
-        assert!(ZeroCopyUtils::validate_file(&file_path).unwrap());
+        assert!(ZeroCopyUtils::validate_file(&file_path).expect("Operation failed in test"));
     }
 
     #[test]
     fn test_builder_from_map() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_from_map.zc");
 
         let mut vocab = TestHashMap::new();
@@ -859,9 +862,9 @@ mod tests {
         let mut builder = ZeroCopyBuilder::new();
         builder.add_tokens_from_map(&vocab);
 
-        builder.build_to_file(&file_path).unwrap();
+        builder.build_to_file(&file_path).expect("Operation failed in test");
 
-        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).unwrap();
+        let tokenizer = ZeroCopyTokenizer::from_file(&file_path).expect("Operation failed in test");
         assert_eq!(tokenizer.vocab_size(), 3);
 
         for (token, &expected_id) in &vocab {

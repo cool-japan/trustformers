@@ -668,17 +668,24 @@ mod tests {
         let tokenizer = WordPieceTokenizer::new(vocab, true);
         let async_tokenizer = AsyncTokenizerWrapper::new(tokenizer, Some(4));
 
-        let result = async_tokenizer.encode_async("Hello world").await.unwrap();
+        let result = async_tokenizer
+            .encode_async("Hello world")
+            .await
+            .expect("Operation failed in test");
         assert!(!result.input_ids.is_empty());
     }
 
     #[tokio::test]
     async fn test_batch_async_encoding() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased").unwrap();
+        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
+            .expect("Operation failed in test");
         let async_tokenizer = AsyncTokenizerWrapper::new(tokenizer, Some(4));
 
         let texts = vec!["Hello world", "This is a test", "Async tokenization"];
-        let results = async_tokenizer.encode_batch_async(&texts).await.unwrap();
+        let results = async_tokenizer
+            .encode_batch_async(&texts)
+            .await
+            .expect("Operation failed in test");
 
         assert_eq!(results.len(), texts.len());
         for result in &results {
@@ -688,7 +695,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_configurable_async_tokenizer() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased").unwrap();
+        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
+            .expect("Operation failed in test");
         let config = AsyncTokenizerConfig {
             max_concurrent_tasks: 2,
             stream_buffer_size: 100,
@@ -697,7 +705,10 @@ mod tests {
         };
         let async_tokenizer = ConfigurableAsyncTokenizer::new(tokenizer, config);
 
-        let result = async_tokenizer.encode_async("Hello world").await.unwrap();
+        let result = async_tokenizer
+            .encode_async("Hello world")
+            .await
+            .expect("Operation failed in test");
         assert!(!result.input_ids.is_empty());
     }
 
@@ -715,8 +726,14 @@ mod tests {
         let tokenizer = WordPieceTokenizer::new(vocab, true);
         let async_tokenizer = AsyncTokenizerWrapper::new(tokenizer, Some(4));
 
-        let encoded = async_tokenizer.encode_async("Hello world").await.unwrap();
-        let decoded = async_tokenizer.decode_async(&encoded.input_ids).await.unwrap();
+        let encoded = async_tokenizer
+            .encode_async("Hello world")
+            .await
+            .expect("Operation failed in test");
+        let decoded = async_tokenizer
+            .decode_async(&encoded.input_ids)
+            .await
+            .expect("Operation failed in test");
 
         assert!(!decoded.is_empty());
         assert!(
@@ -750,11 +767,14 @@ mod tests {
             "Async tokenization".to_string(),
         ];
 
-        let mut stream = async_tokenizer.encode_stream(texts.clone()).await.unwrap();
+        let mut stream = async_tokenizer
+            .encode_stream(texts.clone())
+            .await
+            .expect("Operation failed in test");
         let mut results = Vec::new();
 
         while let Some(result) = stream.next().await {
-            results.push(result.unwrap());
+            results.push(result.expect("Operation failed in test"));
         }
 
         assert_eq!(results.len(), texts.len());
@@ -762,7 +782,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_batch_with_progress() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased").unwrap();
+        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
+            .expect("Operation failed in test");
         let config = AsyncTokenizerConfig::default();
         let async_tokenizer = ConfigurableAsyncTokenizer::new(tokenizer, config);
 
@@ -789,19 +810,26 @@ mod tests {
                     .push((completed, total));
             })
             .await
-            .unwrap();
+            .expect("Operation failed in test");
 
         assert_eq!(results.len(), texts.len());
 
         let updates = progress_updates.lock().expect("lock should not be poisoned");
         assert!(!updates.is_empty());
-        assert_eq!(updates.last().unwrap().0, texts.len());
-        assert_eq!(updates.last().unwrap().1, texts.len());
+        assert_eq!(
+            updates.last().expect("Operation failed in test").0,
+            texts.len()
+        );
+        assert_eq!(
+            updates.last().expect("Operation failed in test").1,
+            texts.len()
+        );
     }
 
     #[tokio::test]
     async fn test_concurrent_performance() {
-        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased").unwrap();
+        let tokenizer = WordPieceTokenizer::from_pretrained("bert-base-uncased")
+            .expect("Operation failed in test");
         let async_tokenizer = AsyncTokenizerWrapper::new(tokenizer, Some(8));
 
         let texts: Vec<&str> = (0..50)
@@ -815,7 +843,10 @@ mod tests {
             .collect();
 
         let start = Instant::now();
-        let results = async_tokenizer.encode_batch_async(&texts).await.unwrap();
+        let results = async_tokenizer
+            .encode_batch_async(&texts)
+            .await
+            .expect("Operation failed in test");
         let duration = start.elapsed();
 
         assert_eq!(results.len(), texts.len());

@@ -752,7 +752,7 @@ mod tests {
 
     #[test]
     fn test_numa_allocator_creation() {
-        let allocator = NumaAllocator::new().unwrap();
+        let allocator = NumaAllocator::new().expect("operation failed in test");
         let topology = allocator.get_topology();
         assert!(topology.total_nodes > 0);
         assert!(topology.total_cores > 0);
@@ -760,16 +760,18 @@ mod tests {
 
     #[test]
     fn test_numa_allocation() {
-        let allocator = NumaAllocator::new().unwrap();
+        let allocator = NumaAllocator::new().expect("operation failed in test");
 
         let allocation = allocator
             .allocate_numa_aware(1024, 64, None, AccessPattern::Sequential)
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(allocation.size_bytes, 1024);
         assert!(!allocation.allocation_id.is_empty());
 
-        allocator.deallocate(&allocation.allocation_id).unwrap();
+        allocator
+            .deallocate(&allocation.allocation_id)
+            .expect("operation failed in test");
     }
 
     #[test]
@@ -786,7 +788,7 @@ mod tests {
 
     #[test]
     fn test_topology_detection() {
-        let topology = NumaAllocator::detect_numa_topology().unwrap();
+        let topology = NumaAllocator::detect_numa_topology().expect("operation failed in test");
         assert!(topology.total_nodes >= 1);
         assert!(!topology.nodes.is_empty());
 
@@ -799,26 +801,28 @@ mod tests {
 
     #[test]
     fn test_workload_aware_selection() {
-        let allocator = NumaAllocator::new().unwrap();
+        let allocator = NumaAllocator::new().expect("operation failed in test");
         let topology = allocator.get_topology();
 
         let node_id = allocator
             .select_workload_aware_node(&topology, 1024 * 1024, &AccessPattern::Sequential)
-            .unwrap();
+            .expect("operation failed in test");
 
         assert!(topology.nodes.contains_key(&node_id));
     }
 
     #[test]
     fn test_performance_monitoring() {
-        let allocator = NumaAllocator::new().unwrap();
+        let allocator = NumaAllocator::new().expect("operation failed in test");
 
         // Make some allocations
         let _alloc1 = allocator
             .allocate_numa_aware(1024, 64, None, AccessPattern::Sequential)
-            .unwrap();
+            .expect("operation failed in test");
 
-        let _alloc2 = allocator.allocate_numa_aware(2048, 64, None, AccessPattern::Random).unwrap();
+        let _alloc2 = allocator
+            .allocate_numa_aware(2048, 64, None, AccessPattern::Random)
+            .expect("operation failed in test");
 
         let stats = allocator.get_performance_stats();
         let total_allocations: u64 =
@@ -829,21 +833,21 @@ mod tests {
 
     #[test]
     fn test_memory_layout_optimization() {
-        let allocator = NumaAllocator::new().unwrap();
+        let allocator = NumaAllocator::new().expect("operation failed in test");
 
         let alloc1 = allocator
             .allocate_numa_aware(1024, 64, None, AccessPattern::Sequential)
-            .unwrap();
+            .expect("operation failed in test");
 
         let alloc2 = allocator
             .allocate_numa_aware(1024, 64, None, AccessPattern::Sequential)
-            .unwrap();
+            .expect("operation failed in test");
 
         let allocation_ids = vec![alloc1.allocation_id.clone(), alloc2.allocation_id.clone()];
 
         let optimized = allocator
             .optimize_memory_layout(&allocation_ids, AccessPattern::Sequential)
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(optimized.len(), allocation_ids.len());
     }

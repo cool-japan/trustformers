@@ -380,7 +380,7 @@ jobs:
         run: |
           # Create basic docs structure if it doesn't exist
           if [ ! -d "docs" ]; then
-            sphinx-quickstart -q -p "TrustformeRS" -a "TrustformeRS Team" --ext-autodoc --ext-viewcode docs
+            sphinx-quickstart -q -p "TrustformeRS" -a "COOLJAPAN OU (Team KitaSan)" --ext-autodoc --ext-viewcode docs
           fi
           sphinx-build -b html docs docs/_build
         continue-on-error: true

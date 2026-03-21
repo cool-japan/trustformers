@@ -1592,8 +1592,9 @@ mod tests {
     #[test]
     fn test_report_format_serialization() {
         let format = ReportFormat::JSON;
-        let serialized = serde_json::to_string(&format).unwrap();
-        let deserialized: ReportFormat = serde_json::from_str(&serialized).unwrap();
+        let serialized = serde_json::to_string(&format).expect("JSON serialization failed");
+        let deserialized: ReportFormat =
+            serde_json::from_str(&serialized).expect("JSON deserialization failed");
         assert_eq!(format, deserialized);
     }
 

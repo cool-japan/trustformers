@@ -433,7 +433,10 @@ mod tests {
         assert_eq!(result.framework_results.len(), 2);
 
         // Check relative performance
-        let pytorch_perf = result.relative_performance.get(&Framework::PyTorch).unwrap();
+        let pytorch_perf = result
+            .relative_performance
+            .get(&Framework::PyTorch)
+            .expect("expected value not found");
         assert!(pytorch_perf.speedup > 1.0); // TrustformeRS should be faster
         assert!(pytorch_perf.latency_improvement_percent > 0.0);
     }

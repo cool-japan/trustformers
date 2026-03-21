@@ -921,7 +921,7 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_tokenizer.bin");
 
         let config = BinaryConfig::default();
@@ -930,12 +930,15 @@ mod tests {
         let tokenizer = create_test_tokenizer();
 
         // Serialize
-        let header = serializer.serialize(&tokenizer, "test", &file_path).unwrap();
+        let header = serializer
+            .serialize(&tokenizer, "test", &file_path)
+            .expect("Operation failed in test");
         assert_eq!(header.tokenizer_type, "test");
         assert_eq!(header.version, BINARY_FORMAT_VERSION);
 
         // Deserialize
-        let (loaded_tokenizer, loaded_header) = serializer.deserialize(&file_path).unwrap();
+        let (loaded_tokenizer, loaded_header) =
+            serializer.deserialize(&file_path).expect("Operation failed in test");
 
         assert_eq!(loaded_tokenizer.vocab, tokenizer.vocab);
         assert_eq!(loaded_tokenizer.id_to_token, tokenizer.id_to_token);
@@ -944,7 +947,7 @@ mod tests {
 
     #[test]
     fn test_compression() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_compressed.bin");
 
         let config = BinaryConfig {
@@ -954,29 +957,34 @@ mod tests {
         let serializer = BinarySerializer::new(config);
 
         let tokenizer = create_test_tokenizer();
-        let header = serializer.serialize(&tokenizer, "test", &file_path).unwrap();
+        let header = serializer
+            .serialize(&tokenizer, "test", &file_path)
+            .expect("Operation failed in test");
 
         assert!(header.compressed_size < header.uncompressed_size);
         assert_eq!(header.compression_level, 9);
 
         // Should still deserialize correctly
-        let (loaded_tokenizer, _) = serializer.deserialize(&file_path).unwrap();
+        let (loaded_tokenizer, _) =
+            serializer.deserialize(&file_path).expect("Operation failed in test");
         assert_eq!(loaded_tokenizer.vocab, tokenizer.vocab);
     }
 
     #[test]
     fn test_file_info() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_info.bin");
 
         let config = BinaryConfig::default();
         let serializer = BinarySerializer::new(config);
 
         let tokenizer = create_test_tokenizer();
-        let original_header = serializer.serialize(&tokenizer, "test", &file_path).unwrap();
+        let original_header = serializer
+            .serialize(&tokenizer, "test", &file_path)
+            .expect("Operation failed in test");
 
         // Get file info without loading
-        let info_header = serializer.get_file_info(&file_path).unwrap();
+        let info_header = serializer.get_file_info(&file_path).expect("Operation failed in test");
 
         assert_eq!(info_header.tokenizer_type, original_header.tokenizer_type);
         assert_eq!(info_header.checksum, original_header.checksum);
@@ -984,21 +992,23 @@ mod tests {
 
     #[test]
     fn test_validation() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_validate.bin");
 
         let config = BinaryConfig::default();
         let serializer = BinarySerializer::new(config.clone());
 
         let tokenizer = create_test_tokenizer();
-        serializer.serialize(&tokenizer, "test", &file_path).unwrap();
+        serializer
+            .serialize(&tokenizer, "test", &file_path)
+            .expect("Operation failed in test");
 
-        assert!(BinaryUtils::validate_file(&file_path, &config).unwrap());
+        assert!(BinaryUtils::validate_file(&file_path, &config).expect("Operation failed in test"));
     }
 
     #[test]
     fn test_compression_ratio() {
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
         let file_path = temp_dir.path().join("test_ratio.bin");
 
         let config = BinaryConfig {
@@ -1008,9 +1018,12 @@ mod tests {
         let serializer = BinarySerializer::new(config.clone());
 
         let tokenizer = create_test_tokenizer();
-        serializer.serialize(&tokenizer, "test", &file_path).unwrap();
+        serializer
+            .serialize(&tokenizer, "test", &file_path)
+            .expect("Operation failed in test");
 
-        let ratio = BinaryUtils::get_compression_ratio(&file_path, &config).unwrap();
+        let ratio = BinaryUtils::get_compression_ratio(&file_path, &config)
+            .expect("Operation failed in test");
         assert!(ratio > 1.0); // Should have some compression
     }
 }

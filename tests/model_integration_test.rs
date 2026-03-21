@@ -5,14 +5,14 @@ fn test_bert_base_functionality() {
     use trustformers_models::bert::{BertConfig, BertModel};
 
     let config = BertConfig::base();
-    let model = BertModel::new(config.clone()).unwrap();
+    let model = BertModel::new(config.clone()).expect("operation failed in test");
 
     // Test forward pass with simple input
     let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]); // [CLS] I love BERT [SEP]
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 }
 
@@ -21,13 +21,13 @@ fn test_gpt2_base_functionality() {
     use trustformers_models::gpt2::{GPT2Config, GPT2Model};
 
     let config = GPT2Config::small();
-    let model = GPT2Model::new(config.clone()).unwrap();
+    let model = GPT2Model::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![50256, 100, 200, 300]); // GPT-2 tokens
     let result = model.forward(&input_ids, None, None);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.n_embd]);
 }
 
@@ -36,14 +36,14 @@ fn test_t5_base_functionality() {
     use trustformers_models::t5::{T5Config, T5Model};
 
     let config = T5Config::small();
-    let model = T5Model::new(config.clone()).unwrap();
+    let model = T5Model::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![1, 100, 200, 300, 1]); // T5 tokens
     let decoder_input_ids = Array1::from_vec(vec![0, 50, 100]);
     let result = model.forward(&input_ids, Some(&decoder_input_ids), None);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, decoder_input_ids.len(), config.d_model]);
 }
 
@@ -55,13 +55,13 @@ fn test_vit_base_functionality() {
     config.image_size = 32;  // Smaller for faster testing
     config.patch_size = 16;
 
-    let model = ViTModel::new(config.clone()).unwrap();
+    let model = ViTModel::new(config.clone()).expect("operation failed in test");
 
     let images = Array4::zeros((1, 32, 32, 3));
     let result = model.forward(&images);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     // 32x32 image with 16x16 patches = 4 patches + 1 class token = 5 tokens
     assert_eq!(output.shape(), &[1, 5, config.hidden_size]);
 }
@@ -71,13 +71,13 @@ fn test_electra_base_functionality() {
     use trustformers_models::electra::{ElectraConfig, ElectraForPreTraining};
 
     let config = ElectraConfig::small();
-    let model = ElectraForPreTraining::new(config.clone()).unwrap();
+    let model = ElectraForPreTraining::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![101, 1045, 2293, 7570, 102]);
     let result = model.forward(&input_ids);
 
     assert!(result.is_ok());
-    let (gen_logits, disc_logits) = result.unwrap();
+    let (gen_logits, disc_logits) = result.expect("operation failed in test");
     assert_eq!(gen_logits.shape(), &[1, input_ids.len(), config.vocab_size]);
     assert_eq!(disc_logits.shape(), &[1, input_ids.len(), 1]);
 }
@@ -87,13 +87,13 @@ fn test_deberta_base_functionality() {
     use trustformers_models::deberta::{DebertaConfig, DebertaModel};
 
     let config = DebertaConfig::base();
-    let model = DebertaModel::new(config.clone()).unwrap();
+    let model = DebertaModel::new(config.clone()).expect("operation failed in test");
 
     let input_ids = Array1::from_vec(vec![0, 1, 2, 3, 2]);
     let result = model.forward(&input_ids, None);
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 }
 
@@ -212,19 +212,19 @@ fn test_llama_base_functionality() {
         ..LlamaConfig::default()
     };
 
-    let model = LlamaModel::new(config.clone()).unwrap();
+    let model = LlamaModel::new(config.clone()).expect("operation failed in test");
 
     // Test forward pass with simple input
     let input_ids = vec![1, 100, 200, 300, 2]; // LLaMA tokens
     let result = model.forward(input_ids.clone());
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 
     // Test LlamaForCausalLM
-    let causal_model = LlamaForCausalLM::new(config.clone()).unwrap();
-    let logits = causal_model.forward(input_ids.clone()).unwrap();
+    let causal_model = LlamaForCausalLM::new(config.clone()).expect("operation failed in test");
+    let logits = causal_model.forward(input_ids.clone()).expect("forward pass failed");
     assert_eq!(logits.shape(), &[1, input_ids.len(), config.vocab_size]);
 }
 
@@ -272,19 +272,19 @@ fn test_mistral_base_functionality() {
         ..MistralConfig::default()
     };
 
-    let model = MistralModel::new(config.clone()).unwrap();
+    let model = MistralModel::new(config.clone()).expect("operation failed in test");
 
     // Test forward pass with simple input
     let input_ids = vec![1, 100, 200, 300, 2]; // Mistral tokens
     let result = model.forward(input_ids.clone());
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[1, input_ids.len(), config.hidden_size]);
 
     // Test MistralForCausalLM
-    let causal_model = MistralForCausalLM::new(config.clone()).unwrap();
-    let logits = causal_model.forward(input_ids.clone()).unwrap();
+    let causal_model = MistralForCausalLM::new(config.clone()).expect("operation failed in test");
+    let logits = causal_model.forward(input_ids.clone()).expect("forward pass failed");
     assert_eq!(logits.shape(), &[1, input_ids.len(), config.vocab_size]);
 }
 
@@ -337,7 +337,7 @@ fn test_clip_base_functionality() {
     use ndarray::Array4;
 
     let config = CLIPConfig::vit_b_32();
-    let model = CLIPModel::new(config.clone()).unwrap();
+    let model = CLIPModel::new(config.clone()).expect("operation failed in test");
 
     // Test text features
     let input_ids = vec![49406, 100, 200, 300, 49407]; // CLIP tokens
@@ -384,19 +384,19 @@ fn test_gemma_base_functionality() {
         ..GemmaConfig::default()
     };
 
-    let model = GemmaModel::new(config.clone()).unwrap();
+    let model = GemmaModel::new(config.clone()).expect("operation failed in test");
 
     // Test forward pass with simple input
     let input_ids = vec![2, 100, 200, 300, 1]; // Gemma tokens
     let result = model.forward(input_ids.clone());
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[input_ids.len(), config.hidden_size]);
 
     // Test GemmaForCausalLM
-    let causal_model = GemmaForCausalLM::new(config.clone()).unwrap();
-    let logits = causal_model.forward(input_ids.clone()).unwrap();
+    let causal_model = GemmaForCausalLM::new(config.clone()).expect("operation failed in test");
+    let logits = causal_model.forward(input_ids.clone()).expect("forward pass failed");
     assert_eq!(logits.shape(), &[input_ids.len(), config.vocab_size]);
 }
 
@@ -433,19 +433,19 @@ fn test_qwen_base_functionality() {
         ..QwenConfig::default()
     };
 
-    let model = QwenModel::new(config.clone()).unwrap();
+    let model = QwenModel::new(config.clone()).expect("operation failed in test");
 
     // Test forward pass with simple input
     let input_ids = vec![151643, 100, 200, 300, 151645]; // Qwen tokens
     let result = model.forward(input_ids.clone());
 
     assert!(result.is_ok());
-    let output = result.unwrap();
+    let output = result.expect("operation failed in test");
     assert_eq!(output.shape(), &[input_ids.len(), config.hidden_size]);
 
     // Test QwenForCausalLM
-    let causal_model = QwenForCausalLM::new(config.clone()).unwrap();
-    let logits = causal_model.forward(input_ids.clone()).unwrap();
+    let causal_model = QwenForCausalLM::new(config.clone()).expect("operation failed in test");
+    let logits = causal_model.forward(input_ids.clone()).expect("forward pass failed");
     assert_eq!(logits.shape(), &[input_ids.len(), config.vocab_size]);
 }
 

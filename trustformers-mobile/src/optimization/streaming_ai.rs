@@ -1086,7 +1086,7 @@ mod tests {
         let result = engine.process_streaming_input(input, 1);
 
         assert!(result.is_ok());
-        let streaming_result = result.unwrap();
+        let streaming_result = result.expect("operation failed in test");
         assert!(streaming_result.latency_us > 0);
         assert!(streaming_result.quality_score >= 0.0);
     }
@@ -1109,7 +1109,7 @@ mod tests {
         let result = optimizer.process_streaming_token(token);
         assert!(result.is_ok());
 
-        let token_result = result.unwrap();
+        let token_result = result.expect("operation failed in test");
         assert!(token_result.cache_efficiency >= 0.0);
     }
 
@@ -1122,7 +1122,7 @@ mod tests {
         let result = adaptation.monitor_and_adapt(15000, 0.9); // 15ms latency, good quality
         assert!(result.is_ok());
 
-        let actions = result.unwrap();
+        let actions = result.expect("operation failed in test");
         assert!(!actions.is_empty()); // Should trigger adaptation
     }
 

@@ -156,8 +156,8 @@ fn run_layer_forward_test(
 
     let result: Result<Tensor, _> = match layer_type {
         "linear" => {
-            let in_features = config["in_features"].as_u64().unwrap() as usize;
-            let out_features = config["out_features"].as_u64().unwrap() as usize;
+            let in_features = config["in_features"].as_u64().expect("operation failed in test") as usize;
+            let out_features = config["out_features"].as_u64().expect("operation failed in test") as usize;
             let use_bias = config["use_bias"].as_bool().unwrap_or(true);
 
             let layer = Linear::new(in_features, out_features, use_bias);
@@ -166,9 +166,9 @@ fn run_layer_forward_test(
         "layer_norm" => {
             let normalized_shape: Vec<usize> = config["normalized_shape"]
                 .as_array()
-                .unwrap()
+                .expect("operation failed in test")
                 .iter()
-                .map(|v| v.as_u64().unwrap() as usize)
+                .map(|v| v.as_u64().expect("operation failed in test") as usize)
                 .collect();
             let eps = config["eps"].as_f64().unwrap_or(1e-5) as f32;
 

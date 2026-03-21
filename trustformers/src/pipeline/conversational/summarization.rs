@@ -1574,7 +1574,7 @@ mod tests {
     #[test]
     fn test_empty_conversation_summarization() {
         let mut summarizer = create_default_summarizer();
-        let result = summarizer.summarize_context_enhanced(&[]).unwrap();
+        let result = summarizer.summarize_context_enhanced(&[]).expect("operation failed in test");
 
         assert!(result.summary.is_empty());
         assert_eq!(result.original_tokens, 0);
@@ -1590,7 +1590,7 @@ mod tests {
             create_test_turn(ConversationRole::Assistant, "Hi there!"),
         ];
 
-        let result = summarizer.summarize_context(&turns).unwrap();
+        let result = summarizer.summarize_context(&turns).expect("operation failed in test");
         assert!(!result.is_empty());
     }
 
@@ -1602,7 +1602,8 @@ mod tests {
             create_test_turn(ConversationRole::Assistant, "Hi there!"),
         ];
 
-        let result = summarizer.summarize_context_enhanced(&turns).unwrap();
+        let result =
+            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
 
         // Should not summarize if under target length
         assert!(result.summary.contains("Hello"));
@@ -1635,7 +1636,8 @@ mod tests {
             ),
         ];
 
-        let result = summarizer.summarize_context_enhanced(&turns).unwrap();
+        let result =
+            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
 
         assert!(!result.summary.is_empty());
         assert!(result.compression_ratio < 1.0);
@@ -1669,7 +1671,8 @@ mod tests {
             ),
         ];
 
-        let result = summarizer.summarize_context_enhanced(&turns).unwrap();
+        let result =
+            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
 
         assert!(!result.summary.is_empty());
         assert!(result.summary.contains("Conversation summary"));
@@ -1700,7 +1703,8 @@ mod tests {
             ),
         ];
 
-        let result = summarizer.summarize_context_enhanced(&turns).unwrap();
+        let result =
+            summarizer.summarize_context_enhanced(&turns).expect("operation failed in test");
 
         assert!(!result.summary.is_empty());
         assert!(result.compression_ratio < 1.0);
@@ -1860,7 +1864,10 @@ mod tests {
 
         let tech_cluster = clusters.iter().find(|c| c.topic == "technology");
         assert!(tech_cluster.is_some());
-        assert_eq!(tech_cluster.unwrap().sentences.len(), 2);
+        assert_eq!(
+            tech_cluster.expect("operation failed in test").sentences.len(),
+            2
+        );
     }
 
     #[test]
@@ -1880,7 +1887,7 @@ mod tests {
 
         let flow_analysis = summarizer.analyze_conversation_flow(&question_heavy_turns);
         assert!(flow_analysis.is_some());
-        assert!(flow_analysis.unwrap().contains("inquiry-heavy"));
+        assert!(flow_analysis.expect("operation failed in test").contains("inquiry-heavy"));
 
         let statement_heavy_turns = vec![
             create_test_turn(ConversationRole::User, "I work in tech."),
@@ -1890,7 +1897,7 @@ mod tests {
 
         let flow_analysis2 = summarizer.analyze_conversation_flow(&statement_heavy_turns);
         assert!(flow_analysis2.is_some());
-        assert!(flow_analysis2.unwrap().contains("informational"));
+        assert!(flow_analysis2.expect("operation failed in test").contains("informational"));
     }
 
     #[test]
@@ -1909,16 +1916,21 @@ mod tests {
         ];
 
         // Test topic-focused summary
-        let topic_summary = summarizer.summarize_by_topic(&turns, "technology").unwrap();
+        let topic_summary = summarizer
+            .summarize_by_topic(&turns, "technology")
+            .expect("operation failed in test");
         assert!(!topic_summary.is_empty());
 
         // Test hierarchical summary
-        let hierarchical = summarizer.hierarchical_summary(&turns).unwrap();
+        let hierarchical =
+            summarizer.hierarchical_summary(&turns).expect("operation failed in test");
         assert!(!hierarchical.overall_summary.is_empty());
         assert_eq!(hierarchical.total_turns, 2);
 
         // Test constrained summary
-        let constrained = summarizer.constrained_summary(&turns, 100, true, true).unwrap();
+        let constrained = summarizer
+            .constrained_summary(&turns, 100, true, true)
+            .expect("operation failed in test");
         assert!(!constrained.summary.is_empty());
         assert!(constrained.topics.is_some());
         assert!(constrained.sentiment_analysis.is_some());

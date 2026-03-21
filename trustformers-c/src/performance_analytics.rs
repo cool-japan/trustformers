@@ -724,7 +724,7 @@ impl PerformanceAnomalyDetector {
             severity: AnomySeverity::Medium,
             detected_at: SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs(),
             affected_metrics: vec!["inference_latency".to_string()],
             description: "Inference latency increased by 15% over baseline".to_string(),

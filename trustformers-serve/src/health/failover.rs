@@ -389,11 +389,11 @@ mod tests {
         manager
             .register_node("node1".to_string(), "http://node1:8080".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         manager
             .register_node("node2".to_string(), "http://node2:8080".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
 
         // Check primary node
         let primary = manager.get_primary_node().await;

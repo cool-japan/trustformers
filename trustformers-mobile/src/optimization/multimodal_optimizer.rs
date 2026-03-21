@@ -744,7 +744,7 @@ mod tests {
             optimizer.optimize_cross_modal_attention(&vision_features, &text_features, &strategy);
 
         assert!(result.is_ok());
-        let attention_tensor = result.unwrap();
+        let attention_tensor = result.expect("tensor operation failed");
         assert_eq!(attention_tensor.shape(), &[1, 2, 2]);
     }
 
@@ -763,7 +763,7 @@ mod tests {
         let text_segment = "Hello world".to_string();
         assert!(inference.add_text_segment(text_segment, 1002).is_ok());
 
-        let frames = inference.process_temporal_window().unwrap();
+        let frames = inference.process_temporal_window().expect("temp file creation failed");
         assert!(frames.len() <= 3);
     }
 
@@ -785,7 +785,7 @@ mod tests {
 
         let loss = distillation.compute_distillation_loss(&student_outputs, &teacher_outputs);
         assert!(loss.is_ok());
-        assert!(loss.unwrap() >= 0.0);
+        assert!(loss.expect("operation failed in test") >= 0.0);
     }
 
     #[test]

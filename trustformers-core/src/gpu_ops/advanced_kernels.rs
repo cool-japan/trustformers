@@ -715,7 +715,7 @@ mod tests {
         );
 
         assert!(result.is_ok());
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.len(), batch_size * output_features);
     }
 }

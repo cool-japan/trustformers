@@ -351,8 +351,8 @@ mod tests {
         let text = "Hello World!";
         let tokenizer = CharTokenizer::from_text(text, 1000);
 
-        let encoded = tokenizer.encode(text).unwrap();
-        let decoded = tokenizer.decode(&encoded.input_ids).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
 
         assert_eq!(decoded.trim(), text);
     }
@@ -362,8 +362,8 @@ mod tests {
         let text = "Hello 世界!";
         let tokenizer = CharTokenizer::from_text(text, 1000).with_chinese_chars(true);
 
-        let encoded = tokenizer.encode(text).unwrap();
-        let decoded = tokenizer.decode(&encoded.input_ids).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
 
         // Should handle Chinese characters properly
         assert!(decoded.contains("世"));
@@ -375,8 +375,8 @@ mod tests {
         let text = "Hello WORLD!";
         let tokenizer = CharTokenizer::from_text(text, 1000).with_lowercase(true);
 
-        let encoded = tokenizer.encode(text).unwrap();
-        let decoded = tokenizer.decode(&encoded.input_ids).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
 
         assert_eq!(decoded.trim().to_lowercase(), text.to_lowercase());
     }
@@ -387,7 +387,7 @@ mod tests {
         let max_len = 10;
         let tokenizer = CharTokenizer::from_text(text, 1000).with_max_length(max_len);
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         assert_eq!(encoded.input_ids.len(), max_len);
         assert_eq!(encoded.attention_mask.len(), max_len);
@@ -415,7 +415,7 @@ mod tests {
             "[EOS]".to_string(),
         );
 
-        let encoded = tokenizer.encode(text).unwrap();
+        let encoded = tokenizer.encode(text).expect("Encoding failed");
 
         // Should have BOS and EOS tokens (text length + 2 special tokens)
         assert_eq!(encoded.input_ids.len(), text.len() + 2);

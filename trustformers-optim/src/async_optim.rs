@@ -587,7 +587,7 @@ mod tests {
 
     #[test]
     fn test_parameter_server_creation() {
-        let params = vec![Tensor::zeros(&[10]).unwrap()];
+        let params = vec![Tensor::zeros(&[10]).expect("Failed to create tensor")];
         let server = ParameterServer::new(params);
         assert_eq!(server.get_global_step(), 0);
     }

@@ -444,7 +444,7 @@ This implementation builds on cutting-edge research from:
 
 ## 📄 License
 
-MIT License - See LICENSE file for details
+Apache-2.0 License - See LICENSE file for details
 
 ---
 

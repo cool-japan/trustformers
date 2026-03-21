@@ -55,12 +55,12 @@ proptest! {
         prop_assume!(seq_len <= config.max_position_embeddings);
         prop_assume!(config.hidden_size % config.num_attention_heads == 0);
 
-        let model = BertModel::new(config.clone()).unwrap();
+        let model = BertModel::new(config.clone()).expect("operation failed in test");
 
         // Create input tensors
-        let input_ids = Tensor::zeros(&[batch_size, seq_len]).unwrap();
-        let attention_mask = Some(Tensor::ones(&[batch_size, seq_len]).unwrap());
-        let token_type_ids = Some(Tensor::zeros(&[batch_size, seq_len]).unwrap());
+        let input_ids = Tensor::zeros(&[batch_size, seq_len]).expect("tensor operation failed");
+        let attention_mask = Some(Tensor::ones(&[batch_size, seq_len]).expect("tensor operation failed"));
+        let token_type_ids = Some(Tensor::zeros(&[batch_size, seq_len]).expect("tensor operation failed"));
 
         // Convert tensors to vectors for TokenizedInput
         let input_ids_vec: Vec<u32> = (0..batch_size*seq_len).map(|_| 0u32).collect();
@@ -131,10 +131,10 @@ proptest! {
             ..Default::default()
         };
 
-        let model = BertModel::new(config).unwrap();
+        let model = BertModel::new(config).expect("operation failed in test");
 
         // Create input with partial masking
-        let input_ids = Tensor::zeros(&[batch_size, seq_len]).unwrap();
+        let input_ids = Tensor::zeros(&[batch_size, seq_len]).expect("tensor operation failed");
 
         // Create attention mask with some positions masked
         let mut mask_data = vec![1.0f32; batch_size * seq_len];
@@ -144,7 +144,7 @@ proptest! {
                 mask_data[i * seq_len + j] = 0.0;
             }
         }
-        let attention_mask = Some(Tensor::from_vec(mask_data.clone(), &[batch_size, seq_len]).unwrap());
+        let attention_mask = Some(Tensor::from_vec(mask_data.clone(), &[batch_size, seq_len]).expect("tensor operation failed"));
 
         // Convert tensors to vectors for TokenizedInput
         let input_ids_vec: Vec<u32> = (0..batch_size*seq_len).map(|_| 0u32).collect();
@@ -201,7 +201,7 @@ proptest! {
             ..Default::default()
         };
 
-        let model = BertModel::new(config).unwrap();
+        let model = BertModel::new(config).expect("operation failed in test");
 
         // Create input with random token IDs
         let input_data: Vec<f32> = token_ids.into_iter()
@@ -212,7 +212,7 @@ proptest! {
         let input_ids = Tensor::from_vec(
             input_data.clone(),
             &[batch_size, seq_len]
-        ).unwrap();
+        ).expect("operation failed in test");
 
         // Convert tensors to vectors for TokenizedInput
         let input_ids_vec: Vec<u32> = input_data.iter().map(|&x| x as u32).collect();
@@ -270,10 +270,10 @@ proptest! {
 
         prop_assume!(seq_len <= max_positions);
 
-        let model = BertModel::new(config).unwrap();
+        let model = BertModel::new(config).expect("operation failed in test");
 
         let batch_size = 1;
-        let input_ids = Tensor::zeros(&[batch_size, seq_len]).unwrap();
+        let input_ids = Tensor::zeros(&[batch_size, seq_len]).expect("tensor operation failed");
 
         // Convert tensors to vectors for TokenizedInput
         let input_ids_vec: Vec<u32> = (0..batch_size*seq_len).map(|_| 0u32).collect();
@@ -328,10 +328,10 @@ proptest! {
             ..Default::default()
         };
 
-        let model = BertModel::new(config).unwrap();
+        let model = BertModel::new(config).expect("operation failed in test");
 
-        let input_ids = Tensor::zeros(&[batch_size, seq_len]).unwrap();
-        let attention_mask = Some(Tensor::ones(&[batch_size, seq_len]).unwrap());
+        let input_ids = Tensor::zeros(&[batch_size, seq_len]).expect("tensor operation failed");
+        let attention_mask = Some(Tensor::ones(&[batch_size, seq_len]).expect("tensor operation failed"));
 
         // Convert tensors to vectors for TokenizedInput
         let input_ids_vec: Vec<u32> = (0..batch_size*seq_len).map(|_| 0u32).collect();
@@ -347,12 +347,12 @@ proptest! {
         };
 
         // Run forward pass twice
-        let output1 = model.forward(tokenized_input.clone()).unwrap();
-        let output2 = model.forward(tokenized_input).unwrap();
+        let output1 = model.forward(tokenized_input.clone()).expect("forward pass failed");
+        let output2 = model.forward(tokenized_input).expect("forward pass failed");
 
         // Compare last hidden states
-        let diff: f32 = output1.last_hidden_state.data().unwrap().iter()
-            .zip(output2.last_hidden_state.data().unwrap().iter())
+        let diff: f32 = output1.last_hidden_state.data().expect("operation failed in test").iter()
+            .zip(output2.last_hidden_state.data().expect("operation failed in test").iter())
             .map(|(a, b)| (a - b).abs())
             .sum();
 

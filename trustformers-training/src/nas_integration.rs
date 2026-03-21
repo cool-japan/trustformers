@@ -1056,7 +1056,8 @@ mod tests {
         let config = NASConfig::default();
         let controller = NASController::new(config);
 
-        let architecture = controller.sample_random_architecture().unwrap();
+        let architecture =
+            controller.sample_random_architecture().expect("operation failed in test");
         assert!(!architecture.id.is_empty());
         assert!(!architecture.encoding.is_empty());
     }
@@ -1066,8 +1067,11 @@ mod tests {
         let config = NASConfig::default();
         let mut controller = NASController::new(config);
 
-        let architecture = controller.sample_random_architecture().unwrap();
-        let metrics = controller.evaluate_architecture(&architecture).unwrap();
+        let architecture =
+            controller.sample_random_architecture().expect("operation failed in test");
+        let metrics = controller
+            .evaluate_architecture(&architecture)
+            .expect("operation failed in test");
 
         assert!(metrics.accuracy >= 0.0 && metrics.accuracy <= 1.0);
         assert!(metrics.loss >= 0.0);
@@ -1093,7 +1097,7 @@ mod tests {
         let config = NASConfig::default();
         let controller = NASController::new(config);
 
-        let population = controller.initialize_population(10).unwrap();
+        let population = controller.initialize_population(10).expect("operation failed in test");
         assert_eq!(population.len(), 10);
 
         for arch in &population {

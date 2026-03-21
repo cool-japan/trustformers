@@ -663,7 +663,7 @@ mod tests {
             degradation_percent: 50.0,
         };
 
-        manager.add_alert(alert, AlertSeverity::Warning).unwrap();
+        manager.add_alert(alert, AlertSeverity::Warning).expect("add operation failed");
         assert_eq!(manager.active_alerts.len(), 1);
     }
 
@@ -691,11 +691,13 @@ mod tests {
         };
 
         // Add first alert
-        manager.add_alert(alert.clone(), AlertSeverity::Warning).unwrap();
+        manager
+            .add_alert(alert.clone(), AlertSeverity::Warning)
+            .expect("add operation failed");
         assert_eq!(manager.active_alerts.len(), 1);
 
         // Try to add duplicate - should be filtered out
-        manager.add_alert(alert, AlertSeverity::Warning).unwrap();
+        manager.add_alert(alert, AlertSeverity::Warning).expect("add operation failed");
         assert_eq!(manager.active_alerts.len(), 1);
     }
 }

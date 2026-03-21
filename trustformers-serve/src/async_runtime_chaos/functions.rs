@@ -53,32 +53,38 @@ mod tests {
     #[tokio::test]
     async fn test_async_chaos_framework_creation() {
         let framework = AsyncRuntimeChaosFramework::new();
-        framework.start().await.unwrap();
+        framework.start().await.expect("async operation should succeed in test");
     }
     #[tokio::test]
     async fn test_task_cancellation_basic() {
         let framework = AsyncRuntimeChaosFramework::new();
-        framework.start().await.unwrap();
+        framework.start().await.expect("async operation should succeed in test");
         let config = TaskCancellationConfig {
             task_count: 10,
             task_duration: Duration::from_millis(100),
             cancellation_delay: Duration::from_millis(10),
             ..Default::default()
         };
-        let result = framework.test_task_cancellation(config).await.unwrap();
+        let result = framework
+            .test_task_cancellation(config)
+            .await
+            .expect("async operation should succeed in test");
         assert!(result.metrics.contains_key("spawned_tasks"));
         assert!(result.metrics.contains_key("cancelled_tasks"));
     }
     #[tokio::test]
     async fn test_panic_recovery_basic() {
         let framework = AsyncRuntimeChaosFramework::new();
-        framework.start().await.unwrap();
+        framework.start().await.expect("async operation should succeed in test");
         let config = PanicRecoveryConfig {
             total_tasks: 10,
             panic_task_count: 3,
             panic_type: PanicType::Immediate,
         };
-        let result = framework.test_async_panic_recovery(config).await.unwrap();
+        let result = framework
+            .test_async_panic_recovery(config)
+            .await
+            .expect("async operation should succeed in test");
         assert!(result.metrics.contains_key("actual_panics"));
         assert!(result.metrics.contains_key("panic_recoveries"));
     }

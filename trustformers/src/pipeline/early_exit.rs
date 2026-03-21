@@ -902,7 +902,9 @@ mod tests {
 
         let config = EarlyExitConfig::default();
         let predictor = EarlyExitPredictor::new(config);
-        let exit_point = predictor.create_base_exit_point(&layer_output).unwrap();
+        let exit_point = predictor
+            .create_base_exit_point(&layer_output)
+            .expect("operation failed in test");
 
         assert_eq!(exit_point.layer_index, 5);
         assert!(exit_point.confidence_score > 0.0);
@@ -926,7 +928,9 @@ mod tests {
             memory_usage_mb: 50.0,
         };
 
-        let exit_point = predictor.should_exit(&high_confidence_output).unwrap();
+        let exit_point = predictor
+            .should_exit(&high_confidence_output)
+            .expect("operation failed in test");
         assert!(exit_point.should_exit);
     }
 }

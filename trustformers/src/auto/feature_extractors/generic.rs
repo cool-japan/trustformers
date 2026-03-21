@@ -634,7 +634,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 128);
         assert_eq!(output.shape, vec![128]);
         assert!(output.metadata.contains_key("word_count"));
@@ -658,7 +658,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
         assert_eq!(output.features.len(), 64);
         // All features should be 0.0 for empty input
         assert!(output.features.iter().all(|&x| x == 0.0));
@@ -712,7 +712,7 @@ mod tests {
         let config = GenericFeatureConfig::from_config(&config_json);
         assert!(config.is_ok());
 
-        let config = config.unwrap();
+        let config = config.expect("operation failed in test");
         assert_eq!(config.feature_size, 1024);
         assert_eq!(config.max_batch_size, Some(64));
     }
@@ -764,7 +764,7 @@ mod tests {
         let result = extractor.extract_features(&input);
         assert!(result.is_ok());
 
-        let output = result.unwrap();
+        let output = result.expect("operation failed in test");
 
         // Check L2 normalization: sum of squares should be approximately 1.0
         let norm_squared: f32 = output.features.iter().map(|&x| x * x).sum();
@@ -784,7 +784,8 @@ mod tests {
         let preprocessed = extractor.preprocess(&input);
         assert!(preprocessed.is_ok());
 
-        if let FeatureInput::Text { content, .. } = preprocessed.unwrap() {
+        if let FeatureInput::Text { content, .. } = preprocessed.expect("operation failed in test")
+        {
             assert_eq!(content, "Hello,    World!");
         } else {
             panic!("Expected text input after preprocessing");
@@ -805,7 +806,10 @@ mod tests {
         assert!(caps.contains_key("extraction_method"));
         assert!(caps.contains_key("normalization"));
         assert_eq!(
-            caps.get("feature_size").unwrap().as_u64().expect("expected u64 value"),
+            caps.get("feature_size")
+                .expect("expected value not found")
+                .as_u64()
+                .expect("expected u64 value"),
             256
         );
     }

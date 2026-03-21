@@ -430,7 +430,10 @@ mod tests {
     fn test_online_learning_manager_creation() {
         let config = OnlineLearningConfig::default();
         let manager = OnlineLearningManager::new(config);
-        assert_eq!(manager.get_buffer_size().unwrap(), 0);
+        assert_eq!(
+            manager.get_buffer_size().expect("operation failed in test"),
+            0
+        );
     }
 
     #[test]
@@ -445,8 +448,11 @@ mod tests {
             importance_weight: 1.0,
         };
 
-        manager.add_data_point(data_point).unwrap();
-        assert_eq!(manager.get_buffer_size().unwrap(), 1);
+        manager.add_data_point(data_point).expect("add operation failed");
+        assert_eq!(
+            manager.get_buffer_size().expect("operation failed in test"),
+            1
+        );
     }
 
     #[test]
@@ -475,15 +481,15 @@ mod tests {
         let manager = OnlineLearningManager::new(config);
 
         // Add some high performance scores
-        assert!(!manager.detect_concept_drift(0.9).unwrap());
-        assert!(!manager.detect_concept_drift(0.85).unwrap());
-        assert!(!manager.detect_concept_drift(0.88).unwrap());
-        assert!(!manager.detect_concept_drift(0.87).unwrap());
+        assert!(!manager.detect_concept_drift(0.9).expect("operation failed in test"));
+        assert!(!manager.detect_concept_drift(0.85).expect("operation failed in test"));
+        assert!(!manager.detect_concept_drift(0.88).expect("operation failed in test"));
+        assert!(!manager.detect_concept_drift(0.87).expect("operation failed in test"));
 
         // Add a significantly lower score that should trigger drift detection
-        assert!(manager.detect_concept_drift(0.6).unwrap());
+        assert!(manager.detect_concept_drift(0.6).expect("operation failed in test"));
 
-        let drift_state = manager.get_current_drift_state().unwrap();
+        let drift_state = manager.get_current_drift_state().expect("operation failed in test");
         assert!(drift_state.detected);
     }
 
@@ -502,11 +508,14 @@ mod tests {
                 timestamp: Instant::now(),
                 importance_weight: 1.0,
             };
-            manager.add_data_point(data_point).unwrap();
+            manager.add_data_point(data_point).expect("add operation failed");
         }
 
         // Buffer should not exceed capacity
-        assert_eq!(manager.get_buffer_size().unwrap(), 2);
+        assert_eq!(
+            manager.get_buffer_size().expect("operation failed in test"),
+            2
+        );
     }
 
     #[test]
@@ -521,9 +530,9 @@ mod tests {
             importance_weight: 1.0,
         };
 
-        manager.add_data_point(data_point).unwrap();
+        manager.add_data_point(data_point).expect("add operation failed");
 
-        let stats = manager.get_statistics().unwrap();
+        let stats = manager.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_samples_processed, 1);
     }
 }

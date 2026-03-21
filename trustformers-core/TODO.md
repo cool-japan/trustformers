@@ -22,15 +22,18 @@ building blocks required by model implementations in trustformers-models and oth
 ## Current Status
 
 ### Implementation Status
-✅ **PRODUCTION-READY** - All major features implemented and battle-tested
+✅ **STABLE** - Version 0.1.0 released 2026-03-21
 ✅ **ZERO COMPILATION ERRORS** - Clean compilation across all backends
-✅ **COMPREHENSIVE TEST COVERAGE** - 857+ tests with 100% pass rate
-✅ **ALL MAJOR TODOS COMPLETED** - Full feature implementation
+✅ **COMPREHENSIVE TEST COVERAGE** - 1,140 tests with 100% pass rate
+✅ **ALL TODOS COMPLETED** - Zero stubs (todo!/unimplemented!) remaining
 ✅ **THREAD-SAFE** - Proper synchronization primitives throughout
 ✅ **MEMORY-SAFE** - Zero-copy operations and efficient memory management
 
 ### Code Quality Metrics
-- **Test Count:** 857+ unit tests, all passing
+- **Test Count:** 1,140 unit tests, all passing (0 failing)
+- **Stubs:** 0 (no todo! or unimplemented! macros)
+- **Public API Items:** 1,596
+- **SLoC:** 121,799
 - **Code Coverage:** Extensive coverage across modules
 - **Clippy Warnings:** 3855+ warnings resolved
 - **File Size Compliance:** All files <2000 lines
@@ -848,7 +851,7 @@ if debugger.is_breakpoint_hit() {
 
 ## Future Enhancements
 
-### High Priority (Updated 2025-11-10)
+### High Priority (Updated 2026-03-21)
 - Additional fused kernel patterns
 - ~~Enhanced sparse tensor operations~~ ✅ COMPLETED (2025-11-10)
 - ~~More quantization methods~~ ✅ COMPLETED (FP8, GGUF K-quants - 2025-11-10)
@@ -928,6 +931,9 @@ cargo doc -p trustformers-core --all-features --no-deps
 
 ---
 
-**Last Updated:** Refactored for alpha.1 release
-**Status:** Production-ready core infrastructure
-**Test Coverage:** 857+ tests, 100% pass rate
+**Last Updated:** 2026-03-21 - 0.1.0 Stable Release
+**Version:** 0.1.0
+**Status:** Stable — production-ready core infrastructure
+**Test Coverage:** 1,140 tests, 100% pass rate, 0 stubs
+**Public API:** 1,596 items
+**SLoC:** 121,799

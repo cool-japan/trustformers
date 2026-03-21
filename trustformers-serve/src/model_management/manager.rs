@@ -564,14 +564,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_model_manager() {
-        let temp_dir = TempDir::new().unwrap();
+        let temp_dir = TempDir::new().expect("test operation should succeed");
         let config = ModelManagementConfig::default();
         let registry = Arc::new(ModelRegistry::new(
             temp_dir.path().to_string_lossy().to_string(),
         ));
         let version_manager = Arc::new(VersionManager::new());
 
-        registry.initialize().await.unwrap();
+        registry.initialize().await.expect("initialization should succeed in test");
 
         let manager = ModelManager::new(config, registry.clone(), version_manager);
 
@@ -586,7 +586,7 @@ mod tests {
                 HashMap::new(),
             )
             .await
-            .unwrap();
+            .expect("test operation should succeed");
 
         // Test model loading
         let load_config = ModelLoadConfig {
@@ -603,13 +603,16 @@ mod tests {
         manager
             .load_model(&model_id, load_config, LoadingStrategy::Eager)
             .await
-            .unwrap();
+            .expect("test operation should succeed");
 
         // Verify model is loaded
         assert!(manager.get_loaded_model(&model_id).is_some());
 
         // Test model unloading
-        manager.unload_model(&model_id, UnloadingStrategy::Immediate).await.unwrap();
+        manager
+            .unload_model(&model_id, UnloadingStrategy::Immediate)
+            .await
+            .expect("async operation should succeed in test");
 
         // Verify model is unloaded
         assert!(manager.get_loaded_model(&model_id).is_none());

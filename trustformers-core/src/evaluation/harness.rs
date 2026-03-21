@@ -560,13 +560,16 @@ mod tests {
 
         // Save and load
         let temp_path = "/tmp/test_results.json";
-        harness.save_results(&suite, temp_path).unwrap();
-        let loaded_suite = harness.load_results(temp_path).unwrap();
+        harness.save_results(&suite, temp_path).expect("temp file creation failed");
+        let loaded_suite = harness.load_results(temp_path).expect("temp file creation failed");
 
         assert_eq!(loaded_suite.results.len(), 1);
         assert_eq!(loaded_suite.results[0].task_name, "test_task");
         assert_eq!(
-            loaded_suite.results[0].metrics.get("accuracy").unwrap(),
+            loaded_suite.results[0]
+                .metrics
+                .get("accuracy")
+                .expect("expected value not found"),
             &0.85
         );
 

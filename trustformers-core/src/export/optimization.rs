@@ -727,7 +727,7 @@ mod tests {
         assert!(pass.is_applicable(&config));
         assert_eq!(pass.name(), "constant_folding");
 
-        let stats = pass.apply(&mut model, &config).unwrap();
+        let stats = pass.apply(&mut model, &config).expect("operation failed in test");
         assert!(stats.speedup_factor >= 1.0);
     }
 

@@ -23,12 +23,15 @@ mod tests {
         let profile_id = service
             .start_profile("req_123".to_string(), "inference".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         assert!(!profile_id.is_empty());
         let stats = service.get_stats().await;
         assert_eq!(stats.total_profiles, 1);
         assert_eq!(stats.active_profiles, 1);
-        service.complete_profile(&profile_id).await.unwrap();
+        service
+            .complete_profile(&profile_id)
+            .await
+            .expect("async operation should succeed in test");
         let stats = service.get_stats().await;
         assert_eq!(stats.active_profiles, 0);
         assert_eq!(stats.completed_profiles, 1);
@@ -41,13 +44,16 @@ mod tests {
         let profile_id = service
             .start_profile("req_123".to_string(), "inference".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         let inference_duration = Duration::from_millis(100);
         service
             .record_timing(&profile_id, "inference", inference_duration)
             .await
-            .unwrap();
-        let profile = service.get_profile(&profile_id).await.unwrap();
+            .expect("test operation should succeed");
+        let profile = service
+            .get_profile(&profile_id)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(
             profile.timing_breakdown.inference_duration,
             Some(inference_duration)
@@ -61,7 +67,7 @@ mod tests {
         let profile_id = service
             .start_profile("req_123".to_string(), "inference".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         let resource_usage = ResourceUsage {
             peak_cpu_percent: Some(85.5),
             peak_memory_bytes: Some(1024 * 1024 * 100),
@@ -70,8 +76,11 @@ mod tests {
         service
             .record_resource_usage(&profile_id, resource_usage.clone())
             .await
-            .unwrap();
-        let profile = service.get_profile(&profile_id).await.unwrap();
+            .expect("test operation should succeed");
+        let profile = service
+            .get_profile(&profile_id)
+            .await
+            .expect("async operation should succeed in test");
         assert_eq!(profile.resource_usage.peak_cpu_percent, Some(85.5));
         assert_eq!(
             profile.resource_usage.peak_memory_bytes,
@@ -86,7 +95,7 @@ mod tests {
         let profile_id = service
             .start_profile("req_123".to_string(), "inference".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         let error_info = ErrorInfo {
             error_type: "TimeoutError".to_string(),
             error_message: "Request timed out".to_string(),
@@ -95,8 +104,14 @@ mod tests {
             timestamp: SystemTime::now(),
             category: ErrorCategory::Timeout,
         };
-        service.record_error(&profile_id, error_info).await.unwrap();
-        let profile = service.get_profile(&profile_id).await.unwrap();
+        service
+            .record_error(&profile_id, error_info)
+            .await
+            .expect("async operation should succeed in test");
+        let profile = service
+            .get_profile(&profile_id)
+            .await
+            .expect("async operation should succeed in test");
         assert!(profile.error_info.is_some());
         assert_eq!(profile.status, ProfileStatus::Failed);
     }
@@ -109,12 +124,15 @@ mod tests {
         let profile1 = service
             .start_profile("req_1".to_string(), "inference".to_string())
             .await
-            .unwrap();
+            .expect("test operation should succeed");
         let profile2 = service
             .start_profile("req_2".to_string(), "preprocessing".to_string())
             .await
-            .unwrap();
-        service.complete_profile(&profile1).await.unwrap();
+            .expect("test operation should succeed");
+        service
+            .complete_profile(&profile1)
+            .await
+            .expect("async operation should succeed in test");
         let inference_profiles = service.list_profiles(Some("inference"), None, None).await;
         assert_eq!(inference_profiles.len(), 1);
         assert_eq!(inference_profiles[0].request_type, "inference");

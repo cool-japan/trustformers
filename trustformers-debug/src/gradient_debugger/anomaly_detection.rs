@@ -53,7 +53,7 @@ impl GradientAnomalyDetector {
         let std = variance.sqrt();
 
         let mut sorted_values = gradient_history.to_vec();
-        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median_idx = sorted_values.len() / 2;
         let median = if sorted_values.len() % 2 == 0 {

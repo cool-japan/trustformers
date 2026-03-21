@@ -355,9 +355,9 @@ mod tests {
         ]]);
         let tokens = MetricInput::Tokens(vec![vec![1, 1]]);
 
-        metric.add_batch(&probabilities, &tokens).unwrap();
+        metric.add_batch(&probabilities, &tokens).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.name, "language_modeling");
         assert!(result.value >= 1.0); // Perplexity should be >= 1
         assert!(result.details.contains_key("perplexity"));
@@ -373,9 +373,9 @@ mod tests {
         let probabilities = MetricInput::Probabilities(vec![vec![vec![0.0, 1.0]]]);
         let tokens = MetricInput::Tokens(vec![vec![1]]);
 
-        metric.add_batch(&probabilities, &tokens).unwrap();
+        metric.add_batch(&probabilities, &tokens).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, 1.0); // Perfect prediction gives perplexity 1
     }
 
@@ -387,9 +387,9 @@ mod tests {
         let probabilities = MetricInput::Probabilities(vec![vec![vec![0.5, 0.5]]]);
         let tokens = MetricInput::Tokens(vec![vec![0]]);
 
-        metric.add_batch(&probabilities, &tokens).unwrap();
+        metric.add_batch(&probabilities, &tokens).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Random binary prediction gives perplexity ~2 (use tolerance for f64)
         assert!((result.value - 2.0).abs() < 1e-6);
     }
@@ -402,9 +402,9 @@ mod tests {
         let probabilities = MetricInput::Probabilities(vec![vec![vec![1.0, 0.0]]]);
         let tokens = MetricInput::Tokens(vec![vec![1]]);
 
-        metric.add_batch(&probabilities, &tokens).unwrap();
+        metric.add_batch(&probabilities, &tokens).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Should handle zero probability gracefully
         assert!(result.value > 1.0);
     }
@@ -417,9 +417,9 @@ mod tests {
         let probabilities = MetricInput::Probabilities(vec![vec![vec![0.5, 0.5]]]);
         let tokens = MetricInput::Tokens(vec![vec![5]]); // Invalid: only 2 vocab items
 
-        metric.add_batch(&probabilities, &tokens).unwrap();
+        metric.add_batch(&probabilities, &tokens).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Should skip invalid tokens
         assert_eq!(result.value, f64::INFINITY); // No valid tokens processed
         assert_eq!(result.details.get("num_tokens"), Some(&0.0));
@@ -435,7 +435,7 @@ mod tests {
                 &MetricInput::Probabilities(vec![vec![vec![0.0, 1.0]]]),
                 &MetricInput::Tokens(vec![vec![1]]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         // Second batch
         metric
@@ -443,9 +443,9 @@ mod tests {
                 &MetricInput::Probabilities(vec![vec![vec![0.5, 0.5]]]),
                 &MetricInput::Tokens(vec![vec![0]]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         // Should combine both batches: (ln(1.0) + ln(0.5)) / 2 = ln(0.5) / 2
         let expected = (-0.5_f64.ln() / 2.0).exp();
         assert!((result.value - expected).abs() < 1e-6);
@@ -461,11 +461,11 @@ mod tests {
                 &MetricInput::Probabilities(vec![vec![vec![0.5, 0.5]]]),
                 &MetricInput::Tokens(vec![vec![0]]),
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         metric.reset();
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, f64::INFINITY); // No data = infinite perplexity
         assert_eq!(result.details.get("num_tokens"), Some(&0.0));
     }
@@ -489,9 +489,9 @@ mod tests {
         let probabilities = MetricInput::Probabilities(vec![vec![]]);
         let tokens = MetricInput::Tokens(vec![vec![]]);
 
-        metric.add_batch(&probabilities, &tokens).unwrap();
+        metric.add_batch(&probabilities, &tokens).expect("add operation failed");
 
-        let result = metric.compute().unwrap();
+        let result = metric.compute().expect("operation failed in test");
         assert_eq!(result.value, f64::INFINITY); // No tokens = infinite perplexity
     }
 }

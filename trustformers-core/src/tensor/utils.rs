@@ -605,7 +605,7 @@ impl Tensor {
     /// # Example
     ///
     /// ```no_run
-    /// use trustformers_core::tensor::{Tensor, utils::{enable_grad, disable_grad}};
+    /// use trustformers_core::tensor::{Tensor, enable_grad, disable_grad};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// enable_grad();
@@ -659,7 +659,7 @@ impl Tensor {
     /// # Example
     ///
     /// ```no_run
-    /// use trustformers_core::tensor::{Tensor, utils::enable_grad};
+    /// use trustformers_core::tensor::{Tensor, enable_grad};
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// enable_grad();
@@ -1268,7 +1268,7 @@ mod tests {
         assert!(x.set_grad(grad.clone()).is_ok());
 
         // Get gradient
-        let retrieved_grad = x.grad().unwrap();
+        let retrieved_grad = x.grad().expect("operation failed in test");
         assert_eq!(retrieved_grad.shape(), vec![2, 3]);
 
         disable_grad();
@@ -1308,7 +1308,7 @@ mod tests {
         let grad = Tensor::ones(&[2, 3]).expect("Failed to create ones tensor");
 
         // Set gradient
-        x.set_grad(grad).unwrap();
+        x.set_grad(grad).expect("operation failed in test");
 
         // Verify gradient exists
         assert!(x.grad().is_ok());

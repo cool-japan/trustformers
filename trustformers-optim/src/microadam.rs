@@ -813,9 +813,9 @@ mod tests {
 
         // After processing some parameters, should show savings
         let gradient_data = vec![0.1; 1000]; // Large gradient
-        let gradient = Tensor::new(gradient_data).unwrap();
-        let mut parameter = Tensor::new(vec![1.0; 1000]).unwrap();
-        optimizer.update(&mut parameter, &gradient).unwrap();
+        let gradient = Tensor::new(gradient_data).expect("Failed to create tensor");
+        let mut parameter = Tensor::new(vec![1.0; 1000]).expect("Failed to create tensor");
+        optimizer.update(&mut parameter, &gradient).expect("Optimizer update failed");
 
         let savings = optimizer.memory_savings_ratio();
         assert!(savings > 0.0, "Should show memory savings");
@@ -830,10 +830,10 @@ mod tests {
         };
         let mut optimizer = MicroAdam::with_config(config);
         let gradient_data = vec![0.1; 500];
-        let gradient = Tensor::new(gradient_data).unwrap();
-        let mut parameter = Tensor::new(vec![1.0; 500]).unwrap();
+        let gradient = Tensor::new(gradient_data).expect("Failed to create tensor");
+        let mut parameter = Tensor::new(vec![1.0; 500]).expect("Failed to create tensor");
 
-        optimizer.update(&mut parameter, &gradient).unwrap();
+        optimizer.update(&mut parameter, &gradient).expect("Optimizer update failed");
 
         let stats = optimizer.compression_statistics();
         assert!(stats.contains("MicroAdam Compression Stats"));

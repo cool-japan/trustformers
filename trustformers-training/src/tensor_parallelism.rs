@@ -1207,9 +1207,12 @@ mod tests {
         };
 
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut tensor_parallelism = TensorParallelism::new(config, 0, 2, process_group).unwrap();
+        let mut tensor_parallelism =
+            TensorParallelism::new(config, 0, 2, process_group).expect("tensor operation failed");
 
-        let partitions = tensor_parallelism.partition_tensor("test", &[100, 200], None).unwrap();
+        let partitions = tensor_parallelism
+            .partition_tensor("test", &[100, 200], None)
+            .expect("tensor operation failed");
         assert_eq!(partitions.len(), 2);
         assert_eq!(partitions[0].shape, vec![100, 100]);
         assert_eq!(partitions[1].shape, vec![100, 100]);
@@ -1224,9 +1227,12 @@ mod tests {
         };
 
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut tensor_parallelism = TensorParallelism::new(config, 0, 2, process_group).unwrap();
+        let mut tensor_parallelism =
+            TensorParallelism::new(config, 0, 2, process_group).expect("tensor operation failed");
 
-        let partitions = tensor_parallelism.partition_tensor("test", &[100, 200], None).unwrap();
+        let partitions = tensor_parallelism
+            .partition_tensor("test", &[100, 200], None)
+            .expect("tensor operation failed");
         assert_eq!(partitions.len(), 2);
         assert_eq!(partitions[0].shape, vec![50, 200]);
         assert_eq!(partitions[1].shape, vec![50, 200]);
@@ -1241,10 +1247,12 @@ mod tests {
         };
 
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 2));
-        let mut tensor_parallelism = TensorParallelism::new(config, 0, 2, process_group).unwrap();
+        let mut tensor_parallelism =
+            TensorParallelism::new(config, 0, 2, process_group).expect("tensor operation failed");
 
-        let partitions =
-            tensor_parallelism.partition_tensor("test", &[64, 100, 200], None).unwrap();
+        let partitions = tensor_parallelism
+            .partition_tensor("test", &[64, 100, 200], None)
+            .expect("tensor operation failed");
         assert_eq!(partitions.len(), 2);
         assert_eq!(partitions[0].shape, vec![32, 100, 200]);
         assert_eq!(partitions[1].shape, vec![32, 100, 200]);
@@ -1254,7 +1262,8 @@ mod tests {
     fn test_tensor_operation_execution() {
         let config = TensorParallelismConfig::default();
         let process_group = Arc::new(SimulatedProcessGroup::new(0, 1));
-        let tensor_parallelism = TensorParallelism::new(config, 0, 1, process_group).unwrap();
+        let tensor_parallelism =
+            TensorParallelism::new(config, 0, 1, process_group).expect("tensor operation failed");
 
         let operation = TensorOperation {
             operation_id: 0,
@@ -1266,8 +1275,14 @@ mod tests {
         };
 
         let mut inputs = HashMap::new();
-        inputs.insert("A".to_string(), Tensor::ones(&[10, 10]).unwrap());
-        inputs.insert("B".to_string(), Tensor::ones(&[10, 10]).unwrap());
+        inputs.insert(
+            "A".to_string(),
+            Tensor::ones(&[10, 10]).expect("tensor operation failed"),
+        );
+        inputs.insert(
+            "B".to_string(),
+            Tensor::ones(&[10, 10]).expect("tensor operation failed"),
+        );
 
         let result = tensor_parallelism.execute_operation(&operation, &inputs);
         assert!(result.is_ok());
@@ -1282,7 +1297,7 @@ mod tests {
             8 * 1024 * 1024 * 1024, // 8GB memory per device
             8,                      // world size
         )
-        .unwrap();
+        .expect("operation failed in test");
 
         assert!(
             config.tensor_parallel_size > 1,

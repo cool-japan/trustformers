@@ -547,11 +547,11 @@ mod tests {
                 &output,
                 OperationType::MatMul,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(tracker.total_operations(), 1);
 
-        let stats = tracker.get_statistics().unwrap();
+        let stats = tracker.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_operations, 1);
         assert!(stats.average_precision_loss >= 0.0);
     }
@@ -574,7 +574,7 @@ mod tests {
                 &output,
                 OperationType::Activation,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(tracker.total_operations(), 1);
         assert!(tracker.has_precision_issues());
@@ -600,10 +600,10 @@ mod tests {
                     &output,
                     OperationType::Gradient,
                 )
-                .unwrap();
+                .expect("operation failed in test");
         }
 
-        let stats = tracker.get_statistics().unwrap();
+        let stats = tracker.get_statistics().expect("operation failed in test");
         assert_eq!(stats.total_operations, 5);
         assert!(stats.per_type_stats.contains_key(&OperationType::Gradient));
         assert_eq!(stats.timeline.len(), 5);
@@ -623,7 +623,7 @@ mod tests {
                 &output,
                 OperationType::Weight,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
         let op_data = tracker.get_operation_data("specific_op");
         assert_eq!(op_data.len(), 1);
@@ -645,9 +645,9 @@ mod tests {
                 &output,
                 OperationType::Other,
             )
-            .unwrap();
+            .expect("operation failed in test");
 
-        let json = tracker.export_to_json().unwrap();
+        let json = tracker.export_to_json().expect("operation failed in test");
         assert!(json.contains("export_test"));
         assert!(json.contains("Other"));
     }

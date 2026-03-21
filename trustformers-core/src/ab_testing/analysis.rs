@@ -415,7 +415,7 @@ mod tests {
 
     fn create_test_data(mean: f64, std_dev: f64, size: usize) -> Vec<MetricDataPoint> {
         use scirs2_core::random::*;
-        let normal = Normal::new(mean, std_dev).unwrap();
+        let normal = Normal::new(mean, std_dev).expect("operation failed in test");
         let mut rng = thread_rng();
 
         (0..size)
@@ -448,7 +448,7 @@ mod tests {
             create_test_data(90.0, 10.0, 100),
         );
 
-        let result = analyzer.analyze(metrics).unwrap();
+        let result = analyzer.analyze(metrics).expect("operation failed in test");
 
         // Should detect significant improvement
         match result.recommendation {
@@ -494,7 +494,7 @@ mod tests {
             create_identical_data(0.95, 100),
         );
 
-        let result = analyzer.analyze(metrics).unwrap();
+        let result = analyzer.analyze(metrics).expect("operation failed in test");
 
         assert_eq!(
             result.recommendation,
@@ -522,7 +522,7 @@ mod tests {
             create_test_data(1100.0, 50.0, 10),
         );
 
-        let result = analyzer.analyze(metrics).unwrap();
+        let result = analyzer.analyze(metrics).expect("operation failed in test");
 
         match result.recommendation {
             TestRecommendation::InsufficientData {

@@ -486,8 +486,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
-        let layer = ColumnParallelLinear::new(512, 2048, true, mp_context).unwrap();
+        let mp_context =
+            Arc::new(ModelParallelContext::new(config).expect("operation failed in test"));
+        let layer = ColumnParallelLinear::new(512, 2048, true, mp_context)
+            .expect("operation failed in test");
 
         // Check weight dimensions
         assert_eq!(layer.weight.shape(), &[512, 1024]); // 2048 / 2 = 1024
@@ -502,8 +504,10 @@ mod tests {
             ..Default::default()
         };
 
-        let mp_context = Arc::new(ModelParallelContext::new(config).unwrap());
-        let attn = ParallelMultiHeadAttention::new(768, 12, mp_context).unwrap();
+        let mp_context =
+            Arc::new(ModelParallelContext::new(config).expect("operation failed in test"));
+        let attn =
+            ParallelMultiHeadAttention::new(768, 12, mp_context).expect("operation failed in test");
 
         assert_eq!(attn.num_heads_per_device, 3); // 12 / 4 = 3
         assert_eq!(attn.head_dim, 64); // 768 / 12 = 64

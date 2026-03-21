@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn test_rocm_device_enumeration() {
-        let devices = RocmKernel::enumerate_devices().unwrap();
+        let devices = RocmKernel::enumerate_devices().expect("operation failed in test");
         assert!(!devices.is_empty());
         assert!(devices.iter().any(|d| d.name.contains("AMD")));
     }

@@ -658,10 +658,13 @@ mod tests {
             overflowing_tokens: None,
         };
 
-        let serialized = serializer.serialize_tokenized_input(&input).unwrap();
+        let serialized =
+            serializer.serialize_tokenized_input(&input).expect("Operation failed in test");
         assert!(!serialized.is_empty());
 
-        let deserialized = serializer.deserialize_tokenized_input(&serialized).unwrap();
+        let deserialized = serializer
+            .deserialize_tokenized_input(&serialized)
+            .expect("Operation failed in test");
         assert_eq!(input.input_ids, deserialized.input_ids);
         assert_eq!(input.attention_mask, deserialized.attention_mask);
         assert_eq!(input.token_type_ids, deserialized.token_type_ids);
@@ -690,10 +693,13 @@ mod tests {
             },
         ];
 
-        let serialized = serializer.serialize_tokenized_batch(&batch).unwrap();
+        let serialized =
+            serializer.serialize_tokenized_batch(&batch).expect("Operation failed in test");
         assert!(!serialized.is_empty());
 
-        let deserialized = serializer.deserialize_tokenized_batch(&serialized).unwrap();
+        let deserialized = serializer
+            .deserialize_tokenized_batch(&serialized)
+            .expect("Operation failed in test");
         assert_eq!(batch.len(), deserialized.len());
         assert_eq!(batch[0].input_ids, deserialized[0].input_ids);
         assert_eq!(batch[1].input_ids, deserialized[1].input_ids);
@@ -712,10 +718,13 @@ mod tests {
             overflowing_tokens: None,
         };
 
-        let serialized = serializer.serialize_tokenized_input(&input).unwrap();
+        let serialized =
+            serializer.serialize_tokenized_input(&input).expect("Operation failed in test");
 
         // Valid data should validate successfully
-        assert!(serializer.validate_messagepack_data(&serialized).unwrap());
+        assert!(serializer
+            .validate_messagepack_data(&serialized)
+            .expect("Operation failed in test"));
 
         // Invalid data should fail validation
         // Try with truncated MessagePack data (incomplete)
@@ -736,13 +745,17 @@ mod tests {
             overflowing_tokens: None,
         };
 
-        let serialized = serializer.serialize_tokenized_input(&input).unwrap();
-        let info = serializer.get_messagepack_info(&serialized).unwrap();
+        let serialized =
+            serializer.serialize_tokenized_input(&input).expect("Operation failed in test");
+        let info = serializer.get_messagepack_info(&serialized).expect("Operation failed in test");
 
-        assert_eq!(info.get("format").unwrap(), "MessagePack");
-        assert_eq!(info.get("data_type").unwrap(), "tokenized_input");
+        assert_eq!(info.get("format").expect("Key not found"), "MessagePack");
         assert_eq!(
-            info.get("size_bytes").unwrap(),
+            info.get("data_type").expect("Key not found"),
+            "tokenized_input"
+        );
+        assert_eq!(
+            info.get("size_bytes").expect("Key not found"),
             &serialized.len().to_string()
         );
     }
@@ -750,7 +763,7 @@ mod tests {
     #[test]
     fn test_file_operations() {
         let serializer = MessagePackSerializer::default();
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
 
         let input = TokenizedInput {
             input_ids: vec![1, 2, 3, 4],
@@ -764,11 +777,15 @@ mod tests {
         let file_path = temp_dir.path().join("test_input.msgpack");
 
         // Save to file
-        serializer.save_tokenized_input_to_file(&input, &file_path).unwrap();
+        serializer
+            .save_tokenized_input_to_file(&input, &file_path)
+            .expect("Operation failed in test");
         assert!(file_path.exists());
 
         // Load from file
-        let loaded_input = serializer.load_tokenized_input_from_file(&file_path).unwrap();
+        let loaded_input = serializer
+            .load_tokenized_input_from_file(&file_path)
+            .expect("Operation failed in test");
         assert_eq!(input.input_ids, loaded_input.input_ids);
         assert_eq!(input.attention_mask, loaded_input.attention_mask);
         assert_eq!(input.token_type_ids, loaded_input.token_type_ids);
@@ -779,24 +796,27 @@ mod tests {
         let test_data = r#"{"test": "data", "number": 42}"#;
 
         // Convert JSON to MessagePack
-        let msgpack_data = MessagePackUtils::json_to_messagepack(test_data).unwrap();
+        let msgpack_data =
+            MessagePackUtils::json_to_messagepack(test_data).expect("Operation failed in test");
         assert!(!msgpack_data.is_empty());
 
         // Convert MessagePack back to JSON
-        let json_data = MessagePackUtils::messagepack_to_json(&msgpack_data).unwrap();
+        let json_data =
+            MessagePackUtils::messagepack_to_json(&msgpack_data).expect("Operation failed in test");
         assert!(json_data.contains("test"));
         assert!(json_data.contains("42"));
 
         // Get statistics
-        let stats = MessagePackUtils::get_statistics(&msgpack_data).unwrap();
-        assert_eq!(stats.get("format").unwrap(), "MessagePack");
-        assert_eq!(stats.get("type").unwrap(), "object");
+        let stats =
+            MessagePackUtils::get_statistics(&msgpack_data).expect("Operation failed in test");
+        assert_eq!(stats.get("format").expect("Key not found"), "MessagePack");
+        assert_eq!(stats.get("type").expect("Key not found"), "object");
     }
 
     #[test]
     fn test_file_validation() {
         let serializer = MessagePackSerializer::default();
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
 
         let input = TokenizedInput {
             input_ids: vec![1, 2, 3],
@@ -808,16 +828,18 @@ mod tests {
         };
 
         let file_path = temp_dir.path().join("validation_test.msgpack");
-        serializer.save_tokenized_input_to_file(&input, &file_path).unwrap();
+        serializer
+            .save_tokenized_input_to_file(&input, &file_path)
+            .expect("Operation failed in test");
 
         // Valid file should validate successfully
-        assert!(MessagePackUtils::validate_file(&file_path).unwrap());
+        assert!(MessagePackUtils::validate_file(&file_path).expect("Operation failed in test"));
     }
 
     #[test]
     fn test_file_comparison() {
         let serializer = MessagePackSerializer::default();
-        let temp_dir = tempdir().unwrap();
+        let temp_dir = tempdir().expect("Operation failed in test");
 
         let input1 = TokenizedInput {
             input_ids: vec![1, 2, 3],
@@ -840,13 +862,28 @@ mod tests {
         let file1_path = temp_dir.path().join("compare1.msgpack");
         let file2_path = temp_dir.path().join("compare2.msgpack");
 
-        serializer.save_tokenized_input_to_file(&input1, &file1_path).unwrap();
-        serializer.save_tokenized_input_to_file(&input2, &file2_path).unwrap();
+        serializer
+            .save_tokenized_input_to_file(&input1, &file1_path)
+            .expect("Operation failed in test");
+        serializer
+            .save_tokenized_input_to_file(&input2, &file2_path)
+            .expect("Operation failed in test");
 
-        let comparison = serializer.compare_messagepack_files(&file1_path, &file2_path).unwrap();
+        let comparison = serializer
+            .compare_messagepack_files(&file1_path, &file2_path)
+            .expect("Operation failed in test");
 
-        assert_eq!(comparison.get("contents_equal").unwrap(), "false");
-        assert_eq!(comparison.get("type1").unwrap(), "tokenized_input");
-        assert_eq!(comparison.get("type2").unwrap(), "tokenized_input");
+        assert_eq!(
+            comparison.get("contents_equal").expect("Key not found"),
+            "false"
+        );
+        assert_eq!(
+            comparison.get("type1").expect("Key not found"),
+            "tokenized_input"
+        );
+        assert_eq!(
+            comparison.get("type2").expect("Key not found"),
+            "tokenized_input"
+        );
     }
 }

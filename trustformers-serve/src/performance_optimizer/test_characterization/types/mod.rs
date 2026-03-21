@@ -9,6 +9,7 @@ pub mod locking;
 pub mod network_io;
 pub mod optimization;
 pub mod patterns;
+pub mod patterns_extended;
 pub mod performance;
 pub mod quality;
 pub mod reporting;
@@ -24,6 +25,7 @@ pub use locking::*;
 pub use network_io::*;
 pub use optimization::*;
 pub use patterns::*;
+// patterns_extended is re-exported via patterns.rs
 pub use performance::*;
 pub use quality::*;
 pub use reporting::*;

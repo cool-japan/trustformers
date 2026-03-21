@@ -552,7 +552,7 @@ impl TypeDocGenerator {
             ]
         });
 
-        serde_json::to_string_pretty(&config).unwrap()
+        serde_json::to_string_pretty(&config).expect("json! macro always produces valid JSON")
     }
 
     /// Generate package.json for TypeDoc project
@@ -571,7 +571,7 @@ impl TypeDocGenerator {
             }
         });
 
-        serde_json::to_string_pretty(&package).unwrap()
+        serde_json::to_string_pretty(&package).expect("json! macro always produces valid JSON")
     }
 
     /// Generate README.md with build instructions
@@ -766,7 +766,7 @@ mod tests {
     #[test]
     fn test_type_mapping() {
         let config = CodeGenConfig::default();
-        let generator = TypeDocGenerator::new(&config).unwrap();
+        let generator = TypeDocGenerator::new(&config).expect("test operation should succeed");
 
         let int_type = FfiType {
             name: "c_int".to_string(),
@@ -794,7 +794,7 @@ mod tests {
     #[test]
     fn test_generate_function_docs() {
         let config = CodeGenConfig::default();
-        let generator = TypeDocGenerator::new(&config).unwrap();
+        let generator = TypeDocGenerator::new(&config).expect("test operation should succeed");
 
         let func = FfiFunction {
             name: "test_function".to_string(),
@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn test_generate_enum_docs() {
         let config = CodeGenConfig::default();
-        let generator = TypeDocGenerator::new(&config).unwrap();
+        let generator = TypeDocGenerator::new(&config).expect("test operation should succeed");
 
         let enum_def = FfiEnum {
             name: "TestEnum".to_string(),
@@ -856,13 +856,13 @@ mod tests {
         assert_eq!(doc["name"], "TestEnum");
         assert_eq!(doc["kind"], TypeDocKind::Enum as u32);
         assert!(doc["children"].is_array());
-        assert_eq!(doc["children"].as_array().unwrap().len(), 2);
+        assert_eq!(doc["children"].as_array().expect("value should be an array").len(), 2);
     }
 
     #[test]
     fn test_generate_interface_docs() {
         let config = CodeGenConfig::default();
-        let generator = TypeDocGenerator::new(&config).unwrap();
+        let generator = TypeDocGenerator::new(&config).expect("test operation should succeed");
 
         let struct_def = FfiStruct {
             name: "TestStruct".to_string(),

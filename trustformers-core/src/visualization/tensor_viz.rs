@@ -955,7 +955,7 @@ mod tests {
         let tensor = Tensor::from_vec(data, &[5]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
-        let stats = visualizer.compute_statistics(&tensor).unwrap();
+        let stats = visualizer.compute_statistics(&tensor).expect("tensor operation failed");
 
         assert_eq!(stats.element_count, 5);
         assert_eq!(stats.min_value, 1.0);
@@ -970,7 +970,7 @@ mod tests {
         let tensor = Tensor::from_vec(data, &[2, 2]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
-        let heatmap = visualizer.create_heatmap(&tensor).unwrap();
+        let heatmap = visualizer.create_heatmap(&tensor).expect("tensor operation failed");
 
         assert_eq!(heatmap.width, 2);
         assert_eq!(heatmap.height, 2);
@@ -984,7 +984,7 @@ mod tests {
         let tensor = Tensor::from_vec(data, &[6]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
-        let histogram = visualizer.create_histogram(&tensor, 3).unwrap();
+        let histogram = visualizer.create_histogram(&tensor, 3).expect("tensor operation failed");
 
         assert_eq!(histogram.bins.len(), 3);
         assert_eq!(histogram.counts.len(), 3);
@@ -997,7 +997,7 @@ mod tests {
         let tensor = Tensor::from_vec(data, &[2, 2]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
-        let result = visualizer.visualize_tensor(&tensor).unwrap();
+        let result = visualizer.visualize_tensor(&tensor).expect("tensor operation failed");
 
         assert!(result.contains("Shape: [2, 2]"));
         assert!(result.contains("Statistics:"));
@@ -1015,7 +1015,7 @@ mod tests {
         };
         let visualizer = TensorVisualizer::with_config(config);
 
-        let result = visualizer.visualize_tensor(&tensor).unwrap();
+        let result = visualizer.visualize_tensor(&tensor).expect("tensor operation failed");
         assert!(result.contains("\"shape\""));
         assert!(result.contains("\"statistics\""));
     }
@@ -1031,7 +1031,7 @@ mod tests {
         };
         let visualizer = TensorVisualizer::with_config(config);
 
-        let result = visualizer.visualize_tensor(&tensor).unwrap();
+        let result = visualizer.visualize_tensor(&tensor).expect("tensor operation failed");
         assert!(result.contains("<div class='tensor-visualization'>"));
         assert!(result.contains("<table"));
     }
@@ -1053,7 +1053,8 @@ mod tests {
         let tensor2 = Tensor::from_vec(data2, &[4]).expect("Tensor from_vec failed");
 
         let visualizer = TensorVisualizer::new();
-        let comparison = visualizer.compare_tensors(&tensor1, &tensor2).unwrap();
+        let comparison =
+            visualizer.compare_tensors(&tensor1, &tensor2).expect("tensor operation failed");
 
         assert!(comparison.contains("Tensor Comparison"));
         assert!(comparison.contains("=== Tensor 1 ==="));

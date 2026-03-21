@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn test_module_integration() {
         // Test that all modules work together seamlessly
-        let optimizer = create_default_performance_optimizer().unwrap();
+        let optimizer = create_default_performance_optimizer().expect("creation should succeed in test");
 
         let snapshot = optimizer.take_snapshot();
         assert!(snapshot.is_ok());
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn test_validation_report_structure() {
         let config = PerformanceOptimizationConfig::default();
-        let optimizer = PerformanceOptimizer::new(config).unwrap();
+        let optimizer = PerformanceOptimizer::new(config).expect("test operation should succeed");
         let health = optimizer.health_check();
         let capabilities = optimizer.get_capabilities();
 

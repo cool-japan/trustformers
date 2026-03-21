@@ -854,7 +854,7 @@ mod tests {
         let tokenizer = ChemicalTokenizer::new();
         let result = tokenizer.encode("CCO");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
     }
 
@@ -863,7 +863,7 @@ mod tests {
         let tokenizer = ChemicalTokenizer::new();
         let result = tokenizer.encode("H2O");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(!tokenized.input_ids.is_empty());
     }
 
@@ -873,7 +873,7 @@ mod tests {
         let inchi = "InChI=1S/C2H6O/c1-2-3/h3H,2H2,1H3";
         let tokens = tokenizer.tokenize_chemical(inchi);
         assert!(tokens.is_ok());
-        let token_list = tokens.unwrap();
+        let token_list = tokens.expect("Operation failed in test");
         assert!(token_list.iter().any(|t| t.token_type == ChemicalTokenType::InChILayer));
     }
 
@@ -905,7 +905,7 @@ mod tests {
         let tokenizer = ChemicalTokenizer::new();
         let analysis = tokenizer.analyze("CCO");
         assert!(analysis.is_ok());
-        let result = analysis.unwrap();
+        let result = analysis.expect("Operation failed in test");
         assert!(result.atomic_composition.contains_key("C"));
         assert!(result.atomic_composition.contains_key("O"));
         assert!(result.complexity_score > 0.0);
@@ -916,7 +916,7 @@ mod tests {
         let tokenizer = ChemicalTokenizer::new();
         let analysis = tokenizer.analyze("COOH");
         assert!(analysis.is_ok());
-        let result = analysis.unwrap();
+        let result = analysis.expect("Operation failed in test");
         assert!(result.functional_groups.contains_key("COOH"));
     }
 
@@ -924,8 +924,8 @@ mod tests {
     fn test_encoding_decoding_consistency() {
         let tokenizer = ChemicalTokenizer::new();
         let original = "CCO";
-        let encoded = tokenizer.encode(original).unwrap();
-        let decoded = tokenizer.decode(&encoded.input_ids).unwrap();
+        let encoded = tokenizer.encode(original).expect("Encoding failed");
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
         // Note: decoded might not be exactly the same due to tokenization
         assert!(!decoded.is_empty());
     }
@@ -938,7 +938,7 @@ mod tests {
 
         let result = tokenizer.encode("CCCCCCCCCCCCCCCC");
         assert!(result.is_ok());
-        let tokenized = result.unwrap();
+        let tokenized = result.expect("Operation failed in test");
         assert!(tokenized.input_ids.len() <= 5);
     }
 }

@@ -21,6 +21,16 @@
 //! ```no_run
 //! use trustformers_core::traits::{Model, Config};
 //! use trustformers_core::tensor::Tensor;
+//! use trustformers_core::errors::Result;
+//! use std::io::Read;
+//! use serde::{Deserialize, Serialize};
+//!
+//! // Example model configuration
+//! #[derive(Debug, Deserialize, Serialize)]
+//! struct MyConfig { hidden_size: usize }
+//! impl Config for MyConfig {
+//!     fn architecture(&self) -> &'static str { "my_model" }
+//! }
 //!
 //! // Example model implementation
 //! struct MyModel {
@@ -38,7 +48,7 @@
 //!         Ok(input)
 //!     }
 //!
-//!     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+//!     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
 //!         // Load pretrained weights
 //!         Ok(())
 //!     }
@@ -46,6 +56,8 @@
 //!     fn get_config(&self) -> &Self::Config {
 //!         &self.config
 //!     }
+//!
+//!     fn num_parameters(&self) -> usize { 0 }
 //! }
 //! ```
 
@@ -74,11 +86,10 @@ use std::io::Read;
 /// ```no_run
 /// use trustformers_core::traits::{Model, Config};
 /// use trustformers_core::tensor::Tensor;
-/// use trustformers_core::error::Result;
+/// use trustformers_core::errors::Result;
 /// use std::io::Read;
 /// use serde::{Deserialize, Serialize};
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// #[derive(Deserialize, Serialize)]
 /// struct BertConfig {
 ///     hidden_size: usize,
@@ -107,7 +118,7 @@ use std::io::Read;
 ///         Ok(input)
 ///     }
 ///
-///     fn load_pretrained(&mut self, reader: &mut dyn Read) -> Result<()> {
+///     fn load_pretrained(&mut self, _reader: &mut dyn Read) -> Result<()> {
 ///         // Load BERT weights from reader
 ///         Ok(())
 ///     }
@@ -115,9 +126,9 @@ use std::io::Read;
 ///     fn get_config(&self) -> &Self::Config {
 ///         &self.config
 ///     }
+///
+///     fn num_parameters(&self) -> usize { 0 }
 /// }
-/// # Ok(())
-/// # }
 /// ```
 pub trait Model: Send + Sync {
     type Config: Config;
@@ -214,9 +225,8 @@ pub trait Model: Send + Sync {
 /// ```no_run
 /// use trustformers_core::traits::Layer;
 /// use trustformers_core::tensor::Tensor;
-/// use trustformers_core::error::Result;
+/// use trustformers_core::errors::Result;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// struct LinearLayer {
 ///     weight: Tensor,
 ///     bias: Option<Tensor>,
@@ -228,7 +238,7 @@ pub trait Model: Send + Sync {
 ///
 ///     fn forward(&self, input: Self::Input) -> Result<Self::Output> {
 ///         // Compute linear transformation: y = xW^T + b
-///         let output = input.matmul(&self.weight.transpose()?)?;
+///         let output = input.matmul(&self.weight.transpose(0, 1)?)?;
 ///         if let Some(bias) = &self.bias {
 ///             output.add(bias)
 ///         } else {
@@ -236,8 +246,6 @@ pub trait Model: Send + Sync {
 ///         }
 ///     }
 /// }
-/// # Ok(())
-/// # }
 /// ```
 pub trait Layer: Send + Sync {
     type Input;
@@ -276,10 +284,9 @@ pub trait Layer: Send + Sync {
 ///
 /// ```no_run
 /// use trustformers_core::traits::Config;
-/// use trustformers_core::error::Result;
+/// use trustformers_core::errors::{Result, TrustformersError};
 /// use serde::{Deserialize, Serialize};
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// #[derive(Debug, Clone, Deserialize, Serialize)]
 /// struct GPT2Config {
 ///     vocab_size: usize,
@@ -291,8 +298,8 @@ pub trait Layer: Send + Sync {
 /// impl Config for GPT2Config {
 ///     fn validate(&self) -> Result<()> {
 ///         if self.hidden_size % self.num_heads != 0 {
-///             return Err(anyhow::anyhow!(
-///                 "hidden_size must be divisible by num_heads"
+///             return Err(TrustformersError::invalid_input(
+///                 "hidden_size must be divisible by num_heads".to_string(),
 ///             ));
 ///         }
 ///         Ok(())
@@ -302,8 +309,6 @@ pub trait Layer: Send + Sync {
 ///         "gpt2"
 ///     }
 /// }
-/// # Ok(())
-/// # }
 /// ```
 pub trait Config: for<'de> Deserialize<'de> + Serialize {
     /// Validates the configuration for correctness.
@@ -358,18 +363,16 @@ pub trait Config: for<'de> Deserialize<'de> + Serialize {
 /// ```no_run
 /// use trustformers_core::traits::WeightReader;
 /// use trustformers_core::tensor::Tensor;
-/// use trustformers_core::error::Result;
+/// use trustformers_core::errors::Result;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// struct SafeTensorsReader {
 ///     // ... implementation details
 /// }
 ///
 /// impl WeightReader for SafeTensorsReader {
-///     fn read_tensor(&mut self, name: &str) -> Result<Tensor> {
+///     fn read_tensor(&mut self, _name: &str) -> Result<Tensor> {
 ///         // Read tensor from SafeTensors file
-///         // ...
-///         Tensor::zeros(&[768, 768])
+///         Ok(Tensor::zeros(&[768, 768])?)
 ///     }
 ///
 ///     fn list_tensors(&self) -> Vec<String> {
@@ -380,8 +383,6 @@ pub trait Config: for<'de> Deserialize<'de> + Serialize {
 ///         ]
 ///     }
 /// }
-/// # Ok(())
-/// # }
 /// ```
 pub trait WeightReader {
     /// Reads a tensor by name from the weight source.
@@ -429,22 +430,19 @@ pub trait WeightReader {
 ///
 /// ```no_run
 /// use trustformers_core::traits::{Tokenizer, TokenizedInput};
-/// use trustformers_core::error::Result;
+/// use trustformers_core::errors::Result;
+/// use std::collections::HashMap;
 ///
 /// struct BertTokenizer {
-///     vocab: std::collections::HashMap<String, u32>,
+///     vocab: HashMap<String, u32>,
 ///     // ... other fields
 /// }
 ///
 /// impl Tokenizer for BertTokenizer {
-///     fn encode(&self, text: &str) -> Result<TokenizedInput> {
+///     fn encode(&self, _text: &str) -> Result<TokenizedInput> {
 ///         // Tokenize text into subwords
-///         let tokens = vec![101, 2023, 2003, 1037, 3231, 102]; // [CLS] this is a test [SEP]
-///         Ok(TokenizedInput {
-///             input_ids: tokens,
-///             attention_mask: vec![1; 6],
-///             token_type_ids: Some(vec![0; 6]),
-///         })
+///         let tokens: Vec<u32> = vec![101, 2023, 2003, 1037, 3231, 102]; // [CLS] this is a test [SEP]
+///         Ok(TokenizedInput::new(tokens, vec![1; 6]))
 ///     }
 ///
 ///     fn encode_pair(&self, text: &str, text2: &str) -> Result<TokenizedInput> {
@@ -452,23 +450,37 @@ pub trait WeightReader {
 ///         let tokens1 = self.encode(text)?;
 ///         let tokens2 = self.encode(text2)?;
 ///         // Combine tokens with separator
-///         let mut combined_tokens = tokens1.token_ids;
-///         combined_tokens.extend_from_slice(&tokens2.token_ids);
-///         Ok(TokenizedInput {
-///             token_ids: combined_tokens,
-///             attention_mask: vec![1; combined_tokens.len()],
-///             token_type_ids: Some(vec![0; tokens1.token_ids.len()].into_iter()
-///                 .chain(vec![1; tokens2.token_ids.len()]).collect()),
-///         })
+///         let len1 = tokens1.input_ids.len();
+///         let len2 = tokens2.input_ids.len();
+///         let mut combined_ids = tokens1.input_ids;
+///         combined_ids.extend_from_slice(&tokens2.input_ids);
+///         let combined_len = combined_ids.len();
+///         Ok(TokenizedInput::with_token_type_ids(
+///             combined_ids,
+///             vec![1; combined_len],
+///             Some(vec![0; len1].into_iter().chain(vec![1; len2]).collect()),
+///         ))
 ///     }
 ///
-///     fn decode(&self, ids: &[u32]) -> Result<String> {
+///     fn decode(&self, _ids: &[u32]) -> Result<String> {
 ///         // Convert token IDs back to text
 ///         Ok("this is a test".to_string())
 ///     }
 ///
 ///     fn vocab_size(&self) -> usize {
 ///         30522 // BERT base vocabulary size
+///     }
+///
+///     fn get_vocab(&self) -> HashMap<String, u32> {
+///         self.vocab.clone()
+///     }
+///
+///     fn token_to_id(&self, token: &str) -> Option<u32> {
+///         self.vocab.get(token).copied()
+///     }
+///
+///     fn id_to_token(&self, id: u32) -> Option<String> {
+///         self.vocab.iter().find(|(_, &v)| v == id).map(|(k, _)| k.clone())
 ///     }
 /// }
 /// ```
@@ -585,11 +597,11 @@ pub trait Tokenizer: Send + Sync {
 /// ```no_run
 /// use trustformers_core::traits::TokenizedInput;
 ///
-/// let input = TokenizedInput {
-///     input_ids: vec![101, 2023, 2003, 1037, 3231, 102], // [CLS] this is a test [SEP]
-///     attention_mask: vec![1, 1, 1, 1, 1, 1], // All tokens are real (not padding)
-///     token_type_ids: Some(vec![0, 0, 0, 0, 0, 0]), // All tokens from first segment
-/// };
+/// let input = TokenizedInput::with_token_type_ids(
+///     vec![101, 2023, 2003, 1037, 3231, 102], // [CLS] this is a test [SEP]
+///     vec![1, 1, 1, 1, 1, 1], // All tokens are real (not padding)
+///     Some(vec![0, 0, 0, 0, 0, 0]), // All tokens from first segment
+/// );
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct TokenizedInput {
@@ -664,7 +676,7 @@ impl TokenizedInput {
 /// ```no_run
 /// use trustformers_core::traits::Optimizer;
 /// use trustformers_core::tensor::Tensor;
-/// use trustformers_core::error::Result;
+/// use trustformers_core::errors::Result;
 ///
 /// struct SGD {
 ///     learning_rate: f32,
@@ -673,7 +685,7 @@ impl TokenizedInput {
 /// }
 ///
 /// impl Optimizer for SGD {
-///     fn update(&mut self, parameter: &mut Tensor, grad: &Tensor) -> Result<()> {
+///     fn update(&mut self, _parameter: &mut Tensor, _grad: &Tensor) -> Result<()> {
 ///         // SGD with momentum: v = momentum * v - lr * grad
 ///         // parameter += v
 ///         Ok(())
@@ -805,18 +817,35 @@ pub trait Optimizer: Send + Sync {
 ///
 /// ```no_run
 /// use trustformers_core::traits::ParameterInit;
-/// use trustformers_core::tensor::Tensor;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut weight = Tensor::zeros(&[768, 768])?;
+/// // Example type implementing ParameterInit
+/// struct WeightMatrix {
+///     data: Vec<f32>,
+///     shape: [usize; 2],
+/// }
+///
+/// impl ParameterInit for WeightMatrix {
+///     fn normal(&mut self, mean: f32, std: f32) {
+///         // fill data with normal distribution values
+///     }
+///     fn uniform(&mut self, min: f32, max: f32) {
+///         // fill data with uniform distribution values
+///     }
+///     fn xavier_uniform(&mut self) {
+///         // Xavier/Glorot initialization
+///     }
+///     fn xavier_normal(&mut self) {}
+///     fn kaiming_uniform(&mut self, _mode: &str, _nonlinearity: &str) {}
+///     fn kaiming_normal(&mut self, _mode: &str, _nonlinearity: &str) {}
+/// }
+///
+/// let mut weight = WeightMatrix { data: vec![0.0; 768 * 768], shape: [768, 768] };
 ///
 /// // Initialize with Xavier/Glorot uniform for tanh activations
 /// weight.xavier_uniform();
 ///
 /// // Or use Kaiming/He initialization for ReLU activations
 /// weight.kaiming_normal("fan_in", "relu");
-/// # Ok(())
-/// # }
 /// ```
 pub trait ParameterInit {
     /// Initializes the tensor with values from a normal distribution.
@@ -829,13 +858,18 @@ pub trait ParameterInit {
     /// # Example
     ///
     /// ```no_run
-    /// # use trustformers_core::tensor::Tensor;
     /// # use trustformers_core::traits::ParameterInit;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut tensor = Tensor::zeros(&[100, 100])?;
-    /// tensor.normal(0.0, 0.02); // Common for transformer embeddings
-    /// # Ok(())
+    /// # struct Weights { data: Vec<f32> }
+    /// # impl ParameterInit for Weights {
+    /// #     fn normal(&mut self, mean: f32, std: f32) {}
+    /// #     fn uniform(&mut self, min: f32, max: f32) {}
+    /// #     fn xavier_uniform(&mut self) {}
+    /// #     fn xavier_normal(&mut self) {}
+    /// #     fn kaiming_uniform(&mut self, _: &str, _: &str) {}
+    /// #     fn kaiming_normal(&mut self, _: &str, _: &str) {}
     /// # }
+    /// let mut tensor = Weights { data: vec![0.0; 10000] };
+    /// tensor.normal(0.0, 0.02); // Common for transformer embeddings
     /// ```
     fn normal(&mut self, mean: f32, std: f32);
 
@@ -849,13 +883,18 @@ pub trait ParameterInit {
     /// # Example
     ///
     /// ```no_run
-    /// # use trustformers_core::tensor::Tensor;
     /// # use trustformers_core::traits::ParameterInit;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut tensor = Tensor::zeros(&[100, 100])?;
-    /// tensor.uniform(-0.1, 0.1);
-    /// # Ok(())
+    /// # struct Weights { data: Vec<f32> }
+    /// # impl ParameterInit for Weights {
+    /// #     fn normal(&mut self, mean: f32, std: f32) {}
+    /// #     fn uniform(&mut self, min: f32, max: f32) {}
+    /// #     fn xavier_uniform(&mut self) {}
+    /// #     fn xavier_normal(&mut self) {}
+    /// #     fn kaiming_uniform(&mut self, _: &str, _: &str) {}
+    /// #     fn kaiming_normal(&mut self, _: &str, _: &str) {}
     /// # }
+    /// let mut tensor = Weights { data: vec![0.0; 10000] };
+    /// tensor.uniform(-0.1, 0.1);
     /// ```
     fn uniform(&mut self, min: f32, max: f32);
 
@@ -890,13 +929,18 @@ pub trait ParameterInit {
     /// # Example
     ///
     /// ```no_run
-    /// # use trustformers_core::tensor::Tensor;
     /// # use trustformers_core::traits::ParameterInit;
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let mut conv_weight = Tensor::zeros(&[64, 32, 3, 3])?;
-    /// conv_weight.kaiming_uniform("fan_in", "relu");
-    /// # Ok(())
+    /// # struct Weights { data: Vec<f32> }
+    /// # impl ParameterInit for Weights {
+    /// #     fn normal(&mut self, mean: f32, std: f32) {}
+    /// #     fn uniform(&mut self, min: f32, max: f32) {}
+    /// #     fn xavier_uniform(&mut self) {}
+    /// #     fn xavier_normal(&mut self) {}
+    /// #     fn kaiming_uniform(&mut self, _: &str, _: &str) {}
+    /// #     fn kaiming_normal(&mut self, _: &str, _: &str) {}
     /// # }
+    /// let mut conv_weight = Weights { data: vec![0.0; 64 * 32 * 3 * 3] };
+    /// conv_weight.kaiming_uniform("fan_in", "relu");
     /// ```
     ///
     /// # References

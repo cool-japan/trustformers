@@ -340,18 +340,18 @@ mod tests {
 
         parameters.insert(
             "param1".to_string(),
-            Tensor::new(param_data.clone()).unwrap(),
+            Tensor::new(param_data.clone()).expect("Failed to create tensor"),
         );
         gradients.insert(
             "param1".to_string(),
-            Tensor::new(grad_data.clone()).unwrap(),
+            Tensor::new(grad_data.clone()).expect("Failed to create tensor"),
         );
 
-        optimizer.step(&mut parameters, &gradients).unwrap();
+        optimizer.step(&mut parameters, &gradients).expect("Step failed");
 
         assert_eq!(optimizer.step, 1);
 
-        let updated_data = parameters.get("param1").unwrap().data()?;
+        let updated_data = parameters.get("param1").expect("Key not found").data()?;
         for i in 0..updated_data.len() {
             let expected = param_data[i] - 0.01 * grad_data[i];
             assert!((updated_data[i] - expected).abs() < 1e-6);

@@ -771,7 +771,7 @@ mod tests {
         }
         assert!(analysis.is_ok());
 
-        let result = analysis.unwrap();
+        let result = analysis.expect("test operation should succeed");
         assert_eq!(result.data_points, 10);
     }
 }

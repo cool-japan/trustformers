@@ -440,7 +440,7 @@ mod tests {
             timestamp: SystemTime::now(),
         };
 
-        optimizer.record_sample(sample).unwrap();
+        optimizer.record_sample(sample).expect("operation failed in test");
 
         // Test next test size progression
         assert_eq!(optimizer.get_next_test_size(), Some(1));
@@ -482,7 +482,7 @@ mod tests {
                     gpu_utilization: 0.7,
                     timestamp: SystemTime::now(),
                 };
-                optimizer.record_sample(sample).unwrap();
+                optimizer.record_sample(sample).expect("operation failed in test");
             }
         }
 

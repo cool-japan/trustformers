@@ -502,7 +502,7 @@ mod tests {
         let validator = DefaultValidator::new();
         let submission = create_test_submission();
 
-        let result = validator.validate(&submission).await.unwrap();
+        let result = validator.validate(&submission).await.expect("async operation failed");
         assert!(result.is_valid);
         assert!(result.errors.is_empty());
     }
@@ -513,7 +513,7 @@ mod tests {
         let mut submission = create_test_submission();
         submission.model_name = "ab".to_string(); // Too short
 
-        let result = validator.validate(&submission).await.unwrap();
+        let result = validator.validate(&submission).await.expect("async operation failed");
         assert!(!result.is_valid);
         assert_eq!(result.errors.len(), 1);
         assert_eq!(result.errors[0].field, "model_name");
@@ -525,7 +525,7 @@ mod tests {
         let mut submission = create_test_submission();
         submission.metrics.latency_ms = -5.0; // Negative latency
 
-        let result = validator.validate(&submission).await.unwrap();
+        let result = validator.validate(&submission).await.expect("async operation failed");
         assert!(!result.is_valid);
         assert!(result.errors.iter().any(|e| e.field == "metrics.latency_ms"));
     }
@@ -536,7 +536,7 @@ mod tests {
         let mut submission = create_test_submission();
         submission.metrics.latency_percentiles.p90 = 40.0; // Less than p50
 
-        let result = validator.validate(&submission).await.unwrap();
+        let result = validator.validate(&submission).await.expect("async operation failed");
         assert!(!result.is_valid);
         assert!(result.errors.iter().any(|e| e.field.contains("percentiles")));
     }
@@ -546,7 +546,7 @@ mod tests {
         let chain = ChainValidator::new().add_validator(Box::new(DefaultValidator::new()));
 
         let submission = create_test_submission();
-        let result = chain.validate(&submission).await.unwrap();
+        let result = chain.validate(&submission).await.expect("async operation failed");
         assert!(result.is_valid);
     }
 }

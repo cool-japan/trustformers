@@ -1228,21 +1228,21 @@ mod tests {
     #[test]
     fn test_target_language() {
         let config = CodeGenConfig::default();
-        let generator = JavadocGenerator::new(&config).unwrap();
+        let generator = JavadocGenerator::new(&config).expect("test operation should succeed");
         assert_eq!(generator.target_language(), TargetLanguage::Javadoc);
     }
 
     #[test]
     fn test_file_extension() {
         let config = CodeGenConfig::default();
-        let generator = JavadocGenerator::new(&config).unwrap();
+        let generator = JavadocGenerator::new(&config).expect("test operation should succeed");
         assert_eq!(generator.file_extension(), "html");
     }
 
     #[test]
     fn test_escape_html() {
         let config = CodeGenConfig::default();
-        let generator = JavadocGenerator::new(&config).unwrap();
+        let generator = JavadocGenerator::new(&config).expect("test operation should succeed");
 
         assert_eq!(generator.escape_html("<div>"), "&lt;div&gt;");
         assert_eq!(generator.escape_html("a & b"), "a &amp; b");
@@ -1252,10 +1252,10 @@ mod tests {
     #[test]
     fn test_generate_empty_interface() {
         let config = CodeGenConfig::default();
-        let generator = JavadocGenerator::new(&config).unwrap();
-        let temp_dir = TempDir::new().unwrap();
+        let generator = JavadocGenerator::new(&config).expect("test operation should succeed");
+        let temp_dir = TempDir::new().expect("test operation should succeed");
         let interface = FfiInterface::default();
-        let templates = TemplateEngine::new().unwrap();
+        let templates = TemplateEngine::new().expect("test operation should succeed");
 
         let result = generator.generate(&interface, temp_dir.path(), &templates);
         assert!(result.is_ok());
@@ -1269,8 +1269,8 @@ mod tests {
     #[test]
     fn test_generate_with_structs() {
         let config = CodeGenConfig::default();
-        let generator = JavadocGenerator::new(&config).unwrap();
-        let temp_dir = TempDir::new().unwrap();
+        let generator = JavadocGenerator::new(&config).expect("test operation should succeed");
+        let temp_dir = TempDir::new().expect("test operation should succeed");
 
         let mut interface = FfiInterface::default();
         interface.structs.push(FfiStruct {
@@ -1286,7 +1286,7 @@ mod tests {
             deprecation: None,
         });
 
-        let templates = TemplateEngine::new().unwrap();
+        let templates = TemplateEngine::new().expect("test operation should succeed");
         let result = generator.generate(&interface, temp_dir.path(), &templates);
         assert!(result.is_ok());
 

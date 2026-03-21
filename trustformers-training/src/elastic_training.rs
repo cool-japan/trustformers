@@ -738,7 +738,7 @@ mod tests {
 
         let result = coordinator.register_worker("worker1".to_string(), hardware_info);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), 0);
+        assert_eq!(result.expect("operation failed in test"), 0);
         assert_eq!(
             coordinator.workers.lock().expect("lock should not be poisoned").len(),
             1
@@ -759,7 +759,9 @@ mod tests {
             compute_capability: 7.5,
         };
 
-        coordinator.register_worker("worker1".to_string(), hardware_info).unwrap();
+        coordinator
+            .register_worker("worker1".to_string(), hardware_info)
+            .expect("operation failed in test");
 
         let metrics = WorkerPerformanceMetrics {
             throughput: 100.0,
@@ -784,10 +786,10 @@ mod tests {
         };
         let mut coordinator = ElasticTrainingCoordinator::new(config);
 
-        let decision = coordinator.evaluate_scaling_decision().unwrap();
+        let decision = coordinator.evaluate_scaling_decision().expect("operation failed in test");
         assert!(decision.is_some());
 
-        let decision = decision.unwrap();
+        let decision = decision.expect("operation failed in test");
         assert!(matches!(decision.decision_type, ScalingType::ScaleUp));
         assert_eq!(decision.target_workers, 2);
     }

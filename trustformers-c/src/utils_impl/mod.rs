@@ -202,7 +202,7 @@ use crate::error::TrustformersResult;
 
     #[test]
     fn test_utils_statistics() {
-        initialize_utils().unwrap();
+        initialize_utils().expect("initialization should succeed in test");
         let stats = get_utils_statistics();
         assert!(stats.string_interning.total_strings >= 0);
         cleanup_utils();
@@ -211,7 +211,7 @@ use crate::error::TrustformersResult;
     #[test]
     fn test_module_integration() {
         // Test that all modules work together
-        initialize_utils().unwrap();
+        initialize_utils().expect("initialization should succeed in test");
 
         // Test string interning
         let interner = get_global_interner();

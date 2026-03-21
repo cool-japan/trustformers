@@ -450,9 +450,15 @@ mod tests {
         let stream_id = Uuid::new_v4();
         let stream = ChunkStream::new(config, stream_id);
 
-        stream.add_text("Hello".to_string()).await.unwrap();
-        stream.add_text(" World".to_string()).await.unwrap();
-        stream.end_stream().await.unwrap();
+        stream
+            .add_text("Hello".to_string())
+            .await
+            .expect("async operation should succeed in test");
+        stream
+            .add_text(" World".to_string())
+            .await
+            .expect("async operation should succeed in test");
+        stream.end_stream().await.expect("async operation should succeed in test");
 
         let stats = stream.get_stats().await;
         assert_eq!(stats.chunks_sent, 2);

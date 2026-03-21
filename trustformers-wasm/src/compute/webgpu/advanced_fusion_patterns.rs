@@ -607,7 +607,7 @@ mod tests {
         let shader = optimizer.generate_mha_fusion(&config);
         assert!(shader.is_ok());
 
-        let shader_code = shader.unwrap();
+        let shader_code = shader.expect("test operation should succeed");
         assert!(shader_code.contains("Multi-Head Attention"));
         assert!(shader_code.contains("@compute"));
     }
@@ -634,7 +634,7 @@ mod tests {
         let shader = optimizer.generate_ffn_fusion(&config);
         assert!(shader.is_ok());
 
-        let shader_code = shader.unwrap();
+        let shader_code = shader.expect("test operation should succeed");
         assert!(shader_code.contains("Feed-Forward Network"));
         assert!(shader_code.contains("gelu"));
         assert!(shader_code.contains("f32")); // Should use f32 since fp16 is disabled
@@ -659,7 +659,7 @@ mod tests {
         let shader = optimizer.generate_layernorm_residual_fusion(&config);
         assert!(shader.is_ok());
 
-        let shader_code = shader.unwrap();
+        let shader_code = shader.expect("test operation should succeed");
         assert!(shader_code.contains("Layer Normalization + Residual"));
     }
 
@@ -682,7 +682,7 @@ mod tests {
         let shader = optimizer.generate_rmsnorm_fusion(&config);
         assert!(shader.is_ok());
 
-        let shader_code = shader.unwrap();
+        let shader_code = shader.expect("test operation should succeed");
         assert!(shader_code.contains("RMS Normalization"));
         assert!(shader_code.contains("LLaMA"));
     }
@@ -706,7 +706,7 @@ mod tests {
         let shader = optimizer.generate_swiglu_fusion(&config);
         assert!(shader.is_ok());
 
-        let shader_code = shader.unwrap();
+        let shader_code = shader.expect("test operation should succeed");
         assert!(shader_code.contains("SwiGLU"));
         assert!(shader_code.contains("silu"));
     }

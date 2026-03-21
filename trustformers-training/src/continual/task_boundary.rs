@@ -356,9 +356,9 @@ mod tests {
             detector.update(2.0, 0.1, 0.9);
         }
 
-        let boundary = detector.detect_boundary().unwrap();
+        let boundary = detector.detect_boundary().expect("operation failed in test");
         assert!(boundary.is_some());
-        assert!(boundary.unwrap() > 0.1);
+        assert!(boundary.expect("operation failed in test") > 0.1);
     }
 
     #[test]
@@ -396,7 +396,7 @@ mod tests {
             detector.update(loss, gradient, confidence);
         }
 
-        let boundary = detector.detect_boundary().unwrap();
+        let boundary = detector.detect_boundary().expect("operation failed in test");
         assert!(boundary.is_some());
     }
 

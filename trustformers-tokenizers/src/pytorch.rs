@@ -666,7 +666,7 @@ mod tests {
         let data = vec![1, 2, 3, 4, 5, 6];
         let tensor = PyTorchTensor::new(data, vec![2, 3], "cpu".to_string(), TensorDType::Int64);
 
-        let reshaped = tensor.reshape(vec![3, 2]).unwrap();
+        let reshaped = tensor.reshape(vec![3, 2]).expect("Operation failed in test");
         assert_eq!(reshaped.shape, vec![3, 2]);
         assert_eq!(reshaped.numel(), 6);
     }
@@ -676,7 +676,7 @@ mod tests {
         let tokenizer = create_test_char_tokenizer();
         let pytorch_tokenizer = PyTorchTokenizer::from_tokenizer(tokenizer);
 
-        let batch = pytorch_tokenizer.encode_to_tensors("hello").unwrap();
+        let batch = pytorch_tokenizer.encode_to_tensors("hello").expect("Operation failed in test");
         assert_eq!(batch.batch_size(), 1);
         assert!(batch.attention_mask.is_some());
     }
@@ -687,7 +687,9 @@ mod tests {
         let pytorch_tokenizer = PyTorchTokenizer::from_tokenizer(tokenizer);
 
         let texts = vec!["hello".to_string(), "world".to_string()];
-        let batch = pytorch_tokenizer.encode_batch_to_tensors(&texts).unwrap();
+        let batch = pytorch_tokenizer
+            .encode_batch_to_tensors(&texts)
+            .expect("Operation failed in test");
 
         assert_eq!(batch.batch_size(), 2);
         assert!(batch.attention_mask.is_some());
@@ -736,7 +738,9 @@ mod tests {
         let pytorch_tokenizer = PyTorchTokenizer::new(tokenizer, config);
 
         let texts = vec!["hi".to_string(), "hello world".to_string()];
-        let batch = pytorch_tokenizer.encode_batch_to_tensors(&texts).unwrap();
+        let batch = pytorch_tokenizer
+            .encode_batch_to_tensors(&texts)
+            .expect("Operation failed in test");
 
         assert_eq!(batch.sequence_length(), 10);
         assert_eq!(batch.batch_size(), 2);

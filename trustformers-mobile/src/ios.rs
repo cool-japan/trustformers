@@ -350,7 +350,7 @@ mod tests {
         let device_info = IOsDeviceInfo::detect();
         assert!(device_info.is_ok());
 
-        let info = device_info.unwrap();
+        let info = device_info.expect("operation failed in test");
         assert!(!info.device_name.is_empty());
         assert!(!info.system_name.is_empty());
         assert!(info.processor_count > 0);
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_performance_tier_classification() {
-        let mut device_info = IOsDeviceInfo::detect().unwrap();
+        let mut device_info = IOsDeviceInfo::detect().expect("operation failed in test");
 
         // Test flagship tier
         device_info.gpu_family = metal::MTL_GPU_FAMILY_APPLE_7;
@@ -377,7 +377,7 @@ mod tests {
 
     #[test]
     fn test_ios_feature_support() {
-        let device_info = IOsDeviceInfo::detect().unwrap();
+        let device_info = IOsDeviceInfo::detect().expect("operation failed in test");
 
         // Core ML should be supported on all iOS devices
         assert!(device_info.supports_feature(&iOSFeature::CoreML));

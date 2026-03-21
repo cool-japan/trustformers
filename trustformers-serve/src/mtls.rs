@@ -955,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn test_mtls_service_creation() {
         let config = MTlsConfig::default();
-        let service = MTlsService::new(config).unwrap();
+        let service = MTlsService::new(config).expect("test operation should succeed");
         assert!(!service.config.enabled); // Default is disabled
     }
 

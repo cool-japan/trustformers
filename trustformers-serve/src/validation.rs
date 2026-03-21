@@ -297,7 +297,7 @@ mod tests {
             max_text_length: 10,
             ..Default::default()
         };
-        let service = ValidationService::new(config).unwrap();
+        let service = ValidationService::new(config).expect("test operation should succeed");
 
         assert!(service.validate_text("short").is_ok());
         assert!(service.validate_text("this is too long").is_err());
@@ -309,7 +309,7 @@ mod tests {
             allowed_models: vec!["gpt-3.5".to_string(), "gpt-4".to_string()],
             ..Default::default()
         };
-        let service = ValidationService::new(config).unwrap();
+        let service = ValidationService::new(config).expect("test operation should succeed");
 
         assert!(service.validate_model("gpt-3.5").is_ok());
         assert!(service.validate_model("gpt-4").is_ok());
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn test_generation_params_validation() {
         let config = ValidationConfig::default();
-        let service = ValidationService::new(config).unwrap();
+        let service = ValidationService::new(config).expect("test operation should succeed");
 
         let valid_params = GenerationParams {
             max_tokens: 100,

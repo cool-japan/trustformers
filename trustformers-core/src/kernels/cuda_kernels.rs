@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_device_enumeration() {
-        let devices = CudaKernel::enumerate_devices().unwrap();
+        let devices = CudaKernel::enumerate_devices().expect("operation failed in test");
         assert!(!devices.is_empty());
         assert_eq!(devices[0].name, "NVIDIA RTX 4090");
         assert_eq!(devices[0].compute_capability, (8, 9));
@@ -786,7 +786,7 @@ mod tests {
 
     #[test]
     fn test_cuda_memory_pool() {
-        let pool = CudaMemoryPool::new(0).unwrap();
+        let pool = CudaMemoryPool::new(0).expect("operation failed in test");
         assert_eq!(pool.device_id, 0);
         assert_eq!(pool.total_allocated, 0);
         assert_eq!(pool.peak_allocated, 0);
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn test_cuda_context_creation() {
-        let context = CudaContext::new(0).unwrap();
+        let context = CudaContext::new(0).expect("operation failed in test");
         assert_eq!(context.device_id, 0);
     }
 

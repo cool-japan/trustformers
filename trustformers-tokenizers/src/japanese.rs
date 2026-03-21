@@ -731,11 +731,11 @@ mod tests {
     fn test_character_type_detection() {
         assert!(JapaneseTokenizer::is_hiragana('あ'));
         assert!(JapaneseTokenizer::is_hiragana(
-            "ひらがな".chars().next().unwrap()
+            "ひらがな".chars().next().expect("Operation failed in test")
         ));
         assert!(JapaneseTokenizer::is_katakana('ア'));
         assert!(JapaneseTokenizer::is_katakana(
-            "カタカナ".chars().next().unwrap()
+            "カタカナ".chars().next().expect("Operation failed in test")
         ));
         assert!(JapaneseTokenizer::is_kanji('日'));
         assert!(JapaneseTokenizer::is_kanji('本'));
@@ -770,9 +770,9 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = JapaneseTokenizer::new(config, vocab).unwrap();
+        let tokenizer = JapaneseTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.tokenize_text("こんにちは").unwrap();
+        let result = tokenizer.tokenize_text("こんにちは").expect("Operation failed in test");
         assert_eq!(result.len(), 5);
         assert_eq!(result, vec!["こ", "ん", "に", "ち", "は"]);
     }
@@ -785,9 +785,9 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = JapaneseTokenizer::new(config, vocab).unwrap();
+        let tokenizer = JapaneseTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.tokenize_text("こんにちは世界").unwrap();
+        let result = tokenizer.tokenize_text("こんにちは世界").expect("Operation failed in test");
         assert!(result.len() > 0);
         // Should separate hiragana from kanji
         assert!(result.iter().any(|t| t.chars().all(JapaneseTokenizer::is_hiragana)));
@@ -802,13 +802,13 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = JapaneseTokenizer::new(config, vocab).unwrap();
+        let tokenizer = JapaneseTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.encode("日本語").unwrap();
+        let result = tokenizer.encode("日本語").expect("Encoding failed");
         assert!(!result.input_ids.is_empty());
         assert_eq!(result.input_ids.len(), result.attention_mask.len());
 
-        let decoded = tokenizer.decode(&result.input_ids).unwrap();
+        let decoded = tokenizer.decode(&result.input_ids).expect("Decoding failed");
         assert_eq!(decoded, "日本語");
     }
 
@@ -820,13 +820,13 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = JapaneseTokenizer::new(config, vocab).unwrap();
+        let tokenizer = JapaneseTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.encode_pair("こんにちは", "世界").unwrap();
+        let result = tokenizer.encode_pair("こんにちは", "世界").expect("Operation failed in test");
         assert!(!result.input_ids.is_empty());
         assert!(result.token_type_ids.is_some());
 
-        let token_type_ids = result.token_type_ids.unwrap();
+        let token_type_ids = result.token_type_ids.expect("Operation failed in test");
         assert!(token_type_ids.contains(&0)); // First sequence
         assert!(token_type_ids.contains(&1)); // Second sequence
     }
@@ -835,7 +835,7 @@ mod tests {
     fn test_dictionary_management() {
         let config = JapaneseTokenizerConfig::default();
         let vocab = create_test_vocab();
-        let mut tokenizer = JapaneseTokenizer::new(config, vocab).unwrap();
+        let mut tokenizer = JapaneseTokenizer::new(config, vocab).expect("Construction failed");
 
         let initial_size = tokenizer.dictionary_size();
 
@@ -857,9 +857,9 @@ mod tests {
             ..Default::default()
         };
         let vocab = create_test_vocab();
-        let tokenizer = JapaneseTokenizer::new(config, vocab).unwrap();
+        let tokenizer = JapaneseTokenizer::new(config, vocab).expect("Construction failed");
 
-        let result = tokenizer.tokenize_text("カタカナ").unwrap();
+        let result = tokenizer.tokenize_text("カタカナ").expect("Operation failed in test");
         // Should be normalized to hiragana
         assert!(result.iter().all(|t| t.chars().all(JapaneseTokenizer::is_hiragana)));
     }

@@ -915,56 +915,79 @@ mod tests {
     #[test]
     fn test_pytorch_adam_creation() {
         let params = vec![
-            ("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap()),
-            ("param2".to_string(), Tensor::zeros(&[5, 5]).unwrap()),
+            (
+                "param1".to_string(),
+                Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+            ),
+            (
+                "param2".to_string(),
+                Tensor::zeros(&[5, 5]).expect("Failed to create tensor"),
+            ),
         ];
 
-        let optimizer = PyTorchAdam::from_params(params).unwrap();
+        let optimizer =
+            PyTorchAdam::from_params(params).expect("Failed to create optimizer from params");
         assert_eq!(optimizer.param_groups().len(), 1);
         assert_eq!(optimizer.param_groups()[0].params.len(), 2);
     }
 
     #[test]
     fn test_pytorch_adamw_creation() {
-        let params = vec![("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())];
+        let params = vec![(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        )];
 
-        let optimizer = PyTorchAdamW::from_params(params).unwrap();
+        let optimizer =
+            PyTorchAdamW::from_params(params).expect("Failed to create optimizer from params");
         assert_eq!(optimizer.param_groups().len(), 1);
         assert_eq!(optimizer.defaults().weight_decay, 0.01);
     }
 
     #[test]
     fn test_pytorch_sgd_creation() {
-        let params = vec![("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())];
+        let params = vec![(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        )];
 
-        let optimizer = PyTorchSGD::from_params(params).unwrap();
+        let optimizer =
+            PyTorchSGD::from_params(params).expect("Failed to create optimizer from params");
         assert_eq!(optimizer.param_groups().len(), 1);
         assert_eq!(optimizer.defaults().lr, 0.01);
     }
 
     #[test]
     fn test_pytorch_optimizer_factory() {
-        let params = vec![("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())];
+        let params = vec![(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        )];
 
         let adam =
             PyTorchOptimizerFactory::adam(params.clone(), 0.001, (0.9, 0.999), 1e-8, 0.0, false)
-                .unwrap();
+                .expect("Operation failed in test");
         assert_eq!(adam.param_groups()[0].lr, 0.001);
 
         let adamw =
             PyTorchOptimizerFactory::adamw(params.clone(), 0.001, (0.9, 0.999), 1e-8, 0.01, false)
-                .unwrap();
+                .expect("Operation failed in test");
         assert_eq!(adamw.param_groups()[0].weight_decay, 0.01);
 
-        let sgd = PyTorchOptimizerFactory::sgd(params, 0.01, 0.9, 0.0, 0.0, false).unwrap();
+        let sgd = PyTorchOptimizerFactory::sgd(params, 0.01, 0.9, 0.0, 0.0, false)
+            .expect("Operation failed in test");
         assert_eq!(sgd.param_groups()[0].momentum, Some(0.9));
     }
 
     #[test]
     fn test_param_group_operations() {
-        let params = vec![("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())];
+        let params = vec![(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        )];
 
-        let mut optimizer = PyTorchAdam::from_params(params).unwrap();
+        let mut optimizer =
+            PyTorchAdam::from_params(params).expect("Failed to create optimizer from params");
 
         let new_group = PyTorchParamGroup {
             params: vec!["param2".to_string()],
@@ -972,16 +995,20 @@ mod tests {
             ..Default::default()
         };
 
-        optimizer.add_param_group(new_group).unwrap();
+        optimizer.add_param_group(new_group).expect("Failed to add param group");
         assert_eq!(optimizer.param_groups().len(), 2);
         assert_eq!(optimizer.param_groups()[1].lr, 0.002);
     }
 
     #[test]
     fn test_state_dict_operations() {
-        let params = vec![("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())];
+        let params = vec![(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        )];
 
-        let optimizer = PyTorchAdam::from_params(params).unwrap();
+        let optimizer =
+            PyTorchAdam::from_params(params).expect("Failed to create optimizer from params");
         let state_dict = optimizer.state_dict();
 
         assert_eq!(state_dict.param_groups.len(), 1);
@@ -990,12 +1017,19 @@ mod tests {
 
     #[test]
     fn test_zero_grad() {
-        let params = vec![("param1".to_string(), Tensor::zeros(&[10, 10]).unwrap())];
+        let params = vec![(
+            "param1".to_string(),
+            Tensor::zeros(&[10, 10]).expect("Failed to create tensor"),
+        )];
 
-        let mut optimizer = PyTorchAdam::from_params(params).unwrap();
+        let mut optimizer =
+            PyTorchAdam::from_params(params).expect("Failed to create optimizer from params");
         optimizer
-            .set_grad("param1".to_string(), Tensor::ones(&[10, 10]).unwrap())
-            .unwrap();
+            .set_grad(
+                "param1".to_string(),
+                Tensor::ones(&[10, 10]).expect("Failed to create tensor"),
+            )
+            .expect("Operation failed in test");
 
         // Check that gradient is set
         assert_eq!(
@@ -1004,7 +1038,7 @@ mod tests {
         );
 
         // Zero gradients
-        optimizer.zero_grad(false).unwrap();
+        optimizer.zero_grad(false).expect("Zero grad failed");
         assert_eq!(
             optimizer.gradients.lock().expect("Mutex lock poisoned").len(),
             0

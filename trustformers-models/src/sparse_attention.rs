@@ -866,7 +866,8 @@ mod tests {
     #[test]
     fn test_pattern_analysis() {
         let pattern = SparsePattern::Local { window_size: 4 };
-        let analysis = utils::analyze_pattern_efficiency(&pattern, 16).unwrap();
+        let analysis =
+            utils::analyze_pattern_efficiency(&pattern, 16).expect("operation failed in test");
 
         assert!(analysis.sparsity > 0.0);
         assert!(analysis.sparsity < 1.0);

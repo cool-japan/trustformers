@@ -1456,7 +1456,7 @@ mod tests {
         let result = engine.create_interactive_line_plot(plot_data, None).await;
         assert!(result.is_ok());
 
-        let plot_id = result.unwrap();
+        let plot_id = result.expect("operation failed in test");
         assert!(engine.active_plots.contains_key(&plot_id));
     }
 
@@ -1474,7 +1474,7 @@ mod tests {
 
         assert!(result.is_ok());
 
-        let plot_id = result.unwrap();
+        let plot_id = result.expect("operation failed in test");
         assert!(engine.active_plots.contains_key(&plot_id));
     }
 }

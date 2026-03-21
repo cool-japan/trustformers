@@ -750,7 +750,7 @@ mod tests {
     #[test]
     fn test_type_mapping() {
         let config = CodeGenConfig::default();
-        let generator = RubyGenerator::new(&config).unwrap();
+        let generator = RubyGenerator::new(&config).expect("test operation should succeed");
 
         assert_eq!(generator.map_base_type("c_int"), ":int");
         assert_eq!(generator.map_base_type("c_float"), ":float");

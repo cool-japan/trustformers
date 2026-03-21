@@ -54,13 +54,16 @@ mod tests {
         devices.insert(0, create_test_device(0));
         let devices = Arc::new(RwLock::new(devices));
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        monitor.start_monitoring(devices, shutdown_rx).await.unwrap();
+        monitor
+            .start_monitoring(devices, shutdown_rx)
+            .await
+            .expect("async operation should succeed in test");
         assert!(monitor.is_monitoring());
         tokio::time::sleep(Duration::from_millis(100)).await;
         let health_status = monitor.get_health_status().await;
         assert!(health_status.contains_key(&0));
         let _ = shutdown_tx.send(());
-        monitor.stop_monitoring().await.unwrap();
+        monitor.stop_monitoring().await.expect("async operation should succeed in test");
         assert!(!monitor.is_monitoring());
     }
     #[tokio::test]
@@ -70,14 +73,17 @@ mod tests {
         devices.insert(0, create_test_device(0));
         let devices = Arc::new(RwLock::new(devices));
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        monitor.start_monitoring(devices, shutdown_rx).await.unwrap();
+        monitor
+            .start_monitoring(devices, shutdown_rx)
+            .await
+            .expect("async operation should succeed in test");
         tokio::time::sleep(Duration::from_millis(200)).await;
         let analytics = monitor.get_health_analytics().await;
         assert!(analytics.contains_key(&0));
         let device_analytics = &analytics[&0];
         assert!(!device_analytics.health_history.is_empty());
         let _ = shutdown_tx.send(());
-        monitor.stop_monitoring().await.unwrap();
+        monitor.stop_monitoring().await.expect("async operation should succeed in test");
     }
     #[tokio::test]
     async fn test_health_summary() {
@@ -87,14 +93,17 @@ mod tests {
         devices.insert(1, create_test_device(1));
         let devices = Arc::new(RwLock::new(devices));
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        monitor.start_monitoring(devices, shutdown_rx).await.unwrap();
+        monitor
+            .start_monitoring(devices, shutdown_rx)
+            .await
+            .expect("async operation should succeed in test");
         tokio::time::sleep(Duration::from_millis(100)).await;
         let summary = monitor.get_health_summary().await;
         assert_eq!(summary.total_devices, 2);
         assert!(summary.healthy_devices <= 2);
         assert!(summary.average_health_score >= 0.0);
         let _ = shutdown_tx.send(());
-        monitor.stop_monitoring().await.unwrap();
+        monitor.stop_monitoring().await.expect("async operation should succeed in test");
     }
     #[tokio::test]
     async fn test_health_report_generation() {
@@ -103,7 +112,10 @@ mod tests {
         devices.insert(0, create_test_device(0));
         let devices = Arc::new(RwLock::new(devices));
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        monitor.start_monitoring(devices, shutdown_rx).await.unwrap();
+        monitor
+            .start_monitoring(devices, shutdown_rx)
+            .await
+            .expect("async operation should succeed in test");
         tokio::time::sleep(Duration::from_millis(200)).await;
         let report = monitor.generate_health_report().await;
         assert!(report.contains("GPU Health Monitoring Report"));
@@ -112,7 +124,7 @@ mod tests {
         assert!(report.contains("DEVICE HEALTH DETAILS"));
         assert!(report.contains("Device 0"));
         let _ = shutdown_tx.send(());
-        monitor.stop_monitoring().await.unwrap();
+        monitor.stop_monitoring().await.expect("async operation should succeed in test");
     }
     #[tokio::test]
     async fn test_force_health_check() {
@@ -121,11 +133,14 @@ mod tests {
         devices.insert(0, create_test_device(0));
         let devices = Arc::new(RwLock::new(devices));
         let (shutdown_tx, shutdown_rx) = broadcast::channel(1);
-        monitor.start_monitoring(devices, shutdown_rx).await.unwrap();
+        monitor
+            .start_monitoring(devices, shutdown_rx)
+            .await
+            .expect("async operation should succeed in test");
         let result = monitor.force_health_check().await;
         assert!(result.is_ok());
         let _ = shutdown_tx.send(());
-        monitor.stop_monitoring().await.unwrap();
+        monitor.stop_monitoring().await.expect("async operation should succeed in test");
     }
     #[tokio::test]
     async fn test_config_update() {

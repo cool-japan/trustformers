@@ -603,7 +603,7 @@ impl TrainingDynamicsAnalyzer {
         let std = self.calculate_std(losses);
 
         let mut sorted_losses = losses.to_vec();
-        sorted_losses.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_losses.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let min = sorted_losses[0];
         let max = sorted_losses[sorted_losses.len() - 1];
@@ -700,7 +700,11 @@ impl TrainingDynamicsAnalyzer {
             });
         }
 
-        let current_lr = self.metrics_history.back().unwrap().learning_rate;
+        let current_lr = self
+            .metrics_history
+            .back()
+            .expect("metrics_history should not be empty after empty check")
+            .learning_rate;
         let lr_schedule_type = self.detect_lr_schedule_type();
 
         let lr_history = self.build_lr_history();
@@ -849,7 +853,11 @@ impl TrainingDynamicsAnalyzer {
         // Find LR with highest effectiveness
         lr_history
             .iter()
-            .max_by(|a, b| a.effectiveness.partial_cmp(&b.effectiveness).unwrap())
+            .max_by(|a, b| {
+                a.effectiveness
+                    .partial_cmp(&b.effectiveness)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|p| p.learning_rate)
             .unwrap_or(0.001)
     }
@@ -925,7 +933,11 @@ impl TrainingDynamicsAnalyzer {
             });
         }
 
-        let current_batch_size = self.metrics_history.back().unwrap().batch_size;
+        let current_batch_size = self
+            .metrics_history
+            .back()
+            .expect("metrics_history should not be empty after empty check")
+            .batch_size;
         let batch_size_history = self.build_batch_size_history();
 
         let batch_size_efficiency = self.calculate_batch_size_efficiency(&batch_size_history);
@@ -1041,7 +1053,7 @@ impl TrainingDynamicsAnalyzer {
             .max_by(|a, b| {
                 let score_a = a.loss_improvement * 0.6 + a.gradient_stability * 0.4;
                 let score_b = b.loss_improvement * 0.6 + b.gradient_stability * 0.4;
-                score_a.partial_cmp(&score_b).unwrap()
+                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|p| p.batch_size)
             .unwrap_or(32)
@@ -1365,7 +1377,11 @@ impl TrainingDynamicsAnalyzer {
         // Simple overfitting risk estimation
         let overfitting_risk =
             if let Some(val_loss) = self.metrics_history.back().and_then(|m| m.validation_loss) {
-                let train_loss = self.metrics_history.back().unwrap().train_loss;
+                let train_loss = self
+                    .metrics_history
+                    .back()
+                    .expect("metrics_history should not be empty in this branch")
+                    .train_loss;
                 ((val_loss - train_loss) / train_loss.abs().max(1e-8)).max(0.0).min(1.0)
             } else {
                 0.5

@@ -424,26 +424,26 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_storage() {
-        let temp_dir = TempDir::new().unwrap();
-        let storage = FileStorage::new(temp_dir.path()).await.unwrap();
+        let temp_dir = TempDir::new().expect("temp file creation failed");
+        let storage = FileStorage::new(temp_dir.path()).await.expect("temp file creation failed");
 
         let entry = create_test_entry().await;
 
         // Test store
-        storage.store(&entry).await.unwrap();
+        storage.store(&entry).await.expect("async operation failed");
 
         // Test get
-        let retrieved = storage.get(entry.id).await.unwrap();
+        let retrieved = storage.get(entry.id).await.expect("expected value not found");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, entry.id);
+        assert_eq!(retrieved.expect("operation failed in test").id, entry.id);
 
         // Test list_all
-        let all = storage.list_all().await.unwrap();
+        let all = storage.list_all().await.expect("async operation failed");
         assert_eq!(all.len(), 1);
 
         // Test delete
-        storage.delete(entry.id).await.unwrap();
-        let deleted = storage.get(entry.id).await.unwrap();
+        storage.delete(entry.id).await.expect("async operation failed");
+        let deleted = storage.get(entry.id).await.expect("expected value not found");
         assert!(deleted.is_none());
     }
 
@@ -454,21 +454,21 @@ mod tests {
         let entry = create_test_entry().await;
 
         // Test store
-        storage.store(&entry).await.unwrap();
+        storage.store(&entry).await.expect("async operation failed");
 
         // Test get
-        let retrieved = storage.get(entry.id).await.unwrap();
+        let retrieved = storage.get(entry.id).await.expect("expected value not found");
         assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, entry.id);
+        assert_eq!(retrieved.expect("operation failed in test").id, entry.id);
 
         // Test query
         let query = LeaderboardQuery::default();
-        let results = storage.query(&query).await.unwrap();
+        let results = storage.query(&query).await.expect("async operation failed");
         assert_eq!(results.len(), 1);
 
         // Test clear
-        storage.clear().await.unwrap();
-        let all = storage.list_all().await.unwrap();
+        storage.clear().await.expect("async operation failed");
+        let all = storage.list_all().await.expect("async operation failed");
         assert_eq!(all.len(), 0);
     }
 }

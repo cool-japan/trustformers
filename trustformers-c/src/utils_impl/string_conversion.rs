@@ -272,8 +272,8 @@ mod tests {
 
     #[test]
     fn test_safe_c_string() {
-        let safe_str = SafeCString::from_str("Hello, World!").unwrap();
-        let back_to_rust = safe_str.to_string().unwrap();
+        let safe_str = SafeCString::from_str("Hello, World!").expect("JSON parsing should succeed for valid test input");
+        let back_to_rust = safe_str.to_string().expect("test operation should succeed");
         assert_eq!(back_to_rust, "Hello, World!");
     }
 
@@ -283,7 +283,7 @@ mod tests {
         let c_str = str_to_c_str(original);
         assert!(!c_str.is_null());
 
-        let converted = c_str_to_string(c_str).unwrap();
+        let converted = c_str_to_string(c_str).expect("test operation should succeed");
         assert_eq!(converted, original);
 
         unsafe {

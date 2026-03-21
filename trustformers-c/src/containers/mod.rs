@@ -597,7 +597,7 @@ mod tests {
             },
         };
 
-        let recommendations = ContainerOptimizer::optimize_configuration(&config).unwrap();
+        let recommendations = ContainerOptimizer::optimize_configuration(&config).expect("test operation should succeed");
         assert!(!recommendations.is_empty());
         assert!(recommendations.iter().any(|r| r.contains("multi-stage build")));
         assert!(recommendations.iter().any(|r| r.contains("non-root user")));

@@ -956,17 +956,19 @@ mod tests {
 
     #[test]
     fn test_basic_tokenization() {
-        let tokenizer = SentencePieceTokenizer::from_pretrained("t5-small").unwrap();
-        let result = tokenizer.encode("Hello world").unwrap();
+        let tokenizer =
+            SentencePieceTokenizer::from_pretrained("t5-small").expect("Operation failed in test");
+        let result = tokenizer.encode("Hello world").expect("Encoding failed");
         assert!(!result.input_ids.is_empty());
         assert_eq!(result.input_ids.len(), result.attention_mask.len());
     }
 
     #[test]
     fn test_decode() {
-        let tokenizer = SentencePieceTokenizer::from_pretrained("t5-small").unwrap();
-        let encoded = tokenizer.encode("Hello world").unwrap();
-        let decoded = tokenizer.decode(&encoded.input_ids).unwrap();
+        let tokenizer =
+            SentencePieceTokenizer::from_pretrained("t5-small").expect("Operation failed in test");
+        let encoded = tokenizer.encode("Hello world").expect("Encoding failed");
+        let decoded = tokenizer.decode(&encoded.input_ids).expect("Decoding failed");
         // The decoded text should be similar to the original
         assert!(!decoded.is_empty());
     }

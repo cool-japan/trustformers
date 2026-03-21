@@ -34,10 +34,12 @@ pub mod port_management;
 pub mod statistics;
 pub mod temp_dir_manager;
 pub mod types;
+pub mod types_data;
 
 // Re-export main types for backward compatibility
 pub use manager::ResourceManagementSystem;
 pub use types::*;
+// types_data is re-exported via types.rs
 
 // Re-export component types for easy access
 pub use allocation::{LoadMetrics, ResourceAllocator, WorkerPool};

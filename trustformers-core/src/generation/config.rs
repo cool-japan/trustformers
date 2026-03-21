@@ -410,7 +410,7 @@ mod tests {
             .max_length(100)
             .early_stopping(true)
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         assert_eq!(config.strategy, GenerationStrategy::Greedy);
         assert_eq!(config.max_length, Some(100));
@@ -432,7 +432,7 @@ mod tests {
             .max_new_tokens(50)
             .repetition_penalty(1.1)
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         if let GenerationStrategy::Sampling { temperature } = config.strategy {
             assert_eq!(temperature, 0.8);
@@ -451,7 +451,7 @@ mod tests {
             .max_length(200)
             .length_penalty(0.8)
             .build()
-            .unwrap();
+            .expect("operation failed in test");
 
         if let GenerationStrategy::BeamSearch { num_beams } = config.strategy {
             assert_eq!(num_beams, 4);

@@ -569,7 +569,7 @@ mod tests {
         let available_splits = loader.available_splits("test");
         assert_eq!(available_splits, vec!["train"]);
 
-        let loaded_dataset = loader.load("test", "train").unwrap();
+        let loaded_dataset = loader.load("test", "train").expect("operation failed in test");
         assert_eq!(loaded_dataset.len(), 1);
         assert_eq!(loaded_dataset.name, "test_train");
     }
@@ -589,7 +589,7 @@ mod tests {
         assert!(cola_splits.contains(&"train".to_string()));
         assert!(cola_splits.contains(&"validation".to_string()));
 
-        let cola_train = loader.load("cola", "train").unwrap();
+        let cola_train = loader.load("cola", "train").expect("operation failed in test");
         assert_eq!(cola_train.len(), 1000);
     }
 

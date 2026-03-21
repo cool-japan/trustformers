@@ -35,7 +35,7 @@ async fn test_async_chaos_framework_initialization() {
 #[tokio::test]
 async fn test_task_cancellation_scenarios() {
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
     // Test broadcast cancellation
     let broadcast_config = TaskCancellationConfig {
@@ -47,7 +47,10 @@ async fn test_task_cancellation_scenarios() {
         completion_timeout: Duration::from_secs(3),
     };
 
-    let result = framework.test_task_cancellation(broadcast_config).await.unwrap();
+    let result = framework
+        .test_task_cancellation(broadcast_config)
+        .await
+        .expect("async operation failed");
 
     // Verify results
     assert!(result.metrics.contains_key("spawned_tasks"));
@@ -67,7 +70,10 @@ async fn test_task_cancellation_scenarios() {
         ..Default::default()
     };
 
-    let selective_result = framework.test_task_cancellation(selective_config).await.unwrap();
+    let selective_result = framework
+        .test_task_cancellation(selective_config)
+        .await
+        .expect("async operation failed");
 
     let selective_cancelled = selective_result.metrics["cancelled_tasks"] as usize;
     assert!(
@@ -80,7 +86,7 @@ async fn test_task_cancellation_scenarios() {
 #[tokio::test]
 async fn test_runtime_shutdown_scenarios() {
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
     let shutdown_config = RuntimeShutdownConfig {
         worker_threads: 2,
@@ -90,7 +96,10 @@ async fn test_runtime_shutdown_scenarios() {
         graceful_shutdown_timeout: Duration::from_secs(2),
     };
 
-    let result = framework.test_runtime_shutdown(shutdown_config).await.unwrap();
+    let result = framework
+        .test_runtime_shutdown(shutdown_config)
+        .await
+        .expect("async operation failed");
 
     // Verify shutdown metrics
     assert!(result.metrics.contains_key("graceful_shutdown"));
@@ -109,7 +118,7 @@ async fn test_runtime_shutdown_scenarios() {
 #[tokio::test]
 async fn test_deadlock_detection() {
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
     let deadlock_config = DeadlockConfig {
         deadlock_delay: Duration::from_millis(50),
@@ -117,7 +126,10 @@ async fn test_deadlock_detection() {
         detection_timeout: Duration::from_secs(1),
     };
 
-    let result = framework.test_deadlock_detection(deadlock_config).await.unwrap();
+    let result = framework
+        .test_deadlock_detection(deadlock_config)
+        .await
+        .expect("async operation failed");
 
     // Verify deadlock detection
     assert!(result.metrics.contains_key("deadlock_detected"));
@@ -137,7 +149,7 @@ async fn test_deadlock_detection() {
 #[tokio::test]
 async fn test_async_memory_pressure() {
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
     let memory_config = AsyncMemoryPressureConfig {
         memory_pressure_mb: 500, // Apply significant memory pressure for reliable testing
@@ -145,7 +157,10 @@ async fn test_async_memory_pressure() {
         pressure_duration: Duration::from_secs(2),
     };
 
-    let result = framework.test_async_memory_pressure(memory_config).await.unwrap();
+    let result = framework
+        .test_async_memory_pressure(memory_config)
+        .await
+        .expect("async operation failed");
 
     // Verify memory pressure test results
     assert!(result.metrics.contains_key("peak_memory_mb"));
@@ -201,7 +216,7 @@ async fn test_async_memory_pressure() {
 #[tokio::test]
 async fn test_async_panic_recovery() {
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
     let panic_config = PanicRecoveryConfig {
         total_tasks: 20,
@@ -209,7 +224,10 @@ async fn test_async_panic_recovery() {
         panic_type: PanicType::Immediate,
     };
 
-    let result = framework.test_async_panic_recovery(panic_config).await.unwrap();
+    let result = framework
+        .test_async_panic_recovery(panic_config)
+        .await
+        .expect("async operation failed");
 
     // Verify panic recovery
     assert!(result.metrics.contains_key("actual_panics"));
@@ -233,9 +251,10 @@ async fn test_async_panic_recovery() {
 #[tokio::test]
 async fn test_comprehensive_chaos_suite() {
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
-    let suite_result = framework.run_comprehensive_test_suite().await.unwrap();
+    let suite_result =
+        framework.run_comprehensive_test_suite().await.expect("async operation failed");
 
     // Verify suite results
     assert!(
@@ -546,7 +565,7 @@ async fn test_integration_with_memory_pressure_handler() {
     // For now, we'll simulate the integration
 
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
     // Simulate memory pressure handler running alongside chaos testing
     let memory_pressure_active = Arc::new(AtomicBool::new(false));
@@ -567,9 +586,12 @@ async fn test_integration_with_memory_pressure_handler() {
         pressure_duration: Duration::from_millis(300),
     };
 
-    let result = framework.test_async_memory_pressure(config).await.unwrap();
+    let result = framework
+        .test_async_memory_pressure(config)
+        .await
+        .expect("async operation failed");
 
-    pressure_handle.await.unwrap();
+    pressure_handle.await.expect("async operation failed");
 
     // Verify integration worked
     assert!(result.metrics.contains_key("total_async_operations"));
@@ -582,7 +604,7 @@ async fn test_chaos_testing_performance_overhead() {
     let start_time = Instant::now();
 
     let framework = AsyncRuntimeChaosFramework::new();
-    framework.start().await.unwrap();
+    framework.start().await.expect("async operation failed");
 
     let setup_time = start_time.elapsed();
 
@@ -595,7 +617,7 @@ async fn test_chaos_testing_performance_overhead() {
         ..Default::default()
     };
 
-    let _result = framework.test_task_cancellation(config).await.unwrap();
+    let _result = framework.test_task_cancellation(config).await.expect("async operation failed");
     let test_time = test_start.elapsed();
 
     println!(

@@ -702,7 +702,7 @@ mod tests {
             service_account: None,
         };
 
-        let yaml = CloudFunctionDeployment::generate_deployment_yaml(&config).unwrap();
+        let yaml = CloudFunctionDeployment::generate_deployment_yaml(&config).expect("generation should succeed in test");
         assert!(yaml.contains("test-function"));
         assert!(yaml.contains("512Mi"));
     }

@@ -513,4 +513,4 @@ Contributions are welcome! Please see the main TrustformeRS repository for contr
 
 ## License
 
-MIT License - see the LICENSE file for details.
+Apache-2.0 License - see the LICENSE file for details.
